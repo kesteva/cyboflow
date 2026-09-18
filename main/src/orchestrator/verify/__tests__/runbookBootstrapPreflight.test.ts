@@ -57,6 +57,7 @@ describe('runbookBootstrapPreflight', () => {
       proceed: true,
       mode: 'derive',
       adopt: false,
+      proveRegistered: false,
     });
   });
 

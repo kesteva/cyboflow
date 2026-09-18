@@ -28,6 +28,7 @@ import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { readOnlyCommandDenyMessage, readOnlyCommandRejection } from './readOnlyCommandGuard';
+import type { RunbookDraftResponse } from './runbookBootstrapRunner';
 import { RUNG1_OPERATION_KINDS } from './runbookDraft';
 import { VERIFY_RUNBOOK_MODALITIES } from '../../../../shared/types/verifyRunbook';
 
@@ -38,12 +39,28 @@ import { VERIFY_RUNBOOK_MODALITIES } from '../../../../shared/types/verifyRunboo
 export const RUNBOOK_DRAFT_ALLOWED_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob', 'Bash'];
 
 /**
- * Deadline for one drafting deployment. Shorter than a verification's, because
- * this agent only reads: no build, no serve, no driving. The owning lane is
- * parked for the whole bootstrap, so every minute here is a minute a sprint lane
- * is not progressing.
+ * Deadline for one ADOPTING deployment — the tree already carries a runbook and
+ * the agent is asked to confirm or minimally correct it. Shorter than a
+ * verification's, because this agent only reads: no build, no serve, no
+ * driving. The owning lane is parked for the whole bootstrap, so every minute
+ * here is a minute a sprint lane is not progressing.
  */
 export const RUNBOOK_DRAFT_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Deadline for an AUTHORING deployment — no runbook exists anywhere and the
+ * agent has to survey the project from scratch. Three times the adopt budget.
+ * Observed 2026-09-17 on cyboflow itself: three consecutive from-scratch drafts
+ * were killed at exactly 5 minutes mid-survey, each with a viable proposal in
+ * sight, and the lane skipped every time. A survey of a large monorepo simply
+ * does not fit in five minutes; a budget that guarantees a timeout buys nothing.
+ */
+export const RUNBOOK_DRAFT_AUTHOR_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** The budget for one deployment, by whether it adopts a committed runbook or authors one. */
+export function runbookDraftTimeoutMs(adopt: boolean): number {
+  return adopt ? RUNBOOK_DRAFT_TIMEOUT_MS : RUNBOOK_DRAFT_AUTHOR_TIMEOUT_MS;
+}
 
 /** Turn budget: a survey plus the structured answer. */
 const RUNBOOK_DRAFT_MAX_TURNS = 40;
@@ -105,8 +122,12 @@ export interface RunbookDraftQueryArgs {
   signal?: AbortSignal;
 }
 
-/** The injectable seam: raw structured output, or null when the stream drained without one. */
-export type RunbookDraftQueryFn = (args: RunbookDraftQueryArgs) => Promise<unknown>;
+/**
+ * The injectable seam. The structured output when the agent produced one, else
+ * WHICH way the deployment failed — see {@link RunbookDraftResponse} for why a
+ * timeout must not travel as `null`.
+ */
+export type RunbookDraftQueryFn = (args: RunbookDraftQueryArgs) => Promise<RunbookDraftResponse>;
 
 /**
  * The read-only `canUseTool` handler.
@@ -151,10 +172,13 @@ export function makeRunbookDraftCanUseTool(logger?: LoggerLike): CanUseTool {
  * Build the production `RunbookDraftQueryFn`. Deploys ONE structured session and
  * returns the last `structured_output`.
  *
- * Errors and timeouts resolve to `null` rather than throwing: the runner treats
- * an unusable draft as a decline, and there is nothing a throw would let it do
- * that a null does not — while a throw crossing the enqueue seam is exactly what
- * that seam's never-throws contract forbids.
+ * Errors and timeouts resolve to a tagged failure rather than throwing: the
+ * runner treats every non-output as a decline, and there is nothing a throw
+ * would let it do that the tag does not — while a throw crossing the enqueue
+ * seam is exactly what that seam's never-throws contract forbids. The TAG is
+ * what matters: before it, a timeout came back as `null`, the runner's parser
+ * reported `null` as "expected an object", and three consecutive 5-minute
+ * timeouts on 2026-09-17 were stamped as a malformed draft nobody could act on.
  *
  * @param claudeExecutablePath The packaged-build native-binary path resolved once
  * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
@@ -208,21 +232,28 @@ export function makeRunbookDraftQuery(
       });
 
       let structured: unknown = null;
+      let sawOutput = false;
       for await (const msg of q) {
         if (msg.type === 'result' && msg.subtype === 'success') {
           structured = msg.structured_output ?? null;
+          sawOutput = structured !== null;
         }
       }
       if (timedOut) {
         logger?.warn('[runbookDraftAgentQuery] drafting agent timed out', { timeoutMs: effectiveTimeoutMs });
-        return null;
+        return { kind: 'timeout', timeoutMs: effectiveTimeoutMs };
       }
-      return structured;
+      return sawOutput ? { kind: 'output', value: structured } : { kind: 'no-output' };
     } catch (err) {
-      logger?.warn('[runbookDraftAgentQuery] drafting query failed', {
-        error: timedOut ? `timed out after ${effectiveTimeoutMs}ms` : err instanceof Error ? err.message : String(err),
-      });
-      return null;
+      if (timedOut) {
+        logger?.warn('[runbookDraftAgentQuery] drafting query failed', {
+          error: `timed out after ${effectiveTimeoutMs}ms`,
+        });
+        return { kind: 'timeout', timeoutMs: effectiveTimeoutMs };
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      logger?.warn('[runbookDraftAgentQuery] drafting query failed', { error: message });
+      return { kind: 'error', message };
     } finally {
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);

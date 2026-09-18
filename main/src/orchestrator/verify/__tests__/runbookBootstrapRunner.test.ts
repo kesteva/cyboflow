@@ -31,6 +31,7 @@ import {
   runRunbookBootstrap,
   type BootstrapProofOutcome,
   type RunbookBootstrapDeps,
+  type RunbookDraftResponse,
 } from '../runbookBootstrapRunner';
 import { RunbookBootstrapStampStore } from '../bootstrapStampStore';
 import { BootstrapSuppressionStore } from '../bootstrapSuppressionStore';
@@ -76,7 +77,16 @@ const BASE = {
   worktreePath: '/wt',
 };
 
-const ARGS = { ...BASE, mode: 'derive' as const, adopt: false };
+const ARGS = { ...BASE, mode: 'derive' as const, adopt: false, proveRegistered: false };
+
+/**
+ * The derive arm for a project whose store already HOLDS a draft record: the
+ * runner proves that record first and drafts only if the proof fails.
+ */
+const PROVE_REGISTERED_ARGS = { ...ARGS, proveRegistered: true };
+
+/** An unproven-draft record as `currentRecord` would hand it back. */
+const DRAFT_RECORD = { hash: 'draft-hash', version: 5, runbook: RUNBOOK, status: 'unproven-draft' as const };
 
 /**
  * The re-prove arm. It carries NO `adopt` — the union has none on this side, and
@@ -129,10 +139,12 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
   const base: RunbookBootstrapDeps = {
     stamps,
     suppression,
-    draft: async () => {
+    // Canned results are the agent's STRUCTURED OUTPUT (what the parser sees);
+    // the tagged failures are exercised by tests that override `draft` directly.
+    draft: async (): Promise<RunbookDraftResponse> => {
       const result = draftResults[Math.min(state.drafts, draftResults.length - 1)];
       state.drafts += 1;
-      return result;
+      return { kind: 'output', value: result };
     },
     readFile: async (_wt, relativePath) => {
       if (relativePath === 'package.json') return MANIFEST;
@@ -400,10 +412,177 @@ describe('runRunbookBootstrap — NOT-POSSIBLE vs a rejected draft', () => {
     h.db.close();
   });
 
-  it('a null draft (the agent timed out) is refused, not treated as empty', async () => {
+  it('a null structured output is refused as malformed, not treated as empty', async () => {
     const h = harness({ draftResults: [null] });
     const outcome = await runRunbookBootstrap(ARGS, h.deps);
     expect(outcome).toMatchObject({ kind: 'declined', reason: 'rejected' });
+    h.db.close();
+  });
+
+  it('a TIMED-OUT deployment is stamped as a timeout, not as a malformed draft', async () => {
+    // Observed 2026-09-17: three lanes whose drafting agent hit its deadline
+    // mid-survey were stamped "returned an unusable result: expected an
+    // object" — a sentence about a draft that never existed. The stamp is
+    // what a human reads to decide what to fix, so it has to name the deadline.
+    const h = harness({ draft: async () => ({ kind: 'timeout', timeoutMs: 300_000 }) });
+    const outcome = await runRunbookBootstrap(ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'infrastructure' });
+    expect(outcome.kind === 'declined' && outcome.detail).toContain('timed out after 300s');
+    expect(h.stamps.read('run-1', 1, 'web')?.detail).toContain('timed out after 300s');
+    // A timeout says nothing about the project: no suppression, no writes.
+    expect(h.suppression.read(1, 'web')).toBeNull();
+    expect(h.written).toEqual([]);
+    h.db.close();
+  });
+
+  it('a deployment that failed to start names the error; one that drained says so', async () => {
+    const errored = harness({ draft: async () => ({ kind: 'error', message: 'spawn ENOENT' }) });
+    const e = await runRunbookBootstrap(ARGS, errored.deps);
+    expect(e).toMatchObject({ kind: 'declined', reason: 'infrastructure' });
+    expect(e.kind === 'declined' && e.detail).toContain('spawn ENOENT');
+    errored.db.close();
+
+    const drained = harness({ draft: async () => ({ kind: 'no-output' }) });
+    const d = await runRunbookBootstrap(ARGS, drained.deps);
+    expect(d).toMatchObject({ kind: 'declined', reason: 'infrastructure' });
+    expect(d.kind === 'declined' && d.detail).toContain('without returning a structured proposal');
+    drained.db.close();
+  });
+});
+
+describe('runRunbookBootstrap — proving an already-registered draft first', () => {
+  it('proves the registered record with NO agent, and reports its pin on a pass', async () => {
+    // The store already holds this runbook as a draft (a setup flow registered
+    // it, a proof never landed). Deriving would deploy an agent to produce, at
+    // best, the same runbook; proving what is registered costs one verification.
+    const h = harness({ currentRecord: () => DRAFT_RECORD });
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, h.deps);
+    expect(outcome).toEqual({
+      kind: 'proven',
+      runbookHash: 'draft-hash',
+      runbookVersion: 5,
+      commitSha: null,
+      rung1: null,
+    });
+    expect(h.drafts).toBe(0);
+    expect(h.proofs).toEqual([{ round: 0, runbookHash: 'draft-hash', runbookLocalVersion: 5 }]);
+    // Nothing was authored: the branch is byte-identical.
+    expect(h.written).toEqual([]);
+    expect(h.commits).toEqual([]);
+    expect(h.stamps.read('run-1', 1, 'web')).toMatchObject({
+      state: 'proven',
+      runbookHash: 'draft-hash',
+      runbookVersion: 5,
+    });
+    h.db.close();
+  });
+
+  it('falls through to drafting when the registered proof FAILS, carrying the failure as feedback', async () => {
+    const feedbacks: Array<string | null> = [];
+    const h = harness({
+      currentRecord: () => DRAFT_RECORD,
+      proofs: [FAIL, PASS],
+      draft: async (request) => {
+        feedbacks.push(request.feedback);
+        return { kind: 'output', value: { decision: 'runbook', modality: 'web', runbook: RUNBOOK } };
+      },
+    });
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'proven', runbookHash: 'hash-1', runbookVersion: 3 });
+    expect(feedbacks).toEqual([expect.stringContaining('the serve command exited immediately')]);
+    // Round 0 is the registered proof; the draft rounds keep their own numbers,
+    // so the registered proof never costs a draft round.
+    expect(h.proofs.map((p) => p.round)).toEqual([0, 1]);
+    h.db.close();
+  });
+
+  it('the registered proof does not eat a draft round: the cap still allows every draft', async () => {
+    const h = harness({ currentRecord: () => DRAFT_RECORD, proofs: [FAIL, FAIL, FAIL] });
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    expect(h.proofs.map((p) => p.round)).toEqual([0, 1, 2]);
+    expect(h.drafts).toBe(MAX_BOOTSTRAP_ROUNDS);
+    h.db.close();
+  });
+
+  it('drafts straight away when there is no record, or the record is not a draft', async () => {
+    const none = harness({ currentRecord: () => null });
+    await runRunbookBootstrap(PROVE_REGISTERED_ARGS, none.deps);
+    expect(none.proofs.map((p) => p.round)).toEqual([1]);
+    expect(none.drafts).toBe(1);
+    none.db.close();
+
+    // The store would not have said 'draft' about a proven record, but the
+    // read here is not the store's: a proven record is not this path's to prove.
+    const proven = harness();
+    await runRunbookBootstrap(PROVE_REGISTERED_ARGS, proven.deps);
+    expect(proven.proofs.map((p) => p.round)).toEqual([1]);
+    proven.db.close();
+  });
+
+  it('a registered proof that cannot be ENQUEUED falls through to drafting rather than refusing', async () => {
+    let calls = 0;
+    const h = harness({
+      currentRecord: () => DRAFT_RECORD,
+      enqueueProof: async ({ round }) => {
+        calls += 1;
+        return round === 0 ? { error: 'scheduler-unavailable' } : { requestId: `req-${round}` };
+      },
+    });
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, h.deps);
+    expect(outcome.kind).toBe('proven');
+    expect(calls).toBe(2);
+    expect(h.drafts).toBe(1);
+    h.db.close();
+  });
+
+  it('a restarted owner mid-registered-proof awaits it and, on a pass, reports the record pin', async () => {
+    const h = harness();
+    h.stamps.claim({ runId: 'run-1', projectId: 1, modality: 'web', ownerTaskRef: 'TASK-7' });
+    h.stamps.advance({
+      runId: 'run-1',
+      projectId: 1,
+      modality: 'web',
+      ownerTaskRef: 'TASK-7',
+      state: 'proving',
+      round: 0,
+      requestId: 'req-registered',
+      runbookHash: 'draft-hash',
+      runbookVersion: 5,
+    });
+    const awaited: string[] = [];
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, {
+      ...h.deps,
+      awaitProof: async (requestId) => {
+        awaited.push(requestId);
+        return PASS;
+      },
+    });
+    expect(awaited).toEqual(['req-registered']);
+    expect(h.proofs).toEqual([]);
+    expect(h.drafts).toBe(0);
+    expect(outcome).toMatchObject({ kind: 'proven', runbookHash: 'draft-hash', runbookVersion: 5, commitSha: null });
+    h.db.close();
+  });
+
+  it('a restarted owner whose registered proof FAILED starts drafting at round 1', async () => {
+    const h = harness({ proofs: [FAIL, PASS] });
+    h.stamps.claim({ runId: 'run-1', projectId: 1, modality: 'web', ownerTaskRef: 'TASK-7' });
+    h.stamps.advance({
+      runId: 'run-1',
+      projectId: 1,
+      modality: 'web',
+      ownerTaskRef: 'TASK-7',
+      state: 'proving',
+      round: 0,
+      requestId: 'req-registered',
+      runbookHash: 'draft-hash',
+      runbookVersion: 5,
+    });
+    const outcome = await runRunbookBootstrap(PROVE_REGISTERED_ARGS, h.deps);
+    expect(outcome.kind).toBe('proven');
+    expect(h.proofs.map((p) => p.round)).toEqual([1]);
+    expect(h.drafts).toBe(1);
     h.db.close();
   });
 });
@@ -621,7 +800,7 @@ describe('runRunbookBootstrap — the proof', () => {
       proofs: [FAIL, PASS],
       draft: async (request) => {
         feedbacks.push(request.feedback);
-        return { decision: 'runbook', modality: 'web', runbook: RUNBOOK };
+        return { kind: 'output', value: { decision: 'runbook', modality: 'web', runbook: RUNBOOK } };
       },
     });
     const outcome = await runRunbookBootstrap(ARGS, h.deps);

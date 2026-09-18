@@ -180,6 +180,14 @@ export type VerifyRunbookStatusReason =
 export interface VerifyRunbookStatusDetail {
   status: VerifyRunbookStatus;
   reason: VerifyRunbookStatusReason;
+  /**
+   * On a `'draft'` answer only: does THIS tree also carry a parseable portable
+   * file declaring the modality? A draft record with a committed file beside
+   * it is §4's adopt case as much as `'file-only'` is — the record merely got
+   * registered first — and the bootstrap should hand the agent that file
+   * rather than ask for a rival. Absent on every other reason.
+   */
+  fileDeclaresModality?: boolean;
 }
 
 /**
@@ -344,7 +352,13 @@ export class VerifyRunbookStore {
         return { status: 'absent', reason: 'no-record' };
       }
 
-      if (row.status !== 'proven') return { status: 'unproven-draft', reason: 'draft' };
+      if (row.status !== 'proven') {
+        return {
+          status: 'unproven-draft',
+          reason: 'draft',
+          fileDeclaresModality: parsedFile !== null && this.declaresModality(parsedFile, modality),
+        };
+      }
 
       // F10 — RECORD-AUTHORITATIVE WHEN THE FILE IS GENUINELY ABSENT HERE.
       // The proof executes the DB record's `portable_json` (the runner resolves
