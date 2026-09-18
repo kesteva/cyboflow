@@ -33,7 +33,10 @@
  *                         (`variants.create` carrying the edited graph, draft
  *                         status, base flow untouched). Disabled when not dirty,
  *                         so the prompt only appears for a real edit.
- *   Save as new flow    — ask for a name (FlowNameDialog); `createCustom` then onSaved(newId).
+ *   Save as new flow    — ask for a name + (edit mode) a scope (FlowNameDialog,
+ *                         TASK-220 — defaults to the source flow's own scope);
+ *                         `createCustom` then `onSaved(newId, scopeNote)` so
+ *                         the host can surface where the copy landed.
  *   Run with modifications — persist (updateSpec OR createCustom) then
  *                            `runs.start`, set the active run, close.
  *
@@ -106,8 +109,14 @@ export interface WorkflowEditorModalProps {
    */
   projects?: SaveScopeProject[];
   mode?: 'edit' | 'create';
-  /** Called after a successful save / reset / create with the affected workflow id. */
-  onSaved?: (workflowId: string) => void;
+  /**
+   * Called after a successful save / reset / create with the affected workflow
+   * id. The second argument, present ONLY for a "save as new flow" landing
+   * (TASK-220), names where the new row landed ("Global" or a project name) —
+   * hosts should surface it (toast/notice) so a project-scoped result is
+   * never silent.
+   */
+  onSaved?: (workflowId: string, savedAsNewScopeNote?: string) => void;
   /**
    * Called after a persisted change that keeps the editor OPEN — a tuning-dial
    * stamp or a custom-slot delete. Hosts close the modal in `onSaved`, and a
@@ -435,12 +444,29 @@ export function WorkflowEditorModal({
   // is no row yet. Saving a brand-new flow always goes through "Save as new".
   const canSave = mode === 'edit' && isDirty && !isBusy && !isLoading;
 
-  // Target scope for the name-dialog create paths (migration 030). Create mode
-  // honors the GalleryNew scope (`createScopeProjectId`; null ⇒ global); edit
-  // mode's "Save as new flow" keeps forking into the launch `projectId` (the
-  // edit-mode global/project choice lives in the SaveScopeDialog instead).
-  const saveAsNewTargetProjectId: number | null =
-    mode === 'create' ? createScopeProjectId : projectId;
+  // Target scope for the name-dialog's CREATE-MODE paths (migration 030):
+  // "Save as new flow" (the flow doesn't exist yet) and "Run with
+  // modifications" both honor the scope already chosen in GalleryNew
+  // (`createScopeProjectId`; null ⇒ global). Edit mode's "Save as new flow"
+  // no longer reads this — it collects its OWN scope via the name dialog's
+  // selector (TASK-220), defaulting to the source flow's own scope
+  // (`sourceProjectId`); see `handleNameConfirm`.
+  const saveAsNewTargetProjectId: number | null = createScopeProjectId;
+
+  // Projects the project-copy path (SaveScopeDialog) AND the edit-mode
+  // "Save as new flow" scope selector (name dialog, TASK-220) can target.
+  // Falls back to the single launch `projectId` when no explicit list is
+  // supplied so the copy path always has a target (non-gallery callers like
+  // the wizard pass no list). Declared here (ahead of `handleNameConfirm`,
+  // which reads it to label where a save-as-new landed) rather than down by
+  // the SaveScopeDialog JSX where it used to live.
+  const saveScopeProjects: SaveScopeProject[] = useMemo(
+    () =>
+      projects && projects.length > 0
+        ? projects
+        : [{ id: projectId, name: 'This project' }],
+    [projects, projectId],
+  );
 
   // ── Persistence helpers ─────────────────────────────────────────────────────
 
@@ -814,10 +840,8 @@ export function WorkflowEditorModal({
    * Each branch owns its own latch/busy lifecycle (save-as-new inline here;
    * run-with-modifications via persistAndRun).
    */
-  const handleNameConfirm = useCallback(async (name: string) => {
-    setNameDialogOpen(false);
+  const handleNameConfirm = useCallback(async (name: string, scopeProjectId: number | null) => {
     const action = pendingAction;
-    setPendingAction(null);
 
     if (action === 'save-as-new') {
       if (actionInFlightRef.current) return;
@@ -825,9 +849,26 @@ export function WorkflowEditorModal({
       setError(null);
       setIsBusy(true);
       try {
-        const newId = await saveCustom(name, saveAsNewTargetProjectId);
-        trackEvent('workflow_saved', { scope: saveAsNewTargetProjectId !== null ? 'project' : 'global' });
-        onSaved?.(newId);
+        // Edit mode: the name dialog's own scope selector decides the target
+        // (default = the source flow's own scope). Create mode: the scope was
+        // already chosen in GalleryNew (createScopeProjectId), so the dialog
+        // shows no selector and `scopeProjectId` is always null — fall back to
+        // `saveAsNewTargetProjectId` (TASK-220).
+        const targetProjectId = mode === 'edit' ? scopeProjectId : saveAsNewTargetProjectId;
+        const newId = await saveCustom(name, targetProjectId);
+        trackEvent('workflow_saved', { scope: targetProjectId !== null ? 'project' : 'global' });
+        const scopeLabel =
+          targetProjectId === null
+            ? 'Global'
+            : (saveScopeProjects.find((p) => p.id === targetProjectId)?.name ?? `project ${targetProjectId}`);
+        // Only close the dialog / clear the pending action on SUCCESS — a
+        // failed save-as-new (reserved-name guard, name collision, network
+        // blip) must leave the dialog open with the user's typed name and
+        // chosen scope intact so they can correct and resubmit without
+        // retyping from scratch.
+        setNameDialogOpen(false);
+        setPendingAction(null);
+        onSaved?.(newId, `Saved “${name}” as a new flow (${scopeLabel}).`);
         onClose();
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Could not create the workflow');
@@ -836,9 +877,11 @@ export function WorkflowEditorModal({
         actionInFlightRef.current = false;
       }
     } else if (action === 'run-with-modifications') {
+      setNameDialogOpen(false);
+      setPendingAction(null);
       await persistAndRun(async () => await saveCustom(name, saveAsNewTargetProjectId));
     }
-  }, [pendingAction, saveCustom, saveAsNewTargetProjectId, onSaved, onClose, persistAndRun]);
+  }, [pendingAction, saveCustom, saveAsNewTargetProjectId, mode, saveScopeProjects, onSaved, onClose, persistAndRun]);
 
   // Cancelling the dialog must leave NO latch held and NO pending action, so the
   // next action can open cleanly. (The latch is never taken on open.)
@@ -854,16 +897,6 @@ export function WorkflowEditorModal({
   }, [mode, state.name, workflowId]);
 
   // ── Save-scope dialog inputs (migration 030) ─────────────────────────────────
-  // Projects the project-copy path can target. Falls back to the single launch
-  // `projectId` when no explicit list is supplied so the copy path always has a
-  // target (non-gallery callers like the wizard pass no list).
-  const saveScopeProjects: SaveScopeProject[] = useMemo(
-    () =>
-      projects && projects.length > 0
-        ? projects
-        : [{ id: projectId, name: 'This project' }],
-    [projects, projectId],
-  );
   // Default copy target: the active gallery filter if set; else the lone
   // enumerated project; else null (All-projects with >1 project → force a pick).
   const saveScopeDefaultProjectId: number | null = useMemo(() => {
@@ -1093,8 +1126,22 @@ export function WorkflowEditorModal({
         // (A template-seeded create already carries its `-copy` from loadCreate.)
         defaultValue={mode === 'create' ? state.name : state.name ? `${state.name}-copy` : ''}
         confirmLabel={pendingAction === 'run-with-modifications' ? 'Run' : 'Create'}
-        onConfirm={(name) => void handleNameConfirm(name)}
+        // Edit-mode "Save as new flow" offers a Global/project scope choice
+        // (TASK-220), defaulting to the SOURCE flow's own scope — a global
+        // built-in forks to a global copy by default, matching Duplicate.
+        // Create mode's name prompt ("Run with modifications") needs no
+        // selector: its scope was already chosen in GalleryNew.
+        scopeProjects={mode === 'edit' ? saveScopeProjects : undefined}
+        defaultScopeProjectId={sourceProjectId}
+        onConfirm={(name, scopeProjectId) => void handleNameConfirm(name, scopeProjectId)}
         onClose={handleNameDialogClose}
+        // A failed save-as-new (createCustom name guards) keeps this dialog
+        // open and must show the rejection INSIDE it — the dialog's overlay
+        // covers the editor's own error banner (TASK-220). `handleSaveAsNew` /
+        // `handleRunWithModifications` clear `error` before opening, and
+        // `handleNameConfirm` clears it before each attempt, so nothing stale
+        // from an earlier action leaks in here.
+        serverError={nameDialogOpen ? error : null}
       />
 
       {/* Save-target choice (edit mode): overwrite / project copy / new flow /

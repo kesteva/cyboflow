@@ -122,6 +122,7 @@ describe('decideRunbookBootstrap', () => {
       proceed: true,
       mode: 'derive',
       adopt: false,
+      proveRegistered: false,
     });
   });
 
@@ -132,14 +133,33 @@ describe('decideRunbookBootstrap', () => {
       proceed: true,
       mode: 'derive',
       adopt: true,
+      proveRegistered: false,
     });
   });
 
-  it('proceeds on an existing draft record — there is no proof to endanger', () => {
+  it('proceeds on an existing draft record by PROVING it first — there is no proof to endanger', () => {
+    // The record is registered already; deploying an agent to re-derive it
+    // would, at best, produce the same runbook. Prove what is there, draft only
+    // if that fails. With no file beside it there is nothing to adopt.
     expect(decideRunbookBootstrap({ ...on, status: status('draft') })).toEqual({
       proceed: true,
       mode: 'derive',
       adopt: false,
+      proveRegistered: true,
+    });
+  });
+
+  it('a draft record WITH a committed file beside it adopts that file if drafting is needed', () => {
+    // Observed 2026-09-17 on cyboflow: a setup-flow-registered draft sat next
+    // to the committed runbook it was registered from, and every lane was told
+    // to derive from scratch — without the file — because only 'file-only'
+    // adopted. The record merely got registered first; it is the same §4 case.
+    const withFile = { status: 'unproven-draft' as const, reason: 'draft' as const, fileDeclaresModality: true };
+    expect(decideRunbookBootstrap({ ...on, status: withFile })).toEqual({
+      proceed: true,
+      mode: 'derive',
+      adopt: true,
+      proveRegistered: true,
     });
   });
 
@@ -291,6 +311,7 @@ describe('decideRunbookBootstrap', () => {
         proceed: true,
         mode: 'derive',
         adopt: false,
+        proveRegistered: false,
       });
     },
   );

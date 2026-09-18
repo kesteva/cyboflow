@@ -1144,6 +1144,71 @@ describe('composeStepPrompt', () => {
     expect(nothing).not.toContain('the adversarial review below');
   });
 
+  it('renders an adversarial-review-sourced revision under its own heading, never as a human decision', () => {
+    const base = {
+      step: step({ id: 'ui-prototype', name: 'UI prototype', agent: 'ui-prototype' }),
+      workflowName: 'planner',
+      attempt: 1,
+    };
+    const auto = composeStepPrompt({
+      ...base,
+      gateRevision: {
+        gateStepId: 'adversarial-review',
+        source: 'adversarial-review',
+        note: '#### AR-1 — no back navigation',
+        reviewMarkdown: '## Blocking\n\n#### AR-1 — no back navigation\n\n## Findings\n\nNone.',
+      },
+    });
+    expect(auto).toContain('## Adversarial review: revision requested');
+    expect(auto).not.toContain('## Design gate: revision requested');
+    expect(auto).not.toContain('A human reviewed');
+    expect(auto).toContain('no human has seen the design gate yet');
+    expect(auto).toContain('`adversarial-review`');
+    // The artifact is the specification; the extracted note is not quoted twice.
+    expect(auto).toContain('### Adversarial review of the previous round');
+    expect(auto).toContain('which `AR-n` ids you resolved');
+    expect(auto).not.toContain('### Blocking entries from the previous round');
+
+    // Artifact unreadable ⇒ fall back to the blocking entries the controller extracted.
+    const fallback = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'adversarial-review', source: 'adversarial-review', note: '#### AR-1 — no back navigation' },
+    });
+    expect(fallback).toContain('### Blocking entries from the previous round');
+    expect(fallback).toContain('AR-1 — no back navigation');
+
+    // Neither ⇒ the verdict alone, with the same no-repeat / no-question rule.
+    const nothing = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'adversarial-review', source: 'adversarial-review' },
+    });
+    expect(nothing).toContain('## Adversarial review: revision requested');
+    expect(nothing).toContain('do NOT re-emit the same result');
+  });
+
+  it('asks the adversarial-review step for the REVIEW verdict trailer, and only promises a loop when the step declares one', () => {
+    const review = (loopback?: string): string =>
+      composeStepPrompt({
+        step: step({
+          id: 'adversarial-review',
+          name: 'Adversarial review',
+          agent: 'adversarial-review',
+          outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
+          ...(loopback ? { loopback } : {}),
+        }),
+        workflowName: 'planner',
+        attempt: 1,
+      });
+    const looping = review('expand-spec');
+    expect(looping).toContain('`REVIEW: BLOCKING`');
+    expect(looping).toContain('`REVIEW: CLEAN`');
+    expect(looping).toContain('re-runs the design steps automatically');
+    const plain = review();
+    expect(plain).toContain('`REVIEW: BLOCKING`');
+    expect(plain).not.toContain('re-runs the design steps automatically');
+    expect(plain).toContain('the design gate is what routes');
+  });
+
   // ── item 13b: thoroughness budgets ──────────────────────────────────────────
 
   it('renders only the running agent\'s thoroughness budget, and nothing without a level', () => {

@@ -209,9 +209,21 @@ export interface ComposeStepPromptArgs {
    * principle both be live. A distinct heading also lets the re-run agent tell
    * "a machine check failed" from "a human sent this back".
    *
+   * `source: 'adversarial-review'` marks the controller's AUTOMATIC revision —
+   * the review step itself sent the region back on a `REVIEW: BLOCKING` verdict,
+   * no human involved — and renders under its own heading so the re-run agent
+   * is never told a human rejected its work when none did. `note` then carries
+   * the review's `## Blocking` section (the fallback when `reviewMarkdown` could
+   * not be read).
+   *
    * Absent on every normal turn ⇒ no section (output unchanged).
    */
-  gateRevision?: { gateStepId: string; note?: string; reviewMarkdown?: string };
+  gateRevision?: {
+    gateStepId: string;
+    note?: string;
+    reviewMarkdown?: string;
+    source?: 'adversarial-review';
+  };
   /**
    * The most recent preceding AGENT step's final text, for a step whose
    * definition sets `consumesPriorStepOutput`. Rendered as a
@@ -287,6 +299,7 @@ export interface ComposeStepPromptArgs {
 function artifactFollowUp(
   outputArtifact: NonNullable<WorkflowStep['outputArtifact']>,
   workflowName: string,
+  autoRevises = false,
 ): string {
   switch (outputArtifact.atype) {
     case 'ui-prototype': {
@@ -320,7 +333,11 @@ function artifactFollowUp(
       // queue of items the very next gate is about to triage. The artifact IS the
       // channel: it is what the gate body is composed from, and — being one per
       // atype per run — what a revision round enriches rather than duplicates.
-      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-adversarial-review\` subagent returns its \`## Result\`, compose ONE markdown doc from it and report it — that doc is the ONLY surface the \`approve-design\` gate reviews, and the gate has nothing to show without it.\n\nCompose it with exactly two top-level sections, in this order:\n\n- \`## Blocking\` — the subagent's \`### Blocking\` entries.\n- \`## Findings\` — its \`### Findings\` entries.\n\nCarry every entry across VERBATIM, keeping its \`#### AR-n — <title>\` heading and its \`**Severity:**\` / \`**Area:**\` / \`**What:**\` / \`**Why it matters:**\` / \`**Fix:**\` fields. Do not renumber, merge, summarize, or re-rank them: the \`AR-n\` ids are how the gate's revision round reports back what it resolved, and a re-numbered entry breaks that thread. Keep a section's heading with \`None.\` under it when it is empty.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'adversarial-review'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. Re-reporting the same atype ENRICHES the same tab, so a re-review after a revision replaces the document rather than stacking a second one.\n\nDo NOT call \`cyboflow_report_finding\` at this step — not for a blocking entry, not for an advisory one, not as a \`decision\`. The approve-design gate decides what becomes a finding: on Approve every entry is logged as an accepted-risk finding, and on Revise the design steps re-run against them. Filing them here pre-empts that decision and buries the human under items the very next gate was about to triage. Likewise do not "auto-fix" a blocking entry yourself by editing a spec or re-running a design step — this step reviews and reports; the gate routes.`;
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-adversarial-review\` subagent returns its \`## Result\`, compose ONE markdown doc from it and report it — that doc is the ONLY surface the \`approve-design\` gate reviews, and the gate has nothing to show without it.\n\nCompose it with exactly two top-level sections, in this order:\n\n- \`## Blocking\` — the subagent's \`### Blocking\` entries.\n- \`## Findings\` — its \`### Findings\` entries.\n\nCarry every entry across VERBATIM, keeping its \`#### AR-n — <title>\` heading and its \`**Severity:**\` / \`**Area:**\` / \`**What:**\` / \`**Why it matters:**\` / \`**Fix:**\` fields. Do not renumber, merge, summarize, or re-rank them: the \`AR-n\` ids are how the gate's revision round reports back what it resolved, and a re-numbered entry breaks that thread. Keep a section's heading with \`None.\` under it when it is empty.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'adversarial-review'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. Re-reporting the same atype ENRICHES the same tab, so a re-review after a revision replaces the document rather than stacking a second one.\n\nDo NOT call \`cyboflow_report_finding\` at this step — not for a blocking entry, not for an advisory one, not as a \`decision\`. The approve-design gate decides what becomes a finding: on Approve every entry is logged as an accepted-risk finding, and on Revise the design steps re-run against them. Filing them here pre-empts that decision and buries the human under items the very next gate was about to triage. Likewise do not "auto-fix" a blocking entry yourself by editing a spec or re-running a design step — this step reviews and reports; the host routes.\n\n**Verdict trailer (machine-read).** After reporting the artifact, end your final message with the \`## Blocking\` section exactly as you reported it (its \`#### AR-n\` entries verbatim, or \`None.\`), followed by a LAST line that is exactly \`REVIEW: BLOCKING\` when that section has one or more entries, else \`REVIEW: CLEAN\`. ${
+        autoRevises
+          ? 'The host orchestrator parses this line: on `REVIEW: BLOCKING` it re-runs the design steps automatically against your entries (once) before the human sees the gate; on `REVIEW: CLEAN` it opens the gate. A populated section with no trailer is still read as blocking, but do not rely on that — emit the line.'
+          : 'The host orchestrator parses this line to know the review\'s verdict; on this flow the design gate is what routes either way, so emit it and stop.'
+      }`;
     case 'verify-runbook':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-verify-setup\` subagent returns its \`## Runbook draft\`, \`## Rung ladder\`, and \`## Open risks\` sections, compose ONE proposal doc — the ONLY surface the \`approve-runbook\` gate reviews — with exactly these three top-level sections, in this order:\n\n- \`## Runbook\` — per declared modality: the \`build\` steps, the \`serve\` form, the REQUIRED \`attestation\` spec, and the behaviors that will serve as the proof. Show the PORTABLE half verbatim (it is what gets committed) and list the machine-local bindings separately, saying plainly that those stay on this machine. Levers stay as \${PORT}-style placeholders — never a resolved port, never a temp dir, never an install or native-rebuild command.\n- \`## Repo changes\` — grouped \`### Rung 0 (no change)\` / \`### Rung 1 (config only)\` / \`### Rung 2 (proposed diff)\`, in that order. Keep every heading even when a rung is empty and write \`None.\` — the human should SEE which rungs you cleared, not guess. Every rung-2 entry names the exact file, what it replaces, and the verbatim proposed change.\n- \`## Risks\` — what could still make the proof fail, and what the fallback is.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'verify-runbook'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's proposal tab, and the approve-runbook gate has nothing to review without it. It is also the ONLY channel by which the later \`prove\` step can see what you drafted: every step is a fresh agent turn with no memory of this one and no tool that can read your prose, so anything you leave out of this doc is lost.\n\nThis is NOT a Compound run: do not compose \`## Act on\` / \`## Discarded\` sections, do not delegate to \`cyboflow-compounder\`, and do not propose CLAUDE.md or docs edits. Write NOTHING to the repo at this step — nothing is registered and nothing is committed until the human approves.`;
     case 'compound-recommendations':
@@ -603,6 +620,40 @@ function conditionalExecution(step: WorkflowStep, workflowName: string, hasRunOw
   }
 }
 
+/**
+ * The `## Adversarial review: revision requested` section — the AUTOMATIC
+ * counterpart of the human gate's revision section. Rendered on every step the
+ * controller re-drives after an adversarial-review step returned
+ * `REVIEW: BLOCKING` and looped back to its declared target (planner's
+ * `expand-spec`), BEFORE the human sees the design gate.
+ *
+ * Deliberately its own heading and wording: the human-gate section says "a
+ * human reviewed this run's design and sent it back", which on an automatic
+ * loop would be a lie the re-run agent has no way to detect. The review itself
+ * is the whole specification here — there is no reviewer note to outrank it —
+ * so the `## Blocking` entries are the must-fix list and `## Findings` stay
+ * advisory, exactly as the gate's "no note" branch already frames them.
+ *
+ * `reviewMarkdown` is the run's adversarial-review artifact (preferred: it is
+ * the complete doc with both sections); `blockingNote` is the `## Blocking`
+ * section the controller extracted from the step's result text, used only when
+ * the artifact could not be read so the re-run is never left with a bare "it
+ * was blocking" and nothing to act on.
+ */
+function composeAdversarialRevisionSection(
+  reviewStepId: string,
+  blockingNote: string,
+  reviewMarkdown: string,
+): string {
+  const body =
+    reviewMarkdown.length > 0
+      ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.\n\n${reviewMarkdown}`
+      : blockingNote.length > 0
+        ? `\n\n### Blocking entries from the previous round\n\nThe full review artifact could not be read back, so these are the \`## Blocking\` entries as the review step reported them. Address EVERY one; state in your output which \`AR-n\` ids you resolved and how, and name — with your reason — any you deliberately did not.\n\n${blockingNote}`
+        : `\n\nNeither the review artifact nor its blocking entries could be read back, so you have the verdict and nothing else. Re-examine your previous output against the spec and the brief, fix what you judge weakest, and state that judgement explicitly in your summary — do NOT re-emit the same result and do NOT ask a question; nothing in this step can answer one.`;
+  return `\n\n## Adversarial review: revision requested\n\nThis run's adversarial review (the \`${reviewStepId}\` step) found must-fix defects in the design, and the workflow sent the refine phase back to address them AUTOMATICALLY — no human has seen the design gate yet, and this re-run is what they will see when it opens. You are part of the RE-RUN: the review found your previous output wanting, and repeating it unchanged wastes the revision and hands the human the same defects. Produce a revised result that answers the entries below that fall within this step's remit, and say plainly in your summary what you changed.${body}`;
+}
+
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   const { step, workflowName, attempt } = args;
   const retryNote =
@@ -699,7 +750,16 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n## Prove-step contract (verify-setup) — overrides step 1 above\n\nYou do this step YOURSELF. Do NOT delegate it: the \`cyboflow-verify-setup\` role is a read-only surveyor/drafter (\`tools: Read, Grep, Glob, Bash\`, and its own contract says it never writes repo files, never writes cyboflow state, and never commits), so handing it this step hands the work to a role that cannot perform it. Its drafting is already done — it lives in the approved proposal above.\n\nIn this order:\n\n1. **Write and commit the portable half.** Write \`.cyboflow/verify-runbook.json\` (the portable half ONLY — placeholders, never a resolved port or temp dir) plus the APPROVED rung-1/rung-2 changes, and commit atomically. **\`git add\` on this path silently does nothing in many projects**: \`.cyboflow/\` is where cyboflow keeps worktrees and local state, so it is very often in \`.gitignore\` or \`.git/info/exclude\`, and \`git add\` on an ignored path is a no-op that reports success. Stage it with \`git add -f .cyboflow/verify-runbook.json\` and CONFIRM the commit really contains it with \`git cat-file -e HEAD:.cyboflow/verify-runbook.json\` before going further. The proof itself does NOT read this file: the runner executes the REGISTERED record's \`portable_json\`, fetched by content hash from the machine-local store, so an uncommitted runbook still proves. Commit it because the committed file is the human-reviewable EXPORT of what you registered — what a reviewer diffs and what another machine re-registers from — and because a file that exists only in your working tree drifts out of the record with nothing to catch it.\n2. **Register each approved modality** with \`cyboflow_register_verify_runbook\`, passing the machine-local \`bindings_json\` from the proposal. Quote the returned \`hash\` and \`version\` in your summary. A \`committed: false\` in the reply is a WARNING, not a blocker: proving works either way, but the reviewable export is not in HEAD — the usual cause is an ignored \`.cyboflow/\`, so re-stage with \`git add -f\`, commit, and register again so the committed file matches the record you are proving.\n3. **Prove each modality by RUNNING it**, one at a time. Compose the \`VerificationTaskV1\` FROM the runbook you just committed — its build steps, its serve form OR its \`app\` block (mobile), its attestation, verbatim — not from memory and not from what you would have preferred; a composed task that does not match the registered runbook is rejected as a \`runbook/sha mismatch\` and proves nothing, and a mobile proof task without the \`app\` block resolves to the wrong modality and is rejected. Fire \`cyboflow_request_verification\` with \`setup_proof: true\` and the \`runbook_hash\` + \`runbook_local_version\` you just got back, then BLOCK on \`cyboflow_await_verification\`. Do not poll, do not continue past the await, and do not fire the next modality until this one has returned.\n4. **Never mark a runbook proven.** Only a PASSING \`setup_proof\` request does, via the engine. Report what came back and claim nothing beyond it.\n5. **On FAIL, read \`failureClass\` first** — \`env\` means fix the ISOLATION lever, \`deliverable\` means fix the commands, \`ambiguous\` means narrow the proof — then re-write, re-commit, re-register (the hash changed), and re-prove. At most 3 rounds per modality. On exhaustion the unproven draft STAYS committed and registered: write the diagnosis into your summary and into the proposal artifact, and finish the step. That is a completed run, not a failure.\n\nRe-report the \`verify-runbook\` artifact at the end, enriching the approved proposal with the per-modality proof outcomes so the human's merge gate sees what actually happened.`
       : '';
   const artifactNote =
-    step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact, workflowName) : '';
+    step.outputArtifact !== undefined
+      ? artifactFollowUp(
+          step.outputArtifact,
+          workflowName,
+          // The verdict-trailer routing sentence is only true on a review step
+          // that declares a loopback — the controller's automatic revision keys
+          // on it (see WorkflowController.tryAdversarialReviewLoopback).
+          step.agent === 'adversarial-review' && step.loopback !== undefined && step.loopback.length > 0,
+        )
+      : '';
   // Task-verify relay contract (verification-agent redesign §5.1; live-smoke fix
   // 2026-07-22): this step turn's FINAL MESSAGE is the typed step-output channel
   // the controller parses for the VERDICT line + the visual-verification
@@ -819,7 +879,9 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   const gateRevision =
     revision === undefined
       ? ''
-      : `\n\n## Design gate: revision requested\n\nA human reviewed this run's design at the \`${revision.gateStepId}\` gate and sent it back. You are part of the RE-RUN: your previous output was not accepted, and repeating it unchanged wastes the revision. Produce a revised result that answers what is below, and say plainly in your summary what you changed.${
+      : revision.source === 'adversarial-review'
+        ? composeAdversarialRevisionSection(revision.gateStepId, revisionNote, revisionReview)
+        : `\n\n## Design gate: revision requested\n\nA human reviewed this run's design at the \`${revision.gateStepId}\` gate and sent it back. You are part of the RE-RUN: your previous output was not accepted, and repeating it unchanged wastes the revision. Produce a revised result that answers what is below, and say plainly in your summary what you changed.${
           revisionNote.length > 0
             ? `\n\nThe reviewer's own words, verbatim — this is the authoritative instruction and it outranks the review below where the two disagree:\n\n> ${revisionNote.replace(/\n/g, '\n> ')}`
             : revisionReview.length > 0

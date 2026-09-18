@@ -2593,12 +2593,12 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     reason: 'draft' | 'file-only' | 'drifted' | 'content-drifted',
     enabled = true,
   ): {
-    seen: Array<{ mode: string; adopt?: boolean }>;
+    seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean }>;
     call: () => Promise<unknown>;
     close: () => void;
   } {
     const own = new Database(':memory:');
-    const seen: Array<{ mode: string; adopt?: boolean }> = [];
+    const seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean }> = [];
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(own),
       backends: {
@@ -2611,7 +2611,11 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
       onVerdict: () => {},
       runbookStatus: async () => ({ status: 'unproven-draft', reason }),
       runbookBootstrap: async (args) => {
-        seen.push(args.mode === 'derive' ? { mode: args.mode, adopt: args.adopt } : { mode: args.mode });
+        seen.push(
+          args.mode === 'derive'
+            ? { mode: args.mode, adopt: args.adopt, proveRegistered: args.proveRegistered }
+            : { mode: args.mode },
+        );
         return { kind: 'declined', reason: 'unavailable', detail: 'test' };
       },
     });
@@ -2640,10 +2644,10 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     d.close();
   });
 
-  it("an ordinary draft still dispatches 'derive', adopt false", async () => {
+  it("an ordinary draft dispatches 'derive' with proveRegistered — the record is proven before any agent", async () => {
     const d = dispatcher('draft');
     await d.call();
-    expect(d.seen).toEqual([{ mode: 'derive', adopt: false }]);
+    expect(d.seen).toEqual([{ mode: 'derive', adopt: false, proveRegistered: true }]);
     d.close();
   });
 
@@ -2653,7 +2657,7 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     // there, not to author a rival — the same §4 rule, one arm over.
     const d = dispatcher('file-only');
     await d.call();
-    expect(d.seen).toEqual([{ mode: 'derive', adopt: true }]);
+    expect(d.seen).toEqual([{ mode: 'derive', adopt: true, proveRegistered: false }]);
     d.close();
   });
 

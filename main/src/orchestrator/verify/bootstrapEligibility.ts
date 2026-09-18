@@ -130,6 +130,12 @@ export type BootstrapDeclineReason =
  *    teammate committed it; this host merely never proved it), so the honest
  *    action is to prove what is there rather than overwrite it with a
  *    machine-authored rival.
+ *    `proveRegistered` is the third way in: the store already HOLDS a draft
+ *    record (`'draft'`), so the derive first proves that record as it stands
+ *    and deploys a drafting agent only if the proof fails — a registered
+ *    runbook that stands the project up needs no agent to say so. With a
+ *    committed file beside the record, `adopt` is true as well, for the same
+ *    reason `'file-only'` adopts.
  *  - `'reprove'` — a proven record DRIFTED (F4 / Codex #2). The runbook is
  *    already written, already committed, already registered; the only thing
  *    that expired is the proof. So this mode writes NOTHING — no draft, no
@@ -139,7 +145,7 @@ export type BootstrapDeclineReason =
  *    read an `adopt` flag would be reading a decision that was never made.
  */
 export type BootstrapDecision =
-  | { proceed: true; mode: 'derive'; adopt: boolean }
+  | { proceed: true; mode: 'derive'; adopt: boolean; proveRegistered: boolean }
   | { proceed: true; mode: 'reprove' }
   | { proceed: false; reason: BootstrapDeclineReason };
 
@@ -271,7 +277,15 @@ export function decideRunbookBootstrap(args: {
     return { proceed: true, mode: 'reprove' };
   }
   if (decline !== null) return { proceed: false, reason: decline };
-  return { proceed: true, mode: 'derive', adopt: args.status.reason === 'file-only' };
+  if (args.status.reason === 'draft') {
+    return {
+      proceed: true,
+      mode: 'derive',
+      adopt: args.status.fileDeclaresModality === true,
+      proveRegistered: true,
+    };
+  }
+  return { proceed: true, mode: 'derive', adopt: args.status.reason === 'file-only', proveRegistered: false };
 }
 
 /**

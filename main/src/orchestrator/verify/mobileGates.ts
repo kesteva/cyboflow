@@ -15,6 +15,12 @@
  * IT) and the pair cannot form an import cycle.
  */
 import type { LoggerLike } from '../types';
+import type { LeaseHandle, ResourceLeasePool } from './verificationLeases';
+import { VERIFY_SCREEN_LEASE, verifyPortLease } from './verificationLeases';
+import type {
+  VerificationModality,
+  VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 
 /**
  * The gate-1 detail for a host on which NO mobile toolchain probe is wired —
@@ -120,4 +126,125 @@ export async function mobileToolchainDetail(
     });
     return MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL;
   }
+}
+
+/**
+ * The agent row's effective deadline: the composed `task.timeoutMs` (when
+ * positive) FLOORED at the configured default and capped by the ceiling.
+ *
+ * F2 (RC5, docs/proposals/visual-verification-brittleness-fixes.md) added the
+ * floor. The outer `timeoutMs` used to be able to LOWER the deadline without
+ * limit, while being documented on no composer-facing surface (only the
+ * nested `serve.readyWhen.timeoutMs` is) — so a task-verify composer that
+ * guessed `180000` had vr_addb4401 killed at 180s mid-attestation with the
+ * build passed and the app already booted; the identical task at `1200000`
+ * passed in 7m18s. 2 of the 7 all-time timeouts are that. A composer may now
+ * only ever RAISE the deadline toward the ceiling; it can never take it below
+ * the default the harness knows a real build → serve → drive → attest cycle
+ * needs. Tests inject a small `agentRequestTimeoutMs`, so the floor is that
+ * INJECTED default, not the 10-minute production constant.
+ *
+ * MOBILE raises the floor further (mobile-verification-tier §19, M9). A cold
+ * `xcodebuild` plus a first simulator boot were both MEASURED past two minutes
+ * on the owner's host, so the composer's guess is even less trustworthy here
+ * than it was for web; `mobileDeadlineFloorMs` is the harness's own number.
+ * The CEILING still wins over the floor — an installation that configured a
+ * floor above the 20-minute cap gets the cap and one warn line saying the
+ * floor was clipped, never a request that outlives the scheduler's contract.
+ */
+export function resolveAgentDeadlineMs(args: {
+  task: Pick<VerificationTaskV1, 'timeoutMs'>;
+  modality: VerificationModality;
+  /** The configured default agent deadline — the floor for every non-mobile modality. */
+  defaultMs: number;
+  /** The scheduler's hard ceiling; wins over every floor. */
+  ceilingMs: number;
+  /** `ResolvedVisualVerifyConfig.mobileDeadlineFloorMs` — the mobile floor. */
+  mobileFloorMs: number;
+  logger?: LoggerLike;
+}): number {
+  const { task, modality, defaultMs, ceilingMs, mobileFloorMs, logger } = args;
+  const requested = typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : defaultMs;
+  const floor = modality === 'mobile' ? Math.max(defaultMs, mobileFloorMs) : defaultMs;
+  const deadline = Math.min(ceilingMs, Math.max(floor, requested));
+  if (deadline < floor) {
+    logger?.warn('[VerificationScheduler] mobile deadline floor clipped by the request ceiling', {
+      floorMs: floor,
+      ceilingMs,
+    });
+  }
+  return deadline;
+}
+
+/** Every lease a drained agent row holds beyond its agent slot (see {@link acquireModalityLeases}). */
+export interface ModalityLeases {
+  /** The count-1 screen lease for a `native-screen` row; null for every other modality (§4). */
+  screenLease: LeaseHandle | null;
+  /** One `verify:mobile:<i>` slot for a `mobile` row; null for every other modality (§8). */
+  mobileLease: LeaseHandle | null;
+  /** Both null for a `mobile` row — that tier leases no port at all (§8, M1). */
+  portLease: LeaseHandle | null;
+  leasedPort: number | null;
+}
+
+/**
+ * Steps (2) and (3) of the agent drain's lease ladder, after the agent slot.
+ *
+ * (2) SCREEN EXCLUSIVITY (§4). A native-screen deployment observes the one
+ * real display, so it additionally takes the count-1 screen lease — the SAME
+ * named lease the legacy Peekaboo backend uses, over the SAME shared mutex,
+ * so a native agent run and a legacy native capture can never overlap either.
+ * A `mobile` deployment takes the BOUNDED simulator-slot pool in the same
+ * position instead (mobile-verification-tier §8): N simulators genuinely run
+ * in parallel, so mobile is bounded rather than exclusive. Every other
+ * modality takes nothing here and stays fully parallel.
+ *
+ * (3) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP)
+ * — NOT for `mobile` (§8, M1): that tier serves nothing over HTTP and drives
+ * no CDP endpoint, so leasing it a port would queue a mobile row behind a
+ * port-exhausted pool for a resource it never uses.
+ *
+ * Returns `null` when any lease is held — the row stays 'queued' for the next
+ * drain — and has ALREADY released whatever it took, so the caller gives back
+ * only the agent slot. A port lease whose name cannot be parsed comes back with
+ * `leasedPort: null`; the caller owns that terminal skip.
+ */
+export async function acquireModalityLeases(args: {
+  leasePool: Pick<ResourceLeasePool, 'tryAcquire' | 'tryAcquireOneOf'>;
+  modality: VerificationModality;
+  mobileSimSlots: number;
+  devServerPorts: readonly number[];
+  portFromLease: (name: string | null) => number | null;
+  requestId: string;
+  logger?: LoggerLike;
+}): Promise<ModalityLeases | null> {
+  const { leasePool, modality, requestId, logger } = args;
+  let screenLease: LeaseHandle | null = null;
+  let mobileLease: LeaseHandle | null = null;
+  if (modality === 'native-screen') {
+    screenLease = await leasePool.tryAcquire(VERIFY_SCREEN_LEASE);
+    if (!screenLease) {
+      logger?.debug('[VerificationScheduler] screen lease held; leaving native-screen row queued', { requestId });
+      return null;
+    }
+  } else if (modality === 'mobile') {
+    mobileLease = await leasePool.tryAcquireOneOf(mobileSlotNames(args.mobileSimSlots));
+    if (!mobileLease) {
+      logger?.debug('[VerificationScheduler] no free mobile simulator slot; leaving queued', { requestId });
+      return null;
+    }
+  }
+  let portLease: LeaseHandle | null = null;
+  let leasedPort: number | null = null;
+  if (modality !== 'mobile') {
+    portLease = await leasePool.tryAcquireOneOf(args.devServerPorts.map(verifyPortLease));
+    if (!portLease) {
+      mobileLease?.release();
+      screenLease?.release();
+      logger?.debug('[VerificationScheduler] no free verify port; leaving queued', { requestId });
+      return null;
+    }
+    leasedPort = args.portFromLease(portLease.name);
+  }
+  return { screenLease, mobileLease, portLease, leasedPort };
 }

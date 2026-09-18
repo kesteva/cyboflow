@@ -40,6 +40,8 @@ import { useCallback, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
+import { useRunSessionMap } from '../../stores/landingStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import {
   PROPOSAL_KIND_LABEL,
   LaunchRunBody,
@@ -51,6 +53,7 @@ import {
   CreateBacklogRows,
   CreateWorkflowBody,
   CreateWorkflowAgentRows,
+  workflowNameLabel,
 } from './ProposalCardBodies';
 import {
   parseLaunchRunResult,
@@ -126,16 +129,64 @@ function ResolvedLine({
 // Resolved-state renderers per kind
 // ---------------------------------------------------------------------------
 
+/**
+ * Muted detail for an executed launch-run row. NEVER the opaque run id
+ * (TASK-221): the executor's result carries the minted `sessionId`, so the
+ * session name resolves straight off the session store even before
+ * activeRunsStore has hydrated the new run (the run-keyed map is only a
+ * fallback for legacy results without a sessionId). While neither has caught
+ * up — the normal state in the seconds right after Confirm, since proposal
+ * finalization and run/session hydration are separate reactive paths — the
+ * row names the workflow and says the session is still loading.
+ */
+function launchRunResolvedDetail(opts: {
+  sessionName: string | null;
+  workflowLabel: string | null;
+}): string | undefined {
+  const { sessionName, workflowLabel } = opts;
+  if (sessionName != null && sessionName !== '') {
+    return workflowLabel != null ? `${sessionName} · ${workflowLabel}` : sessionName;
+  }
+  return workflowLabel != null ? `${workflowLabel} · loading session…` : 'loading session…';
+}
+
 function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  const sessionMap = useRunSessionMap();
+  const r = parseLaunchRunResult(proposal.result);
+  const resultSessionId = r?.sessionId ?? null;
+  const sessionNameById = useSessionStore((s) =>
+    resultSessionId != null ? (s.sessions.find((session) => session.id === resultSessionId)?.name ?? null) : null,
+  );
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
   }
-  const r = parseLaunchRunResult(proposal.result);
   if (r === null) {
     return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} verb="Resolved." glyph={proposal.status === 'failed' ? '✕' : '✓'} />;
   }
   if (r.status === 'executed') {
-    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={r.runId != null ? `run ${r.runId}` : undefined} />;
+    const payload = proposal.payload.kind === 'launch-run' ? proposal.payload : null;
+    const sessionName =
+      sessionNameById ?? (r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null);
+    const workflowLabel = payload != null ? workflowNameLabel(payload.workflowName) : null;
+    const detail = launchRunResolvedDetail({ sessionName, workflowLabel });
+    if (r.runId != null) {
+      const runId = r.runId;
+      return (
+        <button
+          type="button"
+          onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
+          data-testid="proposal-card-resolved-row"
+          className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+        >
+          <StatusCircle tone="success" glyph="✓" />
+          <div className="text-[11px] leading-snug">
+            <span className="font-bold text-text-primary">Run launched.</span>
+            {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
+          </div>
+        </button>
+      );
+    }
+    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />;
   }
   return <ResolvedLine tone="error" glyph="✕" verb="Launch failed." detail={r.error} />;
 }
@@ -159,7 +210,7 @@ function ReprioritizeResolved({ proposal }: { proposal: AgentProposal }): React.
           Reprioritized {okCount} of {total} task{total === 1 ? '' : 's'}.
         </span>
       </div>
-      <ReprioritizeBacklogRows items={payload.items} result={result} />
+      <ReprioritizeBacklogRows projectId={payload.projectId} items={payload.items} result={result} />
     </div>
   );
 }

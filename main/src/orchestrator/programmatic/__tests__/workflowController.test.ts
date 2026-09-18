@@ -3286,3 +3286,166 @@ describe('WorkflowController — gate revision threading', () => {
     }
   });
 });
+
+describe('WorkflowController — adversarial-review automatic revision', () => {
+  /**
+   * Planner's refine phase in miniature: spec → design → adversarial review
+   * (declaring the loopback) → the human design gate.
+   */
+  function reviewDef(reviewLoopback: string | null = 'expand-spec'): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'ui-prototype', optional: true }),
+        step({
+          id: 'adversarial-review',
+          agent: 'adversarial-review',
+          optional: true,
+          ...(reviewLoopback !== null ? { loopback: reviewLoopback } : {}),
+        }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+  }
+
+  const BLOCKING_RESULT = [
+    'Reported the adversarial review.',
+    '',
+    '## Blocking',
+    '',
+    '#### AR-1 — Spend screen has no way back',
+    '**Severity:** blocker   **Area:** prototype',
+    '**What:** no Home affordance.',
+    '',
+    'REVIEW: BLOCKING',
+  ].join('\n');
+  const CLEAN_RESULT = 'Reported the adversarial review.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
+
+  type Seen = { id: string; gateRevision?: { gateStepId: string; note?: string; source?: string } };
+
+  /** Scripted review results per adversarial-review turn; every other step is ok. */
+  function reviewRunner(reviewResults: string[]): StepRunner & { seen: Seen[] } {
+    const seen: Seen[] = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      async runStep(s, ctx) {
+        seen.push({ id: s.id, ...(ctx.gateRevision ? { gateRevision: ctx.gateRevision } : {}) });
+        if (s.id === 'adversarial-review') {
+          return { status: 'ok', resultText: queue.shift() ?? CLEAN_RESULT };
+        }
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it('loops the refine phase back once on REVIEW: BLOCKING, threading the blocking entries, before the gate opens', async () => {
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar', reviewDef());
+    expect(result.outcome).toBe('completed');
+
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec',
+      'ui-prototype',
+      'adversarial-review',
+      // automatic revision — the whole refine region re-runs
+      'expand-spec',
+      'ui-prototype',
+      'adversarial-review',
+      'epics',
+    ]);
+    // The gate opened exactly once, AFTER the revision round.
+    expect(host.gateCalls).toEqual(['approve-design']);
+    // First pass carries nothing; every re-run turn carries the review-sourced
+    // revision with the `## Blocking` section as its note.
+    for (const turn of runner.seen.slice(0, 3)) expect(turn.gateRevision).toBeUndefined();
+    for (const turn of runner.seen.slice(3, 6)) {
+      expect(turn.gateRevision).toEqual({
+        gateStepId: 'adversarial-review',
+        source: 'adversarial-review',
+        note: [
+          '#### AR-1 — Spend screen has no way back',
+          '**Severity:** blocker   **Area:** prototype',
+          '**What:** no Home affordance.',
+        ].join('\n'),
+      });
+    }
+    // The gate's approve clears it: epics runs with no revision armed.
+    expect(runner.seen[6].gateRevision).toBeUndefined();
+  });
+
+  it('falls through to the human gate when the second round is still blocking (bounded to one automatic lap)', async () => {
+    const runner = reviewRunner([BLOCKING_RESULT, BLOCKING_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar2', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.filter((s) => s.id === 'adversarial-review')).toHaveLength(2);
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('does not loop on REVIEW: CLEAN, on a `None.` blocking section, or without a declared loopback', async () => {
+    // Clean verdict.
+    let runner = reviewRunner([CLEAN_RESULT]);
+    let host = makeHost();
+    await new WorkflowController(runner, host).run('run-ar3', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+
+    // No trailer, but the section is the `None.` placeholder — not an entry.
+    runner = reviewRunner(['Reported.\n\n## Blocking\n\nNone.\n\n## Findings\n\n#### AR-1 — nit']);
+    host = makeHost();
+    await new WorkflowController(runner, host).run('run-ar4', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+
+    // No trailer, populated section ⇒ still read as blocking (no-trailer tolerance).
+    runner = reviewRunner(['Reported.\n\n## Blocking\n\n#### AR-1 — real defect\n**What:** x']);
+    host = makeHost();
+    await new WorkflowController(runner, host).run('run-ar5', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+
+    // BLOCKING but the step declares no loopback (ship/launch today) ⇒ advance.
+    runner = reviewRunner([BLOCKING_RESULT]);
+    host = makeHost();
+    await new WorkflowController(runner, host).run('run-ar6', reviewDef(null));
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('a FAILED optional review skips instead of taking its loopback edge', async () => {
+    // The loopback exists for the verdict; a crashed reviewer must not re-run the
+    // whole design phase.
+    const seen: string[] = [];
+    const runner: StepRunner = {
+      async runStep(s) {
+        seen.push(s.id);
+        if (s.id === 'adversarial-review') return { status: 'failed', error: 'boom' };
+        return { status: 'ok' };
+      },
+    };
+    const host = makeHost();
+    const result = await new WorkflowController(runner, host).run('run-ar7', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(seen).toEqual(['expand-spec', 'ui-prototype', 'adversarial-review', 'epics']);
+    expect(host.reports.filter((r) => r.id === 'adversarial-review').map((r) => r.status)).toContain('skipped');
+  });
+
+  it('a plain step with an on-failure loopback still ignores REVIEW: BLOCKING in its result', async () => {
+    // The verdict routing is keyed on the adversarial-review AGENT, not on the
+    // presence of `loopback`.
+    const seen: string[] = [];
+    const runner: StepRunner = {
+      async runStep(s) {
+        seen.push(s.id);
+        return { status: 'ok', resultText: s.id === 'b' ? BLOCKING_RESULT : undefined };
+      },
+    };
+    const d = def([phase('p', [step({ id: 'a' }), step({ id: 'b', loopback: 'a' })])]);
+    const result = await new WorkflowController(runner, makeHost()).run('run-ar8', d);
+    expect(result.outcome).toBe('completed');
+    expect(seen).toEqual(['a', 'b']);
+  });
+});

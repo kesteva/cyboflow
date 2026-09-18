@@ -30,8 +30,8 @@ import * as path from 'node:path';
  * to 09-17). Entries may decrease or disappear, never grow. */
 const FROZEN_LINE_CAPS: Record<string, number> = {
   'orchestrator/mcpServer/mcpQueryHandler.ts': 5717, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read/propose tools → handlers/; backlog projections → backlogProjection.ts
-  'index.ts': 6409, // seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts; §5.3 drift probes → services/visualVerify/verifyDriftProbes.ts; step 4: verify + eval composition → verifyComposition.ts / evalComposition.ts (siblings)
-  'orchestrator/verify/verificationScheduler.ts': 5424, // `this`-free drain-priority policy, lease-name builders + await primitives → verify/schedulerHelpers.ts (re-exported, so no consumer import changed); the mobile gate arm + simulator-slot pool → verify/mobileGates.ts
+  'index.ts': 6409, // step 4: verify + eval composition → verifyComposition.ts / evalComposition.ts (siblings); seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts
+  'orchestrator/verify/verificationScheduler.ts': 4487, // step 5: contracts / leases / skip reasons / request rows → sibling modules (re-exported); mobile gate arm, simulator-slot pool, modality lease ladder + deadline floor → verify/mobileGates.ts
   'services/panels/claude/claudeCodeManager.ts': 4818,
   'database/database.ts': 4249,
   'ipc/session.ts': 3732,

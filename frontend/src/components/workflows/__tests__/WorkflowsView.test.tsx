@@ -20,7 +20,7 @@
  *      one card, with an install count + user-scope hint on the fan-out.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -30,6 +30,7 @@ import type {
 } from '../../../stores/workflowsStore';
 import type { McpEntry, PluginEntry } from '../../../../../shared/types/integrations';
 import { wfMeta } from '../wfMeta';
+import type { WorkflowEditorModalProps } from '../../cyboflow/WorkflowEditorModal';
 
 // ---------------------------------------------------------------------------
 // Mutable store snapshot shared with the mock factory.
@@ -127,9 +128,15 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 // Inert modals — only render markers when open; never touch tRPC at mount.
+// The WorkflowEditorModal mock ALSO captures the props WorkflowsView passes it
+// (TASK-220: `onSaved`'s second arg is the "where did it land" scope note) so
+// tests can invoke callbacks directly without driving the real editor's UI.
+let mockEditorProps: WorkflowEditorModalProps | null = null;
 vi.mock('../../cyboflow/WorkflowEditorModal', () => ({
-  WorkflowEditorModal: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div data-testid="wf-editor-modal" /> : null,
+  WorkflowEditorModal: (props: WorkflowEditorModalProps) => {
+    mockEditorProps = props;
+    return props.isOpen ? <div data-testid="wf-editor-modal" /> : null;
+  },
 }));
 vi.mock('../../cyboflow/agents/AgentEditorModal', () => ({
   AgentEditorModal: ({ isOpen }: { isOpen: boolean }) =>
@@ -238,6 +245,7 @@ function buildPluginEntry(over: Partial<PluginEntry> = {}): PluginEntry {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockEditorProps = null;
   mockInitialized = true;
   mockLoading = false;
   mockError = null;
@@ -564,5 +572,45 @@ describe('WorkflowsView archive/unarchive wiring', () => {
     expect(toggle).not.toBeChecked();
     fireEvent.click(toggle);
     expect(mockToggleShowArchived).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WorkflowsView — "save as new flow" landing toast (TASK-220)', () => {
+  /** Open the editor for the default 'Planner' card and grab its captured props. */
+  async function openEditor(): Promise<WorkflowEditorModalProps> {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('workflow-card-edit-wf-planner'));
+    await waitFor(() => expect(screen.getByTestId('wf-editor-modal')).toBeInTheDocument());
+    if (mockEditorProps === null) throw new Error('WorkflowEditorModal did not receive props');
+    return mockEditorProps;
+  }
+
+  it('surfaces a scope-naming toast when onSaved carries a "save as new" note, and closes the editor', async () => {
+    const editorProps = await openEditor();
+
+    act(() => {
+      editorProps.onSaved?.('wf-new-id', 'Saved “Speedboat” as a new flow (Global).');
+    });
+
+    // The editor modal closes (wfEditor reset)...
+    await waitFor(() => expect(screen.queryByTestId('wf-editor-modal')).not.toBeInTheDocument());
+    // ...and the toast names exactly where the new flow landed.
+    const toast = await screen.findByTestId('session-action-toast');
+    expect(toast).toHaveTextContent('Saved “Speedboat” as a new flow (Global).');
+    // The gallery still refreshes on every save.
+    expect(mockRefresh).toHaveBeenCalled();
+  });
+
+  it('shows no toast for a save with no scope note (overwrite / reset / project-copy fork)', async () => {
+    const editorProps = await openEditor();
+
+    act(() => {
+      editorProps.onSaved?.('wf-planner');
+    });
+
+    await waitFor(() => expect(screen.queryByTestId('wf-editor-modal')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('session-action-toast')).not.toBeInTheDocument();
+    expect(mockRefresh).toHaveBeenCalled();
   });
 });

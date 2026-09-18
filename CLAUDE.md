@@ -13,5 +13,3 @@ pi) start at `AGENTS.md` instead, which points at the same guide.
   writer regenerates them from `main/src/orchestrator/workflows/*/agents/*.md` at every
   session/lane spawn. Edit the flow agent prompts there, never in `.claude/agents/` (a hand
   edit there is invisible to git and vanishes on the next spawn).
-- `.claude/skills/release` — the executable release checklist (`/release`). Use it for any
-  release/packaging task instead of improvising from `docs/RELEASE-RUNBOOK.md`.

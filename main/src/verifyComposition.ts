@@ -42,7 +42,7 @@ import { VerifyRunbookStore } from './orchestrator/verify/runbookStore';
 import { RunbookBootstrapStampStore } from './orchestrator/verify/bootstrapStampStore';
 import { BootstrapSuppressionStore } from './orchestrator/verify/bootstrapSuppressionStore';
 import { MAX_BOOTSTRAP_ROUNDS, runRunbookBootstrap } from './orchestrator/verify/runbookBootstrapRunner';
-import { makeRunbookDraftQuery } from './orchestrator/verify/runbookDraftAgentQuery';
+import { makeRunbookDraftQuery, runbookDraftTimeoutMs } from './orchestrator/verify/runbookDraftAgentQuery';
 import { composeRunbookDraftPrompt } from './orchestrator/verify/runbookDraftPrompt';
 import { commitPathspec } from './orchestrator/verify/bootstrapCommit';
 import { enqueueTaskVerification } from './orchestrator/verify/enqueueFromTask';
@@ -658,7 +658,7 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
         const agent = effective.find((e) => e.agentKey === 'runbook-bootstrap');
         if (!agent) {
           cyboflowLogger?.warn?.('[runbookBootstrap] the runbook-bootstrap agent is not resolvable for this run');
-          return null;
+          return { kind: 'error', message: 'the runbook-bootstrap agent is not resolvable for this run' };
         }
         // Claude-only, deliberately: this deployment's whole output is a
         // structured object validated against a JSON schema, and the query below
@@ -666,6 +666,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
         // Claude default rather than a deployment that cannot honor the contract.
         const model =
           agent.model !== null ? bareModelId(agent.model, isModelUsable) ?? DEFAULT_JUDGE_MODEL : DEFAULT_JUDGE_MODEL;
+        // Authoring from scratch gets the longer budget; adopting a committed
+        // runbook keeps the short one — the agent is told which so it can pace.
+        const timeoutMs = runbookDraftTimeoutMs(request.adopt && request.existingRunbookRaw !== null);
         return runbookDraftQuery({
           prompt: composeRunbookDraftPrompt({
             modality: request.modality,
@@ -675,10 +678,12 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
             existingRunbookRaw: request.existingRunbookRaw,
             feedback: request.feedback,
             laneTaskRef: request.laneTaskRef,
+            timeBudgetMs: timeoutMs,
           }),
           systemPrompt: agent.systemPrompt,
           cwd: request.worktreePath,
           model,
+          timeoutMs,
         });
       },
       readFile: async (worktreePath, relativePath) => {

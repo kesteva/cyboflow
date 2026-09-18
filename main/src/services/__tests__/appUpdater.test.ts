@@ -475,10 +475,25 @@ describe('AppUpdater version comparison', () => {
 
   it('falls back to inequality for versions it cannot parse', () => {
     // Unfamiliar formats stay offerable rather than becoming silently
-    // unreachable; cyboflow ships plain MAJOR.MINOR.PATCH today.
+    // unreachable.
     expect(isNewerVersion('nightly', '0.2.5')).toBe(true);
     expect(isNewerVersion('0.2.5', '0.2.5')).toBe(false);
-    expect(isNewerVersion('0.2.5-rc.1', '0.2.5')).toBe(true);
+  });
+
+  // The dev feed publishes `<next-patch>-dev.<run>` from every push to main
+  // (.github/workflows/dev-release.yml). The installed Dev app must move
+  // forward through those, never be offered the one it already has or an
+  // older one the feed rolled back to.
+  it('orders prerelease suffixes per semver, release above prerelease', () => {
+    expect(isNewerVersion('0.4.3-dev.12', '0.4.3-dev.9')).toBe(true);
+    expect(isNewerVersion('0.4.3-dev.9', '0.4.3-dev.12')).toBe(false);
+    expect(isNewerVersion('0.4.3-dev.9', '0.4.3-dev.9')).toBe(false);
+    expect(isNewerVersion('0.4.3-dev.1', '0.4.2')).toBe(true);
+    expect(isNewerVersion('0.4.3', '0.4.3-dev.40')).toBe(true);
+    expect(isNewerVersion('0.4.3-dev.40', '0.4.3')).toBe(false);
+    expect(isNewerVersion('0.2.5-rc.1', '0.2.5')).toBe(false);
+    expect(isNewerVersion('0.4.3-dev.2', '0.4.3-alpha.9')).toBe(true); // lexical on the tag
+    expect(isNewerVersion('0.4.3-dev.10', '0.4.3-dev.9')).toBe(true); // numeric, not lexical
   });
 });
 
