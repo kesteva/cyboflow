@@ -103,12 +103,21 @@ export async function launchElectronApp(dataDir: string): Promise<{
 }
 
 /**
+ * How many cards `dismissDialogs` will skip through. One prerequisite card plus
+ * the tour itself is two; the headroom covers a second prerequisite being added
+ * without the helper needing a matching edit.
+ */
+const ONBOARDING_SKIP_ATTEMPTS = 4;
+
+/**
  * Consolidated startup-dialog dismisser (replaces 4 copy-pasted variants).
  * Fresh data dirs (zero projects, no onboarding snapshot) boot into the
  * first-run onboarding tour — its full-screen scrim captures pointer events,
  * so it MUST be skipped before any spec interacts with the app. Seeded dirs
- * (projects > 0) are auto-marked onboarded and never show it. An
- * analytics/consent prompt may also appear. All probes are best-effort.
+ * (projects > 0) are auto-marked onboarded and never show it. A prerequisite
+ * card (currently git) can stack in front of the tour, so the skip is a bounded
+ * loop, not a single click. An analytics/consent prompt may also appear. All
+ * probes are best-effort.
  */
 export async function dismissDialogs(page: Page): Promise<void> {
   // OnboardingGate stamps `body[data-onboarding]` once its async hydration
@@ -119,12 +128,26 @@ export async function dismissDialogs(page: Page): Promise<void> {
     .locator('body[data-onboarding]')
     .waitFor({ state: 'attached', timeout: 15_000 })
     .catch(() => {});
-  const onboarding = await page
-    .locator('body')
-    .getAttribute('data-onboarding')
-    .catch(() => null);
-  if (onboarding === 'active') {
+  // The gate STACKS cards, so one skip click is not enough. A git-prerequisite
+  // card (no git binary, or git with no user.name/user.email — the state a bare
+  // CI runner boots in) renders IN FRONT of the tour and reuses the
+  // `onboarding-skip` slot for its own "Skip for now" / "Continue without git"
+  // escape, which dismisses only the prerequisite and leaves the tour standing.
+  // Keep skipping until the gate reports 'resolved'. The gate also renders
+  // nothing at all while the git probe is in flight, so wait for the button to
+  // appear rather than assuming this frame already has one.
+  for (let i = 0; i < ONBOARDING_SKIP_ATTEMPTS; i++) {
+    const onboarding = await page
+      .locator('body')
+      .getAttribute('data-onboarding')
+      .catch(() => null);
+    if (onboarding !== 'active') break;
     const onboardingSkip = page.locator('[data-testid="onboarding-skip"]');
+    const appeared = await onboardingSkip
+      .waitFor({ state: 'visible', timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!appeared) break;
     await onboardingSkip.click({ timeout: 5_000 }).catch(() => {});
     await settle(page, 300);
   }
