@@ -297,8 +297,8 @@ own design. There are no per-idea design flags.
    STOP and end the turn. You resume on a `# Approve-ideas decisions` block,
    one `- IDEA-XXX: approve|deny` line per idea. **Proceed with approved refs
    only.** Denied ideas stay on the backlog untouched (never archive them). If
-   every idea is denied, skip to the `decompose` gate prose ending: end the
-   turn — nothing further lands. If the architecture's foundation idea was
+   every idea is denied, do not run `approve-plan`: end the turn — nothing
+   further lands. If the architecture's foundation idea was
    denied, re-fold the brief's architecture section into the new
    lowest-`BUILD_ORDER` approved idea before continuing.
 
@@ -359,30 +359,27 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
       `complete` when the idea ended up with an epic (delegated at step 11 or
       minted as the fallback here) or `skipped` for a single-task idea that
       correctly got none.
-13. **approve-plan** → **human gate, inline.** **AskUserQuestion** (header
-    `Approve plan`, options **Approve** / **Revise** / **Reject** — labels
-    exactly those words, since the backend matches an `'approve'`/`'reject'`
-    prefix on the presented labels). Present ONE combined gate: every draft
-    grouped by originating idea, with scope, ordering, and acceptance criteria
-    in the preview. Do **not** proceed until the user answers:
+13. **approve-plan** → **final human gate, inline — the run-completion gate.**
+    **AskUserQuestion** (header `Approve plan`, options **Approve** / **Revise**
+    / **Reject** — labels exactly those words, since the backend matches an
+    `'approve'`/`'reject'` prefix on the presented labels). Present ONE combined
+    gate: every draft grouped by originating idea, with scope, ordering, and
+    acceptance criteria in the preview; list the decomposed idea(s) and,
+    separately, any denied ideas staying on the backlog. Do **not** proceed
+    until the user answers:
     - **Approve** → the backend reveals every draft (tasks land at **Ready for
       development**) before your turn resumes — do NOT re-create anything.
       Approving also stamps `decomposed_at` on exactly the ideas that received
       run-created children; childless and denied ideas stay on the board
-      automatically — never archive them by hand. Proceed to `decompose`.
+      automatically — never archive them by hand. **Approving also completes
+      the run** — the backend marks it completed as part of the answer, so do
+      **not** call any further tools after this gate: end the turn.
     - **Revise** → reconcile the existing drafts in place (`cyboflow_update_task`
       for changes, `cyboflow_create_task` for genuinely new drafts, repurpose
       surplus drafts rather than orphaning them), then re-present the gate.
     - **Reject** → the backend deletes every draft this run created. Do not
-      recreate anything and do not run `decompose`; end the turn — the ideas
-      remain on the board as approved stubs.
-14. **decompose** → **final human gate, inline — the run-completion gate.**
-    **AskUserQuestion** (header `Archive idea`, options `Archive & finish` /
-    `Keep ideas & finish`; list the decomposed idea(s) and, separately, any
-    denied ideas staying on the backlog). Either choice ends the run;
-    `Archive & finish` re-asserts the lineage-filtered
-    retirement (a no-op when approval already stamped it). Do **not** call any
-    further tools after this gate.
+      recreate anything; end the turn — the ideas remain on the board as
+      approved stubs.
 
 ## Hard rules
 
@@ -390,7 +387,7 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
   tools; subagents return results and you persist them. Never write planning
   state to disk.
 - Use **AskUserQuestion** for every inline human gate (`approve-brief`,
-  `approve-plan`, `decompose`), every interview round, and
+  `approve-plan`), every interview round, and
   any clarifying question; never silently proceed past a gate. **`approve-ideas`
   and `approve-design` are the exceptions** — each is a blocking `decision`
   review item you open via `cyboflow_report_finding` (never
@@ -442,4 +439,4 @@ below):
 
 `interview`, `project-brief`, `approve-brief`, `ui-prototype`, `architecture`,
 `adversarial-review`, `approve-design`, `ideas`, `approve-ideas`,
-`expand-spec`, `epics`, `tasks`, `approve-plan`, `decompose`.
+`expand-spec`, `epics`, `tasks`, `approve-plan`.
