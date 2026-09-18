@@ -6,7 +6,7 @@
  * The capability gap this closes
  * ───────────────────────────────────────────────────────────────────────────
  * A programmatic run is walked by a host-side controller. When it parks at its
- * final human gate (the terminal 'human-review' / 'decompose' step — a pure
+ * final human gate (the terminal 'human-review' step, or planner/launch's terminal 'approve-plan' — a pure
  * `agent: 'human'` gate awaiting the user's sign-off), user chat routes to the
  * on-demand MONITOR: a structured-output brain that can answer questions and
  * actuate a fixed menu of steering actions, but is NOT a general coding agent. So

@@ -210,8 +210,8 @@ about the human gates sitting between them. On a resume path `approve-idea` (ste
 is the one that goes stale: it re-asks a stub approval an earlier run already got —
 the spec exists *because* of it — so it carries its own guard below. `approve-design`
 (step 7) is already covered by its "only when `ui-prototype` or `architecture` ran"
-condition, and `approve-plan` / `decompose` gate the plan THIS run just drafted, so
-those always run. Re-asking a human to approve what they already approved is not a
+condition, and `approve-plan` gates the plan THIS run just drafted, so it always
+runs. Re-asking a human to approve what they already approved is not a
 harmless extra confirmation; it is how a gate turns into something they click through
 without reading.
 
@@ -320,8 +320,9 @@ back an idea in worse shape than it received.
      next turn you receive a `# Approve-ideas decisions` block, one
      `- IDEA-XXX: approve|deny` line per idea. **Proceed with the approved refs
      only.** Denied ideas need NO action — they stay on the backlog (do NOT archive
-     them). If zero ideas are approved, skip decomposition and go straight to the
-     `decompose` gate.
+     them). If zero ideas are approved, skip decomposition, do not run
+     `approve-plan`, and end the turn — nothing lands on the board and the run
+     simply ends.
 
 ### Phase 2 — Refine
 
@@ -554,22 +555,27 @@ The bar to clear: after this sweep, **no component may read `incomplete` for wor
 run either did or deliberately declined to do.** Every idea you planned should be
 readable, cold, by the next run.
 
-10. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
-   `Approve plan`, options **Approve** / **Revise** / **Reject** — labels exactly
-   those words, since the backend matches an `'approve'` / `'reject'` prefix on the
-   PRESENTED option labels; put scope, ordering, and acceptance criteria in the
-   option markdown preview). **Batch branch:** run ONE combined gate presenting
-   every created draft grouped by originating idea. Do **not** proceed until the
-   user answers:
+10. **approve-plan** → **final human gate, inline — this is the run-completion
+   gate.** Use **AskUserQuestion** (header `Approve plan`, options **Approve** /
+   **Revise** / **Reject** — labels exactly those words, since the backend matches
+   an `'approve'` / `'reject'` prefix on the PRESENTED option labels; put scope,
+   ordering, and acceptance criteria in the option markdown preview, and list the
+   idea(s) you planned — by ref/title — so the human sees what approval retires).
+   **Batch branch:** run ONE combined gate presenting every created draft grouped
+   by originating idea. Do **not** proceed until the user answers:
    - **Approve** → the backend reveals every draft (`approved_at` stamped, tasks
      land at **Ready for development**) **before your turn resumes** — do **not**
-     re-create anything. Proceed to the `decompose` gate. **Approving also takes the
-     originating idea(s) off the board** — the backend stamps `decomposed_at` the
-     moment the plan is approved (approving the plan IS the decomposition; the idea's
-     tasks now carry the flow). Retirement is **lineage-filtered**: only an idea that
-     received ≥1 run-created child retires; an approved idea that ended up with no
-     child (and any denied or guarded idea) stays on the board automatically — never
-     archive those by hand.
+     re-create anything. **Approving also takes the originating idea(s) off the
+     board** — the backend stamps `decomposed_at` the moment the plan is approved
+     (approving the plan IS the decomposition; the idea's tasks now carry the
+     flow). Retirement is **lineage-filtered**: only an idea that received ≥1
+     run-created child retires; an approved idea that ended up with no child (and
+     any denied or guarded idea) stays on the board automatically — never archive
+     those by hand. **Approving also completes the run** — the backend marks it
+     completed as part of the answer, so do **not** call any further tools after
+     this gate: end the turn. If you are then told blocking items are still pending
+     (e.g. size guards you minted earlier), **end the turn** rather than looping —
+     those items hold the run open until humans resolve them outside it.
    - **Revise** → reconcile the **existing drafts in place**: update changed tasks
      via `cyboflow_update_task`, create additional drafts via `cyboflow_create_task`
      for genuinely new tasks, and when the count shrinks **repurpose** a surplus
@@ -582,23 +588,10 @@ readable, cold, by the next run.
      row wins over derivation, so a leftover `complete` would assert children that no
      longer exist and make the next run skip decomposition entirely. Leave the other
      three components as the closeout left them — the spec, prototype, and
-     architecture all survive a rejected plan. Then do **not** recreate anything and
-     do **not** run the `decompose` gate; end the turn here, mirroring the
-     zero-surviving-ideas ending above (**Multi-idea batches** → working set):
-     nothing lands on the board and the run simply ends.
-11. **decompose** → **final human gate, inline — this is the run-completion gate.**
-    After the plan is approved and the drafts revealed, report the `decompose` step,
-    then present the gate with **AskUserQuestion** (header `Archive idea`, options
-    `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
-    ref/title — in the option markdown preview; in a batch, list every planned idea).
-    The idea(s) already left the board at `approve-plan` (above), so this gate's job
-    is to **finalize the run**: either choice ends it. `Archive & finish` re-asserts
-    the lineage-filtered `decomposed_at` retirement (a no-op if the idea was already
-    retired at approval); `Keep ideas & finish` simply completes the run. Do **not**
-    call any further tools after this gate — the run is ending. If you are then told
-    blocking items are still pending (e.g. size guards you minted earlier), **end the
-    turn** rather than looping — those items hold the run open until humans resolve
-    them outside it.
+     architecture all survive a rejected plan. Then do **not** recreate anything;
+     end the turn here, mirroring the zero-surviving-ideas ending above
+     (**Multi-idea batches** → working set): nothing lands on the board and the run
+     simply ends.
 
 ## Hard rules
 
@@ -606,9 +599,8 @@ readable, cold, by the next run.
   tools; subagents return results and you persist them. Never write planning state
   to disk — no per-idea or per-task markdown files and no plugin state directory.
 - Use **AskUserQuestion** for every inline human gate (`approve-idea` on the
-  single-idea path, `approve-plan`,
-  `decompose`) and any clarifying question; never silently proceed past a gate. The
-  **`approve-ideas`, `approve-designs` and `approve-design` gates** are the
+  single-idea path, `approve-plan`) and any clarifying question; never silently proceed past a gate.
+  The **`approve-ideas`, `approve-designs` and `approve-design` gates** are the
   exceptions — each is
   a blocking `decision` review item (there is no per-idea AskUserQuestion), whose
   Approve/Deny surface is an auto-created tab (you open it via
@@ -675,8 +667,8 @@ readable, cold, by the next run.
   idea leaves the board only when the **plan is approved** at `approve-plan` AND it
   received ≥1 run-created child — the backend stamps `decomposed_at` at that moment
   (the idea is reachable thereafter only through its children). Childless, denied, and
-  guarded ideas stay on the board automatically; never archive them by hand. The final
-  `decompose` gate then only finalizes the run.
+  guarded ideas stay on the board automatically; never archive them by hand.
+  `approve-plan` is the run's final gate: approving it also completes the run.
 
 ## Step reporting
 

@@ -1184,8 +1184,11 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicFirst).not.toBeNull();
     expect(planFirst).not.toBeNull();
 
-    // The run is back to 'running'; answer a second approve-plan gate. The guarded
-    // `IS NULL` stamps are no-ops, so every timestamp is unchanged.
+    // Approve on a planner approve-plan gate also COMPLETES the run (it is the
+    // run's final gate). Flip it back to 'running' by hand so a second gate can be
+    // asked at all; the guarded `IS NULL` stamps are no-ops, so every timestamp is
+    // unchanged.
+    db.prepare("UPDATE workflow_runs SET status = 'running' WHERE id = 'run-p'").run();
     await answerPlanGate(db, router, 'run-p', 'Approve');
     expect(taskApprovedAt(db, taskIds[0])).toBe(taskFirst);
     expect(epicApprovedAt(db, epicId)).toBe(epicFirst);
@@ -1954,13 +1957,15 @@ describe('QuestionRouter design-mode fork launches a design session (approve-ide
 });
 
 // ---------------------------------------------------------------------------
-// FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate. Answering at
-// the `decompose` step COMPLETES the run; choosing Archive first retires the
-// run's owned ideas to the terminal Decomposed stage (position 12). The
-// completion is held back while a blocking review_item is still pending.
+// The planner's `approve-plan` gate is its FINAL gate: an Approve answer reveals
+// the plan, retires the run's decomposed ideas (decomposed_at stamp) AND
+// completes the run — there is no separate archive gate any more. Revise /
+// Reject never complete; the completion is held back while a blocking
+// review_item is still pending; and ship (which shares the step id but keeps
+// executing after the gate) is never sealed here.
 // ---------------------------------------------------------------------------
 
-describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MODEL decompose)', () => {
+describe('QuestionRouter approve-plan Approve completes the planner run (merged decompose gate)', () => {
   // Same migration chain as the approve-plan block so the entity tables +
   // seed_idea_id + review_items all exist.
   function buildDb(): Database.Database {
@@ -2023,15 +2028,17 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
 
   function seedPlannerRun(
     db: Database.Database,
-    opts: { runId: string; currentStepId: string },
+    opts: { runId: string; currentStepId: string; workflowName?: 'planner' | 'launch' | 'ship' },
   ): void {
+    const name = opts.workflowName ?? 'planner';
+    const wfId = `wf-${name}`;
     db.prepare(
-      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-p', 1, 'planner', '{}')`,
-    ).run();
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(wfId, name);
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id)
-       VALUES (?, 'wf-p', 1, 'running', ?)`,
-    ).run(opts.runId, opts.currentStepId);
+       VALUES (?, ?, 1, 'running', ?)`,
+    ).run(opts.runId, wfId, opts.currentStepId);
   }
 
   /**
@@ -2065,12 +2072,12 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     ).run(`rvw_block_${Math.random().toString(36).slice(2)}`, runId);
   }
 
-  const DECOMPOSE_QUESTIONS: QuestionPayload[] = [
+  const PLAN_QUESTIONS: QuestionPayload[] = [
     {
-      question: 'Finish the planner run?',
-      header: 'Finish',
+      question: 'Approve the plan?',
+      header: 'Approve plan',
       multiSelect: false,
-      options: [{ label: 'Archive & finish' }, { label: 'Keep ideas & finish' }],
+      options: [{ label: 'Approve' }, { label: 'Revise' }, { label: 'Reject' }],
     },
   ];
 
@@ -2109,7 +2116,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     return idea.taskId;
   }
 
-  async function answerDecomposeGate(
+  async function answerPlanGate(
     db: Database.Database,
     router: QuestionRouter,
     runId: string,
@@ -2118,7 +2125,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     const questionPromise = router.requestQuestion(
       runId,
       `tu-${runId}-${Math.random().toString(36).slice(2)}`,
-      DECOMPOSE_QUESTIONS,
+      PLAN_QUESTIONS,
       vi.fn(),
     );
     await router['getQuestionQueue'](runId).onIdle();
@@ -2127,19 +2134,23 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
         .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
         .get(runId) as { id: string }
     ).id;
-    await router.respond(questionId, { answers: { 'Finish the planner run?': chosen } });
+    await router.respond(questionId, { answers: { 'Approve the plan?': chosen } });
     await questionPromise;
     // Settle any TaskChangeRouter follow-on (idea moves).
     await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
   }
 
-  it('Archive on decompose retires owned ideas off the board (stamps decomposed_at, keeps stage) and completes the run', async () => {
+  function runStatus(db: Database.Database, runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  it('Approve on approve-plan retires decomposed ideas off the board (stamps decomposed_at, keeps stage) and completes the run', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-plan' });
     const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
     const ideaB = await seedOwnedIdea(db, taskRouter, 'run-d');
     // Ideas start at Idea (position 1), not yet retired.
@@ -2148,7 +2159,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
       expect(decomposedAt(db, id)).toBeNull();
     }
 
-    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+    await answerPlanGate(db, router, 'run-d', 'Approve');
 
     // Migration-042 retirement is a decomposed_at stamp, NOT a stage move: each
     // idea keeps its stage (position 1) and the stamp takes it off the board.
@@ -2163,19 +2174,17 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     expect(ev.actor).toBe('orchestrator');
     expect(ev.kind).toBe('decomposed');
 
-    // The run is completed.
-    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
-      'completed',
-    );
+    // The run is completed — approve-plan is the run-completion gate.
+    expect(runStatus(db, 'run-d')).toBe('completed');
   });
 
-  it('Archive on decompose (multi-idea run) retires only the DECOMPOSED idea, not a childless owned one', async () => {
+  it('Approve (multi-idea run) retires only the DECOMPOSED idea, not a childless owned one', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-plan' });
     // Both ideas are owned by the run (created-event attribution), but only the
     // first got a run-created child carrying its originating_idea_id lineage.
     const ideaDecomposed = await seedOwnedIdea(db, taskRouter, 'run-d');
@@ -2184,59 +2193,82 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
       expect(decomposedAt(db, id)).toBeNull();
     }
 
-    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+    await answerPlanGate(db, router, 'run-d', 'Approve');
 
     // Fail-closed: only the genuinely-decomposed idea is stamped; the childless
     // owned idea stays on the board (decomposed_at NULL).
     expect(decomposedAt(db, ideaDecomposed)).not.toBeNull();
     expect(decomposedAt(db, ideaChildless)).toBeNull();
     // The run still completes.
-    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
-      'completed',
-    );
+    expect(runStatus(db, 'run-d')).toBe('completed');
   });
 
-  it('Keep on decompose completes the run WITHOUT moving the ideas', async () => {
+  it('Approve on a LAUNCH approve-plan gate completes the run too (launch reuses the planner step id)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    seedPlannerRun(db, { runId: 'run-l', currentStepId: 'approve-plan', workflowName: 'launch' });
+    const ideaA = await seedOwnedIdea(db, taskRouter, 'run-l');
+
+    await answerPlanGate(db, router, 'run-l', 'Approve');
+
+    expect(decomposedAt(db, ideaA)).not.toBeNull();
+    expect(runStatus(db, 'run-l')).toBe('completed');
+  });
+
+  it('Approve on a SHIP approve-plan gate does NOT complete the run (mid-run gate — materialize + lanes follow)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-s', currentStepId: 'approve-plan', workflowName: 'ship' });
+    await seedOwnedIdea(db, taskRouter, 'run-s');
+
+    await answerPlanGate(db, router, 'run-s', 'Approve');
+
+    // Back at 'running' after respond(); the planner completion never fires for ship.
+    expect(runStatus(db, 'run-s')).toBe('running');
+  });
+
+  it.each(['Revise', 'Reject'])('%s on approve-plan does NOT complete the run', async (chosen) => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-plan' });
     const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
 
-    await answerDecomposeGate(db, router, 'run-d', 'Keep ideas & finish');
+    await answerPlanGate(db, router, 'run-d', chosen);
 
-    // The idea stays where it was (position 1) — NOT retired.
-    expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaA) as { stage_id: string }).stage_id).toBe(
-      stageId(1),
-    );
-    // The run still completes.
-    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
-      'completed',
-    );
+    // Not completed — respond() flipped it back to 'running'; a revised plan
+    // re-presents the gate and a rejected one leaves the agent to end its turn.
+    expect(runStatus(db, 'run-d')).toBe('running');
+    // The idea is NOT retired.
+    expect(decomposedAt(db, ideaA)).toBeNull();
+    expect(ideaStage(db, ideaA)).toBe(stageId(1));
   });
 
-  it('answering on a NON-decompose step does NOT complete the run', async () => {
+  it('Approve on a NON-approve-plan step does NOT complete the run', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    // current_step_id is an earlier gate, not decompose.
+    // current_step_id is an earlier gate, not approve-plan.
     seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-idea' });
     const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
 
-    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+    await answerPlanGate(db, router, 'run-d', 'Approve');
 
-    // Not completed — respond() flipped it back to 'running' and finalize is a no-op.
-    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
-      'running',
-    );
+    // Not completed — respond() flipped it back to 'running' and completion is a no-op.
+    expect(runStatus(db, 'run-d')).toBe('running');
     // The idea is untouched.
-    expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaA) as { stage_id: string }).stage_id).toBe(
-      stageId(1),
-    );
+    expect(decomposedAt(db, ideaA)).toBeNull();
+    expect(ideaStage(db, ideaA)).toBe(stageId(1));
   });
 
   it('does NOT complete the run while a blocking review_item is still pending', async () => {
@@ -2245,17 +2277,17 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
-    await seedOwnedIdea(db, taskRouter, 'run-d');
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-plan' });
+    const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
     // A separate blocking finding stays pending even after the decision gate resolves.
     seedBlockingFinding(db, 'run-d');
 
-    await answerDecomposeGate(db, router, 'run-d', 'Keep ideas & finish');
+    await answerPlanGate(db, router, 'run-d', 'Approve');
 
-    // The aggregate-unblock gate holds the run open (back at 'running' after respond()).
-    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
-      'running',
-    );
+    // The reveal + retirement still land (the plan IS approved) …
+    expect(decomposedAt(db, ideaA)).not.toBeNull();
+    // … but the aggregate-unblock gate holds the run open (back at 'running' after respond()).
+    expect(runStatus(db, 'run-d')).toBe('running');
   });
 });
 

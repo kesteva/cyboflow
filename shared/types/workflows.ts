@@ -836,7 +836,8 @@ export interface WorkflowStepTransitionEvent {
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
 
-  // planner — idea → epics → tasks (board stages 1-6), terminal decompose archives the idea; writes via cyboflow_* MCP tools
+  // planner — idea → epics → tasks (board stages 1-6); the terminal approve-plan gate reveals the
+  // tasks, retires the decomposed idea, and completes the run; writes via cyboflow_* MCP tools
   planner: {
     id: 'planner',
     phases: [
@@ -955,16 +956,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You sign off on scope before tasks queue for sprint.',
-          },
-          {
-            id: 'decompose',
-            name: 'Archive idea',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'Confirm archiving the idea(s) to Decomposed; ends the run.',
+            desc: 'You sign off on scope. Approve puts the tasks on the board, retires the decomposed idea(s), and ends the run.',
           },
         ],
       },
@@ -1189,8 +1181,9 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // + lanes and stamp workflow_runs.batch_id (the handoff seam). The original
   // idea is retired to the terminal Decomposed board stage at the FINAL
   // human-review gate (on Approve), prose-driven via cyboflow_set_task_stage —
-  // not earlier. Planner's terminal 'decompose' step is dropped; sprint's 'plan'
-  // phase id is renamed 'sprint-plan' to avoid colliding with planner's 'plan'.
+  // not earlier. Planner's approve-plan gate is MID-RUN here (it never completes a
+  // ship run); sprint's 'plan' phase id is renamed 'sprint-plan' to avoid colliding
+  // with planner's 'plan'.
   ship: {
     id: 'ship',
     phases: [
@@ -1546,8 +1539,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // produces a project brief, the brief decomposes into an ordered idea set,
   // and every approved idea becomes execution-ready epics and tasks. Ends at the approved backlog — Launch never materializes a
   // sprint; Sprint/Ship run afterwards against the tasks it created. Reuses
-  // planner's approve-plan / decompose step ids so the hidden-draft reveal and
-  // idea-retirement machinery apply unchanged.
+  // planner's approve-plan step id so the hidden-draft reveal, idea-retirement,
+  // and run-completion machinery apply unchanged.
   launch: {
     id: 'launch',
     phases: [
@@ -1700,16 +1693,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You sign off on the whole task plan before tasks queue for sprint.',
-          },
-          {
-            id: 'decompose',
-            name: 'Archive idea',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'Confirm archiving the decomposed idea(s); denied ideas stay on the backlog. Ends the run.',
+            desc: 'You sign off on the whole task plan. Approve puts the tasks on the board, retires the decomposed idea(s) (denied ideas stay on the backlog), and ends the run.',
           },
         ],
       },

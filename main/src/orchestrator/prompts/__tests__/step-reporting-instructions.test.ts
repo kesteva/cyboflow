@@ -162,7 +162,6 @@ describe('buildStepReportingAppend', () => {
       'epics',
       'tasks',
       'approve-plan',
-      'decompose',
     ]);
   });
 
