@@ -1583,6 +1583,20 @@ throwaway `CYBOFLOW_DIR`, on Xcode 26.2:
    them against `mobileDeadlineFloorMs`'s 15-minute default. Recording only — no
    source constant moves in this task.
 
+*Status 2026-09-17 (build day):* T0–T15 landed one commit per task and the
+settled-tree gate is green. **T16 is blocked on the host, not the code.** The
+reference machine now carries Xcode 27.0 (27A266a) but its CoreSimulator
+framework is still 1051.17.7; Xcode 27's `simctl` is a wrapper script that,
+on that mismatch, runs `xcodebuild -runFirstLaunch` (admin-privileged) before
+answering and blocks there from any non-interactive process. Live probe result
+on that host: `mobile-simulator` row `inconclusive` after the 15 s exec
+timeout (~18 s wall), gate 1 closed, nothing leased — the fail-closed design
+held, and the probe detail now names the fix (`sudo xcodebuild
+-runFirstLaunch`). T16 items 1–8, including the cold `xcodebuild` and
+create+boot timings, remain to be recorded once first-launch has been run.
+The fake-toolchain itest (T14) grew a fourth shim, `plutil`, because
+`mobile-install` reads `Info.plist` through `plutil -convert json`.
+
 No `cyboflow_*` MCP tool is called at any point in T0–T16 — per CLAUDE.md's
 two-layers rule, those write to the user's real backlog.
 
