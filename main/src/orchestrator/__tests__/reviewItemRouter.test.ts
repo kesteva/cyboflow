@@ -365,6 +365,102 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     expect(deltas.find((d) => d.field === 'status')).toEqual({ field: 'status', from: 'pending', to: 'resolved' });
   });
 
+  // TASK-222: gate-resolution provenance (resolutionMeta -> payload_json merge)
+  it('resolve with resolutionMeta merges {resolvedOutcome, resolvedSurface} into payload_json WITHOUT clobbering the mint-time gate discriminant', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'decision',
+      title: 'Approve design',
+      payload: { kind: 'decision', gate: 'approve-design', ideaRef: 'IDEA-014' },
+    });
+
+    await router.applyReviewItem(1, {
+      op: 'resolve',
+      actor: 'user',
+      reviewItemId,
+      resolution: 'revise',
+      resolutionMeta: { outcome: 'revise', surface: 'queue' },
+    });
+
+    const row = db.prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payloadJson: string | null;
+    };
+    const payload = JSON.parse(row.payloadJson as string) as {
+      kind: string;
+      gate: string;
+      ideaRef: string;
+      resolvedOutcome: string;
+      resolvedSurface: string;
+    };
+    // The gate discriminant + siblings stamped at MINT time survive the resolve.
+    expect(payload.kind).toBe('decision');
+    expect(payload.gate).toBe('approve-design');
+    expect(payload.ideaRef).toBe('IDEA-014');
+    // The new provenance fields are merged in.
+    expect(payload.resolvedOutcome).toBe('revise');
+    expect(payload.resolvedSurface).toBe('queue');
+  });
+
+  it('resolve with resolutionMeta on an item minted with payload_json: null (the common gate:human-step:* shape) still stamps provenance', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'decision',
+      title: 'Human gate: approve-design',
+      source: 'gate:human-step:approve-design',
+      // payload: null — humanStepManager.composeGatePayload mints NO payload for
+      // this gate; this is the exact swift-bison-20260917 row shape.
+    });
+
+    await router.applyReviewItem(1, {
+      op: 'resolve',
+      actor: 'user',
+      reviewItemId,
+      resolution: 'revise',
+      resolutionMeta: { outcome: 'revise', surface: 'session' },
+    });
+
+    const row = db.prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payloadJson: string | null;
+    };
+    expect(row.payloadJson).not.toBeNull();
+    const payload = JSON.parse(row.payloadJson as string) as {
+      kind: string;
+      resolvedOutcome: string;
+      resolvedSurface: string;
+    };
+    expect(payload.kind).toBe('decision');
+    expect(payload.resolvedOutcome).toBe('revise');
+    expect(payload.resolvedSurface).toBe('session');
+  });
+
+  it('resolve WITHOUT resolutionMeta leaves payload_json untouched (byte-for-byte, pre-existing behavior)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'agent:executor',
+      kind: 'finding',
+      title: 'T',
+      payload: { kind: 'finding', category: 'perf' },
+    });
+    const before = db.prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payloadJson: string | null;
+    };
+
+    await router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId, resolution: 'fixed' });
+
+    const after = db.prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payloadJson: string | null;
+    };
+    expect(after.payloadJson).toBe(before.payloadJson);
+  });
+
   it('dismiss sets status=dismissed', async () => {
     const db = buildDb();
     const router = ReviewItemRouter.initialize(dbAdapter(db));

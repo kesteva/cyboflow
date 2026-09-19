@@ -187,10 +187,13 @@ describe('resolveReviewItem — approve-plan Q1 reveal', () => {
       deps.applyReviewItemResolve.mock.invocationCallOrder[0],
     );
     // outcome wins over free text → resolution 'approve' (deterministic verdict).
+    // TASK-222: an explicit outcome also stamps resolutionMeta (gate-resolution
+    // provenance) — surface is null here (baseInput supplies no surface).
     expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
       reviewItemId: 'rvw_ap',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toEqual({
       ok: true,
@@ -247,6 +250,7 @@ describe('resolveReviewItem — non-approve-plan gate', () => {
       reviewItemId: 'rvw_ai',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: 'approve-idea', outcome: 'approve' });
     expect(runStatus(db, 'run-ai')).toBe('running');

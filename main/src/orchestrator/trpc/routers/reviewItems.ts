@@ -349,6 +349,7 @@ function buildResolveDeps(db: DatabaseLike): ResolveReviewItemDeps {
         actor: args.actor,
         reviewItemId: args.reviewItemId,
         ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+        ...(args.resolutionMeta !== undefined ? { resolutionMeta: args.resolutionMeta } : {}),
       }),
     promotePendingDraftsForRun: (runId) => QuestionRouter.getInstance().promotePendingDraftsForRun(runId),
     deleteRunCreatedEntities: (projectId, runId) =>
@@ -818,6 +819,15 @@ export const reviewItemsRouter = router({
          * item.
          */
         verdicts: z.record(z.string().min(1), z.enum(['approve', 'deny'])).optional(),
+        /**
+         * TASK-222: the UI surface (`ReviewItemCardSurface` — 'queue' | 'session' —
+         * or another resolving surface's own id) that recorded this verdict.
+         * Meaningful only alongside `outcome`; stamped into the item's
+         * payload_json as `resolvedSurface` so a post-mortem can tell which
+         * button, on which surface, answered the gate. Optional and harmless when
+         * omitted.
+         */
+        surface: z.string().min(1).optional(),
       }),
     )
     .mutation(
