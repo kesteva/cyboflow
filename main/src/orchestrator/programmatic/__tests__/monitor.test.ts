@@ -601,6 +601,18 @@ describe('parseConverseOutput', () => {
     expect(parseConverseOutput({ reply: 'ok', action: { kind: 'resolve_review_item' } })).toEqual({ reply: 'ok' });
   });
 
+  it("parses a resolve_review_item action with outcome 'revise' (TASK-222 — the loopback verdict, distinct from reject)", () => {
+    expect(
+      parseConverseOutput({
+        reply: 'sending it back.',
+        action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'revise', resolution: 'rerun with the findings' },
+      }),
+    ).toEqual({
+      reply: 'sending it back.',
+      action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'revise', resolution: 'rerun with the findings' },
+    });
+  });
+
   it('keeps a resolve_review_item action but drops an invalid outcome', () => {
     expect(
       parseConverseOutput({
@@ -679,7 +691,7 @@ describe('MONITOR_CONVERSE_SCHEMA', () => {
     ]) {
       expect(actionProps[field].type).toBe('string');
     }
-    expect(actionProps.outcome.enum).toEqual(['approve', 'reject']);
+    expect(actionProps.outcome.enum).toEqual(['approve', 'revise', 'reject']);
   });
 });
 

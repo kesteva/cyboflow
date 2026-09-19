@@ -809,6 +809,14 @@ export function stampSessionRunsOutcome(
  * 'merged' / 'integrated' / 'pr_open' keeps its more specific stamp, because
  * those describe HOW it landed and this one only asserts THAT it did.
  *
+ * Matches BOTH session shapes — the direct `workflow_runs.session_id` link and
+ * the LEGACY `sessions.run_id` back-link — the same ownership predicate
+ * {@link sessionDeliveredWork}, {@link sessionCompletedNoCodeWork} and the
+ * archive sweep read. Those probes are what make the dismiss dialog OFFER
+ * Mark complete; a stamp that only saw the direct shape reported success with
+ * zero rows on a legacy-linked run, and the archive that followed swept the
+ * findings the choice was meant to keep.
+ *
  * Returns the number of rows stamped. Pure over {@link DatabaseLike}.
  */
 export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): number {
@@ -816,10 +824,13 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
     .prepare(
       `UPDATE workflow_runs
           SET outcome = 'completed', updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ?
+        WHERE (
+                session_id = ?
+                OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = workflow_runs.id)
+              )
           AND COALESCE(outcome, '') NOT IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}`,
     )
-    .run(sessionId) as { changes: number };
+    .run(sessionId, sessionId) as { changes: number };
   return info.changes;
 }
 

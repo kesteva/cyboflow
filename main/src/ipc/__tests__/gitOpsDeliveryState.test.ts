@@ -188,10 +188,38 @@ describe('gitOps.getDeliveryState — completedNoCode wiring', () => {
 
     expect(res.success).toBe(true);
     if (!res.success) throw new Error('expected success');
-    // ownCommits stays 0 (never probed), so the completedNoCode short-circuit
-    // condition (ownCommits === 0) is still met and the helper's verdict wins.
+    // ownCommits stays at its fail-soft default of 0 — an UNPROVEN zero. The
+    // "completed with no repository changes" claim needs a proven zero, so the
+    // operator gets the plain confirmation instead.
     expect(res.data.landed).toBe(false);
     expect(res.data.ownCommits).toBe(0);
+    expect(res.data.completedNoCode).toBe(false);
+  });
+
+  it('does not fire completedNoCode when the git landing probe itself fails (ownCommits never established)', async () => {
+    const { services, getBranchLandingState } = makeServices({ ownCommits: 0 });
+    getBranchLandingState.mockRejectedValueOnce(new Error('fatal: not a git repository'));
+    sessionCompletedNoCodeWork.mockReturnValue(true);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ops = createGitOps(services);
+    const res = await ops.getDeliveryState({ sessionId: SID });
+    errorSpy.mockRestore();
+
+    expect(res.success).toBe(true);
+    if (!res.success) throw new Error('expected success');
+    expect(res.data).toEqual({ delivered: false, landed: false, ownCommits: 0, completedNoCode: false });
+  });
+
+  it('fires completedNoCode when the probe SUCCEEDS with zero own commits and the helper agrees', async () => {
+    const { services } = makeServices({ ownCommits: 0 });
+    sessionCompletedNoCodeWork.mockReturnValue(true);
+
+    const ops = createGitOps(services);
+    const res = await ops.getDeliveryState({ sessionId: SID });
+
+    expect(res.success).toBe(true);
+    if (!res.success) throw new Error('expected success');
     expect(res.data.completedNoCode).toBe(true);
   });
 });

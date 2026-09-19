@@ -11,7 +11,7 @@ import {
   IllegalSessionTransitionError,
   isSessionTransitionAllowed,
 } from '../../../shared/workflows/sessionStateMachine';
-import { hashAskText } from '../orchestrator/sessionAskHash';
+import * as sessionSummaries from './sessionSummaries';
 
 /**
  * A .sql migration file did not apply. Thrown by runFileBasedMigrations() and
@@ -195,34 +195,6 @@ export interface SchemaVersionStatus {
   appMax: number;
   /** True when onDisk > appMax: the DB knows a schema this binary does not. */
   tooNew: boolean;
-}
-
-/** `session_summaries.state` values the review-home board understands (migration 121). */
-const SESSION_SUMMARY_STATES = new Set(['working', 'complete', 'needs_input']);
-
-/**
- * Validates a `session_summaries.state` value at the read/write boundary
- * (migration 121). No CHECK constraint backs this column — see the migration
- * header — so anything outside the known set, including a non-string or a
- * future value this binary doesn't know about yet, degrades to null rather
- * than propagating.
- */
-function normalizeSummaryState(value: unknown): string | null {
-  return typeof value === 'string' && SESSION_SUMMARY_STATES.has(value) ? value : null;
-}
-
-const WAITING_ON_MAX_LENGTH = 300;
-
-/**
- * Validates/clamps a `session_summaries.waiting_on` value at the read/write
- * boundary (migration 121). Non-string becomes null; blank (after trim)
- * becomes null; anything past 300 chars is truncated to it.
- */
-function normalizeWaitingOn(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-  return trimmed.length > WAITING_ON_MAX_LENGTH ? trimmed.slice(0, WAITING_ON_MAX_LENGTH) : trimmed;
 }
 
 export class DatabaseService {
@@ -2729,7 +2701,22 @@ export class DatabaseService {
       console.error('[Database] Update failed:', error);
       throw error;
     }
-    
+
+    // TASK-225 auto-clear, resting twin of the user-message clear in
+    // addConversationMessage: a session coming to REST (stopped / completed /
+    // failed — every writer funnels through here: the per-turn 'exit' handlers,
+    // stopSession, the spawn-failure reverts) has by construction no turn in
+    // flight, so no live AskUserQuestion / permission gate (those are turn
+    // debris the substrate clears at its result boundary, and they live in the
+    // in-memory routers, not in session_summaries anyway). Any summarizer ask
+    // still standing from BEFORE that turn is therefore stale and must not keep
+    // the Needs-your-input card up. Ordering keeps a legitimate ask intact: the
+    // summarizer writes `needs_input` only AFTER the idle window that follows
+    // this very transition, so the clear always precedes a fresh ask.
+    if (data.status === 'stopped' || data.status === 'completed' || data.status === 'failed') {
+      sessionSummaries.clearSessionAsk(this.db, id);
+    }
+
     return this.getSession(id);
   }
 
@@ -2954,6 +2941,14 @@ export class DatabaseService {
       INSERT INTO conversation_messages (session_id, panel_id, message_type, content)
       VALUES (?, ?, ?, ?)
     `).run(panel.sessionId, panelId, messageType, content);
+    // TASK-225 auto-clear, panel-backed twin of addConversationMessage above:
+    // the common chat send paths (ipc/session.ts sessions:input / continue,
+    // baseAIPanelHandler) persist the user's turn THROUGH this method, so
+    // without the same clear here answering in-chat left the Needs-your-input
+    // card standing until the user also hit Dismiss.
+    if (messageType === 'user') {
+      this.clearSessionAsk(panel.sessionId);
+    }
   }
 
   getPanelConversationMessages(panelId: string): ConversationMessage[] {
@@ -3000,6 +2995,12 @@ export class DatabaseService {
           updated_at = CURRENT_TIMESTAMP
       WHERE id IN (${placeholders})
     `).run(...sessionIds);
+    // TASK-225: the boot sweep is a stopped transition too — these sessions were
+    // mid-turn when the app died, so any summarizer ask they still carry
+    // predates that turn and is stale (same rule as updateSession above).
+    for (const sessionId of sessionIds) {
+      sessionSummaries.clearSessionAsk(this.db, sessionId);
+    }
   }
 
   // Prompt marker operations
@@ -4018,150 +4019,34 @@ export class DatabaseService {
     `).all(sessionId, afterId) as ConversationMessage[];
   }
 
-  // Session-summary operations (migration 083, session-summary-plan.md §4).
+  // Session-summary + TASK-225 ask lifecycle — thin delegates over
+  // ./sessionSummaries.ts (extracted under the issue #19 size ratchet).
   getSessionSummary(sessionId: string): SessionSummary | undefined {
-    const row = this.db.prepare(`
-      SELECT * FROM session_summaries WHERE session_id = ?
-    `).get(sessionId) as SessionSummary | undefined;
-    if (!row) return undefined;
-    // Normalize state/waiting_on on the way out — a row written by a
-    // different binary, an older migration, or a hand-edited DB must not
-    // leak an unvalidated value to callers (migration 121).
-    return { ...row, state: normalizeSummaryState(row.state), waiting_on: normalizeWaitingOn(row.waiting_on) };
+    return sessionSummaries.getSessionSummary(this.db, sessionId);
   }
 
-  // Single UPSERT: replaces summary/last_turn_id/state/waiting_on with the
-  // freshly computed values, but ACCUMULATES calls_count/cost_usd_total
-  // across every call for the session (§3 cost surfacing). Never touches
-  // `sessions.updated_at` — the activity-clock contract
-  // (sessionUpdatedAtSemantics.test.ts). `state`/`waitingOn` are optional so
-  // existing call sites keep compiling unchanged; omitted means null.
-  upsertSessionSummary(params: {
-    sessionId: string;
-    summary: string;
-    lastTurnId: number;
-    costUsdDelta: number;
-    state?: string | null;
-    waitingOn?: string | null;
-  }): void {
-    const state = normalizeSummaryState(params.state ?? null);
-    const waitingOn = normalizeWaitingOn(params.waitingOn ?? null);
-    this.db.prepare(`
-      INSERT INTO session_summaries (session_id, summary, last_turn_id, calls_count, cost_usd_total, state, waiting_on, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?, datetime('now'))
-      ON CONFLICT(session_id) DO UPDATE SET
-        summary = excluded.summary,
-        last_turn_id = excluded.last_turn_id,
-        calls_count = calls_count + 1,
-        cost_usd_total = cost_usd_total + excluded.cost_usd_total,
-        state = excluded.state,
-        waiting_on = excluded.waiting_on,
-        updated_at = datetime('now')
-    `).run(params.sessionId, params.summary, params.lastTurnId, params.costUsdDelta, state, waitingOn);
+  upsertSessionSummary(params: sessionSummaries.UpsertSessionSummaryParams): void {
+    sessionSummaries.upsertSessionSummary(this.db, params);
   }
 
-  // Append-only per-sitting history sentences (§1), oldest first via id ASC.
   appendSessionSummaryEntries(sessionId: string, entries: string[]): void {
-    if (entries.length === 0) return;
-    const stmt = this.db.prepare(`
-      INSERT INTO session_summary_entries (session_id, entry) VALUES (?, ?)
-    `);
-    const insertMany = this.db.transaction((rows: string[]) => {
-      for (const entry of rows) {
-        stmt.run(sessionId, entry);
-      }
-    });
-    insertMany(entries);
+    sessionSummaries.appendSessionSummaryEntries(this.db, sessionId, entries);
   }
 
   listSessionSummaryEntries(sessionId: string): SessionSummaryEntry[] {
-    return this.db.prepare(`
-      SELECT * FROM session_summary_entries
-      WHERE session_id = ?
-      ORDER BY id ASC
-    `).all(sessionId) as SessionSummaryEntry[];
+    return sessionSummaries.listSessionSummaryEntries(this.db, sessionId);
   }
 
-  // One transaction: re-checks the session still exists (it may have been
-  // deleted while the summarizer call was in flight) before writing, and
-  // returns false without touching either table if it hasn't.
-  persistSessionSummaryResult(params: {
-    sessionId: string;
-    summary: string;
-    lastTurnId: number;
-    costUsdDelta: number;
-    entries: string[];
-    state?: string | null;
-    waitingOn?: string | null;
-  }): boolean {
-    const persist = this.db.transaction(() => {
-      const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(params.sessionId);
-      if (!session) return false;
-
-      this.upsertSessionSummary({
-        sessionId: params.sessionId,
-        summary: params.summary,
-        lastTurnId: params.lastTurnId,
-        costUsdDelta: params.costUsdDelta,
-        state: params.state,
-        waitingOn: params.waitingOn,
-      });
-      this.appendSessionSummaryEntries(params.sessionId, params.entries);
-      return true;
-    });
-    return persist();
+  persistSessionSummaryResult(params: sessionSummaries.PersistSessionSummaryResultParams): boolean {
+    return sessionSummaries.persistSessionSummaryResult(this.db, params);
   }
 
-  // Manual "Dismiss" action on a quick-session ask card (TASK-225, migration
-  // 140). Clears `state`/`waiting_on` (so the row drops out of the
-  // needs-input bucket right away, same effect as clearSessionAsk) AND stamps
-  // `ask_dismissed_at` + a hash of the waiting_on text that was cleared, so
-  // quickSessionListing.ts's read-time filter can keep the card hidden if the
-  // summarizer later writes back the SAME question — a genuinely different
-  // question hashes differently and resurfaces normally. Upserts: a session
-  // with no session_summaries row yet (e.g. a live 'blocked' gate the
-  // summarizer has never touched) still gets a dismissal stamped, with a null
-  // hash (nothing to suppress against). Returns false without writing when the
-  // session does not exist, mirroring persistSessionSummaryResult.
   dismissSessionAsk(sessionId: string): boolean {
-    const dismiss = this.db.transaction(() => {
-      const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId);
-      if (!session) return false;
-
-      const row = this.db
-        .prepare('SELECT waiting_on FROM session_summaries WHERE session_id = ?')
-        .get(sessionId) as { waiting_on: string | null } | undefined;
-      const currentWaitingOn = row ? normalizeWaitingOn(row.waiting_on) : null;
-      const hash = currentWaitingOn !== null ? hashAskText(currentWaitingOn) : null;
-
-      this.db.prepare(`
-        INSERT INTO session_summaries (session_id, state, waiting_on, ask_dismissed_at, ask_dismissed_hash, updated_at)
-        VALUES (?, NULL, NULL, datetime('now'), ?, datetime('now'))
-        ON CONFLICT(session_id) DO UPDATE SET
-          state = NULL,
-          waiting_on = NULL,
-          ask_dismissed_at = excluded.ask_dismissed_at,
-          ask_dismissed_hash = excluded.ask_dismissed_hash,
-          updated_at = excluded.updated_at
-      `).run(sessionId, hash);
-      return true;
-    });
-    return dismiss();
+    return sessionSummaries.dismissSessionAsk(this.db, sessionId);
   }
 
-  // Auto-clear: fires when fresh activity makes a session's summarized ask
-  // moot WITHOUT a manual dismiss (TASK-225) — currently wired from
-  // addConversationMessage('user', …) below, since a new user turn is the
-  // clearest "the user is already handling this" signal. Unlike
-  // dismissSessionAsk, this does NOT stamp ask_dismissed_at/hash: activity is
-  // not a suppression decision, so if the summarizer produces the identical
-  // question again later it is free to resurface. A no-op (no row, or already
-  // clear) touches nothing.
   clearSessionAsk(sessionId: string): void {
-    this.db.prepare(`
-      UPDATE session_summaries SET state = NULL, waiting_on = NULL
-      WHERE session_id = ? AND (state IS NOT NULL OR waiting_on IS NOT NULL)
-    `).run(sessionId);
+    sessionSummaries.clearSessionAsk(this.db, sessionId);
   }
 
   getSessionToolUsage(sessionId: string): {

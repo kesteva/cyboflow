@@ -164,10 +164,14 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     }
   };
 
-  // TASK-225: manual "Dismiss" on a quick-session ask card. Delegates entirely
-  // to DatabaseService.dismissSessionAsk (clear + dismissal-hash stamp); the
+  // TASK-225: manual "Dismiss" on a quick-session ask card. Delegates to
+  // DatabaseService.dismissSessionAsk (clear + dismissal-hash stamp); the
   // next `listQuick` poll (kicked immediately by the frontend after this
-  // resolves) is what actually drops the card from the board.
+  // resolves) is what actually drops the card from the board. Like `rename`
+  // and `markViewed`, a successful write also emits the existing
+  // 'session-updated' signal so every other mounted consumer (the sidebar's
+  // session row, a second window) learns the session changed instead of
+  // waiting on its own poll.
   const dismissAsk = async ({ sessionId }: OpsInput<'dismissAsk'>): Promise<OpsResult<'dismissAsk'>> => {
     try {
       const sessionValidation = validateSessionExists(sessionId);
@@ -176,7 +180,14 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
         return createValidationError(sessionValidation);
       }
 
-      databaseService.dismissSessionAsk(sessionId);
+      const dismissed = databaseService.dismissSessionAsk(sessionId);
+      if (!dismissed) {
+        return { success: false, error: 'Session not found' };
+      }
+      const session = sessionManager.getSession(sessionId);
+      if (session) {
+        sessionManager.emit('session-updated', session);
+      }
       return { success: true };
     } catch (error) {
       console.error('Failed to dismiss session ask:', error);

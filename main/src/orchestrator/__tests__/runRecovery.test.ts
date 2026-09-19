@@ -995,13 +995,50 @@ describe('archived-session review-item sweeps', () => {
 
     const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
 
-    expect(stamped).toBe(1);
+    // run-direct (workflow_runs.session_id) + run-legacy (the fixture's
+    // sessions.run_id back-link) — both ownership shapes, matching the probes
+    // and the sweep. Before the legacy branch was added this read 1.
+    expect(stamped).toBe(2);
     const outcomeOf = (id: string): string | null =>
       (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(id) as { outcome: string | null }).outcome;
     expect(outcomeOf('run-direct')).toBe('completed');
+    expect(outcomeOf('run-legacy')).toBe('completed');
     // Already delivered, and more specific — left alone.
     expect(outcomeOf('run-pr')).toBe('pr_open');
     expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it('stampSessionRunsCompleted also stamps a run linked only via the LEGACY sessions.run_id shape', async () => {
+    // sessionCompletedNoCodeWork / sessionDeliveredWork recognise this shape and
+    // make the dialog OFFER Mark complete — the stamp must reach the same row,
+    // or the click succeeds with `stamped: 0` and the archive sweeps the findings.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, { id: 'run-planner-legacy', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE sessions SET run_id = 'run-planner-legacy' WHERE id = 'sess-archived'`).run();
+    expect(
+      (db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get('run-planner-legacy') as {
+        session_id: string | null;
+      }).session_id,
+    ).toBeNull();
+    const findingId = await createReviewItem(router, 'run-planner-legacy', 'Backlog rows this run wrote', 'code-review');
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+
+    const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
+
+    // run-direct (direct link, outcome NULL) AND run-planner-legacy (legacy link).
+    expect(stamped).toBe(2);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-legacy') as { outcome: string | null })
+        .outcome,
+    ).toBe('completed');
+    // …and the archive that follows keeps the legacy-linked run's findings.
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+    expect(result.itemsDismissed).toBe(0);
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status,
+    ).toBe('pending');
   });
 
   it('sessionDeliveredWork answers for the session, not the individual run', async () => {

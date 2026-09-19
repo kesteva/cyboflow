@@ -367,9 +367,10 @@ function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
 // ---------------------------------------------------------------------------
 
 /** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons. */
-const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<'completed' | 'no_step', string> = {
+const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<'completed' | 'no_step' | 'in_progress', string> = {
   completed: 'Run already completed — log or dismiss',
   no_step: 'This flow has no address-review step',
+  in_progress: 'Address review is already running for this run',
 };
 
 /** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case). */
@@ -377,6 +378,7 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
   not_found: 'Run not found.',
   not_programmatic: 'Only programmatic runs support Address review findings.',
   not_rewindable: 'This run is not in a state that can be rewound right now.',
+  in_progress: 'Address review is already running for this run — its findings are being worked through.',
   unknown_step: 'This flow has no address-review step.',
   target_not_prior: 'The address-review step is ahead of the run — nothing to rewind.',
   fanout_settled: 'Every sprint task in this run is already integrated.',
@@ -384,7 +386,7 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
 };
 
 /** The eligibility shape `runs.canAddressReviewFindings` returns; null while loading. */
-type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' } | null;
+type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' | 'in_progress' } | null;
 
 export function ReviewItemCard({
   item,

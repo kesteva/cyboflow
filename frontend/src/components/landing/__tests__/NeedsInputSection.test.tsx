@@ -306,10 +306,25 @@ describe('NeedsInputSection', () => {
     expect(approveRestOfRunMock).toHaveBeenCalledWith({ runId: 'run-1' });
   });
 
+  /**
+   * TASK-225: the dismissable ask — an IDLE session whose summarizer wrote
+   * `needs_input`. A live `blocked` row (the helper's default) is a real
+   * in-flight gate the dismiss mutation cannot clear, so it offers no Dismiss.
+   */
+  function dismissableRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
+    return quickRow({
+      state: 'idle',
+      rawStatus: 'completed',
+      idleSince: '2026-07-06T00:00:00.000Z',
+      summaryState: 'needs_input',
+      ...overrides,
+    });
+  }
+
   it('clicking Dismiss on a quick session calls dismissAsk and then onQuickSessionAskDismissed', async () => {
     const user = userEvent.setup();
     const onQuickSessionAskDismissed = vi.fn();
-    const row = quickRow({ sessionId: 'sess-dismiss' });
+    const row = dismissableRow({ sessionId: 'sess-dismiss' });
     render(
       <NeedsInputSection
         {...baseProps}
@@ -326,7 +341,7 @@ describe('NeedsInputSection', () => {
   it('the top-right ✕ on a quick session card also dismisses it', async () => {
     const user = userEvent.setup();
     const onQuickSessionAskDismissed = vi.fn();
-    const row = quickRow({ sessionId: 'sess-x' });
+    const row = dismissableRow({ sessionId: 'sess-x' });
     render(
       <NeedsInputSection
         {...baseProps}
@@ -347,7 +362,7 @@ describe('NeedsInputSection', () => {
     render(
       <NeedsInputSection
         {...baseProps}
-        quickRows={[quickRow()]}
+        quickRows={[dismissableRow()]}
         onQuickSessionAskDismissed={onQuickSessionAskDismissed}
       />,
     );
@@ -357,13 +372,44 @@ describe('NeedsInputSection', () => {
     expect(onQuickSessionAskDismissed).not.toHaveBeenCalled();
   });
 
+  it('offers NO Dismiss (button or ✕) on a live blocked row — the mutation cannot clear an in-flight gate', () => {
+    render(<NeedsInputSection {...baseProps} quickRows={[quickRow({ state: 'blocked' })]} />);
+
+    expect(screen.queryByText('Dismiss')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('rq-needs-input-dismiss-x')).not.toBeInTheDocument();
+    // The card itself still renders with its Answer action.
+    expect(screen.getByText('Answer →')).toBeInTheDocument();
+  });
+
+  it('issues exactly ONE dismiss for a rapid double-click across the ✕ and the Dismiss button', async () => {
+    let settle: (value: { success: true }) => void = () => {};
+    dismissAskMock.mockReturnValueOnce(
+      new Promise<{ success: true }>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    render(<NeedsInputSection {...baseProps} quickRows={[dismissableRow({ sessionId: 'sess-dbl' })]} />);
+
+    await user.click(screen.getByText('Dismiss'));
+    // While the first mutation is in flight both controls are disabled.
+    expect(screen.getByText('Dismiss').closest('button')).toBeDisabled();
+    expect(screen.getByTestId('rq-needs-input-dismiss-x')).toBeDisabled();
+    await user.click(screen.getByTestId('rq-needs-input-dismiss-x'));
+    await user.click(screen.getByText('Dismiss'));
+    expect(dismissAskMock).toHaveBeenCalledTimes(1);
+
+    settle({ success: true });
+    await vi.waitFor(() => expect(screen.getByText('Dismiss').closest('button')).not.toBeDisabled());
+  });
+
   it('renders the Dismiss action ONLY for quick-session rows, not decision items or approvals', () => {
     const item = makeReviewItem();
     const approvalItem: QueueItem = { kind: 'single', approval: makeApproval(), isBlocking: true };
     render(
       <NeedsInputSection
         {...baseProps}
-        quickRows={[quickRow()]}
+        quickRows={[dismissableRow()]}
         reviewItems={[item]}
         approvals={[approvalItem]}
       />,

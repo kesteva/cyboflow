@@ -1817,6 +1817,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
       let landed = false;
       let ownCommits = 0;
+      // Whether `ownCommits` is a PROVEN count (the git probe ran and
+      // succeeded) rather than the fail-soft default. `completedNoCode` claims
+      // the run finished with NO repository changes, so it may only fire on a
+      // proven zero — an unreadable worktree, a missing project, or a session
+      // with no worktree path at all falls back to the plain confirmation, as
+      // documented above.
+      let ownCommitsProven = false;
       const project = sessionManager.getProjectForSession(sessionId);
       if (session.worktreePath && project) {
         try {
@@ -1824,14 +1831,17 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
           landed = state.landed;
           ownCommits = state.ownCommits;
+          ownCommitsProven = true;
         } catch (error) {
           console.error(`[IPC:git] landing probe failed for session ${sessionId}:`, error);
         }
       }
 
-      // Only meaningful when the worktree genuinely has no own commits —
-      // ownCommits > 0 means git already has a real answer via landed/delivered.
-      const completedNoCode = ownCommits === 0
+      // Only meaningful when the worktree PROVABLY has no own commits —
+      // ownCommits > 0 means git already has a real answer via landed/delivered,
+      // and an unproven 0 (probe failed / never ran) must not read as "no code".
+      const completedNoCode = ownCommitsProven
+        && ownCommits === 0
         && sessionCompletedNoCodeWork(makeDatabaseLike(databaseService), sessionId);
 
       return { success: true, data: { delivered, landed, ownCommits, completedNoCode } };

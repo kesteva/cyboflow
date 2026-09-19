@@ -87,6 +87,42 @@ export function nonTerminalFlowRunBySession(runs: ActiveRunRow[]): Map<string, A
 }
 
 /**
+ * The MOST SIGNIFICANT flow run per session, INCLUDING a terminal one — the
+ * navigation/label counterpart of {@link nonTerminalFlowRunBySession} for the
+ * Ready-for-review band (TASK-226 address-review). Once a session's flow run
+ * finishes, the session's own quick row comes back to Ready (the non-terminal
+ * map above stops hiding it) — but "Open →" on that row must still open the
+ * flow run whose output is what there is to review, not the `__quick__` chat
+ * the flow interrupted when it launched, and the row's status label must
+ * describe the run that actually finished (a completed planner run is not
+ * "stopped by you" just because its parked chat run reads `stopped`).
+ *
+ * Precedence: a non-terminal run always wins; otherwise the NEWEST terminal
+ * run (by `created_at`, then list order). Feed this the store's RETAINED rows
+ * (`useAggregatedRetainedRuns`), which keep the newest terminal run per
+ * session — the active-only `useAggregatedRuns` list never contains one.
+ */
+export function significantFlowRunBySession(runs: ActiveRunRow[]): Map<string, ActiveRunRow> {
+  const map = new Map<string, ActiveRunRow>();
+  for (const run of runs) {
+    if (typeof run.session_id !== 'string' || run.session_id === '') continue;
+    const current = map.get(run.session_id);
+    if (current === undefined) {
+      map.set(run.session_id, run);
+      continue;
+    }
+    const currentTerminal = classifyRun(current.status) === 'terminal';
+    const runTerminal = classifyRun(run.status) === 'terminal';
+    if (currentTerminal && !runTerminal) {
+      map.set(run.session_id, run);
+    } else if (currentTerminal && runTerminal && run.created_at > current.created_at) {
+      map.set(run.session_id, run);
+    }
+  }
+  return map;
+}
+
+/**
  * Strip quick-session triage rows for any session a non-terminal flow run
  * already represents, from EVERY bucket — not just `working`, which was the
  * only place this precedence was applied before TASK-226. Without this, a

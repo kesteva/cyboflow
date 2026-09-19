@@ -33,6 +33,8 @@ let mockReviewItems: ReviewItem[] = [];
 let mockBlockingFindings: ReviewItem[] = [];
 let mockBlockingRunIds: ReadonlySet<string> = new Set();
 let mockRuns: ActiveRunRow[] = [];
+/** The rail store's RETAINED rows (active + newest terminal per session) — `useAggregatedRetainedRuns`. */
+let mockRetainedRuns: ActiveRunRow[] = [];
 let mockRunProjectMap: Record<string, number> = {};
 let mockApprovalsQueueLength = 0;
 let mockApprovalBlocking: unknown[] = [];
@@ -55,6 +57,7 @@ vi.mock('../../../stores/landingStore', () => ({
   useAggregatedBlockingFindings: () => mockBlockingFindings,
   useAggregatedBlockingRunIds: () => mockBlockingRunIds,
   useAggregatedRuns: () => mockRuns,
+  useAggregatedRetainedRuns: () => (mockRetainedRuns.length > 0 ? mockRetainedRuns : mockRuns),
   useRunProjectMap: () => mockRunProjectMap,
   useRunSessionMap: () => ({}),
   useLandingStore: (selector: (s: { loadError: boolean; retry: () => void }) => unknown) =>
@@ -330,6 +333,7 @@ beforeEach(() => {
   mockBlockingFindings = [];
   mockBlockingRunIds = new Set();
   mockRuns = [];
+  mockRetainedRuns = [];
   mockRunProjectMap = {};
   mockApprovalsQueueLength = 0;
   mockApprovalBlocking = [];
@@ -766,7 +770,7 @@ describe('LandingHome — page states', () => {
     expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
   });
 
-  it('TASK-226: once the flow run is fully terminal, the session\'s own row returns to Ready for review and Open → opens the quick session', async () => {
+  it('TASK-226: once the flow run is fully terminal, the session\'s own row returns to Ready for review and Open → opens THAT flow run', async () => {
     const user = userEvent.setup();
     mockProviderAccess = CONNECTED_ACCESS;
     mockProjectsCount = 1;
@@ -784,19 +788,96 @@ describe('LandingHome — page states', () => {
       }),
     ];
     // The flow run finished (terminal) -> `useAggregatedRuns` no longer
-    // carries it as a live thing, so it drops out of `runs` entirely.
+    // carries it as a live thing (so the session's own row comes back), but
+    // the rail store still RETAINS it as the session's newest terminal run.
     mockRuns = [];
+    mockRetainedRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'completed',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
 
     render(<LandingHome />);
     await act(async () => {});
 
     const ready = screen.getByTestId('rq-ready-section');
     expect(within(ready).getByText('swift-bison-20260917')).toBeInTheDocument();
-    expect(within(ready).getByText('stopped by you')).toBeInTheDocument();
+    // The label describes the run that finished (completed), not the parked
+    // `__quick__` chat that reads `stopped` — nothing was stopped by the user.
+    expect(within(ready).queryByText('stopped by you')).not.toBeInTheDocument();
+    // Working shows nothing — the run is terminal and the session is idle.
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
 
     await user.click(within(ready).getByText('Open →'));
 
-    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('swift-bison-20260917', 'wf-6-__quick__');
+    expect(mockSetActiveRun).toHaveBeenCalledWith('wf-global-planner');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: a session whose flow run was CANCELED reads "stopped by you" in Ready for review', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'swift-bison-20260917',
+        name: 'swift-bison-20260917',
+        runId: 'wf-6-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'completed',
+        unviewed: true,
+      }),
+    ];
+    mockRuns = [];
+    mockRetainedRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'canceled',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const ready = screen.getByTestId('rq-ready-section');
+    expect(within(ready).getByText('stopped by you')).toBeInTheDocument();
+  });
+
+  it('TASK-226: a session with NO flow run at all still opens its own quick session from Ready for review', async () => {
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'plain-chat',
+        name: 'plain-chat',
+        runId: 'wf-7-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'stopped',
+        unviewed: true,
+      }),
+    ];
+    mockRuns = [];
+    mockRetainedRuns = [];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const ready = screen.getByTestId('rq-ready-section');
+    expect(within(ready).getByText('stopped by you')).toBeInTheDocument();
+    await user.click(within(ready).getByText('Open →'));
+
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('plain-chat', 'wf-7-__quick__');
     expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 

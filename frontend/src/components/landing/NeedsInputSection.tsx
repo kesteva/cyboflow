@@ -52,10 +52,13 @@ function AskCard({ children }: { children: React.ReactNode }): React.JSX.Element
 function CardTop({
   quiet,
   onDismiss,
+  dismissDisabled = false,
 }: {
   quiet: string | null;
   /** Small ✕ in the top-right corner — quick-session rows only (TASK-225). */
   onDismiss?: () => void;
+  /** Disabled while a dismiss is in flight, so a double-click can't fire a second mutation. */
+  dismissDisabled?: boolean;
 }): React.JSX.Element {
   return (
     <div className="flex items-center gap-2">
@@ -70,7 +73,8 @@ function CardTop({
           title="Dismiss"
           data-testid="rq-needs-input-dismiss-x"
           onClick={onDismiss}
-          className={`shrink-0 text-[12px] leading-none text-text-tertiary transition-colors hover:text-text-primary ${quiet === null ? 'ml-auto' : ''}`}
+          disabled={dismissDisabled}
+          className={`shrink-0 text-[12px] leading-none text-text-tertiary transition-colors hover:text-text-primary disabled:opacity-50 ${quiet === null ? 'ml-auto' : ''}`}
         >
           ✕
         </button>
@@ -153,13 +157,23 @@ function QuickSessionAsk({
 }): React.JSX.Element {
   const [busy, setBusy] = React.useState(false);
 
+  // Dismiss only clears the SUMMARIZER's ask (session_summaries.state /
+  // waiting_on). A live `blocked` row is a real in-flight AskUserQuestion /
+  // permission gate the mutation cannot clear — the card would survive the
+  // click — so the affordance is offered only for the idle + needs_input
+  // (summary-derived) ask it can actually remove.
+  const canDismiss = row.state !== 'blocked';
+
   // TASK-225: clears session_summaries.state/waiting_on server-side and stamps
   // a dismissal hash so a future summarizer run repeating the SAME question
   // stays suppressed (quickSessionListing.ts's read-time filter) — a
   // genuinely different question still resurfaces. `onDismissed` kicks an
   // immediate board refresh so the card drops out right away rather than
-  // waiting for the next 3s poll tick.
+  // waiting for the next 3s poll tick. Guarded on `busy` (and both controls
+  // disable while in flight) so a double-click never issues a second dismiss
+  // that would re-stamp over the first one's suppression hash.
   const dismiss = (): void => {
+    if (busy) return;
     setBusy(true);
     void trpc.cyboflow.sessions.dismissAsk
       .mutate({ sessionId: row.sessionId })
@@ -172,7 +186,10 @@ function QuickSessionAsk({
 
   return (
     <AskCard>
-      <CardTop quiet={formatElapsedMinutes(row.restedAtIso, nowMs)} onDismiss={dismiss} />
+      <CardTop
+        quiet={formatElapsedMinutes(row.restedAtIso, nowMs)}
+        {...(canDismiss ? { onDismiss: dismiss, dismissDisabled: busy } : {})}
+      />
       <Headline>{row.waitingOn ?? row.summary ?? 'Waiting for your answer'}</Headline>
       <MetaRow
         projectName={projectName}
@@ -181,9 +198,11 @@ function QuickSessionAsk({
         context={row.waitingOn !== null ? row.summary : null}
         actions={
           <>
-            <GhostButton onClick={dismiss} disabled={busy}>
-              Dismiss
-            </GhostButton>
+            {canDismiss && (
+              <GhostButton onClick={dismiss} disabled={busy}>
+                Dismiss
+              </GhostButton>
+            )}
             <PrimaryButton onClick={() => onOpen(row)}>Answer →</PrimaryButton>
           </>
         }

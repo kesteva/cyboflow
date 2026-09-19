@@ -41,6 +41,7 @@ import {
   useAggregatedBlockingRunIds,
   useAggregatedReviewItems,
   useAggregatedRuns,
+  useAggregatedRetainedRuns,
   useLandingProjects,
   useLandingStore,
   useProjectsCount,
@@ -73,6 +74,7 @@ import {
   countApprovals,
   nonTerminalFlowRunBySession,
   resolveOpenTarget,
+  significantFlowRunBySession,
   selectReadyToReviewRuns,
 } from './queueSelectors';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -180,6 +182,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   const blockingFindings = useAggregatedBlockingFindings();
   const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const runs = useAggregatedRuns();
+  const retainedRuns = useAggregatedRetainedRuns();
   const runProjectMap = useRunProjectMap();
   const runSessionMap = useRunSessionMap();
   const loadError = useLandingStore((s) => s.loadError);
@@ -256,6 +259,16 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // queueSelectors.ts's `nonTerminalFlowRunBySession` / `applyFlowRunPrecedence`
   // for the TASK-226 rationale).
   const flowRunBySession = React.useMemo(() => nonTerminalFlowRunBySession(runs), [runs]);
+  // The Ready-for-review counterpart: the session's most significant flow run
+  // INCLUDING a finished one (the rail store retains the newest terminal run
+  // per session). Once the flow run is terminal its session's own quick row
+  // returns to Ready — but "Open →" there must open THAT run, and the label
+  // must describe it, not the `__quick__` chat the flow interrupted (TASK-226).
+  // Bucket precedence above deliberately keeps using the non-terminal map.
+  const readyFlowRunBySession = React.useMemo(
+    () => significantFlowRunBySession(retainedRuns),
+    [retainedRuns],
+  );
   const triage = React.useMemo(
     () =>
       applyFlowRunPrecedence(
@@ -416,10 +429,18 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   );
   const readyRows = React.useMemo<ReadyRow[]>(
     () => [
-      ...triage.readyForReview.map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
+      ...triage.readyForReview.map((row) => {
+        const flowRun = readyFlowRunBySession.get(row.sessionId);
+        return {
+          kind: 'quick' as const,
+          id: row.sessionId,
+          row,
+          ...(flowRun !== undefined ? { flowRun } : {}),
+        };
+      }),
       ...readyRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
     ],
-    [triage.readyForReview, readyRuns],
+    [triage.readyForReview, readyRuns, readyFlowRunBySession],
   );
 
   // A session that is one arm of a LIVE A/B experiment must not be merged or
@@ -593,14 +614,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         // hands you the list instead of picking for you.
         if (action.sessionIds.length === 1) {
           const row = triage.readyForReview.find((r) => r.sessionId === action.sessionIds[0]);
-          if (row !== undefined) openSessionRow(row, flowRunBySession);
+          if (row !== undefined) openSessionRow(row, readyFlowRunBySession);
           else jumpToReady();
         } else jumpToReady();
         return;
       }
       case 'rebase-behind': {
         const row = triage.readyForReview.find((r) => r.sessionId === action.sessionIds[0]);
-        if (row !== undefined) openSessionRow(row, flowRunBySession);
+        if (row !== undefined) openSessionRow(row, readyFlowRunBySession);
         return;
       }
       case 'wrap-up-stale':
@@ -782,7 +803,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           projectNameById={projectNameById}
           guardedSessionIds={guardedSessionIds}
           nowMs={nowMs}
-          onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
+          onOpenQuickSession={(row) => openSessionRow(row, readyFlowRunBySession)}
           onOpenRun={(run) => openRunSession(run.id, run.project_id)}
           onMergeSession={requestMerge}
           onDismissSession={setDismissTargetId}

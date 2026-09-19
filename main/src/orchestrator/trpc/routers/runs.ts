@@ -362,6 +362,41 @@ export function setRewindRunDeps(deps: RewindRunDeps): void {
   rewindRunDeps = deps;
 }
 
+/** `canAddressReviewFindings`'s ineligibility reasons (mirrored by ReviewItemCard's tooltip copy). */
+export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progress';
+
+/**
+ * `addressReviewFindings`'s result: rewindRunHandler's own shape plus the
+ * mutation's one extra `noOp` reason (`'in_progress'` — address-review is
+ * already the live current step, so the request is refused rather than
+ * restarting in-flight repair work).
+ */
+export type AddressReviewFindingsResult = RewindRunResult | { noOp: true; reason: 'in_progress' };
+
+interface AddressReviewRunRow {
+  status: string;
+  execution_model: string | null;
+  current_step_id: string | null;
+}
+
+/** The pre-flight columns both address-review procedures read (never `any`). */
+function readAddressReviewRunRow(db: DatabaseLike, runId: string): AddressReviewRunRow | undefined {
+  return db
+    .prepare('SELECT status, execution_model, current_step_id FROM workflow_runs WHERE id = ?')
+    .get(runId) as AddressReviewRunRow | undefined;
+}
+
+/**
+ * True when `address-review` is the run's LIVE current step — a rewind there
+ * would abort and restart repair work already under way (rewindRunHandler
+ * allows target === current). A `failed`/`paused`/`awaiting_review` run parked
+ * AT address-review is deliberately NOT in progress: re-driving a dead or
+ * parked step is exactly what the action is for.
+ */
+function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
+  return row.current_step_id === ADDRESS_REVIEW_STEP_ID && (row.status === 'running' || row.status === 'starting');
+}
+
 // ---------------------------------------------------------------------------
 // start dependency bag
 //
@@ -2844,24 +2879,32 @@ export const runsRouter = router({
    *     same source of truth rewindRunHandler validates against — never the
    *     live workflows.spec_json) has no `address-review` step (e.g. a quick
    *     session, compound, or launch/planner run — only sprint/ship carry one).
+   *   - 'in_progress' — `address-review` IS the run's live current step
+   *     (status 'running'): a previous click (or the flow itself) already has
+   *     the step working through the pending findings. Rewinding again would
+   *     abort and restart that repair mid-flight — rewindRunHandler allows
+   *     target === current — so the CTA reads as "already addressing" instead.
+   *     Every eval-finding card for the run shares this verdict, which is what
+   *     makes the action effectively once-per-run across sibling cards.
    *
    * A missing run row is folded into 'completed' — there is nothing to rewind
    * either way, and the eligibility check has no narrower reason to report.
    */
   canAddressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
-    .query(({ ctx, input }): { eligible: boolean; reason?: 'completed' | 'no_step' } => {
+    .query(({ ctx, input }): { eligible: boolean; reason?: AddressReviewIneligibleReason } => {
       if (!ctx.db) {
         throw new TRPCError({
           code: 'PRECONDITION_FAILED',
           message: 'db not wired into tRPC context',
         });
       }
-      const row = ctx.db
-        .prepare('SELECT status, execution_model FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { status: string; execution_model: string | null } | undefined;
+      const row = readAddressReviewRunRow(ctx.db, input.runId);
       if (!row || row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
         return { eligible: false, reason: 'completed' };
+      }
+      if (isAddressReviewInProgress(row)) {
+        return { eligible: false, reason: 'in_progress' };
       }
       const frozen = resolveRunFrozenSpec(ctx.db, input.runId);
       const definition = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
@@ -2888,18 +2931,29 @@ export const runsRouter = router({
    * themselves stay `pending` — the address-review step resolves each one
    * itself as it works through them.
    *
-   * Returns the same `RewindRunResult` shape rewindRunHandler does; the caller
-   * (ReviewItemCard) should pre-check `canAddressReviewFindings` so a `noOp`
-   * here is the rare race case, not the common path.
+   * Returns the same `RewindRunResult` shape rewindRunHandler does, plus one
+   * extra `noOp` reason of its own — `'in_progress'`, when `address-review` is
+   * ALREADY the run's live current step (see canAddressReviewFindings). That
+   * makes the action idempotent per run: a second eval-finding card clicking it
+   * while the first click's repair is under way is refused instead of aborting
+   * and restarting that work (rewindRunHandler itself allows target === current).
+   * Truly concurrent duplicates that both pass this pre-check are still
+   * serialised by the handler's in-queue re-guard (the loser reads
+   * 'not_rewindable' / 'race'). The caller (ReviewItemCard) should pre-check
+   * `canAddressReviewFindings` so a `noOp` here is the exception, not the path.
    */
   addressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
-    .mutation(async ({ input }): Promise<RewindRunResult> => {
+    .mutation(async ({ input }): Promise<AddressReviewFindingsResult> => {
       if (!rewindRunDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
           message: 'rewind-run deps not wired yet. Call setRewindRunDeps() at boot.',
         });
+      }
+      const row = readAddressReviewRunRow(rewindRunDeps.db, input.runId);
+      if (row && isAddressReviewInProgress(row)) {
+        return { noOp: true, reason: 'in_progress' };
       }
       return rewindRunHandler(input.runId, ADDRESS_REVIEW_STEP_ID, rewindRunDeps);
     }),

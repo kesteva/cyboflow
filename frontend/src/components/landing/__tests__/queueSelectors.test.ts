@@ -17,6 +17,7 @@ import {
   nonTerminalFlowRunBySession,
   resolveOpenTarget,
   selectReadyToReviewRuns,
+  significantFlowRunBySession,
 } from '../queueSelectors';
 
 function makeRun(overrides: Partial<ActiveRunRow> & { id: string }): ActiveRunRow {
@@ -253,6 +254,43 @@ describe('nonTerminalFlowRunBySession', () => {
   it('excludes a run with no session_id', () => {
     const run = makeRun({ id: 'run-a', status: 'running', session_id: null });
     expect(nonTerminalFlowRunBySession([run]).size).toBe(0);
+  });
+});
+
+describe('significantFlowRunBySession (TASK-226 — Ready-for-review navigation/label map)', () => {
+  it('includes a terminal run, keyed by its session id', () => {
+    for (const status of ['completed', 'failed', 'canceled'] as const) {
+      const run = makeRun({ id: `run-${status}`, status, session_id: 'sess-a' });
+      expect(significantFlowRunBySession([run]).get('sess-a')).toEqual(run);
+    }
+  });
+
+  it('prefers a non-terminal run over a terminal one for the same session, regardless of order', () => {
+    const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a', created_at: '2026-07-06 13:00:00' });
+    const live = makeRun({ id: 'run-live', status: 'running', session_id: 'sess-a', created_at: '2026-07-06 12:00:00' });
+    expect(significantFlowRunBySession([done, live]).get('sess-a')).toEqual(live);
+    expect(significantFlowRunBySession([live, done]).get('sess-a')).toEqual(live);
+  });
+
+  it('picks the NEWEST terminal run when a session has only terminal runs', () => {
+    const older = makeRun({ id: 'run-old', status: 'failed', session_id: 'sess-a', created_at: '2026-07-06 12:00:00' });
+    const newer = makeRun({ id: 'run-new', status: 'completed', session_id: 'sess-a', created_at: '2026-07-06 13:00:00' });
+    expect(significantFlowRunBySession([older, newer]).get('sess-a')).toEqual(newer);
+    expect(significantFlowRunBySession([newer, older]).get('sess-a')).toEqual(newer);
+  });
+
+  it('excludes a run with no session_id', () => {
+    const run = makeRun({ id: 'run-a', status: 'completed', session_id: null });
+    expect(significantFlowRunBySession([run]).size).toBe(0);
+  });
+
+  it('routes a Ready row of a session whose flow run finished to THAT run via resolveOpenTarget', () => {
+    const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a', project_id: 4 });
+    const target = resolveOpenTarget(
+      makeQuickRow({ sessionId: 'sess-a', runId: 'wf-6-__quick__', projectId: 4 }),
+      significantFlowRunBySession([done]),
+    );
+    expect(target).toEqual({ kind: 'run', runId: 'run-done', projectId: 4 });
   });
 });
 
