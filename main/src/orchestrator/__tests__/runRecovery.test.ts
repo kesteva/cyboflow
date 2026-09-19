@@ -1092,6 +1092,47 @@ describe('archived-session review-item sweeps', () => {
 
     expect(sessionCompletedNoCodeWork(adapter, 'sess-active')).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // Mark complete → archive, end to end (TASK-276 acceptance #3). The dismiss
+  // dialog's "Mark complete" action is markComplete → stampSessionRunsCompleted
+  // (ipc/gitOps.ts); the "Dismiss" that follows it goes through sessions:delete
+  // → dismissPendingReviewItemsForSession. Neither of those calls is reachable
+  // from sessionCompletedNoCodeWork alone — this pins that stamping a
+  // completedNoCode Planner/Launch session's runs 'completed' is enough for the
+  // DELIVERED_SESSION_FINDING_CARVE_OUT to keep its findings on the very next
+  // archive sweep, even though the run outcome was NULL a moment earlier.
+  // -------------------------------------------------------------------------
+  it("stamping a completedNoCode Planner run 'completed' and then archiving keeps its review items", async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, { id: 'run-planner-mc', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-mc'`).run();
+    const findingId = await createReviewItem(router, 'run-planner-mc', 'Backlog rows this run wrote', 'code-review');
+
+    // Precondition: this is exactly the shape sessionCompletedNoCodeWork keys
+    // on (outcome still NULL — the run finished, but nobody has stamped it).
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-mc') as { outcome: string | null })
+        .outcome,
+    ).toBeNull();
+
+    const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
+    expect(stamped).toBeGreaterThan(0);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-mc') as { outcome: string | null })
+        .outcome,
+    ).toBe('completed');
+
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    expect(result.itemsDismissed).toBe(0);
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status,
+    ).toBe('pending');
+  });
 });
 
 // ---------------------------------------------------------------------------
