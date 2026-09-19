@@ -1158,3 +1158,112 @@ describe('resolveReviewItem — approve-plan reject unwinds the plan ledger', ()
     expect(result).toMatchObject({ ok: true, outcome: 'reject' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-222 — attributable-reject guard (stepDeclaresOptionalLoopback)
+//
+// The swift-bison-20260917 incident: a plain 'reject' on the approve-design gate
+// (which the frozen spec declares optional with an intra-phase `loopback` target)
+// ENDS the run instead of looping back to expand-spec. This handler does not itself
+// own the loopback (the WorkflowController does — untouched by this task), but it
+// MUST warn-log so the occurrence is attributable to a surface/actor, and it MUST
+// still honor the caller's explicit choice (no refusal, no behavior change).
+// ---------------------------------------------------------------------------
+
+/** Seed a `workflows` row + point the run at it, so resolveRunFrozenSpec resolves a spec. */
+function seedWorkflowSpec(
+  db: Database.Database,
+  opts: { runId: string; workflowId: string; steps: Array<{ id: string; optional?: boolean; loopback?: string }> },
+): void {
+  db.prepare('INSERT INTO workflows (id, name, spec_json) VALUES (?, ?, ?)').run(
+    opts.workflowId,
+    'test-workflow',
+    JSON.stringify({ phases: [{ steps: opts.steps }] }),
+  );
+  db.prepare('UPDATE workflow_runs SET workflow_id = ? WHERE id = ?').run(opts.workflowId, opts.runId);
+}
+
+describe('resolveReviewItem — TASK-222 attributable-reject guard', () => {
+  it('warns when a reject arrives for a programmatic approve-design gate whose frozen spec declares an optional loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design',
+      workflowId: 'wf-1',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("gate 'approve-design' on run run-design resolved with outcome 'reject'"),
+    );
+    expect(warnSpy.mock.calls[0][0]).toContain('surface=queue');
+    // The reject itself is still honored exactly as requested — no refusal, no
+    // forced remap to 'revise' (that behavior lives in the surfaces, not here).
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'reject' });
+  });
+
+  it('does NOT warn when the same gate is resolved with outcome revise (the intended loopback)', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_revise',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design-2',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design-2',
+      workflowId: 'wf-2',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_revise', outcome: 'revise', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'revise' });
+  });
+
+  it('does NOT warn on reject for a gate whose frozen spec declares NO loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_plain_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-idea',
+      blocking: true,
+      runId: 'run-plain',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-plain',
+      workflowId: 'wf-3',
+      steps: [{ id: 'approve-idea' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_plain_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("declares an optional loopback"));
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-idea', outcome: 'reject' });
+  });
+});
