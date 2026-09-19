@@ -56,9 +56,20 @@ function buildDb(): Database.Database {
       payload_json TEXT,
       resolution TEXT
     );
+    -- workflow_id/spec_hash are joined by resolveRunFrozenSpec (TASK-222's
+    -- stepDeclaresOptionalLoopback guard). Every existing test leaves them NULL,
+    -- so the reader degrades via its own schema-absence/fallback paths; the new
+    -- TASK-222 describe block below is the only one that populates them.
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY,
-      status TEXT NOT NULL
+      status TEXT NOT NULL,
+      workflow_id TEXT,
+      spec_hash TEXT
+    );
+    CREATE TABLE workflows (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      spec_json TEXT
     );
   `);
   return db;
@@ -289,6 +300,68 @@ describe('resolveReviewItem — non-gate items', () => {
 
     expect(deps.maybeResumeRun).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true, reviewItemId: 'rvw_nb', resumed: false, gateStepId: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-277 — "Log as findings" on an eval-sourced finding (resolution
+// 'triaged:logged'): the SAME aggregate-unblock mechanism as any other
+// blocking finding (keyed on `blocking`, never on the resolution text or
+// source), so a blocking catastrophic-cap eval item stops gating the run
+// exactly like the generic case above — and no task is ever minted, because
+// this chokepoint's dep bag carries no task-creation collaborator at all
+// (only reviewItems.promoteToTask does that, via a wholly separate handler).
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — TASK-277 eval finding "Log as findings"', () => {
+  it('a blocking eval-sourced (catastrophic-cap) finding resolved triaged:logged stops gating the run', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_cap',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: true,
+      runId: 'run-eval',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_cap', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    // No task-minting collaborator exists on this path — resolve never mints one.
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
+      reviewItemId: 'rvw_eval_cap',
+      actor: 'user',
+      resolution: 'triaged:logged',
+    });
+    expect(deps.promotePendingDraftsForRun).not.toHaveBeenCalled();
+    expect(deps.deleteRunCreatedEntities).not.toHaveBeenCalled();
+    // The blocking cap item no longer gates the run — aggregate-unblock resumes it.
+    expect(deps.maybeResumeRun).toHaveBeenCalledWith('run-eval');
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_cap', resumed: true, gateStepId: null });
+    expect(runStatus(db, 'run-eval')).toBe('running');
+  });
+
+  it('a non-blocking eval finding resolved triaged:logged just resolves — no resume attempted, no task minted', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_nb',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: false,
+      runId: 'run-eval-nb',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_nb', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_nb', resumed: false, gateStepId: null });
   });
 });
 
