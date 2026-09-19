@@ -100,6 +100,12 @@ import {
   type RetryRunDeps,
   type RetryRunResult,
 } from '../../retryRunHandler';
+import {
+  rewindRunHandler,
+  REWINDABLE_STATUSES,
+  type RewindRunDeps,
+  type RewindRunResult,
+} from '../../rewindRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
 import {
   updateSessionAgentPermissionMode,
@@ -325,6 +331,35 @@ let retryRunDeps: RetryRunDeps | null = null;
  */
 export function setRetryRunDeps(deps: RetryRunDeps): void {
   retryRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// addressReviewFindings dependency bag (TASK-277 — the review queue's
+// "Address review findings" CTA on an eval-sourced finding)
+//
+// Injected at boot by main/src/index.ts via setRewindRunDeps(), reusing the
+// EXACT SAME RewindRunDeps bag the monitor's `rewind_to_step` action wires
+// (main/src/index.ts's `rewindRunDepsBag`) — one dep bag, two entry points
+// (the monitor chat command and this direct UI mutation). Until wired the
+// mutation throws METHOD_NOT_SUPPORTED — same pattern as the other dep-bags.
+// ---------------------------------------------------------------------------
+
+/** The frozen-definition step id `addressReviewFindings` always rewinds to. */
+export const ADDRESS_REVIEW_STEP_ID = 'address-review';
+
+let rewindRunDeps: RewindRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the `addressReviewFindings` mutation
+ * (and the `canAddressReviewFindings` eligibility query's DB-only checks need
+ * no deps at all).
+ *
+ * Called once at boot by main/src/index.ts — the SAME call site that builds
+ * `rewindRunDepsBag` for the monitor's rewind action. Until this is called the
+ * mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setRewindRunDeps(deps: RewindRunDeps): void {
+  rewindRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -2791,6 +2826,82 @@ export const runsRouter = router({
         });
       }
       return retryRunHandler(input.runId, input.stepId, retryRunDeps);
+    }),
+
+  /**
+   * Eligibility check for the review queue's "Address review findings" CTA
+   * (TASK-277) — whether `addressReviewFindings` would actually rewind this
+   * run, WITHOUT mutating anything. Lets the ReviewItemCard render the button
+   * disabled (with an explanatory tooltip) instead of letting the human click
+   * it and hit a `noOp` reason.
+   *
+   * `eligible: false` carries a `reason`:
+   *   - 'completed'  — the run is not programmatic, not found, or not in one
+   *     of rewindRunHandler's REWINDABLE_STATUSES (running / awaiting_review /
+   *     failed / paused) — i.e. it already completed, was canceled, or never
+   *     started walking a DAG at all.
+   *   - 'no_step'    — the run's FROZEN definition (resolveRunFrozenSpec, the
+   *     same source of truth rewindRunHandler validates against — never the
+   *     live workflows.spec_json) has no `address-review` step (e.g. a quick
+   *     session, compound, or launch/planner run — only sprint/ship carry one).
+   *
+   * A missing run row is folded into 'completed' — there is nothing to rewind
+   * either way, and the eligibility check has no narrower reason to report.
+   */
+  canAddressReviewFindings: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ ctx, input }): { eligible: boolean; reason?: 'completed' | 'no_step' } => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      const row = ctx.db
+        .prepare('SELECT status, execution_model FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status: string; execution_model: string | null } | undefined;
+      if (!row || row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
+        return { eligible: false, reason: 'completed' };
+      }
+      const frozen = resolveRunFrozenSpec(ctx.db, input.runId);
+      const definition = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
+      const hasAddressReviewStep = Boolean(
+        definition?.phases.some((phase) => phase.steps.some((step) => step.id === ADDRESS_REVIEW_STEP_ID)),
+      );
+      if (!hasAddressReviewStep) {
+        return { eligible: false, reason: 'no_step' };
+      }
+      return { eligible: true };
+    }),
+
+  /**
+   * Reopen this run's `address-review` step so it acts on every still-pending
+   * eval finding filed against it (TASK-277 — the review queue's "Address
+   * review findings" CTA on an `agent:eval%`-sourced finding).
+   *
+   * A thin wrapper over `rewindRunHandler(runId, 'address-review', ...)`: the
+   * step itself discovers its scope by calling `cyboflow_list_run_findings`
+   * (stepPrompt.ts's "Findings contract (address-review)"), so this mutation
+   * carries no finding-id list — clicking it on ANY eval finding for a run
+   * addresses ALL of that run's pending eval findings in ONE rewind (a
+   * per-finding rewind would restart the step N times). The findings
+   * themselves stay `pending` — the address-review step resolves each one
+   * itself as it works through them.
+   *
+   * Returns the same `RewindRunResult` shape rewindRunHandler does; the caller
+   * (ReviewItemCard) should pre-check `canAddressReviewFindings` so a `noOp`
+   * here is the rare race case, not the common path.
+   */
+  addressReviewFindings: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<RewindRunResult> => {
+      if (!rewindRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'rewind-run deps not wired yet. Call setRewindRunDeps() at boot.',
+        });
+      }
+      return rewindRunHandler(input.runId, ADDRESS_REVIEW_STEP_ID, rewindRunDeps);
     }),
 
   /**

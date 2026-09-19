@@ -157,7 +157,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -4863,6 +4863,11 @@ app.whenReady().then(async () => {
       },
       logger: loggerLike,
     };
+    // The review queue's "Address review findings" CTA (TASK-277) is a SECOND
+    // entry point onto this SAME dep bag — rewindRunHandler(runId,
+    // 'address-review', ...), wired here rather than duplicating the bag.
+    setRewindRunDeps(rewindRunDepsBag);
+    console.log('[Main] runs.addressReviewFindings deps wired');
 
     // Lane-rewind deps bag (monitor rewind_lane_to_step). Deliberately tiny next to
     // the rewind bag above: a lane rewind mutates nothing durable — it records an
