@@ -39,6 +39,7 @@ import type {
   ReviewItemSeverity,
   ReviewItemStatus,
 } from '../../../shared/types/reviews';
+import { SUPERVISOR_RECOMMENDATION_HEADING, upsertMarkdownSection } from '../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts), mirroring
@@ -213,12 +214,38 @@ export interface ReviewItemSetSelected {
   runId?: string | null;
 }
 
+/**
+ * Write a machine-authored markdown SECTION into a still-pending item's body
+ * (today: the run supervisor's non-binding recommendation).
+ *
+ * Deliberately NOT a triage op: the item stays `pending`, keeps its status, its
+ * blocking flag and its resolution, and the human's choice is untouched. What
+ * changes is the body the card renders — which is why this is a body upsert
+ * rather than a new column: every surface already renders the body, so an
+ * annotation needs no migration and no IPC shape change.
+ *
+ * `heading` is a closed set (one member today) so a body can never be scribbled
+ * on with arbitrary machine sections.
+ */
+export interface ReviewItemAnnotate {
+  op: 'annotate';
+  actor: ReviewActor;
+  reviewItemId: string;
+  /** The section heading to insert or replace. Closed set. */
+  heading: typeof SUPERVISOR_RECOMMENDATION_HEADING;
+  /** The section's markdown body (the heading line is written by the op). */
+  markdown: string;
+  /** The run that triggered this annotation, recorded on the entity_events row. */
+  runId?: string | null;
+}
+
 export type ReviewItemChange =
   | ReviewItemCreate
   | ReviewItemTriage
   | ReviewItemMutate
   | ReviewItemApprove
-  | ReviewItemSetSelected;
+  | ReviewItemSetSelected
+  | ReviewItemAnnotate;
 
 // ---------------------------------------------------------------------------
 // Internal row shape
@@ -365,6 +392,11 @@ export class ReviewItemRouter {
    *    emitting ONE 'selection-changed' event per affected id. Rejects an
    *    unstaged id (invalid_status). Also the orchestrator close-out path.
    *
+   * Annotate path: upserts a machine-authored markdown section into a PENDING
+   * item's body (any kind). Action 'annotated'; the item is NOT triaged. Rejects
+   * a non-pending item (invalid_status) — a decision the human already made must
+   * never gain a recommendation after the fact.
+   *
    * For set-selected the returned id/event is the LAST affected id (the
    * per-id events are all emitted on the project channel).
    *
@@ -392,6 +424,8 @@ export class ReviewItemRouter {
           return this.runApprove(projectId, change);
         case 'set-selected':
           return this.runSetSelected(projectId, change);
+        case 'annotate':
+          return this.runAnnotate(projectId, change);
         default:
           return assertNeverChange(change);
       }
@@ -808,6 +842,65 @@ export class ReviewItemRouter {
       reviewItemId: last.reviewItemId,
       event: { id: last.eventId, seq: last.eventSeq },
     };
+  }
+
+  // --------------------------------------------------------------------------
+  // Annotate path — machine-authored markdown section inside a pending body
+  // --------------------------------------------------------------------------
+
+  /**
+   * Upsert `change.markdown` into the item's body under `## <change.heading>`.
+   *
+   * PENDING-ONLY, any kind. A recommendation on an item the human already
+   * resolved is worse than no recommendation: the card would show advice about a
+   * decision that is already made, and the body the review queue keeps as the
+   * record of what the human saw would no longer be what they saw. The consult
+   * that races a human answering the gate is EXPECTED (the annotate is fired
+   * fire-and-forget while the gate is open), so `invalid_status` here is a normal
+   * outcome its caller logs at debug, not an error.
+   *
+   * The body rewrite itself is {@link upsertMarkdownSection} — replace in place,
+   * drop duplicates — so annotating twice leaves exactly one section.
+   */
+  private runAnnotate(
+    projectId: number,
+    change: ReviewItemAnnotate,
+  ): { reviewItemId: string; event: { id: number; seq: number } } {
+    const reviewItemId = change.reviewItemId;
+    const now = new Date().toISOString();
+
+    let eventId = 0;
+    let eventSeq = 0;
+
+    const txn = this.db.transaction(() => {
+      const current = this.readRow(projectId, reviewItemId);
+      if (!current) {
+        throw new ReviewItemError(
+          'not_found',
+          `review item ${reviewItemId} not found for project ${projectId}`,
+        );
+      }
+      if (current.status !== 'pending') {
+        throw new ReviewItemError(
+          'invalid_status',
+          `review item ${reviewItemId} is not pending (status='${current.status}') — cannot annotate`,
+        );
+      }
+
+      const nextBody = upsertMarkdownSection(current.body ?? '', change.heading, change.markdown);
+      this.db
+        .prepare(`UPDATE review_items SET body = ?, updated_at = ? WHERE id = ?`)
+        .run(nextBody, now, reviewItemId);
+
+      const deltas: FieldDelta[] = [{ field: 'body', from: current.body, to: nextBody }];
+      const ev = this.insertEvent(reviewItemId, 'annotated', change.actor, change.runId ?? null, deltas, now);
+      eventId = ev.id;
+      eventSeq = ev.seq;
+    });
+    (txn as () => void)();
+
+    this.emitChange(projectId, reviewItemId, 'annotated');
+    return { reviewItemId, event: { id: eventId, seq: eventSeq } };
   }
 
   // --------------------------------------------------------------------------

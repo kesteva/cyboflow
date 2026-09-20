@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'events';
-import { parseGateVerdict, ReviewQueueHumanGate, type HumanGateOpener } from '../humanGate';
+import {
+  parseGateVerdict,
+  ReviewQueueHumanGate,
+  type HumanGateItemSnapshot,
+  type HumanGateOpenedSnapshot,
+  type HumanGateOpener,
+} from '../humanGate';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { LoggerLike } from '../../types';
 
@@ -360,5 +366,193 @@ describe('ReviewQueueHumanGate', () => {
     // `dismissed` is the discriminant the side-effects need: a null resolution alone
     // also describes a note-less resolve, which is an APPROVE.
     expect(calls).toEqual([{ resolution: null, dismissed: true }]);
+  });
+
+  // ── post-arming read-back: the lost-event window ────────────────────────────
+  //
+  // The listener is armed before openHumanGate, but the `targetId` filter every
+  // event is matched against is only set after it resolves. A human who answers
+  // in that gap fires the ONLY event for this gate while targetId is still null.
+  // `readGateItem` after arming is what closes the window.
+
+  /** An opener whose readGateItem answers with one fixed snapshot (or null). */
+  function openerReading(
+    id: string,
+    item: HumanGateItemSnapshot | null,
+    extra: Partial<HumanGateOpener> = {},
+  ): HumanGateOpener {
+    return {
+      openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue(id),
+      readGateItem: vi.fn<NonNullable<HumanGateOpener['readGateItem']>>().mockReturnValue(item),
+      ...extra,
+    };
+  }
+
+  it('settles with the stored verdict when the item was RESOLVED before the target was armed', async () => {
+    const events = new EventEmitter();
+    const opener = openerReading('ri-lost', {
+      title: 'Approve plan',
+      body: 'body',
+      status: 'resolved',
+      resolution: 'revise: only AR-2 matters',
+    });
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    // No event is ever emitted — the read-back is the only signal.
+    await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).resolves.toBe('revise');
+    expect(opener.readGateItem).toHaveBeenCalledWith('ri-lost');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  it('settles as a reject when the item was DISMISSED before the target was armed', async () => {
+    const events = new EventEmitter();
+    const calls: Array<{ resolution: string | null; dismissed: boolean }> = [];
+    const opener = openerReading(
+      'ri-lost-dis',
+      { title: 't', body: 'b', status: 'dismissed', resolution: null },
+      {
+        onGateResolved: vi.fn(async (args) => {
+          calls.push({ resolution: args.resolution, dismissed: args.dismissed });
+        }),
+      },
+    );
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).resolves.toBe('reject');
+    expect(calls).toEqual([{ resolution: null, dismissed: true }]);
+  });
+
+  it('keeps awaiting the change event when the read-back says pending (or cannot answer)', async () => {
+    for (const snapshot of [
+      { title: 't', body: 'b', status: 'pending' as const, resolution: null },
+      null,
+    ]) {
+      const events = new EventEmitter();
+      const gate = new ReviewQueueHumanGate(openerReading('ri-p', snapshot), events, channelFor);
+      const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+      await Promise.resolve();
+      events.emit('review-project-1', { reviewItemId: 'ri-p', action: 'resolved', item: { resolution: 'approve' } });
+      await expect(pending).resolves.toBe('approve');
+    }
+  });
+
+  // ── onOpened: fire-and-forget gate-open hook ────────────────────────────────
+
+  it('fires onOpened AFTER the target is armed, with the item snapshot, and still settles', async () => {
+    const events = new EventEmitter();
+    const seen: HumanGateOpenedSnapshot[] = [];
+    const gate = new ReviewQueueHumanGate(
+      openerReading('ri-open', { title: 'Approve design', body: 'the real body', status: 'pending', resolution: null }),
+      events,
+      channelFor,
+    );
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'approve-design', name: 'Approve design' }),
+      onOpened: (snapshot) => {
+        seen.push(snapshot);
+      },
+    });
+    await flush();
+
+    expect(seen).toEqual([
+      { reviewItemId: 'ri-open', title: 'Approve design', body: 'the real body', resumed: false },
+    ]);
+    // A change event arriving AFTER the hook still settles the gate normally.
+    events.emit('review-project-1', { reviewItemId: 'ri-open', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
+  });
+
+  it('marks the snapshot resumed when it re-attached to an already-open gate, and falls back to the step name', async () => {
+    const events = new EventEmitter();
+    const seen: HumanGateOpenedSnapshot[] = [];
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn().mockResolvedValue(null), // already open
+      findPendingGate: vi.fn().mockResolvedValue('ri-existing'),
+      // No readGateItem -> the snapshot falls back to the step name + empty body.
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'approve-plan', name: 'Approve plan' }),
+      onOpened: (snapshot) => {
+        seen.push(snapshot);
+      },
+    });
+    await flush();
+
+    expect(seen).toEqual([
+      { reviewItemId: 'ri-existing', title: 'Approve plan', body: '', resumed: true },
+    ]);
+    events.emit('review-project-1', { reviewItemId: 'ri-existing', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
+  });
+
+  it('never rejects the gate when onOpened throws (fail-soft, logged)', async () => {
+    const events = new EventEmitter();
+    const logger: LoggerLike = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const gate = new ReviewQueueHumanGate(
+      openerReading('ri-throw', { title: 't', body: 'b', status: 'pending', resolution: null }),
+      events,
+      channelFor,
+      logger,
+    );
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'g' }),
+      onOpened: () => {
+        throw new Error('consult exploded');
+      },
+    });
+    await flush();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[ReviewQueueHumanGate] onOpened hook failed (fail-soft)',
+      expect.objectContaining({ error: 'consult exploded' }),
+    );
+    events.emit('review-project-1', { reviewItemId: 'ri-throw', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
+  });
+
+  it('does NOT await onOpened — a never-settling hook cannot delay the verdict', async () => {
+    const events = new EventEmitter();
+    const gate = new ReviewQueueHumanGate(
+      openerReading('ri-hang', { title: 't', body: 'b', status: 'pending', resolution: null }),
+      events,
+      channelFor,
+    );
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'g' }),
+      onOpened: () => new Promise<void>(() => undefined), // never resolves
+    });
+    await flush();
+
+    events.emit('review-project-1', { reviewItemId: 'ri-hang', action: 'resolved', item: { resolution: 'reject' } });
+    await expect(pending).resolves.toBe('reject');
+  });
+
+  it('does not fire onOpened when the gate was already settled before arming', async () => {
+    const events = new EventEmitter();
+    const onOpened = vi.fn();
+    const gate = new ReviewQueueHumanGate(
+      openerReading('ri-done', { title: 't', body: 'b', status: 'resolved', resolution: 'approve' }),
+      events,
+      channelFor,
+    );
+
+    await expect(
+      gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }), onOpened }),
+    ).resolves.toBe('approve');
+    await flush();
+    expect(onOpened).not.toHaveBeenCalled();
   });
 });

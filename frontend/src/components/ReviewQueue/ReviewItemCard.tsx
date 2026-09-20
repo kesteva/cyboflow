@@ -75,7 +75,8 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
-import { IDLE_REVIEW_SOURCE_PREFIX } from '../../../../shared/types/reviews';
+import { IDLE_REVIEW_SOURCE_PREFIX, parseSupervisorRecommendation } from '../../../../shared/types/reviews';
+import type { SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -92,6 +93,25 @@ const TARGET_CHIP_LABEL: Record<FindingProposedTarget, string> = {
   docs: '→ Docs',
   prompt: '→ Prompt',
   fix: '→ Quick fix',
+};
+
+// ---------------------------------------------------------------------------
+// Supervisor-recommendation chip — the run monitor's NON-BINDING advice, written
+// into the item body as a `## Supervisor recommendation` section by the router's
+// `annotate` op. The label is the COPY OF THE BUTTON the recommendation points
+// at, not the raw choice word, so the human reads "the supervisor would press
+// that one" rather than having to map a verb onto a menu. Keyed on the
+// discriminant so a new choice breaks the map at compile time (per
+// docs/CODE-PATTERNS.md "Label maps for shared-type discriminants").
+// ---------------------------------------------------------------------------
+
+const RECOMMENDATION_CHIP_LABEL: Record<SupervisorRecommendationChoice, string> = {
+  approve: 'Approve',
+  reject: 'Reject',
+  revise: 'Revise',
+  continue: 'Continue, log as findings',
+  rerun: 'Rerun planning with findings',
+  dismiss: 'Continue without logging',
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +368,10 @@ export function ReviewItemCard({
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
   const proposedTarget = findingProposedTarget(item);
+  // The supervisor's recommendation, parsed out of the body's annotated section;
+  // null = no chip. Rendered on BOTH surfaces (the header block below is shared),
+  // because the advice is just as useful in the queue as it is in the session.
+  const recommendation = parseSupervisorRecommendation(item.body);
   // A/B testing slice C: an experiment-comparison decision routes to the
   // comparison view instead of the legacy resolve/dismiss actions.
   const comparisonExperimentId = experimentComparisonId(item);
@@ -879,6 +903,16 @@ export function ReviewItemCard({
             data-testid="blocking-badge"
           >
             Blocking
+          </span>
+        )}
+        {recommendation && (
+          <span
+            className="rounded-full border border-interactive/40 bg-interactive/10 px-1.5 py-px text-[10px] font-medium text-interactive"
+            data-testid="supervisor-recommendation"
+            data-choice={recommendation.choice}
+            title={recommendation.sentence}
+          >
+            Supervisor recommends: {RECOMMENDATION_CHIP_LABEL[recommendation.choice]}
           </span>
         )}
         <span className="ml-auto text-xs text-text-muted">{formatAge(item.created_at)}</span>

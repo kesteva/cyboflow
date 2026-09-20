@@ -605,6 +605,11 @@ export function parseDesignVerdictMap(resolution: string | null | undefined): Id
  *                         (staged_at set, selected pre-checked; migration 034).
  *   - selection-changed — a ready finding's compound-this checkbox toggled
  *                         (selected 0↔1; migration 034).
+ *   - annotated         — a still-pending item's body gained (or had replaced)
+ *                         a machine-written markdown section — today only the
+ *                         supervisor's recommendation. The item is NOT triaged;
+ *                         every subscriber upserts the full item, so no
+ *                         subscriber needs a new switch arm.
  */
 export type ReviewItemChangeAction =
   | 'created'
@@ -612,7 +617,8 @@ export type ReviewItemChangeAction =
   | 'dismissed'
   | 'mutated'
   | 'staged'
-  | 'selection-changed';
+  | 'selection-changed'
+  | 'annotated';
 
 /**
  * Emitted on the project-scoped channel after every committed review-item
@@ -624,4 +630,212 @@ export interface ReviewItemChangedEvent {
   reviewItemId: string;
   action: ReviewItemChangeAction;
   item: ReviewItem;
+}
+
+// ---------------------------------------------------------------------------
+// Supervisor recommendation — a machine-written section inside an item's body
+//
+// The run supervisor (monitor) may ANNOTATE a still-pending review item with a
+// non-binding recommendation, so the card can tell the human which choice the
+// brain that watched the whole run would make. It is a markdown SECTION inside
+// the existing body rather than a new column: the body is the one field every
+// surface already renders, so an annotation needs no migration, no IPC shape
+// change, and degrades to plain prose anywhere that has not been taught the
+// section (the review-queue markdown, a copied gate body, a CLI read).
+//
+// The helpers below are pure and runtime-free so both the main process (the
+// router's `annotate` op) and the renderer (the card's chip) share ONE parser.
+// ---------------------------------------------------------------------------
+
+/**
+ * The one heading `ReviewItemAnnotate` may write today. A closed set, so a body
+ * can never be scribbled on with arbitrary machine sections, and so the parser
+ * and the writer can never drift on the spelling.
+ */
+export const SUPERVISOR_RECOMMENDATION_HEADING = 'Supervisor recommendation';
+
+/**
+ * The choices a supervisor recommendation may name. `approve`/`reject`/`revise`
+ * are the three-way human-gate verdicts; `continue`/`rerun`/`dismiss` are the
+ * approve-design gate's own menu (continue = approve and log the review's
+ * entries as accepted-risk findings, rerun = revise, dismiss = continue WITHOUT
+ * logging). Non-binding: nothing resolves a gate off this value.
+ */
+export type SupervisorRecommendationChoice =
+  | 'approve'
+  | 'reject'
+  | 'revise'
+  | 'continue'
+  | 'rerun'
+  | 'dismiss';
+
+/**
+ * A markdown line that opens or closes a fenced code block: at most three
+ * leading spaces, then three-or-more backticks or tildes. Captured so a closing
+ * fence can be matched against the marker that opened the block.
+ */
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** An ATX H1/H2 heading line: `# text` or `## text` (at most three indents). */
+const H1_H2_RE = /^ {0,3}(#{1,2})\s+(.*)$/;
+
+/** Normalize a heading's text for comparison: trailing whitespace + case-insensitive. */
+function normalizeHeading(text: string): string {
+  return text.trim().toLowerCase();
+}
+
+/**
+ * Index every H1/H2 heading line that sits OUTSIDE a fenced code block.
+ *
+ * Fence tracking is the whole point: a body that quotes a markdown template in a
+ * ``` block ("## Supervisor recommendation" as an EXAMPLE) must not have that
+ * example treated as a real section — replacing it would rewrite the human's
+ * sample, and reading it would parse a recommendation nobody made.
+ */
+function indexHeadings(lines: string[]): Array<{ line: number; level: number; text: string }> {
+  const out: Array<{ line: number; level: number; text: string }> = [];
+  let fence: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const fenceMatch = FENCE_RE.exec(lines[i]);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (fence === null) {
+        // Opening fence (any info string).
+        fence = marker;
+        continue;
+      }
+      // A closing fence must use the same character, be at least as long, and
+      // carry no info string (CommonMark). Anything else is block content.
+      if (marker[0] === fence[0] && marker.length >= fence.length && fenceMatch[2].trim() === '') {
+        fence = null;
+      }
+      continue;
+    }
+    if (fence !== null) continue;
+    const headingMatch = H1_H2_RE.exec(lines[i]);
+    if (headingMatch) {
+      out.push({ line: i, level: headingMatch[1].length, text: headingMatch[2] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Locate every `## <heading>` section in `lines`, as [startLine, endLineExclusive)
+ * ranges. A section runs from its own heading line to the next H1/H2 outside a
+ * fence (or end of body).
+ */
+function findSections(lines: string[], heading: string): Array<{ start: number; end: number }> {
+  const headings = indexHeadings(lines);
+  const wanted = normalizeHeading(heading);
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (let h = 0; h < headings.length; h++) {
+    if (headings[h].level !== 2 || normalizeHeading(headings[h].text) !== wanted) continue;
+    const next = headings[h + 1];
+    ranges.push({ start: headings[h].line, end: next ? next.line : lines.length });
+  }
+  return ranges;
+}
+
+/**
+ * Insert or replace the `## <heading>` section of a markdown body.
+ *
+ * Replace-in-place (rather than append-and-let-the-last-one-win) is what makes a
+ * re-annotation idempotent: a gate the supervisor annotates twice must end with
+ * ONE recommendation, in the position the human already read it, not a growing
+ * stack. Any further duplicate sections — from an older writer, or a body the
+ * human pasted twice — are removed in the same pass, so the parser's "first
+ * section" and the reader's "the section" can never disagree.
+ *
+ * Section boundaries follow {@link indexHeadings}: the next H1/H2 OUTSIDE a
+ * fenced code block ends the section. Output always ends with exactly one
+ * trailing newline. Pure — the input string is never mutated.
+ */
+export function upsertMarkdownSection(body: string, heading: string, markdown: string): string {
+  const sectionText = `## ${heading.trim()}\n\n${markdown.trim()}\n`;
+  const source = body ?? '';
+  const lines = source.split('\n');
+  const ranges = findSections(lines, heading);
+
+  if (ranges.length === 0) {
+    const base = source.replace(/\s+$/, '');
+    return base === '' ? sectionText : `${base}\n\n${sectionText}`;
+  }
+
+  // Rebuild from the tail so the earlier ranges' indices stay valid: the FIRST
+  // section becomes the new text, every later duplicate is dropped.
+  const out = lines.slice();
+  for (let i = ranges.length - 1; i >= 1; i--) {
+    out.splice(ranges[i].start, ranges[i].end - ranges[i].start);
+  }
+  const first = ranges[0];
+  out.splice(first.start, first.end - first.start, ...sectionText.replace(/\n$/, '').split('\n'), '');
+  return `${out.join('\n').replace(/\s+$/, '')}\n`;
+}
+
+/**
+ * Read back the body of the `## <heading>` section (its heading line excluded),
+ * or null when the body carries no such section. Same boundary rules as
+ * {@link upsertMarkdownSection}; leading/trailing blank lines are trimmed off.
+ *
+ * Used by the recommendation parser and by the gate consult's "already
+ * annotated, leave it alone" check.
+ */
+export function readMarkdownSection(body: string | null | undefined, heading: string): string | null {
+  if (typeof body !== 'string' || body === '') return null;
+  const lines = body.split('\n');
+  const ranges = findSections(lines, heading);
+  if (ranges.length === 0) return null;
+  return lines
+    .slice(ranges[0].start + 1, ranges[0].end)
+    .join('\n')
+    .replace(/^\s*\n/, '')
+    .replace(/\s+$/, '');
+}
+
+/**
+ * The machine-readable first line of a supervisor recommendation:
+ * `Recommended: <choice> — <one sentence>`. Case-insensitive on the choice; the
+ * separator may be an em dash, a hyphen, or a colon.
+ */
+const RECOMMENDED_LINE_RE =
+  /^Recommended:\s*(approve|reject|revise|continue|rerun|dismiss)\s*(?:—|-|:)\s*(.+)$/i;
+
+/**
+ * Parse the supervisor's recommendation out of a review-item body.
+ *
+ * Reads ONLY inside the `## Supervisor recommendation` section. A stray
+ * `Recommended: approve — …` line elsewhere in the body — a reviewer quoting
+ * itself, an agent's prose, a human's note — is deliberately ignored: the
+ * section is the only thing the router writes, so it is the only thing that may
+ * emphasize a button. Malformed (no section, no leading `Recommended:` line, an
+ * unknown choice, an empty sentence) yields null and the card renders no chip.
+ */
+export function parseSupervisorRecommendation(
+  body: string | null | undefined,
+): { choice: SupervisorRecommendationChoice; sentence: string } | null {
+  const section = readMarkdownSection(body, SUPERVISOR_RECOMMENDATION_HEADING);
+  if (section === null) return null;
+  const firstLine = section.split('\n').find((l) => l.trim() !== '');
+  if (firstLine === undefined) return null;
+  const m = RECOMMENDED_LINE_RE.exec(firstLine.trim());
+  if (!m) return null;
+  const sentence = m[2].trim();
+  if (sentence === '') return null;
+  return { choice: m[1].toLowerCase() as SupervisorRecommendationChoice, sentence };
+}
+
+/**
+ * Compose the markdown a supervisor recommendation section carries: the
+ * machine-readable `Recommended:` line first (so {@link parseSupervisorRecommendation}
+ * finds it), then the optional human-readable rationale after one blank line.
+ */
+export function composeSupervisorRecommendation(
+  choice: SupervisorRecommendationChoice,
+  sentence: string,
+  rationale?: string,
+): string {
+  const head = `Recommended: ${choice} — ${sentence.trim()}`;
+  const tail = rationale?.trim();
+  return tail ? `${head}\n\n${tail}` : head;
 }

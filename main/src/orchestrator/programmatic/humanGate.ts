@@ -23,6 +23,29 @@ import type { LoggerLike } from '../types';
 import { parseGateResolution } from '../../../../shared/types/reviews';
 import type { HumanGateDecision } from './types';
 
+/**
+ * The gate review item as the resolver reads it back AFTER arming — title, body
+ * and current lifecycle. The body matters because it is composed INSIDE the
+ * gate-open transaction (humanStepManager), so nothing outside can know what the
+ * human is being asked until the item exists.
+ */
+export interface HumanGateItemSnapshot {
+  title: string;
+  body: string;
+  status: 'pending' | 'resolved' | 'dismissed';
+  /** The raw resolution note; null while pending, and on a note-less resolve. */
+  resolution: string | null;
+}
+
+/** What {@link HumanGateRequest.onOpened} is handed when a gate goes live. */
+export interface HumanGateOpenedSnapshot {
+  reviewItemId: string;
+  title: string;
+  body: string;
+  /** True when this gate was ALREADY open and the resolver re-attached to it. */
+  resumed: boolean;
+}
+
 export interface HumanGateRequest {
   runId: string;
   projectId: number;
@@ -35,6 +58,19 @@ export interface HumanGateRequest {
    * 'abort' without opening a gate.
    */
   signal?: AbortSignal;
+  /**
+   * Fired ONCE, AFTER the resolver has armed itself on the gate item (i.e. after
+   * `targetId` is set), with the item as it exists at that moment.
+   *
+   * FIRE-AND-FORGET, by contract: it is scheduled on a microtask, never awaited,
+   * and a throw or a rejection is logged and swallowed. The gate promise must be
+   * settleable by the human at any instant — including while this hook is still
+   * running — so nothing here may delay, block or reject it. The hook exists for
+   * work that needs the gate's real body (which only exists once the item does),
+   * such as consulting the run supervisor for a recommendation to annotate onto
+   * the item. Absent => nothing fires (today's behaviour).
+   */
+  onOpened?: (snapshot: HumanGateOpenedSnapshot) => void | Promise<void>;
 }
 
 /** What the ControllerHost depends on to resolve a human gate. */
@@ -99,6 +135,17 @@ export interface HumanGateOpener {
     /** True when the human DISMISSED the gate (a rejection) rather than resolving it. */
     dismissed: boolean;
   }): Promise<void>;
+  /**
+   * Read the gate review item back by id, or null.
+   *
+   * SYNCHRONOUS and FAIL-SOFT (null on a missing row, a missing table, or any
+   * thrown read): the resolver calls it on the hot path right after arming, and
+   * a read that cannot answer must degrade to today's behaviour — await the
+   * change event — never abort a run parked at a gate. Optional so pre-existing
+   * openers and fakes keep compiling; absent => the resolver skips both the
+   * already-settled check and the onOpened snapshot's title/body.
+   */
+  readGateItem?(reviewItemId: string): HumanGateItemSnapshot | null;
 }
 
 /**
@@ -278,6 +325,58 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
             stepId: step.id,
             reviewItemId: effectiveId,
           });
+
+          // LOST-EVENT WINDOW. The listener is armed before openHumanGate, but
+          // `targetId` — the filter every event is matched against — is only set
+          // HERE. A human who resolves the item in the gap (trivially reachable on
+          // a resume: findPendingGate is an awaited round-trip on an item that has
+          // been sitting in the queue) fires the ONLY 'resolved' event for this
+          // gate while targetId is still null, and onChange drops it. The run then
+          // waits forever on a gate nobody will answer again. Re-reading the item
+          // right after arming closes the window: whatever the event said is still
+          // true in the row.
+          const item = this.opener.readGateItem?.(effectiveId) ?? null;
+          if (item?.status === 'resolved') {
+            this.logger?.info('[ReviewQueueHumanGate] gate was already resolved when armed', {
+              runId,
+              stepId: step.id,
+              reviewItemId: effectiveId,
+            });
+            settleResumed(parseGateVerdict(item.resolution), item.resolution);
+            return;
+          }
+          if (item?.status === 'dismissed') {
+            this.logger?.info('[ReviewQueueHumanGate] gate was already dismissed when armed', {
+              runId,
+              stepId: step.id,
+              reviewItemId: effectiveId,
+            });
+            settleResumed('reject', null, true);
+            return;
+          }
+
+          // Gate-open hook. Scheduled on a microtask and NEVER awaited: the human
+          // may settle this gate while the hook is still running, and that is
+          // fine — a hook that writes to the item finds it non-pending and its
+          // write is refused, which is the designed outcome, not a race to win.
+          if (req.onOpened) {
+            const snapshot: HumanGateOpenedSnapshot = {
+              reviewItemId: effectiveId,
+              title: item?.title ?? step.name,
+              body: item?.body ?? '',
+              resumed: id === null,
+            };
+            void Promise.resolve()
+              .then(() => req.onOpened?.(snapshot))
+              .catch((err: unknown) => {
+                this.logger?.warn('[ReviewQueueHumanGate] onOpened hook failed (fail-soft)', {
+                  runId,
+                  stepId: step.id,
+                  reviewItemId: effectiveId,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              });
+          }
         })
         .catch((err) => {
           if (settled) return;

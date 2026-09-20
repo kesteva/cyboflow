@@ -907,4 +907,60 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('approve-ideas-resolved')).toHaveTextContent('Decisions submitted');
     expect(screen.queryByTestId('decision-review-ideas')).not.toBeInTheDocument();
   });
+
+  // -- Supervisor recommendation chip --------------------------------------
+  //
+  // The monitor's advice lives INSIDE the body as a `## Supervisor recommendation`
+  // section (the router's `annotate` op), so the chip is a pure function of the
+  // body and must render on BOTH surfaces — the queue row is where a human
+  // triaging their inbox sees it first.
+
+  it.each([['queue'], ['session']] as const)('renders the supervisor chip on the %s surface', (surface) => {
+    const item = makeItem('decision', {
+      id: 'rvw_rec',
+      blocking: true,
+      body: 'The gate body.\n\n## Supervisor recommendation\n\nRecommended: rerun — AR-2 is still unaddressed\n',
+    });
+    render(<ReviewItemCard item={item} surface={surface} />);
+    const chip = screen.getByTestId('supervisor-recommendation');
+    // The chip shows the BUTTON COPY, not the raw choice word.
+    expect(chip).toHaveTextContent('Supervisor recommends: Rerun planning with findings');
+    expect(chip).toHaveAttribute('data-choice', 'rerun');
+  });
+
+  it('maps each choice to its button copy', () => {
+    const cases: Array<[string, string]> = [
+      ['approve', 'Approve'],
+      ['reject', 'Reject'],
+      ['revise', 'Revise'],
+      ['continue', 'Continue, log as findings'],
+      ['dismiss', 'Continue without logging'],
+    ];
+    for (const [choice, label] of cases) {
+      const { unmount } = render(
+        <ReviewItemCard
+          item={makeItem('decision', {
+            id: `rvw_${choice}`,
+            body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
+          })}
+        />,
+      );
+      expect(screen.getByTestId('supervisor-recommendation')).toHaveTextContent(`Supervisor recommends: ${label}`);
+      unmount();
+    }
+  });
+
+  it('renders no chip when the body carries no section, a malformed one, or nothing at all', () => {
+    for (const body of [
+      null,
+      'Just the gate body.',
+      // A `Recommended:` line OUTSIDE the section must never emphasize anything.
+      'Recommended: reject — the reviewer quoting itself\n\n## Findings\n\nAR-1\n',
+      '## Supervisor recommendation\n\nprose with no machine line\n',
+    ]) {
+      const { unmount } = render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_none', body })} />);
+      expect(screen.queryByTestId('supervisor-recommendation')).not.toBeInTheDocument();
+      unmount();
+    }
+  });
 });

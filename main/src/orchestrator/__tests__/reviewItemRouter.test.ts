@@ -37,6 +37,10 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { countPendingBlockingReviewItems } from '../reviewItemListing';
 import type { DatabaseLike } from '../types';
 import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
+import {
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  parseSupervisorRecommendation,
+} from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 034 + 046.
@@ -1084,3 +1088,182 @@ describe('ReviewItemRouter — source-keyed idempotent create', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// annotate — machine-authored markdown section inside a PENDING body
+//
+// The supervisor's recommendation is stored in the body (no column, no
+// migration), so these pin the three properties the card and the consult depend
+// on: the section is upserted (a second annotate REPLACES, never stacks), the
+// item stays pending, and an item the human already answered refuses the write.
+// ---------------------------------------------------------------------------
+
+describe('ReviewItemRouter — annotate', () => {
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+    reviewItemChangeEvents.removeAllListeners();
+  });
+
+  /** Mint a pending blocking decision (the gate shape the supervisor annotates). */
+  async function createDecision(router: ReviewItemRouter, body: string): Promise<string> {
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'decision',
+      title: 'Approve design',
+      body,
+      blocking: true,
+      payload: { kind: 'decision', gate: 'approve-design' },
+    });
+    return reviewItemId;
+  }
+
+  it('annotates a pending DECISION: upserts the section, keeps it pending, emits "annotated"', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createDecision(router, 'The gate body.\n\n## Findings\n\nAR-1');
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    await router.applyReviewItem(1, {
+      op: 'annotate',
+      actor: 'monitor',
+      reviewItemId,
+      heading: SUPERVISOR_RECOMMENDATION_HEADING,
+      markdown: 'Recommended: rerun — AR-2 is still unaddressed',
+    });
+
+    const row = db.prepare('SELECT status, body FROM review_items WHERE id = ?').get(reviewItemId) as {
+      status: string;
+      body: string;
+    };
+    expect(row.status).toBe('pending');
+    expect(row.body).toContain('The gate body.');
+    expect(row.body).toContain('## Findings'); // the existing section survives
+    expect(parseSupervisorRecommendation(row.body)).toEqual({
+      choice: 'rerun',
+      sentence: 'AR-2 is still unaddressed',
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].action).toBe('annotated');
+    expect(events[0].item.body).toBe(row.body);
+    db.close();
+  });
+
+  it('annotates a pending FINDING too (any kind is allowed)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    await router.applyReviewItem(1, {
+      op: 'annotate',
+      actor: 'monitor',
+      reviewItemId,
+      heading: SUPERVISOR_RECOMMENDATION_HEADING,
+      markdown: 'Recommended: dismiss — stylistic only',
+    });
+
+    const row = db.prepare('SELECT status, body FROM review_items WHERE id = ?').get(reviewItemId) as {
+      status: string;
+      body: string | null;
+    };
+    expect(row.status).toBe('pending');
+    expect(parseSupervisorRecommendation(row.body)?.choice).toBe('dismiss');
+    db.close();
+  });
+
+  it('writes one "annotated" entity_events row carrying the body from/to delta', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    seedRun(db, 'run-annot');
+    const reviewItemId = await createDecision(router, 'Original.');
+
+    const before = eventCount(db, reviewItemId);
+    await router.applyReviewItem(1, {
+      op: 'annotate',
+      actor: 'monitor',
+      reviewItemId,
+      runId: 'run-annot',
+      heading: SUPERVISOR_RECOMMENDATION_HEADING,
+      markdown: 'Recommended: approve — nothing blocking',
+    });
+
+    expect(eventCount(db, reviewItemId)).toBe(before + 1);
+    const ev = lastEntityEvent(db, reviewItemId);
+    expect(ev.kind).toBe('annotated');
+    expect(ev.actor).toBe('monitor');
+    const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: string; to: string }>;
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].field).toBe('body');
+    expect(deltas[0].from).toBe('Original.');
+    expect(deltas[0].to).toContain('Recommended: approve');
+    db.close();
+  });
+
+  it('a second annotate REPLACES the section rather than stacking a second copy', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createDecision(router, 'Body.');
+
+    for (const markdown of [
+      'Recommended: approve — first pass',
+      'Recommended: revise — second pass',
+    ]) {
+      await router.applyReviewItem(1, {
+        op: 'annotate',
+        actor: 'monitor',
+        reviewItemId,
+        heading: SUPERVISOR_RECOMMENDATION_HEADING,
+        markdown,
+      });
+    }
+
+    const row = db.prepare('SELECT body FROM review_items WHERE id = ?').get(reviewItemId) as { body: string };
+    expect(row.body.match(/## Supervisor recommendation/g)).toHaveLength(1);
+    expect(row.body).not.toContain('first pass');
+    expect(parseSupervisorRecommendation(row.body)).toEqual({ choice: 'revise', sentence: 'second pass' });
+    db.close();
+  });
+
+  it('refuses an item the human already RESOLVED (invalid_status) — advice after the fact is worse than none', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createDecision(router, 'Body.');
+    await router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId, resolution: 'approve' });
+
+    await expect(
+      router.applyReviewItem(1, {
+        op: 'annotate',
+        actor: 'monitor',
+        reviewItemId,
+        heading: SUPERVISOR_RECOMMENDATION_HEADING,
+        markdown: 'Recommended: reject — too late',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_status' });
+
+    const row = db.prepare('SELECT body FROM review_items WHERE id = ?').get(reviewItemId) as { body: string };
+    expect(row.body).toBe('Body.'); // untouched
+    db.close();
+  });
+
+  it('refuses a dismissed item and an unknown id (not_found)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const dismissedId = await createDecision(router, 'Body.');
+    await router.applyReviewItem(1, { op: 'dismiss', actor: 'user', reviewItemId: dismissedId });
+
+    const annotate = (reviewItemId: string): Promise<unknown> =>
+      router.applyReviewItem(1, {
+        op: 'annotate',
+        actor: 'monitor',
+        reviewItemId,
+        heading: SUPERVISOR_RECOMMENDATION_HEADING,
+        markdown: 'Recommended: approve — x',
+      });
+
+    await expect(annotate(dismissedId)).rejects.toMatchObject({ code: 'invalid_status' });
+    await expect(annotate('rvw_nope')).rejects.toMatchObject({ code: 'not_found' });
+    db.close();
+  });
+});

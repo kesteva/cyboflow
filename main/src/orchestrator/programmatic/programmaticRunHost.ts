@@ -47,7 +47,7 @@ import type {
   VerificationPosture,
   VisualVerifyGate,
 } from './types';
-import type { HumanGateResolver } from './humanGate';
+import type { HumanGateOpenedSnapshot, HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
@@ -299,6 +299,22 @@ export interface ProgrammaticRunHostArgs {
    */
   fileSetAsideFinding?: (input: SetAsideFindingInput) => Promise<void>;
   /**
+   * GATE-OPEN hook. Fired (fire-and-forget, never awaited by the resolver) once a
+   * human gate is live and this host has armed on it, with the gate item's real
+   * title + body. The supervisor's escalation consult binds here: it is the first
+   * instant the question the human is being asked actually exists, because the
+   * gate body is composed inside the gate-open transaction.
+   *
+   * MUST be fail-soft — a rejection is logged and swallowed by the resolver, and
+   * nothing here may delay or reject the gate promise. Absent => no hook fires
+   * (today's behaviour).
+   */
+  onGateOpened?: (
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    snapshot: HumanGateOpenedSnapshot,
+  ) => Promise<void>;
+  /**
    * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
    * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
    * composition root to the SAME ReviewItemRouter chokepoint verdictDelivery
@@ -375,6 +391,12 @@ export class ProgrammaticRunHost implements ControllerHost {
       projectId: this.args.projectId,
       step,
       signal: ctx.signal,
+      // Only pass the hook when a sink is injected: the resolver's own `onOpened`
+      // is optional, and an always-present no-op would make "is anybody listening"
+      // untestable at this seam.
+      ...(this.args.onGateOpened
+        ? { onOpened: (snapshot: HumanGateOpenedSnapshot) => this.args.onGateOpened?.(step, ctx, snapshot) }
+        : {}),
     });
   }
 

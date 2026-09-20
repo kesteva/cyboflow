@@ -17,6 +17,11 @@ import {
   acceptedResolution,
   GATE_RESOLUTION_MODIFIER_NO_FINDINGS,
   RESOLUTION_PREFIX_PROMOTED,
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  upsertMarkdownSection,
+  readMarkdownSection,
+  parseSupervisorRecommendation,
+  composeSupervisorRecommendation,
 } from '../reviews';
 
 describe('composeGateResolution', () => {
@@ -109,5 +114,171 @@ describe('parseGateResolution', () => {
       modifier: 'no-findings',
       note: 'keep it',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Supervisor recommendation — markdown section upsert/read + the parser
+//
+// WHY: the recommendation lives INSIDE the item body (no column, no migration),
+// so the section boundary rules ARE the data model. These pin the three ways a
+// naive implementation corrupts a body: appending a second copy instead of
+// replacing, swallowing the following section, and treating a `##` heading that
+// is merely QUOTED inside a fenced code block as a real one.
+// ---------------------------------------------------------------------------
+
+describe('upsertMarkdownSection', () => {
+  const H = SUPERVISOR_RECOMMENDATION_HEADING;
+
+  it('appends the section after one blank line when the body has none', () => {
+    expect(upsertMarkdownSection('Gate body.', H, 'Recommended: approve — ship it')).toBe(
+      'Gate body.\n\n## Supervisor recommendation\n\nRecommended: approve — ship it\n',
+    );
+  });
+
+  it('creates the section from an empty body without leading blank lines', () => {
+    expect(upsertMarkdownSection('', H, 'hello')).toBe('## Supervisor recommendation\n\nhello\n');
+  });
+
+  it('always ends with exactly one trailing newline', () => {
+    const out = upsertMarkdownSection('Body.\n\n\n', H, 'x\n\n');
+    expect(out.endsWith('\n')).toBe(true);
+    expect(out.endsWith('\n\n')).toBe(false);
+  });
+
+  it('replaces an existing section IN PLACE and keeps the following section', () => {
+    const body = ['# Gate', '', '## Supervisor recommendation', '', 'old text', '', '## Findings', '', 'AR-1'].join('\n');
+    expect(upsertMarkdownSection(body, H, 'new text')).toBe(
+      ['# Gate', '', '## Supervisor recommendation', '', 'new text', '', '## Findings', '', 'AR-1', ''].join('\n'),
+    );
+  });
+
+  it('removes duplicate sections, keeping the first position', () => {
+    const body = [
+      '## Supervisor recommendation',
+      '',
+      'first',
+      '',
+      '## Other',
+      '',
+      'keep me',
+      '',
+      '## Supervisor recommendation',
+      '',
+      'second',
+    ].join('\n');
+    const out = upsertMarkdownSection(body, H, 'only');
+    expect(out.match(/## Supervisor recommendation/g)).toHaveLength(1);
+    expect(out).toContain('only');
+    expect(out).toContain('keep me');
+    expect(out).not.toContain('second');
+  });
+
+  it('ignores a heading that only appears inside a fenced code block', () => {
+    const body = ['Template:', '', '```md', '## Supervisor recommendation', '', 'example', '```'].join('\n');
+    const out = upsertMarkdownSection(body, H, 'real');
+    // The fenced example is untouched and the real section is APPENDED.
+    expect(out.match(/## Supervisor recommendation/g)).toHaveLength(2);
+    expect(out).toContain('example');
+    expect(out.indexOf('real')).toBeGreaterThan(out.indexOf('example'));
+  });
+
+  it('ends the section at the next H1 as well as the next H2', () => {
+    const body = ['## Supervisor recommendation', '', 'old', '', '# Appendix', '', 'tail'].join('\n');
+    const out = upsertMarkdownSection(body, H, 'new');
+    expect(out).toContain('# Appendix');
+    expect(out).toContain('tail');
+    expect(out).not.toContain('old');
+  });
+
+  it('matches the heading case-insensitively and tolerates trailing whitespace', () => {
+    const body = '## supervisor RECOMMENDATION   \n\nold\n';
+    expect(upsertMarkdownSection(body, H, 'new')).toBe('## Supervisor recommendation\n\nnew\n');
+  });
+});
+
+describe('readMarkdownSection', () => {
+  const H = SUPERVISOR_RECOMMENDATION_HEADING;
+
+  it('returns the section body without its heading', () => {
+    const body = '# Gate\n\n## Supervisor recommendation\n\nline one\nline two\n\n## Next\n\nother\n';
+    expect(readMarkdownSection(body, H)).toBe('line one\nline two');
+  });
+
+  it('returns null when the section is absent, the body is empty, or nullish', () => {
+    expect(readMarkdownSection('## Other\n\nx', H)).toBeNull();
+    expect(readMarkdownSection('', H)).toBeNull();
+    expect(readMarkdownSection(null, H)).toBeNull();
+    expect(readMarkdownSection(undefined, H)).toBeNull();
+  });
+
+  it('does not see a heading that is only quoted inside a fence', () => {
+    expect(readMarkdownSection('```\n## Supervisor recommendation\n\nfake\n```\n', H)).toBeNull();
+  });
+
+  it('round-trips with upsertMarkdownSection', () => {
+    const out = upsertMarkdownSection('Body.', H, 'Recommended: revise — tighten AR-2');
+    expect(readMarkdownSection(out, H)).toBe('Recommended: revise — tighten AR-2');
+  });
+});
+
+describe('parseSupervisorRecommendation', () => {
+  const wrap = (md: string): string => upsertMarkdownSection('Gate body.', SUPERVISOR_RECOMMENDATION_HEADING, md);
+
+  it.each([
+    ['approve', 'approve'],
+    ['reject', 'reject'],
+    ['revise', 'revise'],
+    ['continue', 'continue'],
+    ['rerun', 'rerun'],
+    ['dismiss', 'dismiss'],
+  ])('parses choice %s', (choice, expected) => {
+    expect(parseSupervisorRecommendation(wrap(`Recommended: ${choice} — because`))).toEqual({
+      choice: expected,
+      sentence: 'because',
+    });
+  });
+
+  it('accepts a hyphen or a colon separator and an upper-case choice', () => {
+    expect(parseSupervisorRecommendation(wrap('Recommended: Approve - because'))?.choice).toBe('approve');
+    expect(parseSupervisorRecommendation(wrap('Recommended: RERUN: because'))?.choice).toBe('rerun');
+  });
+
+  it('reads past blank lines to the first non-blank line and keeps the rationale out', () => {
+    const body = wrap('Recommended: approve — one sentence\n\nA longer rationale that must not leak into `sentence`.');
+    expect(parseSupervisorRecommendation(body)).toEqual({ choice: 'approve', sentence: 'one sentence' });
+  });
+
+  it('IGNORES a Recommended: line outside the section', () => {
+    const body = 'Recommended: reject — a reviewer quoting itself\n\n## Findings\n\nAR-1\n';
+    expect(parseSupervisorRecommendation(body)).toBeNull();
+  });
+
+  it('returns null for a malformed section, an unknown choice, or an empty sentence', () => {
+    expect(parseSupervisorRecommendation(wrap('just prose'))).toBeNull();
+    expect(parseSupervisorRecommendation(wrap('Recommended: maybe — hedging'))).toBeNull();
+    expect(parseSupervisorRecommendation(wrap('Recommended: approve —'))).toBeNull();
+    expect(parseSupervisorRecommendation(null)).toBeNull();
+  });
+
+  it('requires the Recommended: line to LEAD the section', () => {
+    expect(parseSupervisorRecommendation(wrap('Preamble.\n\nRecommended: approve — late'))).toBeNull();
+  });
+});
+
+describe('composeSupervisorRecommendation', () => {
+  it('composes the machine-readable line, with the rationale after one blank line', () => {
+    expect(composeSupervisorRecommendation('rerun', 'the review still blocks')).toBe(
+      'Recommended: rerun — the review still blocks',
+    );
+    expect(composeSupervisorRecommendation('dismiss', 'nothing worth logging', 'AR-1 and AR-2 are stylistic.')).toBe(
+      'Recommended: dismiss — nothing worth logging\n\nAR-1 and AR-2 are stylistic.',
+    );
+  });
+
+  it('round-trips through the parser', () => {
+    const md = composeSupervisorRecommendation('revise', 'AR-2 is real', 'Rationale.');
+    const body = upsertMarkdownSection('Gate body.', SUPERVISOR_RECOMMENDATION_HEADING, md);
+    expect(parseSupervisorRecommendation(body)).toEqual({ choice: 'revise', sentence: 'AR-2 is real' });
   });
 });

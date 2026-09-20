@@ -30,6 +30,7 @@ import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import type { DecisionPayload } from '../../../shared/types/reviews';
+import type { HumanGateItemSnapshot } from './programmatic/humanGate';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
@@ -409,6 +410,39 @@ export class HumanStepManager {
    */
   async findPendingGate(runId: string, stepId: string): Promise<string | null> {
     return this.findPendingItemBySource(runId, this.sourceForStep(stepId));
+  }
+
+  /**
+   * Read a gate review item back by id: title, body, status, resolution — or null.
+   *
+   * SYNCHRONOUS on purpose (it backs `HumanGateOpener.readGateItem`, which the
+   * programmatic resolver calls on the hot path right after arming itself on the
+   * item) and FAIL-SOFT in every direction: a missing inbox table, a missing row,
+   * an unrecognised status, or any thrown read all yield null, so the resolver
+   * degrades to awaiting the change event rather than aborting a parked run.
+   * Read-only; no transition, and deliberately NOT on the per-run queue — it must
+   * be answerable while an openHumanGate for the same run is in flight.
+   */
+  readGateItem(reviewItemId: string): HumanGateItemSnapshot | null {
+    try {
+      if (!hasReviewItemsTable(this.db)) return null;
+      const row = this.db
+        .prepare('SELECT title, body, status, resolution FROM review_items WHERE id = ?')
+        .get(reviewItemId) as
+        | { title?: string; body?: string | null; status?: string; resolution?: string | null }
+        | undefined;
+      if (!row) return null;
+      const status = row.status;
+      if (status !== 'pending' && status !== 'resolved' && status !== 'dismissed') return null;
+      return {
+        title: row.title ?? '',
+        body: row.body ?? '',
+        status,
+        resolution: row.resolution ?? null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

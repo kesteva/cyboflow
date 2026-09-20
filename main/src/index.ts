@@ -122,11 +122,11 @@ import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { DesignHandoffService } from './orchestrator/design/designHandoffService';
-import { GateSideEffects, gateDecisionFromResolution } from './orchestrator/gateSideEffects';
+import { GateSideEffects } from './orchestrator/gateSideEffects';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
-import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
+import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
 import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
@@ -2741,38 +2741,11 @@ async function initializeServices(): Promise<boolean> {
       report: (runId, stepId, status) =>
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
     },
-    gate: new ReviewQueueHumanGate(
-      // The opener is HumanStepManager plus ONE extra hook. `onGateResolved` is
-      // awaited inside ReviewQueueHumanGate.settleResumed BEFORE the gate promise
-      // resolves — the single seam the controller genuinely waits on, which is why
-      // the design bind lands here rather than after resolveReviewItem returns.
-      // Anything hung off the resolve would race the resumed walk: the review-item
-      // router's 'resolved' emit fires synchronously inside it and is what wakes
-      // the gate, so by the time the resolve returns the next step is already
-      // spawning and its `cyboflow_get_task` may see no approved_design at all.
-      // GateSideEffects.apply is idempotent and never throws, so awaiting it here
-      // can never hang a run at a gate the human already answered.
-      {
-        openHumanGate: (runId, stepId, stepName) =>
-          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName),
-        findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
-        maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
-        onGateResolved: (args) =>
-          GateSideEffects.getInstance().apply({
-            runId: args.runId,
-            stepId: args.stepId,
-            // The opener reports the raw resolution note; the same sniff the
-            // controller's own parseGateVerdict uses turns it into the verdict. A
-            // DISMISSED gate is a rejection (the resolver itself maps it so) — its
-            // null note must never sniff to 'approve' and bind a declined design.
-            decision: args.dismissed ? 'reject' : gateDecisionFromResolution(args.resolution),
-            resolution: args.resolution,
-          }),
-      },
-      reviewItemChangeEvents,
-      reviewItemProjectChannel,
-      cyboflowLogger,
-    ),
+    gate: buildReviewQueueHumanGate({
+      events: reviewItemChangeEvents,
+      channelFor: reviewItemProjectChannel,
+      logger: cyboflowLogger,
+    }),
     // Per-step idea scope for programmatic prompts. The ownership projection
     // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
     // raw-prompt path picks up the idea its context step creates before optional
