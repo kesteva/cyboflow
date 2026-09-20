@@ -496,7 +496,8 @@ export interface ReviewLoopRequest {
   /**
    * The review document the verdict was read from — the run's artifact when
    * there is one (preferred: it carries BOTH `## Blocking` and `## Findings`),
-   * else the reviewer's captured text. Absent when neither could be read.
+   * else the reviewer's WHOLE captured result text, verbatim. Absent when
+   * neither could be read.
    */
   reviewMarkdown?: string;
   /** `reviewMarkdown` parsed — the id allow-list the steering is validated against. */

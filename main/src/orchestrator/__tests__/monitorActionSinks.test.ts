@@ -43,6 +43,18 @@ function makeDeps(overrides: Partial<MonitorActionSinkDeps> = {}): {
   return { deps, ops };
 }
 
+/**
+ * A DB whose `review_items` probe reflects what the fake router has already
+ * accepted — the same round trip the real sink makes (router create → a row the
+ * next call's dedupe probe reads back).
+ */
+function filedTitlesDb(ops: CreateOp[]): DatabaseLike {
+  return {
+    prepare: () => ({ all: () => ops.map((op) => ({ title: op.change.title })) }),
+    transaction: vi.fn(),
+  } as unknown as DatabaseLike;
+}
+
 const ENTRY: AdversarialFinding = {
   id: 'AR-3',
   title: 'Copy nit',
@@ -135,6 +147,42 @@ describe('buildSetAsideFindingSink', () => {
     const change = ops[0].change;
     expect(change.severity).toBe('error');
     expect(change.payload).toEqual({ kind: 'finding', category: 'design-review', proposedTarget: 'backlog' });
+  });
+
+  it('files a repeated set-aside entry ONCE — the run’s filed ids are the key', async () => {
+    // The supervisor votes once per round and may set the same entry aside on
+    // every one of them; without the dedupe a three-lap loop files one deferral
+    // three times. Keyed on the `AR-n` PREFIX, so a reworded title is still the
+    // same entry.
+    const { deps, ops } = makeDeps();
+    const sink = buildSetAsideFindingSink({ ...deps, db: filedTitlesDb(ops) });
+
+    await sink('run-1', { entry: ENTRY, reason: 'not worth a design lap', round: 2 });
+    await sink('run-1', { entry: { ...ENTRY, title: 'Copy nit (reworded)' }, reason: 'still not', round: 3 });
+
+    expect(ops).toHaveLength(1);
+    expect(ops[0].change.title).toBe('AR-3 — Copy nit');
+  });
+
+  it('a different entry still files while one is deduped', async () => {
+    const { deps, ops } = makeDeps();
+    const sink = buildSetAsideFindingSink({ ...deps, db: filedTitlesDb(ops) });
+
+    await sink('run-1', { entry: ENTRY, reason: 'a', round: 1 });
+    await sink('run-1', { entry: { id: 'AR-1', title: 'Real defect', severity: 'blocker' }, reason: 'b', round: 2 });
+
+    expect(ops.map((op) => op.change.title)).toEqual(['AR-3 — Copy nit', 'AR-1 — Real defect']);
+  });
+
+  it('an unreadable history files rather than drops — a duplicate is recoverable', async () => {
+    // makeDeps' bare `prepare: vi.fn()` returns undefined, so the probe throws
+    // and reads as "nothing filed".
+    const { deps, ops } = makeDeps();
+    const sink = buildSetAsideFindingSink(deps);
+
+    await sink('run-1', { entry: ENTRY, reason: 'a', round: 1 });
+
+    expect(ops).toHaveLength(1);
   });
 });
 

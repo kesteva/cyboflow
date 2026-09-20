@@ -3905,6 +3905,49 @@ describe('WorkflowController — supervised adversarial-review loop (cap 3)', ()
     expect(host.requests[0].stepId).toBe('adversarial-review');
   });
 
+  it('falls back to the reviewer’s WHOLE captured text when the run has no artifact', async () => {
+    // Not the extracted `## Blocking` slice: the slice is what a re-run's prompt
+    // quotes, while the supervisor is deciding whether to SPEND a lap and needs
+    // everything the reviewer said — including a `## Findings` entry it may set
+    // aside. `supervisedHost` wires no `readAdversarialReview` at all.
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+
+    await new WorkflowController(runner, host).run('run-text-fallback', reviewDef());
+
+    expect(host.requests).toHaveLength(1);
+    expect(host.requests[0].reviewMarkdown).toBe(REVIEW_DOC);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-3']);
+  });
+
+  it('an OPERATOR-skipped gate disarms the escalation a `stop` armed', async () => {
+    // The skipped gate WAS that escalation's presentation — the walk reached it
+    // and moved on — so the NEXT gate must not inherit "the supervisor stopped
+    // the review loop" as if it were about itself.
+    const twoGates = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-plan', agent: 'human', human: true }),
+      ]),
+    ]);
+    const runner = reviewRunner([REVIEW_DOC]);
+    const host = supervisedHost([
+      { verdict: 'stop', rationale: 'a product call the brief does not settle', setAside: [] },
+    ]);
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('approve-design');
+
+    const result = await new WorkflowController(runner, host).run(
+      'run-ar-opskip-escalation', twoGates, undefined, undefined, undefined, directives,
+    );
+
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual(['approve-plan']);
+    expect(host.gateCtxs[0].escalation).toBeUndefined();
+  });
+
   it('never consults when the review is CLEAN or the step declares no loopback', async () => {
     const clean = reviewRunner([CLEAN_RESULT]);
     const cleanHost = supervisedHost([LOOP]);

@@ -642,7 +642,13 @@ export class WorkflowController {
           // self-skipped optional gate below does: the walk reached the gate and
           // moved on, so the "revision requested" section must not leak into the
           // steps after it.
-          if (isPureHumanGate(step)) pendingGateRevision = undefined;
+          if (isPureHumanGate(step)) {
+            pendingGateRevision = undefined;
+            // The armed escalation goes with it: it describes THIS gate's
+            // presentation, so leaving it set would attach a stale "the
+            // supervisor stopped the review loop" note to a later gate.
+            escalation = undefined;
+          }
           i += 1;
           continue;
         }
@@ -3074,6 +3080,14 @@ export class WorkflowController {
     index: number;
     blocking: boolean;
     note: string | null;
+    /**
+     * The reviewer's captured result text, verbatim ('' when the turn captured
+     * none). The WHOLE text, not just `note`'s `## Blocking` slice, because it is
+     * the supervisor's fallback review document when the run has no artifact —
+     * and a `## Findings` section only the full text carries is exactly what a
+     * set-aside id is validated against.
+     */
+    text: string;
     parsed: ParsedAdversarialReview;
     source: 'text' | 'artifact';
   } | null {
@@ -3087,7 +3101,7 @@ export class WorkflowController {
     if (verdict === 'clean') {
       // Explicit CLEAN wins over any artifact — a stale artifact from the
       // previous round must never re-loop a cleared review.
-      return { index: targetIndex, blocking: false, note: null, parsed: parseAdversarialReviewDoc(text), source: 'text' };
+      return { index: targetIndex, blocking: false, note: null, text, parsed: parseAdversarialReviewDoc(text), source: 'text' };
     }
     // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
     // trailer over a `None.` section still loops, but with no quoted note (the
@@ -3099,6 +3113,7 @@ export class WorkflowController {
         index: targetIndex,
         blocking: true,
         note: textHasEntries ? extractBlockingSection(text) : null,
+        text,
         parsed: parseAdversarialReviewDoc(text),
         source: 'text',
       };
@@ -3109,12 +3124,13 @@ export class WorkflowController {
     const artifact = this.readAdversarialReviewArtifact();
     const parsed = parseAdversarialReviewDoc(artifact);
     if (parsed.blocking.length === 0) {
-      return { index: targetIndex, blocking: false, note: null, parsed, source: 'artifact' };
+      return { index: targetIndex, blocking: false, note: null, text, parsed, source: 'artifact' };
     }
     return {
       index: targetIndex,
       blocking: true,
       note: extractBlockingSection(artifact ?? ''),
+      text,
       parsed,
       source: 'artifact',
     };
@@ -3151,7 +3167,7 @@ export class WorkflowController {
     loopbackStepId: string;
     round: number;
     used: number;
-    review: { note: string | null; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    review: { note: string | null; text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
     priorRounds: ReviewLoopPriorRound[];
     ctx: ControllerStepContext;
     signal?: AbortSignal;
@@ -3204,13 +3220,18 @@ export class WorkflowController {
    * text-only parse has no `findings` at all and the supervisor could never
    * validate a set-aside id that lives under `## Findings`. The VERDICT keeps
    * its own channel order (an explicit `REVIEW: CLEAN` in the text still wins).
+   *
+   * With no artifact the fallback is the reviewer's WHOLE captured text, not the
+   * extracted `## Blocking` slice: the slice is what a re-run's prompt quotes,
+   * while the supervisor is deciding whether to spend a lap and needs everything
+   * the reviewer actually said.
    */
   private async consultReviewLoop(args: {
     step: WorkflowStep;
     loopbackStepId: string;
     round: number;
     used: number;
-    review: { note: string | null; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    review: { note: string | null; text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
     priorRounds: ReviewLoopPriorRound[];
     ctx: ControllerStepContext;
     signal?: AbortSignal;
@@ -3223,7 +3244,11 @@ export class WorkflowController {
     if (isAborted(args.signal)) return undefined;
     const artifact = this.readAdversarialReviewArtifact();
     const useArtifact = typeof artifact === 'string' && artifact.trim().length > 0;
-    const reviewMarkdown = useArtifact ? artifact : (args.review.note ?? undefined);
+    const reviewMarkdown = useArtifact
+      ? artifact
+      : args.review.text.trim().length > 0
+        ? args.review.text
+        : undefined;
     const parsed = useArtifact ? parseAdversarialReviewDoc(artifact) : args.review.parsed;
     try {
       const decision = await advise.call(this.host, {

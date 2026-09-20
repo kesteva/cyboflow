@@ -976,6 +976,32 @@ describe('ProgrammaticRunHost', () => {
       expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
     });
 
+    it('records nothing when the run is canceled mid-consult', async () => {
+      // The controller discards a verdict that arrives after the abort, so the
+      // audit finding would assert a lap that never happened and the set-aside
+      // findings would defer entries nothing ever set aside.
+      const controller = new AbortController();
+      const monitor: MonitorSession = {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        adviseReviewLoop: vi.fn().mockImplementation(async () => {
+          controller.abort();
+          return LOOP;
+        }),
+      };
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const fileSetAsideFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding,
+        fileSetAsideFinding,
+      });
+
+      expect(await host.adviseReviewLoop(req, { ...ctx, signal: controller.signal })).toBeUndefined();
+      expect(fileMonitorFinding).not.toHaveBeenCalled();
+      expect(fileSetAsideFinding).not.toHaveBeenCalled();
+    });
+
     it('files nothing when the monitor returns no verdict', async () => {
       const monitor = makeLoopMonitor(undefined);
       const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);

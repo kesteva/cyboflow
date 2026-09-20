@@ -367,7 +367,7 @@ export class GateSideEffects {
     const entries = [...blocking, ...findings];
     if (entries.length === 0) return;
 
-    const alreadyFiled = this.filedAdversarialIds(runId);
+    const alreadyFiled = filedAdversarialIds(this.deps.db, runId);
     let filed = 0;
     for (const entry of entries) {
       if (alreadyFiled.has(entry.id)) continue;
@@ -407,35 +407,6 @@ export class GateSideEffects {
         total: entries.length,
       });
     }
-  }
-
-  /**
-   * The `AR-n` ids this run has already filed, read off the finding TITLES.
-   *
-   * The title prefix is the idempotence key rather than a payload field because
-   * `FindingPayload` has no slot for one, and inventing an untyped key on the
-   * payload would be invisible to every reader. The prefix is stable, visible in
-   * the queue, and the same thing the review doc calls the entry.
-   */
-  private filedAdversarialIds(runId: string): Set<string> {
-    const ids = new Set<string>();
-    try {
-      const rows = this.deps.db
-        .prepare(
-          `SELECT title FROM review_items
-            WHERE run_id = ? AND kind = 'finding' AND source = ?`,
-        )
-        .all(runId, ADVERSARIAL_FINDING_SOURCE) as Array<{ title?: unknown }>;
-      for (const row of rows) {
-        if (typeof row.title !== 'string') continue;
-        const m = /^(AR-\d+)\b/.exec(row.title);
-        if (m) ids.add(m[1]);
-      }
-    } catch {
-      // An unreadable history is treated as "nothing filed": a duplicate finding
-      // is recoverable by a human, a dropped one is not.
-    }
-    return ids;
   }
 
   // -------------------------------------------------------------------------
@@ -500,6 +471,41 @@ export class GateSideEffects {
       return undefined;
     }
   }
+}
+
+/**
+ * The `AR-n` ids a run has already filed, read off the finding TITLES.
+ *
+ * The title prefix is the idempotence key rather than a payload field because
+ * `FindingPayload` has no slot for one, and inventing an untyped key on the
+ * payload would be invisible to every reader. The prefix is stable, visible in
+ * the queue, and the same thing the review doc calls the entry.
+ *
+ * Exported and standalone because there are now TWO writers of these findings —
+ * this module's gate arm and the supervisor's SET-ASIDE sink
+ * (monitorActionSinks.ts), which files the same entry mid-loop and must skip one
+ * a previous round already filed. A second copy of this query is a second way
+ * for the two to disagree, which is the duplicate the dedupe exists to prevent.
+ */
+export function filedAdversarialIds(db: DatabaseLike, runId: string): Set<string> {
+  const ids = new Set<string>();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT title FROM review_items
+            WHERE run_id = ? AND kind = 'finding' AND source = ?`,
+      )
+      .all(runId, ADVERSARIAL_FINDING_SOURCE) as Array<{ title?: unknown }>;
+    for (const row of rows) {
+      if (typeof row.title !== 'string') continue;
+      const m = /^(AR-\d+)\b/.exec(row.title);
+      if (m) ids.add(m[1]);
+    }
+  } catch {
+    // An unreadable history is treated as "nothing filed": a duplicate finding
+    // is recoverable by a human, a dropped one is not.
+  }
+  return ids;
 }
 
 /**

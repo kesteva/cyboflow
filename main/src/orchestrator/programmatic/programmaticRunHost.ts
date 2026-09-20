@@ -726,7 +726,8 @@ export class ProgrammaticRunHost implements ControllerHost {
    *
    * Fail-soft overall: `DefaultMonitorSession.adviseReviewLoop` already never
    * rejects, so the try/catch is belt-and-braces. An ABORTED run also resolves
-   * undefined: a canceled walk has no lap to take.
+   * undefined — a canceled walk has no lap to take — and records NOTHING, which
+   * is why the abort is re-checked between the consult and step 4.
    */
   async adviseReviewLoop(
     req: ReviewLoopRequest,
@@ -752,6 +753,17 @@ export class ProgrammaticRunHost implements ControllerHost {
     try {
       const decision = await monitor.adviseReviewLoop(req, ctx.signal);
       if (decision === undefined) return undefined;
+      // Canceled WHILE the consult was in flight: the controller discards the
+      // verdict, so recording it would leave the queue asserting a lap that
+      // never happened and set-aside entries nothing ever set aside.
+      if (ctx.signal?.aborted === true) {
+        this.args.logger?.info('[ProgrammaticRunHost] review-loop verdict discarded; the run was canceled mid-consult', {
+          runId: this.args.runId,
+          stepId: req.stepId,
+          round: req.round,
+        });
+        return undefined;
+      }
       await this.fileReviewLoopAudit(req, decision);
       const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
       await this.fileSetAsideFindings(req, setAside);

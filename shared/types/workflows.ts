@@ -906,13 +906,15 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             // A `REVIEW: BLOCKING` result re-runs the refine phase from `expand-spec`
-            // AUTOMATICALLY (once — MAX_REVIEW_AUTO_REVISIONS) with the review's
-            // `## Blocking` entries threaded into every re-run step, before the
-            // human sees the design gate; a second BLOCKING falls through to the
-            // gate. Being optional, a review that merely FAILS still skips rather
-            // than taking this edge.
+            // AUTOMATICALLY with the review's `## Blocking` entries threaded into
+            // every re-run step, before the human sees the design gate. Bounded by
+            // MAX_REVIEW_AUTO_REVISIONS (3) for laps a supervisor voted for, or by
+            // MAX_REVIEW_MECHANICAL_REVISIONS (1) when there is no supervisor
+            // verdict; past the bound the round falls through to the gate. Being
+            // optional, a review that merely FAILS still skips rather than taking
+            // this edge.
             loopback: 'expand-spec',
-            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -1259,9 +1261,10 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             // Same automatic revision as Planner: a `REVIEW: BLOCKING` result
-            // re-runs the refine phase from `expand-spec` once, then the gate.
+            // re-runs the refine phase from `expand-spec` — up to 3 laps a
+            // supervisor voted for, 1 with no supervisor verdict — then the gate.
             loopback: 'expand-spec',
-            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -1620,7 +1623,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             // itself (`ui-prototype`) — the brief is already approved, exactly
             // as the gate's own revise below.
             loopback: 'ui-prototype',
-            desc: 'Stress-test the brief + concept design surfaces; a blocking verdict re-runs the design pass once automatically, remaining critique surfaced (non-blocking) at the design gate.',
+            desc: 'Stress-test the brief + concept design surfaces; a blocking verdict re-runs the design pass automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {

@@ -35,7 +35,12 @@ import {
   type TaskMutationDeps,
   type TaskMutationResult,
 } from './taskMutationHandler';
-import { ADVERSARIAL_FINDING_CATEGORY, ADVERSARIAL_FINDING_SOURCE, renderAcceptedRiskBody } from './gateSideEffects';
+import {
+  ADVERSARIAL_FINDING_CATEGORY,
+  ADVERSARIAL_FINDING_SOURCE,
+  filedAdversarialIds,
+  renderAcceptedRiskBody,
+} from './gateSideEffects';
 import { adversarialSeverityToReviewSeverity } from '../../../shared/types/adversarialReview';
 import type {
   LaneTriageAdjustResult,
@@ -183,6 +188,13 @@ export function buildMonitorFindingSink(
  *
  * The body leads with the supervisor's reason so the finding reads as what it is
  * — an entry somebody deliberately deferred — before the reviewer's own words.
+ *
+ * IDEMPOTENT by `AR-n` prefix within the run, off the SAME probe the gate arm
+ * uses: the supervisor votes once per round and may set the same entry aside on
+ * every one of them, so without this a three-lap loop files one deferral three
+ * times. Fail-soft in the same direction as the gate's — an unreadable history
+ * reads as "nothing filed", because a duplicate is recoverable and a dropped
+ * set-aside is not.
  */
 export function buildSetAsideFindingSink(
   deps: MonitorActionSinkDeps,
@@ -190,6 +202,14 @@ export function buildSetAsideFindingSink(
   return async (runId, { entry, reason, round }) => {
     const projectId = deps.runProjectId(runId);
     if (projectId === undefined) return;
+    if (filedAdversarialIds(deps.db, runId).has(entry.id)) {
+      deps.logger?.info('[monitorActionSinks] set-aside entry already filed for this run; skipping the duplicate', {
+        runId,
+        arId: entry.id,
+        round,
+      });
+      return;
+    }
     const body = `Set aside by the supervisor on round ${round}: ${reason}\n\n${renderAcceptedRiskBody(entry)}`;
     await deps.applyReviewItem(projectId, {
       op: 'create',
