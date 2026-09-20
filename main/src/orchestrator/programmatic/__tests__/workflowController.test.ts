@@ -245,6 +245,34 @@ describe('WorkflowController', () => {
     expect(runner.calls.map((c) => c.id)).toEqual(['a']);
   });
 
+  it('skips the blocking-review-items checkpoint for a step marked consumesBlockingReviewItems', async () => {
+    // Regression: addressReviewFindings rewinds a run to 'address-review'
+    // SPECIFICALLY because a blocking eval finding is pending. If the
+    // checkpoint applied to that step too, it would re-park the run
+    // awaiting_review before the repair agent ever ran, deadlocking the
+    // one path meant to clear the item.
+    const d = def([
+      phase('p1', [step({ id: 'a' }), step({ id: 'address-review', consumesBlockingReviewItems: true })]),
+    ]);
+    const runner = makeRunner();
+    const host = makeHost();
+    const gateCalls: string[] = [];
+    const hostWithCheckpoint: ControllerHost = {
+      ...host,
+      awaitBlockingReviewItems: async () => {
+        gateCalls.push('checkpoint');
+        return 'proceed';
+      },
+    };
+
+    const result = await new WorkflowController(runner, hostWithCheckpoint).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Checkpoint fires only before 'a' — 'address-review' is exempt.
+    expect(gateCalls).toEqual(['checkpoint']);
+    expect(runner.calls.map((c) => c.id)).toEqual(['a', 'address-review']);
+  });
+
   it('retries an agent step in place up to retries+1 attempts and then completes', async () => {
     const d = def([phase('p1', [step({ id: 'a', retries: 2 })])]);
     // Fail, fail, ok → succeeds on the 3rd attempt (within budget of 3).

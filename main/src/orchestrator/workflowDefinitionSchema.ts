@@ -92,6 +92,10 @@ export const workflowStepSchema = z.object({
   loopback: z.string().optional(),
   desc: z.string().optional(),
   fanOut: fanOutSchema.optional(),
+  // Opts this step out of the blocking-review-items checkpoint (see
+  // ProgrammaticRunHost.awaitBlockingReviewItems / WorkflowStep.consumesBlockingReviewItems)
+  // because it is itself the step that resolves the run's pending blocking items.
+  consumesBlockingReviewItems: z.boolean().optional(),
   // Declares the artifact this step produces on completion (auto-mint + the
   // "creates ⟨artifact⟩" chip). Kept in the schema so the field survives parse.
   outputArtifact: z

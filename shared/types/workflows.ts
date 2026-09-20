@@ -657,6 +657,22 @@ export interface WorkflowStep {
    * channel-unavailable degradation task-verify's verdict channel takes.
    */
   consumesPriorStepOutput?: boolean;
+  /**
+   * When true, the programmatic host's blocking-review-items checkpoint (see
+   * `ProgrammaticRunHost.awaitBlockingReviewItems`) does NOT park the run
+   * before starting this step, even though a pending BLOCKING review_item
+   * exists. Set on a step that itself resolves the run's pending blocking
+   * items (e.g. `address-review`, reopened via `addressReviewFindings` to
+   * repair a confirmed-catastrophic eval finding).
+   *
+   * Without this, the checkpoint deadlocks: `addressReviewFindings` rewinds
+   * the run to this step SPECIFICALLY BECAUSE a blocking item is pending, but
+   * the walk loop parks `awaiting_review` again before the step's agent ever
+   * runs, since the very item the rewind exists to clear is still open —
+   * the repair step can never start. Absent (the default) preserves today's
+   * behavior for every other step.
+   */
+  consumesBlockingReviewItems?: boolean;
 }
 
 /**
@@ -1078,6 +1094,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
@@ -1412,6 +1434,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
