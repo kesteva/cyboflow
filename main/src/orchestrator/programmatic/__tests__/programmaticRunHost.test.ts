@@ -205,6 +205,44 @@ describe('ProgrammaticRunHost', () => {
     expect(text).toContain('Guidance for the retry: pin the fixture clock');
   });
 
+  it("files a non-blocking 'triage-retry' audit finding for a supervised retry, fail-soft when the sink throws", async () => {
+    const monitor = makeMonitor('retry', 'the fixture clock is stale', 'pin the fixture clock');
+    const fileMonitorFinding = vi.fn<(input: { title: string; body: string; category?: string }) => Promise<void>>(
+      async () => undefined,
+    );
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      setRetryGuidance: vi.fn(),
+      fileMonitorFinding,
+      injectEvent: () => undefined,
+    });
+    expect(await host.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom')).toBe('retry');
+    expect(fileMonitorFinding).toHaveBeenCalledTimes(1);
+    const filed = fileMonitorFinding.mock.calls[0][0];
+    expect(filed.title).toBe('Triage retry — Implement');
+    expect(filed.category).toBe('triage-retry');
+    expect(filed.body).toContain('pin the fixture clock');
+    expect(filed.body).toContain('the fixture clock is stale');
+
+    const throwing = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      setRetryGuidance: vi.fn(),
+      fileMonitorFinding: async () => {
+        throw new Error('queue down');
+      },
+      injectEvent: () => undefined,
+    });
+    expect(await throwing.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom')).toBe('retry');
+  });
+
   it('retries WITHOUT guidance (and warns) when no setRetryGuidance is wired', async () => {
     const monitor = makeMonitor('retry', 'stale fixture', 'pin the fixture clock');
     const injected: ClaudeStreamEvent[] = [];

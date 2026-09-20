@@ -104,6 +104,8 @@ export interface LaneTriageAdjustResult {
 
 /** Grouping category for the supervisor's review-loop audit findings in the review queue. */
 const REVIEW_LOOP_FINDING_CATEGORY = 'review-loop';
+/** Grouping category for the supervisor's triage-retry audit findings in the review queue. */
+const TRIAGE_RETRY_FINDING_CATEGORY = 'triage-retry';
 
 /** Longest before/after body excerpt rendered into the audit finding. */
 const FINDING_BODY_EXCERPT = 1200;
@@ -548,6 +550,12 @@ export class ProgrammaticRunHost implements ControllerHost {
           ? `Triage — ${step.name}: retry. ${rationale}\n\nGuidance for the retry: ${staged}`
           : `Triage — ${step.name}: retry. ${rationale}`,
       );
+      // The audit record the charter promises ("every autonomous action is
+      // recorded in the run's review queue"): a supervised retry spends a step
+      // turn on the supervisor's say-so, so it gets the same non-blocking paper
+      // trail a lane rescue or a review-loop verdict gets. Fail-soft — the retry
+      // is already decided, and losing its record must not lose the retry.
+      await this.fileTriageRetryAudit(step, rationale, staged);
       return 'retry';
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] monitor.triage failed; escalating to human', {
@@ -557,6 +565,41 @@ export class ProgrammaticRunHost implements ControllerHost {
       });
       this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
+    }
+  }
+
+  /**
+   * File the NON-BLOCKING audit record for one supervised triage retry (source
+   * `monitor`, category `triage-retry`), so the human reaches the next gate
+   * knowing a step was re-driven autonomously and with what instruction. Absent
+   * sink ⇒ nothing filed (the chat note still carries the decision).
+   */
+  private async fileTriageRetryAudit(
+    step: WorkflowStep,
+    rationale: string,
+    guidance: string | undefined,
+  ): Promise<void> {
+    if (!this.args.fileMonitorFinding) return;
+    try {
+      await this.args.fileMonitorFinding({
+        title: `Triage retry — ${step.name}`,
+        body: [
+          `The run supervisor re-drove \`${step.id}\` after it exhausted its automatic retries` +
+            `${step.optional === true ? ' (an optional step that would otherwise have been skipped)' : ''}.`,
+          '',
+          `- Rationale: ${rationale}`,
+          guidance !== undefined
+            ? `- Guidance handed to the retry (this attempt only): ${guidance}`
+            : '- No guidance was staged for the retry.',
+        ].join('\n'),
+        category: TRIAGE_RETRY_FINDING_CATEGORY,
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] triage-retry audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
