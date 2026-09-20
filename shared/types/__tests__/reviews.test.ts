@@ -102,4 +102,12 @@ describe('parseGateResolution', () => {
       modifier: 'some-future-flag',
     });
   });
+
+  it('normalizes an upper-case modifier to lower case', () => {
+    expect(parseGateResolution('approve[NO-FINDINGS]: keep it')).toEqual({
+      verdict: 'approve',
+      modifier: 'no-findings',
+      note: 'keep it',
+    });
+  });
 });

@@ -2869,10 +2869,12 @@ export class WorkflowController {
     // revisit steps and silently bypass the gate itself.
     this.clearCompletedFrom(remainingCompleted, phaseSteps, nextIndex);
     if (targetIndex < 0) return { terminal: false, i: nextIndex };
-    // A real jump: recover the human's note (the verdict channel dropped it) and
-    // arm it for every step the jump re-drives. A host without the seam, or a
-    // resolution that is a bare verdict word, yields undefined — the re-run then
-    // learns WHICH gate sent it back and nothing more, which still beats silence.
+    // A real jump: recover the human's note (stored behind the anchored verdict
+    // prefix by `composeGateResolution`; `readGateResolutionNote` hands back only
+    // the note) and arm it for every step the jump re-drives. A host without the
+    // seam, or a resolution that is a bare verdict word, yields undefined — the
+    // re-run then learns WHICH gate sent it back and nothing more, which still
+    // beats silence.
     let note: string | undefined;
     try {
       note = this.host.readGateResolutionNote?.(step.id);

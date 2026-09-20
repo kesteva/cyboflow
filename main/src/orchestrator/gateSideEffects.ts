@@ -60,11 +60,7 @@ import {
   adversarialSeverityToReviewSeverity,
   type AdversarialFinding,
 } from '../../../shared/types/adversarialReview';
-import {
-  parseIdeaVerdictMap,
-  parseDesignVerdictMap,
-  parseGateResolution,
-} from '../../../shared/types/reviews';
+import { parseIdeaVerdictMap, parseDesignVerdictMap } from '../../../shared/types/reviews';
 import { parseThoroughnessDeclaration } from '../../../shared/types/thoroughness';
 
 // ---------------------------------------------------------------------------
@@ -86,43 +82,11 @@ export const ADVERSARIAL_FINDING_SOURCE = 'agent:adversarial-review';
 /** Grouping category for the accepted-risk findings in the review queue. */
 const ADVERSARIAL_FINDING_CATEGORY = 'design-review';
 
-/** The human's answer, as the gate resolver reports it. */
-export type GateDecision = 'approve' | 'revise' | 'reject' | 'abort';
-
-/**
- * The verdict a resolution note encodes.
- *
- * Mirrors `programmatic/humanGate.parseGateVerdict` exactly, and lives here so
- * every call site that has a resolution string but not a decision (the gate
- * opener's `onGateResolved`, the orchestrated-plane resolve) reads it the SAME
- * way the controller does. Duplicated rather than imported to keep this module —
- * and, transitively, the review-item resolve path — free of a `programmatic/`
- * import, the same argument humanStepManager.ts makes for its copied constants.
- *
- * Both serialized verdict-map prefixes spell a declined item 'deny', never
- * 'reject', precisely so a batch gate carrying denials still reads as
- * approve-to-proceed here.
- *
- * A null/empty note is an APPROVE, deliberately and in agreement with
- * `parseGateVerdict`: resolving a blocking gate IS the act of approval, and the
- * queue card's Approve button records no note. Do NOT "harden" this by reading
- * null as a rejection — a DISMISSED gate also arrives with a null note, but the
- * two are told apart by the opener's own `dismissed` flag (see the
- * `onGateResolved` wiring in main/src/index.ts), not by the string. Suppressing
- * on null would silently stop binding designs on the most common approve path.
- */
-export function gateDecisionFromResolution(resolution: string | null | undefined): GateDecision {
-  // PREFIX FIRST (same contract as parseGateVerdict): a resolution written by
-  // `composeGateResolution` carries an anchored verdict, so the note after the
-  // colon is never sniffed — 'revise: the architecture rejects empty input' is a
-  // REVISE. Only a legacy row (parse returns null) falls through to the sniff.
-  const parsed = parseGateResolution(resolution);
-  if (parsed !== null) return parsed.verdict;
-  const r = (resolution ?? '').trim().toLowerCase();
-  if (r.includes('reject')) return 'reject';
-  if (r.includes('revise') || r.includes('retry')) return 'revise';
-  return 'approve';
-}
+// The verdict sniff lives in its own leaf module so `adversarialReviewGateBody`
+// (which this file imports for the review markdown) can borrow it without a
+// module cycle; re-exported here so every existing importer is untouched.
+export { gateDecisionFromResolution, type GateDecision } from './gateDecision';
+import { gateDecisionFromResolution, type GateDecision } from './gateDecision';
 
 export interface GateSideEffectsDeps {
   db: DatabaseLike;

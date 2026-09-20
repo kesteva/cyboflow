@@ -425,8 +425,8 @@ export const GATE_RESOLUTION_MODIFIER_NO_FINDINGS = 'no-findings';
  * `<verdict>[<modifier>]: <note>`, anchored on the TRIMMED string.
  *
  * The `i` flag exists for the VERDICT (legacy writers spelled it 'Approve');
- * {@link parseGateResolution} normalizes that capture to lower case. It also
- * lets an upper-case modifier through, which is deliberate — the parser never
+ * {@link parseGateResolution} normalizes both captures to lower case. An
+ * upper-case modifier is therefore accepted and normalized — the parser never
  * throws on an old row, and the resolve handler is the thing that refuses any
  * modifier it does not recognize.
  */
@@ -468,7 +468,9 @@ export function parseGateResolution(
   if (typeof resolution !== 'string') return null;
   const m = GATE_RESOLUTION_RE.exec(resolution.trim());
   if (m === null) return null;
-  const modifier = m[2];
+  // Normalized like the verdict: the `i` flag lets 'approve[NO-FINDINGS]' through
+  // (the parser never rejects an old row), and the handler compares the literal.
+  const modifier = m[2]?.toLowerCase();
   const note = (m[3] ?? '').trim();
   return {
     verdict: m[1].toLowerCase() as GateVerdictWord,

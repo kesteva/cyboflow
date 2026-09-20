@@ -33,10 +33,7 @@ import {
 import { parseGateResolution } from '../../../shared/types/reviews';
 // The legacy free-text sniff, borrowed rather than re-implemented so this count can
 // never disagree with what the gate readers decided the run actually did (CR-13).
-// `gateSideEffects` imports this module back (for `readAdversarialReviewMarkdown`),
-// so the two form a cycle — harmless here because both sides export hoisted function
-// declarations and neither calls the other at module-evaluation time.
-import { gateDecisionFromResolution } from './gateSideEffects';
+import { gateDecisionFromResolution } from './gateDecision';
 
 /** The step id whose gate this module speaks for. */
 export const APPROVE_DESIGN_STEP_ID = 'approve-design';
