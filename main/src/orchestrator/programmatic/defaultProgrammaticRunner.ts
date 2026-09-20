@@ -881,13 +881,14 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // Optional-human-gate precondition (approve-design): when BOTH design steps
     // self-skipped (no idea carried the UI_PROTOTYPE/ARCH_DESIGN flags), the run
     // has no prototype artifact and no architecture section — the gate would
-    // park the run over an empty review surface. hasReviewableDesignSurface is
-    // fail-open (any read error opens the gate).
+    // park the run over an empty review surface. A POPULATED adversarial-review
+    // artifact counts as a surface too, so a critique with entries always opens
+    // the gate. hasReviewableDesignSurface is fail-open (any read error opens it).
     const humanGateSkip = (step: WorkflowStep): string | null => {
       if (step.id !== 'approve-design' || !this.deps.db) return null;
       return hasReviewableDesignSurface(this.deps.db, ctx.runId)
         ? null
-        : 'no design surface to review — no prototype artifact and no architecture design section';
+        : 'no design surface to review — no prototype artifact, no architecture design section, and no adversarial-review entries';
     };
 
     // Autonomous LANE-RESCUE collaborators, run-bound here so the host only ever

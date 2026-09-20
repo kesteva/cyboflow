@@ -721,6 +721,13 @@ export class WorkflowController {
             });
             this.host.log?.('info', `optional human gate '${step.id}' skipped: ${gateSkipReason}`);
             this.host.reportStep(step.id, 'skipped');
+            // A SKIPPED gate answers the pending revision the same way an opened
+            // one does — the walk reached it and moved on. `pendingGateRevision`
+            // is otherwise cleared only where a gate actually opens, so without
+            // this the "revision requested" section leaks into every step after
+            // the skip (epics/tasks re-running as if a human had just asked for
+            // changes that nobody is ever shown).
+            pendingGateRevision = undefined;
             i += 1;
             continue;
           }

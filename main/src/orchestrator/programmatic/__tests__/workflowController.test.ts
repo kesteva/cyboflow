@@ -3484,6 +3484,44 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     expect(host.reports.filter((r) => r.id === 'adversarial-review').map((r) => r.status)).toContain('skipped');
   });
 
+  it('a SKIPPED optional gate clears the armed revision instead of leaking it into the steps after it', async () => {
+    // The automatic lap arms a review-sourced revision for the re-driven region.
+    // If the gate that would have consumed it self-skips, the steps AFTER it must
+    // not keep receiving "a revision was requested" — nobody ever asked.
+    const skippableGateDef = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'ui-prototype', optional: true }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, optional: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost();
+    const withSkip: ControllerHost = {
+      ...host,
+      shouldSkipHumanGate: (s) => (s.id === 'approve-design' ? 'no design surface to review' : null),
+    };
+
+    const result = await new WorkflowController(runner, withSkip).run('run-ar-skip', skippableGateDef);
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual([]); // the gate never opened
+
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // automatic lap after the blocking verdict
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    // The lap's turns still carry the review-sourced revision…
+    for (const turn of runner.seen.slice(3, 6)) {
+      expect(turn.gateRevision?.source).toBe('adversarial-review');
+    }
+    // …and the skipped gate clears it before `epics`.
+    expect(runner.seen[6].gateRevision).toBeUndefined();
+  });
+
   it('a plain step with an on-failure loopback still ignores REVIEW: BLOCKING in its result', async () => {
     // The verdict routing is keyed on the adversarial-review AGENT, not on the
     // presence of `loopback`.

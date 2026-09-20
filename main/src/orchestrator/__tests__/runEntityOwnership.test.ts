@@ -676,4 +676,59 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
     insertRun(db, 'run-d', null);
     expect(hasReviewableDesignSurface(dbAdapter(db), 'run-d')).toBe(true);
   });
+
+  /** Writes an `adversarial-review` artifact with the given markdown payload. */
+  function insertReview(db: Database.Database, runId: string, markdown: string): void {
+    db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
+      `art_rev_${runId}`,
+      runId,
+      'adversarial-review',
+      JSON.stringify({ markdown }),
+    );
+  }
+
+  it('true when a POPULATED adversarial-review artifact exists with no prototype or architecture', () => {
+    // The reviewer raised a blocking defect against something that left no other
+    // surface behind — the critique itself is what the human has to see.
+    const db = buildDesignDb();
+    insertRun(db, 'run-rev', null);
+    insertReview(
+      db,
+      'run-rev',
+      ['## Blocking', '', '#### AR-1 — no way back from Spend', '**What:** no Home affordance.', '', '## Findings', '', 'None.'].join('\n'),
+    );
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev')).toBe(true);
+  });
+
+  it('true when only the non-blocking Findings section is populated', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-rev-f', null);
+    insertReview(db, 'run-rev-f', '## Blocking\n\nNone.\n\n## Findings\n\n#### AR-2 — nit\n**What:** copy.');
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-f')).toBe(true);
+  });
+
+  it('false when the review artifact is EMPTY (both sections `None.`, or no entries at all)', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-rev-empty', null);
+    insertReview(db, 'run-rev-empty', '## Blocking\n\nNone.\n\n## Findings\n\nNone.\n');
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-empty')).toBe(false);
+
+    insertRun(db, 'run-rev-bare', null);
+    insertReview(db, 'run-rev-bare', 'Reported the adversarial review.\n');
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-bare')).toBe(false);
+  });
+
+  it('a run with NO review artifact keeps its existing result', () => {
+    const db = buildDesignDb();
+    // Nothing at all → still false (today's behaviour).
+    insertRun(db, 'run-rev-none', null);
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-none')).toBe(false);
+    // Another run's populated review is not this run's surface.
+    insertReview(db, 'run-other', '## Blocking\n\n#### AR-1 — x\n**What:** y.');
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-none')).toBe(false);
+    // A prototype still short-circuits to true without consulting the review.
+    insertRun(db, 'run-rev-proto', null);
+    db.prepare("INSERT INTO artifacts (id, run_id, atype) VALUES ('art_p', 'run-rev-proto', 'ui-prototype')").run();
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-proto')).toBe(true);
+  });
 });
