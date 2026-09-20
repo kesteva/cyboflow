@@ -3322,7 +3322,10 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
   ].join('\n');
   const CLEAN_RESULT = 'Reported the adversarial review.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
 
-  type Seen = { id: string; gateRevision?: { gateStepId: string; note?: string; source?: string } };
+  type Seen = {
+    id: string;
+    gateRevision?: { gateStepId: string; note?: string; source?: string; round?: number };
+  };
 
   /** Scripted review results per adversarial-review turn; every other step is ok. */
   function reviewRunner(reviewResults: string[]): StepRunner & { seen: Seen[] } {
@@ -3366,6 +3369,8 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
       expect(turn.gateRevision).toEqual({
         gateStepId: 'adversarial-review',
         source: 'adversarial-review',
+        // One review result has completed, so the re-run is about to write round 2.
+        round: 1,
         note: [
           '#### AR-1 — Spend screen has no way back',
           '**Severity:** blocker   **Area:** prototype',
@@ -3375,6 +3380,52 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     }
     // The gate's approve clears it: epics runs with no revision armed.
     expect(runner.seen[6].gateRevision).toBeUndefined();
+  });
+
+  it('counts one ROUND per completed review result and carries it into a later human revise', async () => {
+    // The round number is the reviewer's only anchor for id continuity, so it has
+    // to count EVERY completed review — the automatic lap's blocking one and the
+    // clean one after it — not just the laps (which stop at their cap).
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar-round', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // automatic lap after the blocking verdict
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // the human then revises the (clean) second round
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    // Lap: one review has completed, so the re-run writes round 2.
+    expect(runner.seen[3].gateRevision?.round).toBe(1);
+    expect(runner.seen[3].gateRevision?.source).toBe('adversarial-review');
+    // Human revise after the lap: two reviews have completed — round 3 next. The
+    // count is attributed to the phase's REVIEW step, not to the gate.
+    expect(runner.seen[6].gateRevision).toEqual({ gateStepId: 'approve-design', round: 2 });
+    expect(runner.seen[8].gateRevision?.round).toBe(2);
+    // Approve clears it.
+    expect(runner.seen[9].gateRevision).toBeUndefined();
+  });
+
+  it('omits the round on a gate whose phase has no adversarial-review step', async () => {
+    const noReview = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar-noreview', noReview);
+    expect(result.outcome).toBe('completed');
+    // The re-driven step learns WHICH gate sent it back and nothing more — no
+    // invented round.
+    expect(runner.seen[1].gateRevision).toEqual({ gateStepId: 'approve-design' });
   });
 
   it('falls through to the human gate when the second round is still blocking (bounded to one automatic lap)', async () => {

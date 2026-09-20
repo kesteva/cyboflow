@@ -446,11 +446,22 @@ export class WorkflowController {
     // forward, and cleared the moment the walk reaches the gate again (the gate
     // having re-opened, the revision has been answered). The fan-out path never
     // reads it — lanes carry their own per-lane channels.
-    let pendingGateRevision: { gateStepId: string; note?: string; source?: 'adversarial-review' } | undefined;
+    let pendingGateRevision:
+      | { gateStepId: string; note?: string; source?: 'adversarial-review'; round?: number }
+      | undefined;
     // Per-step-id count of AUTOMATIC adversarial-review revisions taken this walk
     // (bounded by MAX_REVIEW_AUTO_REVISIONS). Separate from `loopbacks` so the
     // one automatic lap never eats into the human gate's own revise budget.
     const reviewAutoRevisions = new Map<string, number>();
+    // Per-step-id count of COMPLETED adversarial-review results this walk — the
+    // review ROUND number, and the only source of it. Deliberately NOT
+    // `reviewAutoRevisions`: that one counts only the automatic laps and stops at
+    // its cap, while a round is any completed review, clean or blocking, reached
+    // by a lap OR by a human's Revise. The re-run prompt quotes it so the reviewer
+    // knows which round it is writing and which ids are already spent. Walk state,
+    // like every other map here: a restart or a rewind resets it, and nothing
+    // persists it (the DB's revision count is a different, unreliable quantity).
+    const reviewRounds = new Map<string, number>();
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -673,7 +684,7 @@ export class WorkflowController {
                 signal,
                 attempt: 1,
               });
-              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i);
+              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
               if (next.terminal) return this.finish(next.result, runId);
               i = next.i;
               continue;
@@ -736,7 +747,7 @@ export class WorkflowController {
         if (isPureHumanGate(step)) {
           this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
           const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt: 1 });
-          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i);
+          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
           if (next.terminal) return this.finish(next.result, runId);
           // Every gate decision REPLACES the pending revision: a revise-with-target
           // arms a fresh one, and anything else (approve, or a revise that only
@@ -835,6 +846,13 @@ export class WorkflowController {
           // instead of parking the run at the design gate with defects the flow
           // could have fixed itself. Bounded by MAX_REVIEW_AUTO_REVISIONS; past it
           // the step advances and the human gate presents the surviving entries.
+          // One completed review result = one round, whatever the verdict and
+          // whoever asked for it. Counted BEFORE the loopback decision so a clean
+          // result (which takes no lap) still advances the number a later human
+          // Revise will quote.
+          if (step.agent === 'adversarial-review') {
+            reviewRounds.set(step.id, (reviewRounds.get(step.id) ?? 0) + 1);
+          }
           const reviewJump = this.tryAdversarialReviewLoopback(
             step, phase.steps, okResultText, reviewAutoRevisions,
           );
@@ -847,10 +865,12 @@ export class WorkflowController {
             );
             // Deliberate revisit — same purge the gate's revise performs.
             this.clearCompletedFrom(remainingCompleted, phase.steps, reviewJump.index);
+            const lapRound = reviewRounds.get(step.id);
             pendingGateRevision = {
               gateStepId: step.id,
               source: 'adversarial-review',
               ...(reviewJump.blocking !== null ? { note: reviewJump.blocking } : {}),
+              ...(lapRound !== undefined ? { round: lapRound } : {}),
             };
             i = reviewJump.index;
             continue;
@@ -860,7 +880,7 @@ export class WorkflowController {
           if (hasTrailingGate(step)) {
             this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
             const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt });
-            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i, attempt);
+            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt);
             if (next.terminal) return this.finish(next.result, runId);
             pendingGateRevision = next.gateRevision;
             i = next.i;
@@ -2781,13 +2801,18 @@ export class WorkflowController {
     phase: WorkflowDefinition['phases'][number],
     phaseSteps: WorkflowStep[],
     loopbacks: Map<string, number>,
+    reviewRounds: ReadonlyMap<string, number>,
     remainingCompleted: Set<string>,
     steps: StepReport[],
     i: number,
     attempts = 1,
   ):
     | { terminal: true; result: ControllerResult }
-    | { terminal: false; i: number; gateRevision?: { gateStepId: string; note?: string } } {
+    | {
+        terminal: false;
+        i: number;
+        gateRevision?: { gateStepId: string; note?: string; round?: number };
+      } {
     if (decision === 'approve') {
       this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
       this.host.reportStep(step.id, 'done');
@@ -2843,10 +2868,21 @@ export class WorkflowController {
       note = undefined;
     }
     const trimmed = (note ?? '').trim();
+    // The ROUND this revision follows. A human gate has no review step of its
+    // own, so the count belongs to the adversarial-review step in the SAME phase
+    // — the one whose critique the gate just presented. A phase without one (or a
+    // walk that never completed a review) contributes no round, and the prompt
+    // drops the clause rather than inventing a number.
+    const reviewStep = phaseSteps.find((s) => s.agent === 'adversarial-review');
+    const round = reviewStep !== undefined ? reviewRounds.get(reviewStep.id) : undefined;
     return {
       terminal: false,
       i: nextIndex,
-      gateRevision: { gateStepId: step.id, ...(trimmed.length > 0 ? { note: trimmed } : {}) },
+      gateRevision: {
+        gateStepId: step.id,
+        ...(trimmed.length > 0 ? { note: trimmed } : {}),
+        ...(round !== undefined ? { round } : {}),
+      },
     };
   }
 

@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseAdversarialReviewDoc,
   adversarialSeverityToReviewSeverity,
+  maxAdversarialId,
   ADVERSARIAL_SEVERITIES,
 } from '../adversarialReview';
 
@@ -128,12 +129,12 @@ describe('parseAdversarialReviewDoc — the PROMOTED (artifact) heading form', (
 describe('parseAdversarialReviewDoc — empty and degenerate documents', () => {
   it('reads `None.` under a heading as zero entries', () => {
     const parsed = parseAdversarialReviewDoc('## Result\n\n### Blocking\n\nNone.\n\n### Findings\n\nNone.\n');
-    expect(parsed).toEqual({ blocking: [], findings: [] });
+    expect(parsed).toEqual({ blocking: [], findings: [], prior: [] });
   });
 
   it('returns empty arrays for null / empty / heading-less input', () => {
     for (const input of [null, undefined, '', 'Just some prose with no headings at all.']) {
-      expect(parseAdversarialReviewDoc(input)).toEqual({ blocking: [], findings: [] });
+      expect(parseAdversarialReviewDoc(input)).toEqual({ blocking: [], findings: [], prior: [] });
     }
   });
 
@@ -198,6 +199,155 @@ describe('parseAdversarialReviewDoc — sloppy formatting', () => {
     );
     expect(parsed.blocking.map((f) => f.id)).toEqual(['AR-1', 'AR-2']);
     expect(parsed.findings).toEqual([]);
+  });
+});
+
+describe('parseAdversarialReviewDoc — the `Prior entries` carry-forward ledger', () => {
+  const LEDGER = [
+    '- AR-1 (blocker) — resolved — the failure screen is in the prototype now',
+    '- AR-2 (major) — unresolved — the criterion still says nothing about reachability',
+    '- AR-3 (minor) — resolved-with-regression (see AR-6) — the queue is gone, the retry is not',
+    '- AR-4 (advisory) — set-aside — steering excluded it this lap',
+    '- AR-5 — withdrawn',
+  ].join('\n');
+
+  it('reads a ledger under the PROMOTED `## Prior entries` heading', () => {
+    const parsed = parseAdversarialReviewDoc(`## Blocking\n\nNone.\n\n## Findings\n\nNone.\n\n## Prior entries\n\n${LEDGER}\n`);
+    expect(parsed.prior).toEqual([
+      {
+        id: 'AR-1',
+        previousSeverity: 'blocker',
+        status: 'resolved',
+        note: 'the failure screen is in the prototype now',
+      },
+      {
+        id: 'AR-2',
+        previousSeverity: 'major',
+        status: 'unresolved',
+        note: 'the criterion still says nothing about reachability',
+      },
+      {
+        id: 'AR-3',
+        previousSeverity: 'minor',
+        status: 'resolved-with-regression',
+        ref: 'AR-6',
+        note: 'the queue is gone, the retry is not',
+      },
+      {
+        id: 'AR-4',
+        previousSeverity: 'advisory',
+        status: 'set-aside',
+        note: 'steering excluded it this lap',
+      },
+      { id: 'AR-5', status: 'withdrawn' },
+    ]);
+  });
+
+  it('reads the SAME ledger under the subagent\'s nested `### Prior entries` heading', () => {
+    const promoted = parseAdversarialReviewDoc(`## Prior entries\n\n${LEDGER}\n`);
+    const nested = parseAdversarialReviewDoc(`## Result\n\n### Prior entries\n\n${LEDGER}\n`);
+    expect(nested.prior).toEqual(promoted.prior);
+  });
+
+  it('yields an empty ledger for a first review and for an old two-section document', () => {
+    expect(parseAdversarialReviewDoc('## Prior entries\n\nNone.\n').prior).toEqual([]);
+    expect(parseAdversarialReviewDoc(CANONICAL).prior).toEqual([]);
+  });
+
+  it('DROPS a line whose status word is not one of the five rather than guessing one', () => {
+    const parsed = parseAdversarialReviewDoc(
+      ['## Prior entries', '', '- AR-1 (blocker) — mostly fixed — close enough', '- AR-2 (minor) — resolved'].join('\n'),
+    );
+    expect(parsed.prior).toEqual([{ id: 'AR-2', previousSeverity: 'minor', status: 'resolved' }]);
+  });
+
+  it('ignores a ledger that is only an EXAMPLE inside a fenced block', () => {
+    const parsed = parseAdversarialReviewDoc(
+      [
+        '## Prior entries',
+        '',
+        '```',
+        '- AR-n (blocker|major|minor|advisory) — resolved | unresolved — <one line>',
+        '```',
+        '',
+        '- AR-1 (blocker) — resolved',
+      ].join('\n'),
+    );
+    expect(parsed.prior).toEqual([{ id: 'AR-1', previousSeverity: 'blocker', status: 'resolved' }]);
+  });
+
+  it('ignores a whole `## Prior entries` section written inside a fence', () => {
+    const parsed = parseAdversarialReviewDoc(
+      ['## Blocking', '', '#### AR-1 — Real', '', '```', '## Prior entries', '- AR-9 — resolved', '```'].join('\n'),
+    );
+    expect(parsed.prior).toEqual([]);
+    expect(parsed.blocking.map((f) => f.id)).toEqual(['AR-1']);
+  });
+
+  it('tolerates a hyphen separator, a missing severity, and a missing note', () => {
+    const parsed = parseAdversarialReviewDoc(
+      ['## Prior entries', '', '- AR-7 - unresolved - still open', '* ar 8 — resolved'].join('\n'),
+    );
+    expect(parsed.prior).toEqual([
+      { id: 'AR-7', status: 'unresolved', note: 'still open' },
+      { id: 'AR-8', status: 'resolved' },
+    ]);
+  });
+
+  it('never lets the ledger leak into blocking/findings, even when it uses `#### AR-n` headings', () => {
+    const parsed = parseAdversarialReviewDoc(
+      [
+        '## Blocking',
+        '',
+        '#### AR-2 — Still broken',
+        '**Severity:** blocker',
+        '',
+        '## Prior entries',
+        '',
+        '#### AR-1 — Resolved last round',
+        '**Severity:** blocker',
+        '',
+        '- AR-1 (blocker) — resolved',
+      ].join('\n'),
+    );
+    expect(parsed.blocking.map((f) => f.id)).toEqual(['AR-2']);
+    expect(parsed.findings).toEqual([]);
+    expect(parsed.prior).toEqual([{ id: 'AR-1', previousSeverity: 'blocker', status: 'resolved' }]);
+  });
+});
+
+describe('maxAdversarialId', () => {
+  it('returns 0 for a document with no AR ids, and for null / empty input', () => {
+    for (const input of [null, undefined, '', '## Blocking\n\nNone.\n']) {
+      expect(maxAdversarialId(input)).toBe(0);
+    }
+  });
+
+  it('returns the highest id anywhere in the doc, ledger and prose included', () => {
+    expect(maxAdversarialId(CANONICAL)).toBe(4);
+    expect(
+      maxAdversarialId('## Blocking\n\n#### AR-2 — X\n\n## Prior entries\n\n- AR-11 (minor) — resolved\n'),
+    ).toBe(11);
+    // Sloppy spellings count too — they are the same spent id.
+    expect(maxAdversarialId('see ar 12 and AR-3')).toBe(12);
+  });
+
+  it('ignores the `ar` inside ordinary prose words followed by a number', () => {
+    // A review doc is prose-heavy; without a leading word boundary the `ar` in
+    // `year` / `linear` / `similar` matches and inflates the spent-id range the
+    // re-review prompt quotes back to the reviewer.
+    const prose = [
+      '## Blocking',
+      '',
+      'None.',
+      '',
+      '## Findings',
+      '',
+      '**Why it matters:** in year 2026 the queue overflows.',
+      'It is a linear 4-step flow, and similar 3 screens appear near 5 places.',
+    ].join('\n');
+    expect(maxAdversarialId(prose)).toBe(0);
+    expect(maxAdversarialId(`${prose}\n\n#### AR-2 — X\n`)).toBe(2);
   });
 });
 

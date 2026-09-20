@@ -145,8 +145,16 @@ export interface ControllerStepContext {
    * human ever saw the design gate, and `note` holds the review's `## Blocking`
    * section. The prompt renders a different heading for it, so the re-run agent
    * never reads a machine verdict as "a human rejected this".
+   *
+   * `round` is how many adversarial-review results this walk has completed for
+   * the review step attached to this revision — so the re-run's prompt can tell
+   * the reviewer which round it is about to write and which `AR-n` ids are
+   * already spent. Absent when the walk has no review step for the gate, or when
+   * the revision came from a path that never ran one; the prompt then drops the
+   * round clause and keeps the rest. It is WALK state, not run state: a restart
+   * or a rewind resets it, which is why it is never persisted.
    */
-  gateRevision?: { gateStepId: string; note?: string; source?: 'adversarial-review' };
+  gateRevision?: { gateStepId: string; note?: string; source?: 'adversarial-review'; round?: number };
   /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see

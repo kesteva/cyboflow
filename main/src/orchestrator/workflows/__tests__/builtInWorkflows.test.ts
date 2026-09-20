@@ -680,6 +680,27 @@ describe('buildBuiltInWorkflows', () => {
     }
   });
 
+  it('teaches the adversarial reviewer the carry-forward ledger and the clean-verdict rule', () => {
+    // The convergence reporting is only as good as the ledger the reviewer emits:
+    // without `### Prior entries` the gate cannot tell a round that fixed three
+    // blockers from one that found three different ones, and without the
+    // diminishing-returns rule a re-review keeps minting blockers forever. Both
+    // live in the prompt and nothing else enforces them.
+    const descriptors = buildBuiltInWorkflows();
+    const agentsRoot = dirname(descriptors[0].path);
+    const copies = readdirSync(agentsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== '__tests__')
+      .map((e) => join(agentsRoot, e.name, 'agents', 'adversarial-review.md'))
+      .filter((p) => existsSync(p));
+    expect(copies.length, 'found the adversarial-review prompt copies').toBeGreaterThan(0);
+    for (const path of copies) {
+      const body = readFileSync(path, 'utf-8');
+      expect(body, `${path}: names the carry-forward ledger`).toContain('### Prior entries');
+      expect(body, `${path}: names the clean verdict`).toContain('REVIEW: CLEAN');
+      expect(body, `${path}: freezes ids across rounds`).toContain('Frozen ids');
+    }
+  });
+
   it("declares a SELF-loopback on every fan-out's implement step (sprint + ship)", () => {
     // A first-step failure must get the same second chance every later inner step
     // gets. The programmatic controller reads `loopback` literally — an undeclared

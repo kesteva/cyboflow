@@ -3,9 +3,14 @@
  * `adversarial-review` step's critique.
  *
  * The step's subagent returns a `## Result` document holding `### Blocking`
- * (must-fix) and `### Findings` (advisory), each with `#### AR-n — title` entries
- * carrying a small set of bolded fields. The step agent PROMOTES those two
- * sections to top level (`## Blocking` / `## Findings`) when it composes the run's
+ * (must-fix), `### Findings` (advisory) and — on a re-review — `### Prior
+ * entries` (the carry-forward ledger: one line per id from the PREVIOUS round
+ * saying what became of it, which is the only way a reader can tell a converging
+ * review from one that merely found a different set of defects). The first two
+ * carry `#### AR-n — title` entries
+ * with a small set of bolded fields; the ledger carries plain list lines. The
+ * step agent PROMOTES all three
+ * sections to top level (`## Blocking` / `## Findings` / `## Prior entries`) when it composes the run's
  * `adversarial-review` ARTIFACT, which is the only thing that survives the step's
  * turn. BOTH depths parse here, because the artifact is the promoted form while a
  * Revise threads the raw nested form back into the design steps. `AR-n` ids are
@@ -55,11 +60,54 @@ export interface AdversarialFinding {
   fix?: string;
 }
 
+/**
+ * What became of a prior round's entry, as the re-review reports it in its
+ * carry-forward ledger.
+ *
+ * `set-aside` is the supervisor's steering excluding an entry from this lap;
+ * `withdrawn` is the reviewer no longer standing behind it. The two are kept
+ * apart because only one of them is a judgement about the DEFECT.
+ */
+export type PriorEntryStatus =
+  | 'resolved'
+  | 'unresolved'
+  | 'resolved-with-regression'
+  | 'set-aside'
+  | 'withdrawn';
+
+/**
+ * One line of a re-review's `## Prior entries` ledger: an id from the PREVIOUS
+ * round and what this round found of it.
+ *
+ * `previousSeverity` is the severity the entry carried LAST round, which is the
+ * only way a reader can count prior blockers apart from prior advisories — this
+ * round's document may not list the entry at all (it was resolved), so its
+ * current severity does not exist. Optional because the reviewer may omit the
+ * parenthesis; a ledger line without it still carries its status.
+ */
+export interface PriorEntry {
+  /** The `AR-n` label, normalized (e.g. 'AR-3'). */
+  id: string;
+  /** The entry's severity in the PREVIOUS round, when the reviewer declared it. */
+  previousSeverity?: AdversarialSeverity;
+  status: PriorEntryStatus;
+  /** For `resolved-with-regression (see AR-m)`: the `AR-m` the regression became. */
+  ref?: string;
+  /** The reviewer's one-line explanation, when there is one. */
+  note?: string;
+}
+
 export interface ParsedAdversarialReview {
   /** Entries under `## Blocking` — must-fix. */
   blocking: AdversarialFinding[];
   /** Entries under `## Findings` — advisory. */
   findings: AdversarialFinding[];
+  /**
+   * The `## Prior entries` carry-forward ledger — empty on a first review, and
+   * empty for any document written before the ledger existed. ALWAYS present so
+   * a consumer can read `.prior.length` without a guard.
+   */
+  prior: PriorEntry[];
 }
 
 /** A section heading line at H2 or H3 (`## Blocking` / `### Blocking`). */
@@ -68,9 +116,31 @@ const SECTION_HEADING_RE = /^[ \t]*#{2,3}[ \t]+(.+?)[ \t]*$/;
 const ENTRY_HEADING_RE = /^[ \t]*#{4,6}[ \t]+(AR[-\s]?\d+)[ \t]*(?:[—–-][ \t]*)?(.*)$/i;
 /** A bolded field line: `**Severity:** blocker   **Area:** spec`. */
 const FIELD_RE = /\*\*([^*]+?)\s*:\*\*[ \t]*([^*]*)/g;
+/** A fenced-code delimiter (``` or ~~~), at any indent. */
+const FENCE_RE = /^[ \t]*(?:```|~~~)/;
+/**
+ * One ledger line: `- AR-3 (major) — unresolved — the fix moved the check`.
+ * The severity parenthesis and the dash are both optional, and any list marker
+ * and dash flavour are accepted — the producer is a language model.
+ */
+const PRIOR_LINE_RE =
+  /^[ \t]*[-*+][ \t]+(AR[-\s]?\d+)\b[ \t]*(?:\(([^)]*)\))?[ \t]*(?:[—–:-][ \t]*)?(.*)$/i;
+/** The five status words, longest-first so `resolved-with-regression` wins over `resolved`. */
+const PRIOR_STATUS_RE = /^(resolved[-\s]with[-\s]regression|unresolved|resolved|set[-\s]aside|withdrawn)\b/i;
+/** The regression pointer that may follow the status: `(see AR-7)`. */
+const PRIOR_REF_RE = /^[ \t]*\([ \t]*see[ \t]+(AR[-\s]?\d+)[ \t]*\)/i;
+/**
+ * Every `AR-n` token, for `maxAdversarialId`. The leading `\b` is load-bearing:
+ * without it the `ar` inside ordinary prose (`year 2026`, `a linear 4-step flow`)
+ * matches and inflates the spent-id range the re-review prompt quotes. There is
+ * deliberately no trailing `\b` — `AR-12abc` should degrade to 12, not be rejected.
+ */
+const AR_TOKEN_RE = /\bAR[-\s]?(\d+)/gi;
 
 /** Section buckets this parser recognizes; anything else is ignored. */
-type SectionKey = 'blocking' | 'findings' | null;
+type SectionKey = 'blocking' | 'findings' | 'prior' | null;
+/** The two sections that hold `#### AR-n` ENTRIES (the ledger holds lines, not entries). */
+type EntryBucket = 'blocking' | 'findings';
 
 function classifySection(heading: string): SectionKey {
   const h = heading.trim().toLowerCase();
@@ -78,6 +148,7 @@ function classifySection(heading: string): SectionKey {
   // written before any Blocking/Findings heading are not misfiled.
   if (h.startsWith('blocking')) return 'blocking';
   if (h.startsWith('finding')) return 'findings';
+  if (h.startsWith('prior entr')) return 'prior';
   return null;
 }
 
@@ -99,6 +170,64 @@ function cleanField(value: string): string | undefined {
   return v.length > 0 ? v : undefined;
 }
 
+/** `resolved with regression` / `Set Aside` → the canonical union member. */
+function normalizePriorStatus(raw: string): PriorEntryStatus {
+  return raw.trim().toLowerCase().replace(/\s+/g, '-') as PriorEntryStatus;
+}
+
+/**
+ * Parse ONE `## Prior entries` ledger line, or null when the line is not one.
+ *
+ * STRICT about the status word and lenient about everything else: a line whose
+ * status is not one of the five is DROPPED rather than guessed at, because the
+ * gate's convergence arithmetic counts these — inventing a status would make the
+ * gate report progress that nobody verified. Everything else (the list marker,
+ * the dash flavour, the severity parenthesis, the note) degrades the usual way.
+ */
+function parsePriorLine(line: string): PriorEntry | null {
+  const m = PRIOR_LINE_RE.exec(line);
+  if (m === null) return null;
+  const statusMatch = PRIOR_STATUS_RE.exec(m[3]);
+  if (statusMatch === null) return null;
+
+  const entry: PriorEntry = { id: normalizeId(m[1]), status: normalizePriorStatus(statusMatch[1]) };
+
+  const declared = (m[2] ?? '').trim().toLowerCase();
+  const severity = ADVERSARIAL_SEVERITIES.find((s) => declared.startsWith(s));
+  if (severity !== undefined) entry.previousSeverity = severity;
+
+  let rest = m[3].slice(statusMatch[0].length);
+  const refMatch = PRIOR_REF_RE.exec(rest);
+  if (refMatch !== null) {
+    entry.ref = normalizeId(refMatch[1]);
+    rest = rest.slice(refMatch[0].length);
+  }
+  const note = cleanField(rest.replace(/^[ \t]*[—–:-][ \t]*/, ''));
+  if (note !== undefined) entry.note = note;
+  return entry;
+}
+
+/**
+ * The highest `AR-n` number appearing anywhere in a document, or 0 when there is
+ * none.
+ *
+ * Deliberately a whole-document scan rather than a walk of the parsed buckets:
+ * the point is "which ids have been SPENT in this run", and an id can survive
+ * only in the ledger (resolved last round, listed nowhere else this round). The
+ * next round's prompt hands this number to the reviewer so a new entry continues
+ * from it instead of colliding with a retired id.
+ */
+export function maxAdversarialId(markdown: string | null | undefined): number {
+  if (typeof markdown !== 'string' || markdown.length === 0) return 0;
+  let max = 0;
+  AR_TOKEN_RE.lastIndex = 0;
+  for (let m = AR_TOKEN_RE.exec(markdown); m !== null; m = AR_TOKEN_RE.exec(markdown)) {
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
 /**
  * Parse an adversarial-review document into its two buckets.
  *
@@ -117,11 +246,18 @@ function cleanField(value: string): string | undefined {
  * non-blocking note, which is the failure direction that actually costs something.
  */
 export function parseAdversarialReviewDoc(markdown: string | null | undefined): ParsedAdversarialReview {
-  const result: ParsedAdversarialReview = { blocking: [], findings: [] };
+  const result: ParsedAdversarialReview = { blocking: [], findings: [], prior: [] };
   if (typeof markdown !== 'string' || markdown.length === 0) return result;
 
   let section: SectionKey = null;
-  let current: { entry: AdversarialFinding; bucket: Exclude<SectionKey, null>; body: string[] } | null = null;
+  let current: { entry: AdversarialFinding; bucket: EntryBucket; body: string[] } | null = null;
+  // Fence state, consulted ONLY by the ledger (its heading and its lines). The
+  // two older buckets keep their pre-ledger behaviour byte for byte: their
+  // recognition never looked at fences and changing that here would silently
+  // re-parse documents this module has been reading for two releases. The ledger
+  // is new, so it gets the stricter rule from the start — a fenced EXAMPLE of a
+  // ledger line (the reviewer prompt shows one) must never count as an entry.
+  let inFence = false;
 
   const flush = (): void => {
     if (!current) return;
@@ -158,12 +294,18 @@ export function parseAdversarialReviewDoc(markdown: string | null | undefined): 
   };
 
   for (const line of markdown.split(/\r?\n/)) {
+    if (FENCE_RE.test(line)) inFence = !inFence;
+
     const entryMatch = ENTRY_HEADING_RE.exec(line);
     if (entryMatch) {
       flush();
+      // A `#### AR-n` under the LEDGER is a re-statement, not an entry: the
+      // ledger's whole job is to name ids the current round is NOT re-filing, so
+      // promoting one to `blocking` would double-count it at the gate.
+      if (section === 'prior') continue;
       // An entry before any recognized section heading is treated as advisory —
       // it exists, so it must not vanish.
-      const bucket: Exclude<SectionKey, null> = section ?? 'findings';
+      const bucket: EntryBucket = section === null ? 'findings' : section;
       current = {
         bucket,
         body: [],
@@ -180,11 +322,20 @@ export function parseAdversarialReviewDoc(markdown: string | null | undefined): 
     if (sectionMatch) {
       flush();
       const classified = classifySection(sectionMatch[1]);
+      // A `## Prior entries` heading inside a fence is an EXAMPLE of the format,
+      // not the section itself — fall through as if it were unrecognized.
+      if (classified === 'prior' && inFence) continue;
       // Only RESET the bucket on a heading we recognize, or on the `## Result`
       // wrapper. An unrelated heading between entries (a reviewer's `### Notes`)
       // leaves the current bucket alone rather than silently re-filing what
       // follows.
       if (classified !== null || /^result\b/i.test(sectionMatch[1].trim())) section = classified;
+      continue;
+    }
+
+    if (section === 'prior' && !inFence) {
+      const priorEntry = parsePriorLine(line);
+      if (priorEntry !== null) result.prior.push(priorEntry);
       continue;
     }
 

@@ -30,6 +30,7 @@ import type { DatabaseLike } from './types';
 import {
   parseAdversarialReviewDoc,
   type AdversarialFinding,
+  type PriorEntry,
 } from '../../../shared/types/adversarialReview';
 
 /** The step id whose gate this module speaks for. */
@@ -111,6 +112,58 @@ function renderBlockingLine(entry: AdversarialFinding): string {
 }
 
 /**
+ * The CONVERGENCE lines — the part of the body that answers "is this getting
+ * better?", which the counts alone cannot.
+ *
+ * Two rounds of "3 blocking defects" look identical in the counts even when the
+ * second round fixed all three and found three unrelated ones. The ledger is the
+ * only place that distinction survives, so it is rendered as its own line the
+ * moment there is a ledger to read (a first review has none, and says nothing).
+ *
+ * Deliberately WITHOUT a round number: the only honest sources of one are the
+ * controller's walk-scoped counter, which this module cannot see, and the gate's
+ * resolved-item count, which undercounts an automatic lap. A wrong round number
+ * is worse than none — it would be the one number a reader trusts absolutely.
+ *
+ * `newBlockers` counts the CURRENT blocking entries the ledger does not mention:
+ * an entry the reviewer carried forward is the same defect, whereas an id absent
+ * from the ledger is one this round raised for the first time.
+ */
+function renderConvergence(prior: PriorEntry[], blocking: AdversarialFinding[]): string[] {
+  if (prior.length === 0) return [];
+
+  const priorBlockers = prior.filter(
+    (p) => p.previousSeverity === 'blocker' || p.previousSeverity === 'major',
+  );
+  const resolvedBlockers = priorBlockers.filter((p) => p.status === 'resolved').length;
+  const regressions = prior.filter((p) => p.status === 'resolved-with-regression').length;
+  const setAside = prior.filter((p) => p.status === 'set-aside').length;
+  const priorIds = new Set(prior.map((p) => p.id));
+  const newBlockers = blocking.filter((entry) => !priorIds.has(entry.id)).length;
+
+  const lines = [
+    '',
+    `**Convergence:** ${resolvedBlockers} of ${priorBlockers.length} prior ${pluralize(priorBlockers.length, 'blocker', 'blockers')} resolved, ${regressions} ${pluralize(regressions, 'regression', 'regressions')}, ${newBlockers} new ${pluralize(newBlockers, 'blocker', 'blockers')}, ${setAside} set aside.`,
+  ];
+
+  const open = prior.filter(
+    (p) => p.status === 'unresolved' || p.status === 'resolved-with-regression',
+  );
+  if (open.length > 0) {
+    // Plain text, not a `<details>` block: the review item's body is rendered as a
+    // React text child (ReviewItemCard's `whitespace-pre-wrap` <p>), so any HTML
+    // here would reach the human as literal `<details>` / `<summary>` tags. Use the
+    // same `**Label:**` + list idiom the Blocking section below already uses.
+    lines.push(
+      '',
+      '**Unresolved or regressed:**',
+      ...open.map((p) => `- ${p.id} — ${p.status}${p.note !== undefined ? ` — ${p.note}` : ''}`),
+    );
+  }
+  return lines;
+}
+
+/**
  * The revision-budget sentence, or null when nothing has been revised yet (saying
  * "0 of 5 used" on a first visit is noise that implies a countdown nobody started).
  */
@@ -139,7 +192,7 @@ export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string
   const markdown = readAdversarialReviewMarkdown(db, runId);
   if (markdown === undefined) return null;
 
-  const { blocking, findings } = parseAdversarialReviewDoc(markdown);
+  const { blocking, findings, prior } = parseAdversarialReviewDoc(markdown);
   const lines: string[] = [];
 
   if (blocking.length === 0 && findings.length === 0) {
@@ -154,6 +207,8 @@ export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string
     }
     lines.push(`The adversarial reviewer raised ${parts.join(' and ')}. Full detail is in the Adversarial review tab.`);
   }
+
+  lines.push(...renderConvergence(prior, blocking));
 
   if (blocking.length > 0) {
     lines.push('', '**Blocking:**', ...blocking.map(renderBlockingLine));

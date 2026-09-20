@@ -190,6 +190,81 @@ describe('composeAdversarialReviewGateBody', () => {
     expect(last).toContain('`rejected`');
     expect(last).toContain('swept when the session is archived');
   });
+
+  it('says nothing about convergence on a FIRST review (there is no ledger to read)', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC);
+    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1')).not.toContain('Convergence');
+  });
+
+  it('reports convergence from the ledger: prior blockers resolved, regressions, NEW blockers, set aside', () => {
+    const db = buildDb();
+    // Prior round: AR-1 + AR-2 blocking, AR-3 minor, AR-4 advisory.
+    // This round: AR-2 still blocking (carried forward), AR-9 is brand new.
+    seedReview(
+      db,
+      'run-1',
+      [
+        '## Blocking',
+        '',
+        '#### AR-2 — Criteria never mention reachability',
+        '**Severity:** major',
+        '',
+        '#### AR-9 — The new failure screen has no retry',
+        '**Severity:** blocker',
+        '',
+        '## Findings',
+        '',
+        'None.',
+        '',
+        '## Prior entries',
+        '',
+        '- AR-1 (blocker) — resolved — the failure screen is in the prototype now',
+        '- AR-2 (major) — unresolved — the criterion is unchanged',
+        '- AR-3 (minor) — resolved-with-regression (see AR-9) — the retry went missing with the queue',
+        '- AR-4 (advisory) — set-aside — steering excluded it',
+      ].join('\n'),
+    );
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
+    // b counts prior blocker|major only (2), a the resolved ones among them (1);
+    // AR-9 is the only current blocker absent from the ledger.
+    expect(body).toContain('**Convergence:** 1 of 2 prior blockers resolved, 1 regression, 1 new blocker, 1 set aside.');
+    // The still-open entries are listed, not dropped. Plain text only: this body is
+    // rendered as a React text child, so raw HTML would reach the human as tags.
+    expect(body).toContain('**Unresolved or regressed:**');
+    expect(body).not.toContain('<details>');
+    expect(body).not.toContain('<summary>');
+    expect(body).toContain('- AR-2 — unresolved — the criterion is unchanged');
+    expect(body).toContain('- AR-3 — resolved-with-regression — the retry went missing with the queue');
+    expect(body).not.toContain('- AR-1 — resolved');
+  });
+
+  it('reports a fully converged round with no open-entry list', () => {
+    const db = buildDb();
+    seedReview(
+      db,
+      'run-1',
+      [
+        '## Blocking',
+        '',
+        'None.',
+        '',
+        '## Findings',
+        '',
+        'None.',
+        '',
+        '## Prior entries',
+        '',
+        '- AR-1 (blocker) — resolved — fixed',
+        '- AR-2 (advisory) — withdrawn — no longer stand behind it',
+      ].join('\n'),
+    );
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
+    expect(body).toContain('**Convergence:** 1 of 1 prior blocker resolved, 0 regressions, 0 new blockers, 0 set aside.');
+    expect(body).not.toContain('**Unresolved or regressed:**');
+  });
 });
 
 describe('countApproveDesignRevisionsUsed', () => {

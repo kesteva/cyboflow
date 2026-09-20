@@ -1095,6 +1095,12 @@ describe('composeStepPrompt', () => {
     // parks the run behind items the next gate was about to triage.
     expect(out).toContain('Do NOT call `cyboflow_report_finding` at this step');
     expect(out).toContain('Do not renumber');
+    // Three sections, not two: the ledger is what makes a re-review readable as
+    // a continuation of the last one rather than a fresh critique.
+    expect(out).toContain('exactly three top-level sections');
+    expect(out).toContain('## Prior entries');
+    expect(out).toContain("the subagent's `### Prior entries` ledger, VERBATIM");
+    expect(out).toContain('write `None.` under it on a first review');
   });
 
   // ── item 12b: the gate-revision channel ─────────────────────────────────────
@@ -1180,6 +1186,58 @@ describe('composeStepPrompt', () => {
     });
     expect(nothing).toContain('## Adversarial review: revision requested');
     expect(nothing).toContain('do NOT re-emit the same result');
+  });
+
+  // ── item 1: round threading + id continuity ─────────────────────────────────
+
+  it('tells a re-run which round it is and which AR ids are already spent', () => {
+    const base = {
+      step: step({ id: 'expand-spec', name: 'Expand spec', agent: 'expand-spec' }),
+      workflowName: 'planner' as const,
+      attempt: 1,
+    };
+    const reviewMarkdown = '## Blocking\n\n#### AR-3 — still broken\n\n## Prior entries\n\n- AR-1 (blocker) — resolved';
+
+    // Automatic lap, round known.
+    const lap = composeStepPrompt({
+      ...base,
+      gateRevision: {
+        gateStepId: 'adversarial-review',
+        source: 'adversarial-review',
+        round: 1,
+        reviewMarkdown,
+      },
+    });
+    expect(lap).toContain('This is round 2 of the adversarial review.');
+    expect(lap).toContain('Ids used so far: `AR-1`..`AR-3`.');
+    expect(lap).toContain('continue any NEW entry from AR-4');
+    expect(lap).toContain('`### Prior entries`');
+
+    // Human gate revise, round known — the same sentence, the other branch.
+    const human = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'approve-design', round: 2, reviewMarkdown },
+    });
+    expect(human).toContain('## Design gate: revision requested');
+    expect(human).toContain('This is round 3 of the adversarial review.');
+    expect(human).toContain('Ids used so far: `AR-1`..`AR-3`.');
+
+    // Round unknown ⇒ the id rule survives, the round clause is dropped rather
+    // than guessed at.
+    const noRound = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'approve-design', reviewMarkdown },
+    });
+    expect(noRound).not.toContain('This is round');
+    expect(noRound).toContain('Ids used so far: `AR-1`..`AR-3`.');
+
+    // k = 0 ⇒ no ids exist yet, so the whole sentence is omitted.
+    const noIds = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'approve-design', round: 1, reviewMarkdown: '## Blocking\n\nNone.' },
+    });
+    expect(noIds).not.toContain('Ids used so far');
+    expect(noIds).not.toContain('This is round');
   });
 
   it('asks the adversarial-review step for the REVIEW verdict trailer, and only promises a loop when the step declares one', () => {
