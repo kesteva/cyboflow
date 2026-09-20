@@ -846,6 +846,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         // Per-step operator-guidance resolver (RunDirectives live steering): read
         // this step's guidance off the SAME directives object each turn.
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
+        // Per-step SUPERVISOR retry guidance, CONSUMED on read: the entry the
+        // host staged when triage returned 'retry' reaches exactly the one
+        // attempt it was bought for, and a later spawn of the same step (a
+        // loopback, a gate revise, a second triage) starts clean. Deleting here
+        // rather than at the write site is what makes that true regardless of
+        // WHY the step spawns again.
+        retryGuidance: (stepId) => {
+          const g = directives.retryGuidance.get(stepId);
+          if (g !== undefined) directives.retryGuidance.delete(stepId);
+          return g;
+        },
         taskScope,
         runOwnedIdeaIds,
         approveIdeasDecisions,
@@ -956,6 +967,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),
+      // The WRITE half of the one-shot retry-guidance channel. The runner owns
+      // `directives`, so it is the only place that can hand the host a setter;
+      // the host stages the supervisor's guidance here and SpawnStepRunner's
+      // consuming thunk above picks it up on the step's next spawn.
+      setRetryGuidance: (stepId: string, text: string) => {
+        directives.retryGuidance.set(stepId, text);
+      },
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
       fanOutDriverProvider,

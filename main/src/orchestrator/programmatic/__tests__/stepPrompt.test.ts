@@ -638,6 +638,55 @@ describe('composeStepPrompt', () => {
   });
 
   // -------------------------------------------------------------------------
+  // retryGuidance — the supervisor's ONE-SHOT triage-retry correction. Its own
+  // heading (not folded into `## Operator guidance`), rendered AFTER it, and
+  // absent ⇒ byte-identical output.
+  // -------------------------------------------------------------------------
+
+  it('renders the supervisor retry-guidance section under its own heading', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      retryGuidance: 'pin the fixture clock instead of sleeping',
+    });
+    expect(out).toContain('## Supervisor retry guidance (this attempt only)');
+    expect(out).toContain('pin the fixture clock instead of sleeping');
+    // Not merged into the operator's channel.
+    expect(out).not.toContain('## Operator guidance');
+  });
+
+  it('renders the retry guidance AFTER the operator guidance when both are present', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      userGuidance: 'Keep the change under the feature flag.',
+      retryGuidance: 'pin the fixture clock instead of sleeping',
+    });
+    expect(out.indexOf('## Operator guidance')).toBeGreaterThan(-1);
+    expect(out.indexOf('## Supervisor retry guidance (this attempt only)')).toBeGreaterThan(
+      out.indexOf('## Operator guidance'),
+    );
+    // Both bodies survive; the operator's section is untouched.
+    expect(out).toContain('The operator added mid-run guidance for this step');
+    expect(out).toContain('Keep the change under the feature flag.');
+    expect(out).toContain('pin the fixture clock instead of sleeping');
+  });
+
+  it('omits the retry-guidance section (byte-identical output) when absent or blank', () => {
+    const base = composeStepPrompt({ step: step({ id: 'a' }), workflowName: 'sprint', attempt: 2 });
+    const blank = composeStepPrompt({
+      step: step({ id: 'a' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      retryGuidance: '   ',
+    });
+    expect(base).not.toContain('## Supervisor retry guidance');
+    expect(blank).toBe(base);
+  });
+
+  // -------------------------------------------------------------------------
   // Approve-ideas decisions — the resolved batch-gate verdict lines threaded
   // into every POST-gate step turn (launch's programmatic plane). Heading must
   // stay byte-identical to APPROVE_IDEAS_DECISIONS_HEADING.

@@ -231,6 +231,12 @@ export interface StepRunner {
  * it can consult the ON-DEMAND monitor (or, absent a monitor, the host defaults to
  * 'escalate' — routing every exhausted required failure to the human review queue):
  *   - 'retry'    — re-run the step once more (bounded by a per-step triage budget).
+ *                  A monitor 'retry' must come with GUIDANCE saying what the next
+ *                  attempt should do differently (staged as a one-shot
+ *                  `RunDirectives.retryGuidance` entry the next spawn consumes);
+ *                  a retry verdict without it is downgraded to 'escalate' by
+ *                  `parseTriageAdvice`, since an identical re-attempt is what the
+ *                  step's own retry budget already spent.
  *   - 'escalate' — open a human gate routing the failure to the review queue; the
  *                  human then decides (approve = skip the step and advance, reject
  *                  = fail the run, revise = retry, abort = cancel). The host's

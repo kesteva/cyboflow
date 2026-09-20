@@ -11,13 +11,30 @@ describe('createRunDirectives', () => {
     const d = createRunDirectives();
     expect(d.userSkippedStepIds.size).toBe(0);
     expect(d.stepGuidance.size).toBe(0);
+    expect(d.retryGuidance.size).toBe(0);
 
     // Distinct instances share no backing collections (per-run isolation).
     const other = createRunDirectives();
     d.userSkippedStepIds.add('a');
     d.stepGuidance.set('a', 'go');
+    d.retryGuidance.set('a', 'do it differently');
     expect(other.userSkippedStepIds.size).toBe(0);
     expect(other.stepGuidance.size).toBe(0);
+    expect(other.retryGuidance.size).toBe(0);
+  });
+
+  it('keeps retryGuidance a SEPARATE map from the operator stepGuidance', () => {
+    // The two channels differ in lifetime (retry guidance is consumed on read,
+    // the operator's steer is sticky), so they must never share storage — a
+    // consume-on-read delete would otherwise swallow the operator's steer.
+    const d = createRunDirectives();
+
+    d.stepGuidance.set('impl', 'keep it behind the flag');
+    d.retryGuidance.set('impl', 'mock the clock instead of sleeping');
+    d.retryGuidance.delete('impl');
+
+    expect(d.retryGuidance.size).toBe(0);
+    expect(d.stepGuidance.get('impl')).toBe('keep it behind the flag');
   });
 
   it('mutates in place so a held reference sees later skip additions/removals', () => {

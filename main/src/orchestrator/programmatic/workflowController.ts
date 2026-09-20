@@ -62,6 +62,7 @@ import type {
   StepReport,
   StepRunner,
   SupervisorEvent,
+  TriageDecision,
   VerificationPosture,
   VisualGateOutcome,
 } from './types';
@@ -199,6 +200,18 @@ export const MAX_REVIEW_MECHANICAL_REVISIONS = 1;
  * in-place `retries` budget (which re-attempts the SAME step without jumping).
  */
 export const MAX_STEP_LOOPBACKS = 5;
+
+/**
+ * Maximum SUPERVISED retries of an OPTIONAL step per step id across a whole walk.
+ *
+ * ONE, deliberately. An optional step that fails used to be skipped in silence —
+ * cheap, but it threw away every failure a single corrected attempt would have
+ * fixed. A supervisor consult before the skip recovers those, while the cap keeps
+ * the cost of an optional step bounded at roughly what it always was: an optional
+ * step is by definition one the run can finish without, so it must never be able
+ * to spend the budget of a required one.
+ */
+export const MAX_OPTIONAL_TRIAGE_RETRIES = 1;
 
 /**
  * Maximum number of SYSTEMIC park-and-retry cycles allowed per step id across a
@@ -465,6 +478,12 @@ export class WorkflowController {
     // Per-step-id triage-retry counters (Stage 3) — bounds 'retry' triage verdicts
     // and escalation-gate 'revise' re-runs so a flapping step can never spin.
     const triageRetries = new Map<string, number>();
+    // Per-step-id count of SUPERVISED retries granted to an OPTIONAL step this
+    // walk (bounded by MAX_OPTIONAL_TRIAGE_RETRIES). Separate from `triageRetries`
+    // because the two bound different things: that one bounds a REQUIRED step's
+    // triage retries AND its escalation-gate revises, and an optional step reaches
+    // neither of those paths — it is skipped, never escalated.
+    const optionalTriageRetries = new Map<string, number>();
     // Per-step-id systemic park-and-retry counters — bounds how many times a step
     // (or a fan-out outer step) may park on a systemic condition and re-run without
     // consuming its retry/optional/loopback/triage budget. Capped at
@@ -1040,6 +1059,38 @@ export class WorkflowController {
         }
 
         if (step.optional === true) {
+          // An optional step's failure used to be SILENT: skipped, with nothing
+          // asked and nothing recorded. It now gets ONE supervised retry — the
+          // supervisor reads the failure and either names something concrete to do
+          // differently (the host has already staged that guidance for the next
+          // spawn) or agrees the step is not worth another attempt. Both of the
+          // other verdicts mean "skip as before": an optional step NEVER opens a
+          // gate and never ends the run, so `escalate` and `fail` are the same
+          // outcome here, and the consult is purely an attempt to recover a step
+          // the run would otherwise have written off.
+          if (
+            this.host.triageFailure &&
+            (optionalTriageRetries.get(step.id) ?? 0) < MAX_OPTIONAL_TRIAGE_RETRIES
+          ) {
+            let optionalDecision: TriageDecision = 'escalate';
+            try {
+              optionalDecision = await this.host.triageFailure(step, { ...baseCtx, attempt }, lastError);
+            } catch {
+              // Fail-soft: a thrown consult leaves exactly the old behaviour (skip).
+              optionalDecision = 'escalate';
+            }
+            if (optionalDecision === 'retry') {
+              optionalTriageRetries.set(step.id, (optionalTriageRetries.get(step.id) ?? 0) + 1);
+              this.host.reportStep(step.id, 'done');
+              this.host.log?.(
+                'warn',
+                `optional step '${step.id}' failed; supervisor granted a retry ` +
+                  `(${optionalTriageRetries.get(step.id)}/${MAX_OPTIONAL_TRIAGE_RETRIES})`,
+              );
+              // `i` unchanged — re-run this same step with the staged guidance.
+              continue;
+            }
+          }
           this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
           this.host.log?.('warn', `optional step '${step.id}' failed; skipping`);
           this.host.reportStep(step.id, 'skipped');

@@ -186,6 +186,17 @@ export interface ComposeStepPromptArgs {
    */
   userGuidance?: string;
   /**
+   * The run SUPERVISOR's one-shot RETRY guidance for THIS attempt of this step
+   * (monitor triage `retry`). Rendered as its own section AFTER the operator's
+   * `## Operator guidance`, and deliberately NOT folded into it: the operator's
+   * steer is a standing preference while this is a correction that applies to
+   * exactly one attempt, and the agent has to be able to tell the difference.
+   * Sourced from `RunDirectives.retryGuidance`, which SpawnStepRunner's thunk
+   * consumes, so no later spawn of the step carries it. Absent / empty ⇒ no
+   * section (output byte-identical to before this field existed).
+   */
+  retryGuidance?: string;
+  /**
    * The run supervisor's LANE-RESCUE guidance for this fan-out lane (monitor
    * lane triage). Rendered in the SAME `## Operator guidance` section as
    * `userGuidance` — an agent should not have to learn two section names for
@@ -952,6 +963,15 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   }
   const userGuidance =
     guidanceBlocks.length > 0 ? `\n\n## Operator guidance\n\n${guidanceBlocks.join('\n\n')}` : '';
+  // The supervisor's ONE-SHOT retry guidance, rendered immediately after the
+  // operator's section (and only when the host staged one for this attempt). Its
+  // own heading, not a third block inside `## Operator guidance`: the heading is
+  // what tells the agent this instruction expires with this attempt, and the
+  // previous attempt of this step having FAILED is the reason it exists.
+  const retryGuidance =
+    args.retryGuidance !== undefined && args.retryGuidance.trim().length > 0
+      ? `\n\n## Supervisor retry guidance (this attempt only)\n\nThe previous attempt of this step FAILED and the run's SUPERVISOR bought this retry on the strength of a specific correction. It applies to THIS attempt only — follow it:\n\n${args.retryGuidance.trim()}`
+      : '';
   // Visual-verification output-contract re-run (§5.1/§5.3): a task-verify PASS
   // result MUST contain EXACTLY ONE of a `## Visual verification task` fence or a
   // `VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>` line. The previous attempt
@@ -1020,5 +1040,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

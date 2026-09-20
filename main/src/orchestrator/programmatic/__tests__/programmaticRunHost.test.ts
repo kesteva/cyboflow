@@ -39,11 +39,23 @@ function makeGate(decision: 'approve' | 'reject' | 'revise'): HumanGateResolver 
 function makeMonitor(
   decision: 'retry' | 'escalate' | 'fail',
   rationale = 'because',
+  guidance?: string,
 ): MonitorSession & { triage: ReturnType<typeof vi.fn> } {
   return {
-    triage: vi.fn().mockResolvedValue({ decision, rationale }),
+    triage: vi.fn().mockResolvedValue({ decision, rationale, ...(guidance ? { guidance } : {}) }),
     answer: vi.fn().mockResolvedValue(''),
   };
+}
+
+/** Collect the text of every assistant turn the host injected into the run stream. */
+function injectedText(events: ClaudeStreamEvent[]): string {
+  return events
+    .map((ev) =>
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '',
+    )
+    .join('\n');
 }
 
 describe('ProgrammaticRunHost', () => {
@@ -168,6 +180,113 @@ describe('ProgrammaticRunHost', () => {
         ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
         : '';
     expect(text).toContain('escalated to the review queue');
+  });
+
+  // ── one-shot retry guidance (RunDirectives.retryGuidance write half) ───────
+  it("stages a 'retry' verdict's guidance for the next spawn and quotes it in the chat note", async () => {
+    const monitor = makeMonitor('retry', 'the fixture clock is stale', 'pin the fixture clock');
+    const injected: ClaudeStreamEvent[] = [];
+    const setRetryGuidance = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      setRetryGuidance,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(await host.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom')).toBe('retry');
+
+    expect(setRetryGuidance).toHaveBeenCalledWith('impl', 'pin the fixture clock');
+    const text = injectedText(injected);
+    expect(text).toContain('Triage — Implement: retry. the fixture clock is stale');
+    expect(text).toContain('Guidance for the retry: pin the fixture clock');
+  });
+
+  it('retries WITHOUT guidance (and warns) when no setRetryGuidance is wired', async () => {
+    const monitor = makeMonitor('retry', 'stale fixture', 'pin the fixture clock');
+    const injected: ClaudeStreamEvent[] = [];
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      injectEvent: (e) => injected.push(e),
+      logger,
+    });
+
+    // The retry still happens — a dropped hint is never worse than the old path.
+    expect(await host.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom')).toBe('retry');
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[ProgrammaticRunHost] retry guidance dropped (no setter wired)',
+      expect.objectContaining({ stepId: 'impl' }),
+    );
+    // …and the chat note does not promise guidance the re-run will never see.
+    expect(injectedText(injected)).not.toContain('Guidance for the retry');
+  });
+
+  it('is fail-soft when setRetryGuidance throws — the retry proceeds unguided', async () => {
+    const monitor = makeMonitor('retry', 'stale fixture', 'pin the fixture clock');
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      setRetryGuidance: () => {
+        throw new Error('directives boom');
+      },
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(await host.triageFailure(step({ id: 'impl' }), ctx, 'boom')).toBe('retry');
+    expect(injectedText(injected)).not.toContain('Guidance for the retry');
+  });
+
+  // ── OPTIONAL step: nothing is escalated, so nothing may say it was ─────────
+  it('phrases an OPTIONAL step\'s escalate / fail verdicts as skipping, not escalating', async () => {
+    for (const [decision, expected] of [
+      ['escalate', 'skipping the optional step'],
+      ['fail', 'skipping the optional step'],
+    ] as const) {
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r',
+        projectId: 1,
+        reporter: makeReporter(),
+        gate: makeGate('approve'),
+        monitor: makeMonitor(decision, 'not worth another attempt'),
+        injectEvent: (e) => injected.push(e),
+      });
+
+      expect(
+        await host.triageFailure(step({ id: 'proto', name: 'Prototype', optional: true }), ctx, 'boom'),
+      ).toBe('escalate');
+      const text = injectedText(injected);
+      expect(text).toContain(expected);
+      expect(text).not.toContain('escalated to the review queue');
+    }
+  });
+
+  it('keeps the review-queue wording for a REQUIRED step (unchanged behaviour)', async () => {
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor: makeMonitor('escalate', 'a product call'),
+      injectEvent: (e) => injected.push(e),
+    });
+
+    await host.triageFailure(step({ id: 'a', name: 'Build epics' }), ctx, 'boom');
+
+    expect(injectedText(injected)).toContain('Triage — Build epics: escalate. a product call');
   });
 
   it("is fail-soft — a throwing monitor.triage defaults to 'escalate' and does not abort the walk", async () => {

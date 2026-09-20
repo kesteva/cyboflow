@@ -157,6 +157,16 @@ export interface ProgrammaticRunHostArgs {
    */
   monitor?: MonitorSession;
   /**
+   * ONE-SHOT retry-guidance setter (`RunDirectives.retryGuidance`), injected by
+   * the runner that owns the run's directives. Called by `triageFailure` when the
+   * supervisor's verdict is 'retry' WITH guidance, so the step's next spawn is
+   * told what to do differently instead of repeating the attempt its own retry
+   * budget already made. Absent (tests / a host built without a runner) ⇒ the
+   * retry still happens, just unguided — logged at warn, never a failure: a
+   * dropped hint must never be worse than the pre-seam behaviour.
+   */
+  setRetryGuidance?: (stepId: string, text: string) => void;
+  /**
    * Inject a synthetic event into the run's unified stream (monitor-unify seam).
    * Used to render the monitor's triage rationale as an assistant turn in the Chat
    * pane. Threaded from the run context (Slice B); a no-op when no persisting bridge
@@ -479,40 +489,105 @@ export class ProgrammaticRunHost implements ControllerHost {
    * Fail-soft: a throwing monitor/inject must never strand the run — default to
    * 'escalate' (DefaultMonitorSession itself already fails-soft to 'escalate', so
    * this catch is a belt-and-braces guard).
+   *
+   * Two things the seam now also carries:
+   *   - a 'retry' verdict's GUIDANCE is STAGED for the step's next spawn (the
+   *     one-shot `RunDirectives.retryGuidance` channel) and quoted into the chat
+   *     note, so a supervised retry actually differs from the attempts the step's
+   *     own budget already spent. A host with no setter wired still retries —
+   *     unguided, logged at warn.
+   *   - an OPTIONAL step's 'escalate'/'fail' is phrased as SKIPPING. The
+   *     controller never opens a gate for an optional step (item 7D consults this
+   *     seam before skipping one), so "escalated to the review queue" would
+   *     promise the user a gate that is never going to appear.
    */
   async triageFailure(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
   ): Promise<TriageDecision> {
+    const optional = step.optional === true;
+    // What an unusable/absent verdict MEANS for this step, in the user's terms.
+    const escalationOutcome = optional
+      ? 'skipping the optional step'
+      : 'escalated to the review queue for your decision';
     if (!this.args.monitor) {
-      this.injectMonitorTurn(
-        `Step **${step.name}** exhausted its retries — escalated to the review queue for your decision.`,
-      );
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
     }
     try {
-      const { decision, rationale } = await this.args.monitor.triage(step, error, ctx.signal);
+      const { decision, rationale, guidance } = await this.args.monitor.triage(step, error, ctx.signal);
       if (decision === 'fail') {
         // The supervisor recommends ending the run, but ending it is the HUMAN's
-        // call — downgrade to an escalation carrying the recommendation.
+        // call — downgrade to an escalation carrying the recommendation. For an
+        // optional step there is no run to end and no gate to open: it is a skip.
         this.injectMonitorTurn(
-          `Triage — ${step.name}: the supervisor recommends ending the run, escalated to the review queue for your decision. ${rationale}`,
+          optional
+            ? `Triage — ${step.name}: the supervisor judged this optional step not worth another attempt — skipping the optional step. ${rationale}`
+            : `Triage — ${step.name}: the supervisor recommends ending the run, escalated to the review queue for your decision. ${rationale}`,
         );
         return 'escalate';
       }
-      this.injectMonitorTurn(`Triage — ${step.name}: ${decision}. ${rationale}`);
-      return decision;
+      if (decision === 'escalate') {
+        // Non-optional wording is unchanged from the pre-guidance seam; only an
+        // OPTIONAL step needs re-phrasing, because nothing is escalated there.
+        this.injectMonitorTurn(
+          optional
+            ? `Triage — ${step.name}: skipping the optional step. ${rationale}`
+            : `Triage — ${step.name}: escalate. ${rationale}`,
+        );
+        return 'escalate';
+      }
+      // 'retry' — stage the supervisor's guidance for the next spawn before the
+      // controller re-drives the step, and quote it in the chat so the user sees
+      // what the retry was bought with. Fail-soft: a missing or throwing setter
+      // costs the guidance, never the retry.
+      const staged = this.stageRetryGuidance(step, guidance);
+      this.injectMonitorTurn(
+        staged !== undefined
+          ? `Triage — ${step.name}: retry. ${rationale}\n\nGuidance for the retry: ${staged}`
+          : `Triage — ${step.name}: retry. ${rationale}`,
+      );
+      return 'retry';
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] monitor.triage failed; escalating to human', {
         runId: this.args.runId,
         stepId: step.id,
         error: err instanceof Error ? err.message : String(err),
       });
-      this.injectMonitorTurn(
-        `Step **${step.name}** exhausted its retries — escalated to the review queue for your decision.`,
-      );
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
+    }
+  }
+
+  /**
+   * Stage a triage 'retry' verdict's guidance on the one-shot channel and return
+   * what was actually staged (undefined ⇒ nothing was, so the chat note must not
+   * promise guidance the re-run will never see). Never throws: the guidance is an
+   * improvement on the retry, not a precondition for it, so a host built without
+   * the setter — or one whose setter throws — logs and lets the unguided retry
+   * proceed exactly as it did before this channel existed.
+   */
+  private stageRetryGuidance(step: WorkflowStep, guidance: string | undefined): string | undefined {
+    const text = (guidance ?? '').trim();
+    if (text.length === 0) return undefined;
+    if (!this.args.setRetryGuidance) {
+      this.args.logger?.warn('[ProgrammaticRunHost] retry guidance dropped (no setter wired)', {
+        runId: this.args.runId,
+        stepId: step.id,
+      });
+      return undefined;
+    }
+    try {
+      this.args.setRetryGuidance(step.id, text);
+      return text;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] retry guidance dropped (setter failed)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
     }
   }
 

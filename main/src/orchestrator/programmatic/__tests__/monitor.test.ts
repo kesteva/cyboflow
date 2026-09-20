@@ -3,6 +3,7 @@ import {
   DefaultMonitorSession,
   DefaultHistoryReader,
   MonitorRegistry,
+  monitorCharter,
   buildTriagePrompt,
   buildAnswerPrompt,
   buildActionAnswerPrompt,
@@ -88,7 +89,11 @@ function fakeHistory(snapshot: MonitorHistory): { reader: HistoryReader; reads: 
 
 describe('parseTriageAdvice', () => {
   it('parses a valid structured verdict', () => {
-    expect(parseTriageAdvice({ decision: 'retry', rationale: 'flaky' })).toEqual({ decision: 'retry', rationale: 'flaky' });
+    expect(parseTriageAdvice({ decision: 'retry', rationale: 'flaky', guidance: 'pin the fixture clock' })).toEqual({
+      decision: 'retry',
+      rationale: 'flaky',
+      guidance: 'pin the fixture clock',
+    });
   });
   it("falls back to 'escalate' for unparseable / unknown verdicts", () => {
     expect(parseTriageAdvice(null).decision).toBe('escalate');
@@ -98,6 +103,75 @@ describe('parseTriageAdvice', () => {
   it('tolerates a missing rationale', () => {
     expect(parseTriageAdvice({ decision: 'fail' })).toEqual({ decision: 'fail', rationale: '' });
   });
+
+  // A supervised retry is only worth paying for when the next attempt is told to
+  // do something DIFFERENT — otherwise it is the identical attempt the step's own
+  // retry budget already spent.
+  it("keeps a 'retry' that carries actionable guidance", () => {
+    expect(
+      parseTriageAdvice({ decision: 'retry', rationale: 'stale fixture', guidance: 'pin the fixture clock' }),
+    ).toEqual({ decision: 'retry', rationale: 'stale fixture', guidance: 'pin the fixture clock' });
+  });
+
+  it("downgrades a 'retry' with missing / blank guidance to 'escalate', keeping the rationale", () => {
+    expect(parseTriageAdvice({ decision: 'retry', rationale: 'looks flaky' })).toEqual({
+      decision: 'escalate',
+      rationale: 'looks flaky (retry downgraded: no actionable guidance)',
+    });
+    expect(parseTriageAdvice({ decision: 'retry', rationale: 'looks flaky', guidance: '   ' }).decision).toBe(
+      'escalate',
+    );
+  });
+
+  it("downgrades a 'retry' whose guidance is vacuous or too short", () => {
+    for (const guidance of ['try again', 'Try again.', 'retry', 'Retry.', 'redo it']) {
+      const advice = parseTriageAdvice({ decision: 'retry', rationale: 'r', guidance });
+      expect(advice.decision).toBe('escalate');
+      expect(advice.guidance).toBeUndefined();
+    }
+  });
+
+  it("never attaches guidance to an 'escalate' / 'fail' verdict", () => {
+    expect(parseTriageAdvice({ decision: 'escalate', rationale: 'r', guidance: 'do X differently' })).toEqual({
+      decision: 'escalate',
+      rationale: 'r',
+    });
+    expect(parseTriageAdvice({ decision: 'fail', rationale: 'r', guidance: 'do X differently' })).toEqual({
+      decision: 'fail',
+      rationale: 'r',
+    });
+  });
+});
+
+describe('monitorCharter', () => {
+  it('states the objective and names the four human-only escalation cases', () => {
+    const charter = monitorCharter(ctx);
+    expect(charter).toContain('You are the SUPERVISOR of a "planner" workflow run');
+    expect(charter).toContain('Host code sequences the steps; you never run them.');
+    expect(charter).toContain('reaches its next human gate with the best result it can');
+    expect(charter).toContain('product calls the brief does not settle');
+    expect(charter).toContain('work that needs their own hands or accounts');
+    expect(charter).toContain('irreversible or cost-material actions');
+    expect(charter).toContain('after the autonomous budget is spent');
+    expect(charter).toContain('Never suppress a finding to avoid an interruption');
+    expect(charter).toContain("recorded in the run's review queue");
+  });
+
+  it('opens EVERY monitor prompt — one charter, one escalation line, all builders', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const charter = monitorCharter(ctx);
+    const prompts = [
+      buildTriagePrompt(ctx, step({ id: 'epics' }), 'boom', history),
+      buildLaneTriagePrompt(ctx, history, laneReq()),
+      buildReviewLoopPrompt(ctx, history, loopReq()),
+      buildAnswerPrompt(ctx, 'why did it stop?', history),
+      buildActionAnswerPrompt(ctx, 'why did it stop?', history),
+    ];
+    for (const p of prompts) {
+      // FIRST paragraph, verbatim, followed by a blank line.
+      expect(p.startsWith(`${charter}\n\n`)).toBe(true);
+    }
+  });
 });
 
 describe('MONITOR_TRIAGE_SCHEMA', () => {
@@ -105,6 +179,15 @@ describe('MONITOR_TRIAGE_SCHEMA', () => {
     const props = MONITOR_TRIAGE_SCHEMA.properties as Record<string, { enum?: string[] }>;
     expect(props.decision.enum).toEqual(['retry', 'escalate', 'fail']);
     expect(MONITOR_TRIAGE_SCHEMA.required).toEqual(['decision', 'rationale']);
+  });
+
+  it('carries an OPTIONAL guidance string — required in practice for retry, enforced by the parser', () => {
+    const props = MONITOR_TRIAGE_SCHEMA.properties as Record<string, { type?: string; description?: string }>;
+    expect(props.guidance.type).toBe('string');
+    expect(props.guidance.description).toContain('retry only');
+    // Not `required`: an escalate/fail verdict has no use for guidance, and a
+    // schema-level requirement would make the model invent one.
+    expect(MONITOR_TRIAGE_SCHEMA.required).not.toContain('guidance');
   });
 });
 
@@ -123,6 +206,39 @@ describe('buildTriagePrompt', () => {
     expect(p).toContain('fail');
     expect(p).toContain('running steps'); // conversation digest
     expect(p).toContain('epics'); // step timeline
+  });
+
+  it('requires guidance on retry and draws the escalation line (no "prefer this when unsure")', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildTriagePrompt(ctx, step({ id: 'epics' }), 'boom', history);
+    // The old menu made escalation the safe default — exactly the interruption
+    // the charter exists to avoid.
+    expect(p).not.toContain('Prefer this when unsure');
+    expect(p).toContain('`guidance` is REQUIRED');
+    expect(p).toContain('"try again" is not guidance');
+    expect(p).toContain('RESOLVE IT YOURSELF WHERE YOU CAN');
+    expect(p).toContain('is an escalation, not a safe default');
+    expect(p).toContain('a product call the brief does not settle');
+    expect(p).toContain("the human's own hands or accounts");
+    expect(p).toContain('irreversible or cost-material');
+    expect(p).toContain('autonomous budget is already spent');
+    expect(p).toContain('{ decision, rationale, guidance? }');
+  });
+
+  it('adds the OPTIONAL-step paragraph only when the failed step is optional', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const optionalNote = 'This step is OPTIONAL';
+    const required = buildTriagePrompt(ctx, step({ id: 'a' }), 'boom', history);
+    expect(required).not.toContain(optionalNote);
+    expect(required).toContain('A REQUIRED step');
+    const p = buildTriagePrompt(ctx, step({ id: 'a', optional: true }), 'boom', history);
+    expect(p).toContain(optionalNote);
+    // The lead sentence must agree with the paragraph: calling an optional step
+    // REQUIRED would tell the supervisor a gate is at stake when none can open.
+    expect(p).not.toContain('A REQUIRED step');
+    expect(p).toContain('An OPTIONAL step has exhausted its automatic retries');
+    // Both non-retry verdicts mean the same thing there: no gate ever opens.
+    expect(p).toContain('`escalate` and `fail` both mean skip here; nothing opens a gate');
   });
 });
 
@@ -288,13 +404,15 @@ describe('DefaultMonitorSession.triage', () => {
       conversation: [userMsg('hi')],
       steps: [stepRow({ stepId: 'a', outcome: 'failed', error: 'boom' })],
     });
-    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ decision: 'retry', rationale: 'transient' });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ decision: 'retry', rationale: 'transient', guidance: 'pin the fixture clock' });
     const textQuery: TextQueryFn = vi.fn();
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery });
 
     const advice = await session.triage(step({ id: 'a' }), 'boom');
 
-    expect(advice).toEqual({ decision: 'retry', rationale: 'transient' });
+    expect(advice).toEqual({ decision: 'retry', rationale: 'transient', guidance: 'pin the fixture clock' });
     expect(reads).toEqual(['run-1']);
     const args = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(args.schema).toBe(MONITOR_TRIAGE_SCHEMA);

@@ -290,6 +290,76 @@ describe('WorkflowController', () => {
     // The optional-skip path reports 'skipped' for 'a' (then 'b' running → done).
     expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
     expect(host.reports.some((r) => r.id === 'a' && r.status === 'done')).toBe(false);
+    // No triage seam on this host ⇒ no consult at all (the pre-item-7 behaviour).
+  });
+
+  // ── OPTIONAL-step failure consult (item 7D) ────────────────────────────────
+  // An optional failure used to be silent. It now gets ONE supervised retry;
+  // every other verdict — and every fail-soft path — skips exactly as before.
+
+  it('gives a failing OPTIONAL step ONE supervised retry, then skips on the second failure', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }, { status: 'failed', error: 'meh again' }] });
+    const host = makeHost();
+    const triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue('retry');
+    host.triageFailure = triageFailure;
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Two attempts of 'a' (the second is the supervised retry), then the skip.
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(2);
+    // The cap is ONE: the second failure is not consulted again.
+    expect(triageFailure).toHaveBeenCalledTimes(1);
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+    expect(result.steps[1]).toMatchObject({ stepId: 'b', outcome: 'done' });
+    // The granted retry closes the first attempt's boundary as 'done', not 'skipped'.
+    expect(host.reports).toContainEqual({ id: 'a', status: 'done' });
+    expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
+  });
+
+  it('completes the run when the supervised retry of an OPTIONAL step SUCCEEDS', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] }); // second attempt ok
+    const host = makeHost();
+    host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue('retry');
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // The supervised retry re-enters the step like a loopback jump does, so its
+    // in-place `attempt` counter restarts — the step reports 'done' on the retry.
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'done' });
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(2);
+  });
+
+  it("skips an OPTIONAL step on 'escalate' / 'fail' — no gate opens and the run never ends", async () => {
+    for (const decision of ['escalate', 'fail'] as const) {
+      const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] });
+      const host = makeHost();
+      host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue(decision);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+      expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(1);
+      expect(host.gateCalls).toEqual([]);
+    }
+  });
+
+  it('is fail-soft: a THROWING optional-step consult skips exactly as before the seam', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] });
+    const host = makeHost();
+    host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockRejectedValue(new Error('triage boom'));
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(1);
   });
 
   it('loops back to an intra-phase target on failure, then completes after the rerun succeeds', async () => {

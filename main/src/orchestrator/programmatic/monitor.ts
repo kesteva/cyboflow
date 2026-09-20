@@ -162,6 +162,14 @@ export const MONITOR_TRIAGE_SCHEMA: Record<string, unknown> = {
   properties: {
     decision: { type: 'string', enum: ['retry', 'escalate', 'fail'] },
     rationale: { type: 'string', description: '2-4 sentences: why this decision' },
+    // OPTIONAL at the schema level, REQUIRED in practice for 'retry' — the
+    // requirement is enforced by `parseTriageAdvice`'s downgrade rather than by
+    // the schema, because a `required` here would force the model to invent
+    // guidance for an escalate/fail verdict that has no use for one.
+    guidance: {
+      type: 'string',
+      description: 'retry only: what the re-run must do DIFFERENTLY (not "try again")',
+    },
   },
 };
 
@@ -169,7 +177,24 @@ export const MONITOR_TRIAGE_SCHEMA: Record<string, unknown> = {
 export interface TriageAdvice {
   decision: TriageDecision;
   rationale: string;
+  /**
+   * RETRY-only: what the next attempt must do differently. Staged by the host as
+   * a ONE-SHOT `RunDirectives.retryGuidance` entry that the step's next spawn
+   * consumes. Absent on every other decision (and on a downgraded retry).
+   */
+  guidance?: string;
 }
+
+/**
+ * A "retry" guidance string that says nothing actionable. A retry whose guidance
+ * is one of these is the SAME attempt again — which the step's own in-place retry
+ * budget already spent — so `parseTriageAdvice` downgrades it to an escalation
+ * rather than buying a repeat.
+ */
+const VACUOUS_RETRY_GUIDANCE = /^\s*(try again|retry)\s*\.?\s*$/i;
+
+/** Shortest guidance string treated as actionable, in characters. */
+const MIN_RETRY_GUIDANCE_CHARS = 12;
 
 /** A `TriageDecision` type guard (narrows the structured-output `decision`). */
 function isTriageDecision(v: unknown): v is TriageDecision {
@@ -180,15 +205,33 @@ function isTriageDecision(v: unknown): v is TriageDecision {
  * Parse the SDK's structured-output object into a `TriageAdvice`. Lenient and never
  * throws: an unrecognized / missing decision falls back to 'escalate' (route to the
  * human seam — the safe default when the verdict is unusable).
+ *
+ * ONE downgrade beyond that: a 'retry' with missing, blank, or vacuous `guidance`
+ * becomes an 'escalate'. The whole value of a supervised retry is that the next
+ * attempt is told to do something DIFFERENT — without that it is the identical
+ * attempt the step's own retry budget already made, so it is cheaper to hand the
+ * failure to the human than to pay for a repeat. The original rationale is kept
+ * (it is what the human reads) with the downgrade named in it.
  */
 export function parseTriageAdvice(structured: unknown): TriageAdvice {
   if (typeof structured === 'object' && structured !== null) {
     const o = structured as Record<string, unknown>;
     if (isTriageDecision(o.decision)) {
-      return {
-        decision: o.decision,
-        rationale: typeof o.rationale === 'string' ? o.rationale : '',
-      };
+      const rationale = typeof o.rationale === 'string' ? o.rationale : '';
+      const guidance = typeof o.guidance === 'string' ? o.guidance.trim() : '';
+      if (o.decision === 'retry') {
+        if (
+          guidance.length < MIN_RETRY_GUIDANCE_CHARS ||
+          VACUOUS_RETRY_GUIDANCE.test(guidance)
+        ) {
+          return {
+            decision: 'escalate',
+            rationale: `${rationale} (retry downgraded: no actionable guidance)`,
+          };
+        }
+        return { decision: 'retry', rationale, guidance };
+      }
+      return { decision: o.decision, rationale };
     }
   }
   return { decision: 'escalate', rationale: 'unparseable triage verdict — escalating to human' };
@@ -693,10 +736,42 @@ function digestConversation(conversation: UnifiedMessage[]): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * The supervisor's CHARTER — the first paragraph of EVERY monitor prompt.
+ *
+ * Each builder used to open with its own one-or-two-sentence framing ("You are
+ * the SUPERVISOR … host code does"), which said what the monitor is NOT allowed
+ * to do and nothing about what it is FOR. The result was a model with no stated
+ * objective and, per builder, a differently-worded sense of when a human should
+ * be involved — which is exactly the judgement every one of these consults turns
+ * on. One charter, prepended verbatim, gives all of them the same objective and
+ * the same ESCALATION LINE (the four genuinely-human cases); each builder's
+ * task-specific paragraphs follow it unchanged.
+ *
+ * Pure: the only run-specific substitution is the workflow name.
+ */
+export function monitorCharter(ctx: MonitorContext): string {
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run in this git worktree. Host code sequences the steps; you never run them. Your objective is that this run reaches its next human gate with the best result it can, and that the human is interrupted only for decisions that are genuinely theirs: product calls the brief does not settle, work that needs their own hands or accounts, irreversible or cost-material actions (ending a run, a whole-run rewind), and anything after the autonomous budget is spent. Everything else you resolve, steer, or record. Never suppress a finding to avoid an interruption — file it non-blocking. Every autonomous action you take is recorded in the run's review queue and summarized for the human at the next gate.`;
+}
+
+/**
  * Compose the TRIAGE prompt for one failed step. Pure (output depends only on its
- * args). Frames the monitor as the supervisor; includes the step timeline + the
+ * args). Opens with the shared `monitorCharter`; includes the step timeline + the
  * recent conversation + the failure; instructs read-only investigation then a
- * structured { decision, rationale } verdict. Reuses the supervisor's prose tone.
+ * structured { decision, rationale, guidance? } verdict.
+ *
+ * Two things the menu is deliberate about:
+ *   - `retry` REQUIRES `guidance`. A retry with nothing said differently is the
+ *     same attempt again, which is what the step's own in-place retry budget
+ *     already spent — so `parseTriageAdvice` downgrades a guidance-less retry to
+ *     `escalate` rather than paying for a repeat.
+ *   - `escalate` is no longer "prefer this when unsure". That phrasing made the
+ *     escalation the safe default, which is precisely the interruption the
+ *     charter exists to avoid; the menu now names what escalation is FOR (the
+ *     charter's four human-only cases) and says so explicitly.
+ *
+ * An OPTIONAL step gets one extra paragraph: there, `escalate` and `fail` are
+ * both just "skip" (the controller never opens a gate for an optional step), and
+ * a model that does not know that would escalate expecting a human to appear.
  */
 export function buildTriagePrompt(
   ctx: MonitorContext,
@@ -704,7 +779,21 @@ export function buildTriagePrompt(
   error: string | undefined,
   history: MonitorHistory,
 ): string {
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. A REQUIRED step has exhausted its automatic retries and you must TRIAGE it.
+  const optionalNote =
+    failedStep.optional === true
+      ? `\n\nThis step is OPTIONAL: if you do not retry it, it is skipped and the run continues — \`escalate\` and \`fail\` both mean skip here; nothing opens a gate.`
+      : '';
+  // The lead sentence has to agree with `optionalNote`: item 7D routes OPTIONAL
+  // steps through this same builder, and announcing a REQUIRED step there would
+  // contradict the paragraph below it (which says nothing opens a gate) in the one
+  // prompt whose job is to give the supervisor a correct model of the stakes.
+  const leadIn =
+    failedStep.optional === true
+      ? 'An OPTIONAL step has exhausted its automatic retries and you must TRIAGE it.'
+      : 'A REQUIRED step has exhausted its automatic retries and you must TRIAGE it.';
+  return `${monitorCharter(ctx)}
+
+${leadIn}
 
 Failed step: **${failedStep.name}** (id: \`${failedStep.id}\`, agent: \`${failedStep.agent}\`)
 Error: ${error ?? '(no error message captured)'}
@@ -716,11 +805,13 @@ Recent conversation:
 ${digestConversation(history.conversation)}
 
 If it helps, investigate the worktree with your read-only tools (Read/Grep/Glob) before deciding. Then decide ONE triage action and return it as structured output:
-- "retry"    — the failure looks transient/flaky and a fresh attempt is likely to succeed.
-- "escalate" — a human should decide (ambiguous, risky, or needs a judgement call). Prefer this when unsure.
+- "retry"    — a concrete, DIFFERENT approach is likely to succeed. \`guidance\` is REQUIRED and must say what to do DIFFERENTLY; "try again" is not guidance and the host will reject it (downgrading your verdict to "escalate"). Your guidance is handed to the re-run as authoritative instructions for that one attempt.
+- "escalate" — a human must decide. Use it ONLY for: a product call the brief does not settle; work that needs the human's own hands or accounts; an irreversible or cost-material action; or a run whose autonomous budget is already spent.
 - "fail"     — the failure is definitive and retrying won't help; recommend ending the run (a human confirms before it ends).
 
-Return only the structured { decision, rationale } object. The rationale should be 2-4 sentences explaining your reasoning.`;
+RESOLVE IT YOURSELF WHERE YOU CAN. Bias hard toward "retry" whenever you can name a concrete different approach for the next attempt. "escalate" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous retry and its guidance are recorded in the run's review queue, so nothing you do here is unaudited.${optionalNote}
+
+Return only the structured { decision, rationale, guidance? } object. The rationale should be 2-4 sentences explaining your reasoning.`;
 }
 
 /**
@@ -765,7 +856,9 @@ export function buildLaneTriagePrompt(
 ): string {
   const chain = req.innerStepIds.length > 0 ? req.innerStepIds.map((id) => `\`${id}\``).join(' → ') : '(unknown)';
   const defaultTarget = req.innerStepIds[0] ?? '(none)';
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.
+  return `${monitorCharter(ctx)}
+
+One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.
 
 Failing lane: **${req.taskRef}** — ${req.taskTitle}
 Failure kind: \`${req.failureKind}\` — ${LANE_FAILURE_KIND_LABELS[req.failureKind]}
@@ -845,7 +938,9 @@ export function buildReviewLoopPrompt(
   const blockingCount = req.parsed.blocking.length;
   const findingCount = req.parsed.findings.length;
   const review = (req.reviewMarkdown ?? '').trim();
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. The run's adversarial reviewer has just returned a BLOCKING verdict on the design, and you must decide whether the flow takes another automatic revision lap or hands the surviving entries to the human design gate.
+  return `${monitorCharter(ctx)}
+
+The run's adversarial reviewer has just returned a BLOCKING verdict on the design, and you must decide whether the flow takes another automatic revision lap or hands the surviving entries to the human design gate.
 
 Review step: \`${req.stepId}\` — round ${req.round}. Automatic laps used: ${req.lapsUsed} of ${req.maxLaps} (${lapsLeft} left).
 An automatic lap re-runs the design steps from \`${req.loopbackStepId}\` with your steering attached.
@@ -884,7 +979,9 @@ export function buildAnswerPrompt(
   question: string,
   history: MonitorHistory,
 ): string {
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. The workflow's steps are sequenced by HOST CODE, not by you — do NOT try to run, edit, or re-order steps. Your role is to MONITOR the run and answer the user's questions about it.
+  return `${monitorCharter(ctx)}
+
+Your role on this turn is to MONITOR the run and answer the user's questions about it — do NOT try to run, edit, or re-order steps.
 
 Step timeline so far:
 ${digestSteps(history.steps)}${laneSection(history)}
@@ -931,7 +1028,9 @@ export function buildActionAnswerPrompt(
   question: string,
   history: MonitorHistory,
 ): string {
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and attach a validated action for the host to execute — either because the user explicitly asks for it, or PROACTIVELY when the user's message describes a problem and you are confident which single action fixes it. Either way the host STAGES the action behind a confirm/cancel gate before it runs (see CONFIRM BEFORE YOU ACT below) — you never claim it already ran.
+  return `${monitorCharter(ctx)}
+
+Your role on this turn is to MONITOR the run, answer the user's questions about it, and attach a validated action for the host to execute — either because the user explicitly asks for it, or PROACTIVELY when the user's message describes a problem and you are confident which single action fixes it. Either way the host STAGES the action behind a confirm/cancel gate before it runs (see CONFIRM BEFORE YOU ACT below) — you never claim it already ran.
 
 Step timeline so far:
 ${digestSteps(history.steps)}${laneSection(history)}
