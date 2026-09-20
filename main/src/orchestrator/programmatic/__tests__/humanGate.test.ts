@@ -62,7 +62,7 @@ describe('ReviewQueueHumanGate', () => {
 
     // Let openHumanGate resolve so the target id is registered.
     await Promise.resolve();
-    expect(opener.openHumanGate).toHaveBeenCalledWith('r', 'approve-plan', 'Approve plan');
+    expect(opener.openHumanGate).toHaveBeenCalledWith('r', 'approve-plan', 'Approve plan', undefined);
 
     // A resolution for a DIFFERENT item is ignored…
     events.emit('review-project-1', { reviewItemId: 'other', action: 'resolved', item: { resolution: 'reject' } });
@@ -108,6 +108,23 @@ describe('ReviewQueueHumanGate', () => {
     await expect(pending).resolves.toBe('approve');
     expect(opener.findPendingGate).toHaveBeenCalledWith('r', 'approve-plan');
     expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  it("threads the step's gateHeader through to the opener", async () => {
+    const events = new EventEmitter();
+    const opener = makeOpener('ri-h');
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'approve-plan', name: 'Approve task plan', gateHeader: 'Approve plan' }),
+    });
+    await Promise.resolve();
+    expect(opener.openHumanGate).toHaveBeenCalledWith('r', 'approve-plan', 'Approve task plan', 'Approve plan');
+
+    events.emit('review-project-1', { reviewItemId: 'ri-h', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
   });
 
   it('still rejects when the gate is null AND no pending gate exists', async () => {

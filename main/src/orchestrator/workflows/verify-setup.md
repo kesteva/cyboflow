@@ -136,7 +136,7 @@ committed.
 
 ### 3. approve-runbook — human gate, inline
 
-STOP here. Present the gate with **AskUserQuestion** (header `Approve setup`,
+STOP here. Present the gate with **AskUserQuestion** (header `Approve runbook`,
 options **Approve all** / **Pick subset** / **Reject**) and point the user at the
 **`verify-runbook` artifact tab** for the full proposal — keep the
 option previews short (which modalities, which rungs), not a dump of every

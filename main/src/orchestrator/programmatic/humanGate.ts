@@ -47,7 +47,16 @@ export interface HumanGateResolver {
  * not 'running'). Satisfied in production by HumanStepManager.openHumanGate.
  */
 export interface HumanGateOpener {
-  openHumanGate(runId: string, stepId: string, stepName: string): Promise<string | null>;
+  /**
+   * `gateHeader` is the step's WorkflowStep.gateHeader when the flow author set
+   * one; the opener titles the review item with it (falling back to stepName).
+   */
+  openHumanGate(
+    runId: string,
+    stepId: string,
+    stepName: string,
+    gateHeader?: string,
+  ): Promise<string | null>;
   /**
    * Find an ALREADY-pending gate review-item id for (runId, stepId), or null
    * (crash-safe resume). When `openHumanGate` returns null because the gate is
@@ -237,7 +246,7 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
       if (signal && onAbort) signal.addEventListener('abort', onAbort);
 
       this.opener
-        .openHumanGate(runId, step.id, step.name)
+        .openHumanGate(runId, step.id, step.name, step.gateHeader)
         .then(async (id) => {
           if (settled) return; // aborted while opening
           let effectiveId = id;
