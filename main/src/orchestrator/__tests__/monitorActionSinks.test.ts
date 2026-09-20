@@ -405,4 +405,118 @@ describe('buildGateEscalationSinks', () => {
       ).rejects.toBe(err);
     });
   });
+
+  describe('resolveAsMonitor', () => {
+    it('routes the autonomous close through the router `resolve` op as actor monitor', async () => {
+      const { deps, ops } = makeDeps();
+
+      await buildGateEscalationSinks(deps).resolveAsMonitor('run-1', {
+        reviewItemId: 'ri-find',
+        resolution: 'resolved by supervisor: already fixed.',
+      });
+
+      expect(ops).toHaveLength(1);
+      expect(ops[0].projectId).toBe(7);
+      expect(ops[0].change).toMatchObject({
+        op: 'resolve',
+        actor: 'monitor',
+        reviewItemId: 'ri-find',
+        resolution: 'resolved by supervisor: already fixed.',
+        runId: 'run-1',
+      });
+    });
+
+    it('writes nothing for a run with no resolvable project', async () => {
+      const { deps, ops } = makeDeps({ runProjectId: () => undefined });
+
+      await buildGateEscalationSinks(deps).resolveAsMonitor('run-gone', { reviewItemId: 'x', resolution: 'y' });
+
+      expect(ops).toHaveLength(0);
+    });
+
+    it('PROPAGATES the router’s refusal (the human triaged it first)', async () => {
+      const err = Object.assign(new Error('item is not pending'), { code: 'invalid_status' });
+      const { deps } = makeDeps({
+        applyReviewItem: async () => {
+          throw err;
+        },
+      });
+
+      await expect(
+        buildGateEscalationSinks(deps).resolveAsMonitor('run-1', { reviewItemId: 'x', resolution: 'y' }),
+      ).rejects.toBe(err);
+    });
+  });
+
+  describe('countMonitorResolves', () => {
+    /** A DB whose single COUNT probe records its SQL + args and returns `n`. */
+    function countingDb(n: unknown): { db: DatabaseLike; sql: string[]; args: unknown[][] } {
+      const sql: string[] = [];
+      const args: unknown[][] = [];
+      const db = {
+        prepare: (text: string) => {
+          sql.push(text);
+          return {
+            get: (...params: unknown[]) => {
+              args.push(params);
+              return { n };
+            },
+            all: () => [],
+            run: () => ({ changes: 0, lastInsertRowid: 0 }),
+          };
+        },
+        transaction: vi.fn(),
+      } as unknown as DatabaseLike;
+      return { db, sql, args };
+    }
+
+    it('counts this run’s monitor-sourced escalation-resolve findings', async () => {
+      const { db, sql, args } = countingDb(3);
+      const { deps } = makeDeps({ db });
+
+      expect(await buildGateEscalationSinks(deps).countMonitorResolves('run-1')).toBe(3);
+
+      const text = sql[0].replace(/\s+/g, ' ').trim();
+      expect(text).toContain('SELECT COUNT(*) AS n');
+      expect(text).toContain('FROM review_items');
+      expect(text).toContain("WHERE run_id = ? AND source = 'monitor'");
+      // The category lives in payload_json — a plain column read would count 0
+      // forever and silently hand the supervisor an unbounded budget.
+      expect(text).toContain("json_extract(payload_json, '$.category') = ?");
+      expect(args[0]).toEqual(['run-1', 'escalation-resolve']);
+    });
+
+    it('treats an UNREADABLE count as EXHAUSTED, never as zero', async () => {
+      // Fail-soft upward: an unreadable budget must downgrade the resolve (the
+      // run merely parks), not hand out free autonomous closures.
+      const logger = makeLogger();
+      const db = {
+        prepare: () => {
+          throw new Error('db boom');
+        },
+        transaction: vi.fn(),
+      } as unknown as DatabaseLike;
+      const { deps } = makeDeps({ db, logger });
+
+      expect(await buildGateEscalationSinks(deps).countMonitorResolves('run-1')).toBe(Number.MAX_SAFE_INTEGER);
+      expect(logger.warn).toHaveBeenCalled();
+    });
+  });
+
+  describe('awaitWritesSettled', () => {
+    it('delegates to the injected chokepoint barrier with the project id', async () => {
+      const awaitProjectWritesSettled = vi.fn().mockResolvedValue(undefined);
+      const { deps } = makeDeps({ awaitProjectWritesSettled });
+
+      await buildGateEscalationSinks(deps).awaitWritesSettled(7);
+
+      expect(awaitProjectWritesSettled).toHaveBeenCalledWith(7);
+    });
+
+    it('resolves immediately when no barrier is injected (pre-item-9 posture)', async () => {
+      const { deps } = makeDeps();
+
+      await expect(buildGateEscalationSinks(deps).awaitWritesSettled(7)).resolves.toBeUndefined();
+    });
+  });
 });

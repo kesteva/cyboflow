@@ -6,7 +6,11 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { ReviewQueueBlockingItemsGate, type BlockingItemsOpener } from '../blockingItemsGate';
+import {
+  ReviewQueueBlockingItemsGate,
+  type BlockingItemsOpener,
+  type PendingBlockingItem,
+} from '../blockingItemsGate';
 
 const channelFor = (projectId: number): string => `review-project-${projectId}`;
 
@@ -129,5 +133,53 @@ describe('ReviewQueueBlockingItemsGate', () => {
 
     events.emit('review-project-2', { reviewItemId: 'rvw', action: 'dismissed' }); // clears
     await expect(p).resolves.toBe('proceed');
+  });
+});
+
+describe('ReviewQueueBlockingItemsGate.listPendingBlockingItems', () => {
+  const item: PendingBlockingItem = {
+    id: 'rvw_1',
+    kind: 'finding',
+    source: 'agent:code-review',
+    severity: 'error',
+    title: 'null deref in parser',
+    body: 'parse() dereferences `node` before the guard.',
+  };
+
+  it('delegates to the opener', () => {
+    const opener = makeOpener(true);
+    const list = vi.fn().mockReturnValue([item]);
+    const gate = new ReviewQueueBlockingItemsGate(
+      { ...opener, listPendingBlockingItems: list },
+      new EventEmitter(),
+      channelFor,
+    );
+
+    expect(gate.listPendingBlockingItems('r')).toEqual([item]);
+    expect(list).toHaveBeenCalledWith('r');
+  });
+
+  it('returns [] when the opener has no reader (every pre-item-9 fake)', () => {
+    const gate = new ReviewQueueBlockingItemsGate(makeOpener(true), new EventEmitter(), channelFor);
+
+    expect(gate.listPendingBlockingItems('r')).toEqual([]);
+  });
+
+  it('is fail-soft: a throwing opener reads as an empty list, never as a thrown boundary', () => {
+    const warn = vi.fn();
+    const gate = new ReviewQueueBlockingItemsGate(
+      {
+        ...makeOpener(true),
+        listPendingBlockingItems: () => {
+          throw new Error('db boom');
+        },
+      },
+      new EventEmitter(),
+      channelFor,
+      { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    );
+
+    expect(gate.listPendingBlockingItems('r')).toEqual([]);
+    expect(warn).toHaveBeenCalled();
   });
 });

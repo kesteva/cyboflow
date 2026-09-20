@@ -27,6 +27,27 @@
  */
 import type { EventEmitter } from 'events';
 import type { LoggerLike } from '../types';
+import type { ReviewItemKind } from '../../../../shared/types/reviews';
+
+/**
+ * One PENDING BLOCKING review item, as the supervisor's step-boundary escalation
+ * review sees it (item 9).
+ *
+ * Unlike the gate consult's `EscalationReviewItemSummary`, this one CARRIES THE
+ * BODY: the supervisor is being asked whether this specific item is already
+ * addressed, out of scope, or a false positive, and that judgement is impossible
+ * from a title. The list is bounded by construction — it is only the items
+ * actually parking THIS run — so no cap is needed here.
+ */
+export interface PendingBlockingItem {
+  id: string;
+  kind: ReviewItemKind;
+  /** Provenance tag, e.g. `monitor` / `agent:code-review`. Null on old rows. */
+  source: string | null;
+  severity: string | null;
+  title: string;
+  body: string;
+}
 
 export interface BlockingItemsGateRequest {
   runId: string;
@@ -48,6 +69,17 @@ export interface BlockingItemsResolver {
    * parked.
    */
   awaitClear(req: BlockingItemsGateRequest): Promise<'proceed' | 'canceled'>;
+  /**
+   * The run's pending human-audience blocking items, for the supervisor's
+   * step-boundary escalation review (item 9). SYNC, because the host calls it
+   * between its write barrier and `awaitClear` and an extra await would widen
+   * the window in which a new finding can slip in unseen.
+   *
+   * OPTIONAL: the many faked resolvers across the suite omit it, and the host
+   * treats an absent method exactly like an empty list — i.e. it parks without
+   * consulting, which is the pre-item-9 behaviour.
+   */
+  listPendingBlockingItems?(runId: string): PendingBlockingItem[];
 }
 
 /**
@@ -61,6 +93,13 @@ export interface BlockingItemsOpener {
   parkForBlockingReview(runId: string): Promise<boolean>;
   /** Resume awaiting_review -> running once no blocking item remains. */
   maybeResumeRun(runId: string): Promise<boolean>;
+  /**
+   * The rows behind `hasPendingBlockingItems` (SAME predicate), for the
+   * supervisor's escalation review. Optional so every existing fake opener
+   * keeps compiling; absent ⇒ the gate reports an empty list and the run parks
+   * without a consult.
+   */
+  listPendingBlockingItems?(runId: string): PendingBlockingItem[];
 }
 
 /** Minimal shape of a review-item change event consumed here (no `any`). */
@@ -82,6 +121,26 @@ export class ReviewQueueBlockingItemsGate implements BlockingItemsResolver {
     private readonly channelFor: (projectId: number) => string,
     private readonly logger?: LoggerLike,
   ) {}
+
+  /**
+   * Delegate the escalation-review listing to the opener, fail-soft.
+   *
+   * A throwing or absent reader yields `[]`, which the host reads as "nothing to
+   * consult about" and parks exactly as it did before item 9 — a broken read
+   * must never cost the run its park, and it must never be mistaken for the
+   * items having cleared (that is `awaitClear`'s own predicate, read separately).
+   */
+  listPendingBlockingItems(runId: string): PendingBlockingItem[] {
+    try {
+      return this.opener.listPendingBlockingItems?.(runId) ?? [];
+    } catch (err) {
+      this.logger?.warn('[BlockingItemsGate] pending blocking item read failed (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
 
   awaitClear(req: BlockingItemsGateRequest): Promise<'proceed' | 'canceled'> {
     const { runId, projectId, signal } = req;

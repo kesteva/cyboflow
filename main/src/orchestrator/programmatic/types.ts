@@ -29,6 +29,7 @@ import type {
   ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
 import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { PendingBlockingItem } from './blockingItemsGate';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -612,6 +613,38 @@ export interface GateEscalationRequest {
 export type GateEscalationDecision =
   | { action: 'recommend'; choice: SupervisorRecommendationChoice; rationale: string }
   | { action: 'pass'; rationale: string };
+
+/**
+ * The ESCALATION consult request at a STEP BOUNDARY the run is about to park on
+ * (item 9): every pending blocking review item that has not already been
+ * reviewed on this walk, bodies included.
+ *
+ * Sibling of {@link GateEscalationRequest} on the same `MonitorSession` family —
+ * the `kind` discriminant is what lets a reader tell the two apart. The
+ * difference that matters: at a GATE the supervisor may only advise, while here
+ * it may RESOLVE a finding outright (bounded by the host's two caps), because a
+ * blocking finding — unlike a designed gate — is a defect claim the run itself
+ * filed and may itself have already closed.
+ */
+export interface BlockingItemsEscalationRequest {
+  kind: 'blocking-items';
+  items: PendingBlockingItem[];
+}
+
+/**
+ * The supervisor's verdict on ONE pending blocking item.
+ *
+ * `choice` is free-text rather than {@link SupervisorRecommendationChoice}
+ * because the menu depends on the item's KIND and the host owns that mapping (a
+ * finding is recommended `dismiss`/`continue`, a decision `approve`/`reject`/
+ * `revise`); an out-of-menu value is normalized there, never trusted here.
+ */
+export interface BlockingItemDecision {
+  reviewItemId: string;
+  action: 'resolve' | 'recommend' | 'pass';
+  choice?: string;
+  rationale: string;
+}
 
 /**
  * The run's own DELIVERABLES and ENTITIES, folded into the supervisor's prompts

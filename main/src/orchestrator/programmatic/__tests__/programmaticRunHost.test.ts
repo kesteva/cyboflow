@@ -3,6 +3,8 @@ import {
   ProgrammaticRunHost,
   ESCALATION_REVIEW_KILL_SWITCH_ENV,
   LANE_TRIAGE_KILL_SWITCH_ENV,
+  MONITOR_RUN_RESOLVE_CAP,
+  MONITOR_WALK_RESOLVE_CAP,
   REVIEW_LOOP_KILL_SWITCH_ENV,
   firstSentence,
   type StepReporter,
@@ -12,6 +14,8 @@ import type { LaneTriageDecision, MonitorSession } from '../monitor';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
   ControllerStepContext,
   FanOutDriver,
   GateEscalationDecision,
@@ -25,6 +29,7 @@ import type {
   AdversarialSeverity,
 } from '../../../../../shared/types/adversarialReview';
 import type { SystemicPauseResolver } from '../systemicPauseGate';
+import type { BlockingItemsResolver, PendingBlockingItem } from '../blockingItemsGate';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'human', mcps: [], retries: 0, ...p };
@@ -1397,5 +1402,344 @@ describe('firstSentence', () => {
     expect(firstSentence('no terminator here')).toBe('no terminator here');
     // A decimal must not split the sentence — there is no whitespace after it.
     expect(firstSentence('The budget is 3.5 laps. Stop now.')).toBe('The budget is 3.5 laps.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 9 — the step-boundary escalation review (blocking items)
+// ---------------------------------------------------------------------------
+
+function blockingItem(p: Partial<PendingBlockingItem> = {}): PendingBlockingItem {
+  return {
+    id: 'rvw_f1',
+    kind: 'finding',
+    source: 'agent:code-review',
+    severity: 'error',
+    title: 'null deref in parser',
+    body: 'parse() dereferences `node`.',
+    ...p,
+  };
+}
+
+/**
+ * A fake blocking gate whose pending list is mutable, recording the ORDER of the
+ * calls the host makes against it — which is how the write-barrier ordering is
+ * asserted without a real router.
+ */
+function makeBlockingGate(
+  items: PendingBlockingItem[],
+  trace: string[] = [],
+): BlockingItemsResolver & { items: PendingBlockingItem[]; trace: string[]; awaitClear: ReturnType<typeof vi.fn> } {
+  const gate = {
+    items: [...items],
+    trace,
+    listPendingBlockingItems: (): PendingBlockingItem[] => {
+      trace.push('list');
+      return gate.items;
+    },
+    awaitClear: vi.fn(async (): Promise<'proceed' | 'canceled'> => {
+      trace.push(gate.items.length > 0 ? 'park' : 'proceed');
+      return 'proceed';
+    }),
+  };
+  return gate;
+}
+
+/** A monitor whose blocking-items consult returns canned per-item verdicts. */
+function makeBlockingMonitor(
+  decisions: BlockingItemDecision[],
+): MonitorSession & { reviewBlockingItems: ReturnType<typeof vi.fn> } {
+  return {
+    triage: vi.fn(),
+    answer: vi.fn().mockResolvedValue(''),
+    reviewBlockingItems: vi.fn().mockResolvedValue(decisions),
+  };
+}
+
+describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', () => {
+  afterEach(() => {
+    delete process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV];
+  });
+
+  it('awaits the write barrier BEFORE the first queue read (CR-3)', async () => {
+    const trace: string[] = [];
+    const blockingGate = makeBlockingGate([blockingItem()], trace);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 7, reporter: makeReporter(), gate: makeGate('approve'),
+      blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'pass', rationale: 'a human should look.' }]),
+      awaitReviewWritesSettled: vi.fn(async (projectId: number) => {
+        trace.push(`barrier:${projectId}`);
+      }),
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(trace[0]).toBe('barrier:7');
+    expect(trace).toContain('list');
+    expect(trace.indexOf('barrier:7')).toBeLessThan(trace.indexOf('list'));
+  });
+
+  it('still barriers on the PLAIN path (no monitor) before awaitClear reads', async () => {
+    const trace: string[] = [];
+    const blockingGate = makeBlockingGate([blockingItem()], trace);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      awaitReviewWritesSettled: vi.fn(async () => {
+        trace.push('barrier');
+      }),
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(trace).toEqual(['barrier', 'park']);
+  });
+
+  it('a `resolve` clears the item so awaitClear fast-paths, and files the audit finding', async () => {
+    const trace: string[] = [];
+    const blockingGate = makeBlockingGate([blockingItem()], trace);
+    const resolveReviewItemAsMonitor = vi.fn(async (input: { reviewItemId: string }) => {
+      // The production sink's effect: the item stops being pending.
+      blockingGate.items = blockingGate.items.filter((i) => i.id !== input.reviewItemId);
+    });
+    const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([
+        { reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed in 9a1b2c3. The guard landed.' },
+      ]),
+      resolveReviewItemAsMonitor,
+      fileMonitorFinding,
+    });
+
+    expect(await host.awaitBlockingReviewItems('r')).toBe('proceed');
+
+    expect(resolveReviewItemAsMonitor).toHaveBeenCalledWith({
+      reviewItemId: 'rvw_f1',
+      resolution: 'resolved by supervisor: already fixed in 9a1b2c3. The guard landed.',
+    });
+    const audit = fileMonitorFinding.mock.calls[0][0] as { title: string; body: string; category: string };
+    expect(audit.title).toBe('Resolved blocking finding: null deref in parser');
+    expect(audit.category).toBe('escalation-resolve');
+    expect(audit.body).toContain('rvw_f1');
+    // The resolve landed BEFORE awaitClear read the queue — no park flicker.
+    expect(trace).toEqual(['list', 'proceed']);
+  });
+
+  it('a `pass` writes nothing and the run parks exactly as it does today', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const annotateReviewItem = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'pass', rationale: 'a human should look.' }]),
+      resolveReviewItemAsMonitor,
+      annotateReviewItem,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+    expect(annotateReviewItem).not.toHaveBeenCalled();
+    expect(blockingGate.trace).toEqual(['list', 'park']);
+  });
+
+  it('a `recommend` annotates the item with the finding menu and keeps it blocking', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([
+        { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'dismiss', rationale: 'AR-1 is cosmetic. It costs nothing.' },
+      ]),
+      annotateReviewItem,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    const written = annotateReviewItem.mock.calls[0][0] as { reviewItemId: string; markdown: string };
+    expect(written.reviewItemId).toBe('rvw_f1');
+    expect(written.markdown.split('\n')[0]).toBe('Recommended: dismiss — AR-1 is cosmetic.');
+    expect(blockingGate.trace).toEqual(['list', 'park']);
+  });
+
+  it('normalizes an out-of-menu choice onto the item kind\'s own menu', async () => {
+    const blockingGate = makeBlockingGate([blockingItem(), blockingItem({ id: 'rvw_d1', kind: 'decision', title: 'Approve the plan' })]);
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([
+        // `approve` is not a finding's choice; `rerun` is not a decision's.
+        { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'approve', rationale: 'keep it.' },
+        { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'rerun', rationale: 'send it back.' },
+      ]),
+      annotateReviewItem,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    const markdowns = annotateReviewItem.mock.calls.map((c) => (c[0] as { markdown: string }).markdown);
+    expect(markdowns[0]).toContain('Recommended: continue');
+    expect(markdowns[1]).toContain('Recommended: revise');
+  });
+
+  it('NEVER resolves a `decision` item — it is annotated instead', async () => {
+    const blockingGate = makeBlockingGate([blockingItem({ id: 'rvw_d1', kind: 'decision', title: 'Approve the plan' })]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_d1', action: 'resolve', rationale: 'the gate is moot.' }]),
+      resolveReviewItemAsMonitor,
+      annotateReviewItem,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+    expect(annotateReviewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('downgrades to a recommendation once the WALK cap is spent', async () => {
+    // One item per boundary, MONITOR_WALK_RESOLVE_CAP + 1 boundaries on ONE host.
+    const total = MONITOR_WALK_RESOLVE_CAP + 1;
+    const ids = Array.from({ length: total }, (_, i) => `rvw_f${i}`);
+    const blockingGate = makeBlockingGate([]);
+    const monitor: MonitorSession = {
+      triage: vi.fn(),
+      answer: vi.fn().mockResolvedValue(''),
+      reviewBlockingItems: vi.fn(async (req: BlockingItemsEscalationRequest) =>
+        req.items.map((i) => ({ reviewItemId: i.id, action: 'resolve' as const, rationale: 'already fixed.' })),
+      ),
+    };
+    const resolveReviewItemAsMonitor = vi.fn(async (input: { reviewItemId: string }) => {
+      blockingGate.items = blockingGate.items.filter((i) => i.id !== input.reviewItemId);
+    });
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor, resolveReviewItemAsMonitor, annotateReviewItem,
+    });
+
+    for (const id of ids) {
+      blockingGate.items = [blockingItem({ id })];
+      await host.awaitBlockingReviewItems('r');
+    }
+
+    expect(resolveReviewItemAsMonitor).toHaveBeenCalledTimes(MONITOR_WALK_RESOLVE_CAP);
+    // The one past the cap became advice rather than being dropped.
+    expect(annotateReviewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('downgrades to a recommendation when the DURABLE cap is already spent', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const countMonitorResolves = vi.fn().mockResolvedValue(MONITOR_RUN_RESOLVE_CAP);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed.' }]),
+      resolveReviewItemAsMonitor, annotateReviewItem, countMonitorResolves,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(countMonitorResolves).toHaveBeenCalledWith('r');
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+    expect(annotateReviewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an UNREADABLE durable budget as spent, never as free', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed.' }]),
+      resolveReviewItemAsMonitor,
+      countMonitorResolves: vi.fn().mockRejectedValue(new Error('db boom')),
+      annotateReviewItem: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+  });
+
+  it('reviews each item ONCE per walk (a re-parked run is not re-litigated)', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const monitor = makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'pass', rationale: 'a human should look.' }]);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate, monitor,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+    await host.awaitBlockingReviewItems('r');
+
+    expect(monitor.reviewBlockingItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('consults about a NEWLY filed item even after an earlier boundary passed on another', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const monitor: MonitorSession = {
+      triage: vi.fn(),
+      answer: vi.fn().mockResolvedValue(''),
+      reviewBlockingItems: vi.fn(async (req: BlockingItemsEscalationRequest) =>
+        req.items.map((i) => ({ reviewItemId: i.id, action: 'pass' as const, rationale: 'x' })),
+      ),
+    };
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate, monitor,
+    });
+
+    await host.awaitBlockingReviewItems('r');
+    blockingGate.items = [blockingItem(), blockingItem({ id: 'rvw_f2', title: 'second' })];
+    await host.awaitBlockingReviewItems('r');
+
+    const second = (monitor.reviewBlockingItems as ReturnType<typeof vi.fn>).mock
+      .calls[1][0] as BlockingItemsEscalationRequest;
+    expect(second.items.map((i) => i.id)).toEqual(['rvw_f2']);
+  });
+
+  it('goes straight to awaitClear when the kill switch is set (no read, no consult)', async () => {
+    process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV] = '1';
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const monitor = makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'x' }]);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate, monitor,
+      awaitReviewWritesSettled: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(monitor.reviewBlockingItems).not.toHaveBeenCalled();
+    expect(blockingGate.trace).toEqual(['park']);
+  });
+
+  it('never throws: a broken barrier, consult, resolve or annotate all still reach awaitClear', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        reviewBlockingItems: vi.fn().mockRejectedValue(new Error('consult boom')),
+      },
+      awaitReviewWritesSettled: vi.fn().mockRejectedValue(new Error('barrier boom')),
+      resolveReviewItemAsMonitor: vi.fn().mockRejectedValue(new Error('resolve boom')),
+      annotateReviewItem: vi.fn().mockRejectedValue(new Error('annotate boom')),
+    });
+
+    await expect(host.awaitBlockingReviewItems('r')).resolves.toBe('proceed');
+    expect(blockingGate.awaitClear).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a no-op (no barrier, no consult) for a host built without a blocking gate', async () => {
+    const awaitReviewWritesSettled = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), awaitReviewWritesSettled,
+    });
+
+    expect(await host.awaitBlockingReviewItems('r')).toBe('proceed');
+    expect(awaitReviewWritesSettled).not.toHaveBeenCalled();
   });
 });

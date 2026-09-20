@@ -7,16 +7,19 @@ import {
   buildTriagePrompt,
   buildAnswerPrompt,
   buildActionAnswerPrompt,
+  buildBlockingItemsPrompt,
   buildGateEscalationPrompt,
   buildLaneTriagePrompt,
   buildReviewLoopPrompt,
   parseTriageAdvice,
   parseConverseOutput,
+  parseBlockingItemsOutput,
   parseGateEscalationOutput,
   parseLaneTriageOutput,
   parseReviewLoopOutput,
   MONITOR_TRIAGE_SCHEMA,
   MONITOR_CONVERSE_SCHEMA,
+  MONITOR_BLOCKING_ITEMS_SCHEMA,
   MONITOR_GATE_ESCALATION_SCHEMA,
   MONITOR_LANE_TRIAGE_SCHEMA,
   MONITOR_REVIEW_LOOP_SCHEMA,
@@ -26,6 +29,7 @@ import {
   type MonitorHistory,
   type MonitorSession,
   type MonitorActions,
+  type BlockingItemsEscalationRequest,
   type GateEscalationRequest,
   type LaneTriageRequest,
   type ReviewLoopRequest,
@@ -3050,5 +3054,217 @@ describe('DefaultMonitorSession.reviewGateEscalation', () => {
       expect.stringContaining('first'),
       expect.stringContaining('second'),
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 9 — blocking-items escalation at a step boundary
+// ---------------------------------------------------------------------------
+
+function blockingReq(
+  p: Partial<BlockingItemsEscalationRequest> = {},
+): BlockingItemsEscalationRequest {
+  return {
+    kind: 'blocking-items',
+    items: [
+      {
+        id: 'rvw_f1',
+        kind: 'finding',
+        source: 'agent:code-review',
+        severity: 'error',
+        title: 'null deref in parser',
+        body: 'parse() dereferences `node` before the guard.',
+      },
+      {
+        id: 'rvw_d1',
+        kind: 'decision',
+        source: 'gate:human-step',
+        severity: null,
+        title: 'Approve the plan',
+        body: 'Five tasks, two of them human.',
+      },
+    ],
+    ...p,
+  };
+}
+
+describe('MONITOR_BLOCKING_ITEMS_SCHEMA', () => {
+  it('requires items and pins the three per-item actions, forbidding extra fields', () => {
+    const items = MONITOR_BLOCKING_ITEMS_SCHEMA.properties as {
+      items: { items: { required: string[]; additionalProperties: boolean; properties: Record<string, { enum?: string[] }> } };
+    };
+    expect(MONITOR_BLOCKING_ITEMS_SCHEMA.required).toEqual(['items']);
+    expect(MONITOR_BLOCKING_ITEMS_SCHEMA.additionalProperties).toBe(false);
+    const entry = items.items.items;
+    expect(entry.additionalProperties).toBe(false);
+    expect(entry.required).toEqual(['reviewItemId', 'action', 'rationale']);
+    expect(entry.properties.action.enum).toEqual(['resolve', 'recommend', 'pass']);
+  });
+});
+
+describe('parseBlockingItemsOutput (downgrade table)', () => {
+  it('parses a well-formed per-item verdict list', () => {
+    expect(
+      parseBlockingItemsOutput(
+        {
+          items: [
+            { reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'fixed in 9a1b2c3.' },
+            { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'approve', rationale: 'the plan matches the brief.' },
+          ],
+        },
+        blockingReq(),
+      ),
+    ).toEqual([
+      { reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'fixed in 9a1b2c3.' },
+      { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'approve', rationale: 'the plan matches the brief.' },
+    ]);
+  });
+
+  it('DROPS an entry naming an item that was never shown (a hallucinated target)', () => {
+    const out = parseBlockingItemsOutput(
+      { items: [{ reviewItemId: 'rvw_nope', action: 'resolve', rationale: 'x' }] },
+      blockingReq(),
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('downgrades a `resolve` on a NON-finding to `recommend`', () => {
+    const out = parseBlockingItemsOutput(
+      { items: [{ reviewItemId: 'rvw_d1', action: 'resolve', rationale: 'the gate is moot.' }] },
+      blockingReq(),
+    );
+    expect(out).toEqual([{ reviewItemId: 'rvw_d1', action: 'recommend', rationale: 'the gate is moot.' }]);
+  });
+
+  it('keeps the LAST word on an item to one entry (a repeated id is ignored)', () => {
+    const out = parseBlockingItemsOutput(
+      {
+        items: [
+          { reviewItemId: 'rvw_f1', action: 'pass', rationale: 'first' },
+          { reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'second' },
+        ],
+      },
+      blockingReq(),
+    );
+    expect(out).toEqual([{ reviewItemId: 'rvw_f1', action: 'pass', rationale: 'first' }]);
+  });
+
+  it('substitutes "(none given)" for a blank rationale', () => {
+    const out = parseBlockingItemsOutput(
+      { items: [{ reviewItemId: 'rvw_f1', action: 'pass', rationale: '   ' }] },
+      blockingReq(),
+    );
+    expect(out[0].rationale).toBe('(none given)');
+  });
+
+  it('malformed output passes EVERY shown item', () => {
+    for (const bad of [null, 'nope', 42, {}, { items: 'not-an-array' }, { items: null }]) {
+      const out = parseBlockingItemsOutput(bad, blockingReq());
+      expect(out.map((d) => [d.reviewItemId, d.action])).toEqual([
+        ['rvw_f1', 'pass'],
+        ['rvw_d1', 'pass'],
+      ]);
+    }
+  });
+
+  it('skips an entry with an unknown action rather than guessing one', () => {
+    const out = parseBlockingItemsOutput(
+      { items: [{ reviewItemId: 'rvw_f1', action: 'delete', rationale: 'x' }] },
+      blockingReq(),
+    );
+    expect(out).toEqual([]);
+  });
+});
+
+describe('buildBlockingItemsPrompt', () => {
+  it('renders the charter, every item with its fenced body, and the resolve caps', () => {
+    const prompt = buildBlockingItemsPrompt(ctx, digestHistory, blockingReq());
+
+    expect(prompt).toContain(monitorCharter(ctx));
+    expect(prompt).toContain('about to PARK');
+    expect(prompt).toContain('null deref in parser');
+    expect(prompt).toContain('`rvw_f1`');
+    expect(prompt).toContain('parse() dereferences');
+    expect(prompt).toContain('Approve the plan');
+    // The caps must be quoted where the model reads them.
+    expect(prompt).toContain('4 per pass');
+    expect(prompt).toContain('8 for the whole run');
+    expect(prompt).toContain('AUTONOMOUS EXECUTION');
+    // The out-of-scope rule has to be explicit, not inferred from the schema.
+    expect(prompt).toContain('A `decision` item is NEVER resolved here');
+    // The digest is rendered (this consult opts into it).
+    expect(prompt).toContain('## Run deliverables');
+  });
+
+  it('degrades gracefully for an item with no body', () => {
+    const prompt = buildBlockingItemsPrompt(
+      ctx,
+      digestHistory,
+      blockingReq({ items: [{ id: 'rvw_x', kind: 'finding', source: null, severity: null, title: 'bare', body: '  ' }] }),
+    );
+    expect(prompt).toContain('this item has no body');
+  });
+});
+
+describe('DefaultMonitorSession.reviewBlockingItems', () => {
+  it('queries with the blocking-items schema, reads the digest, and posts ONE note', async () => {
+    const { reader, readOpts } = fakeHistory(digestHistory);
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      items: [
+        { reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed on this branch.' },
+        { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'approve', rationale: 'matches the brief.' },
+      ],
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decisions = await session.reviewBlockingItems(blockingReq());
+
+    expect(decisions).toHaveLength(2);
+    expect(readOpts).toEqual([{ withRunDigest: true }]);
+    expect((structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0].schema).toBe(MONITOR_BLOCKING_ITEMS_SCHEMA);
+    expect(injected).toHaveLength(1);
+    expect(injected[0].text).toContain('resolved **null deref in parser**');
+    expect(injected[0].text).toContain('Approve the plan');
+  });
+
+  it('says so plainly when it had nothing to add', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ items: [{ reviewItemId: 'rvw_f1', action: 'pass', rationale: 'a human should look.' }] });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    await session.reviewBlockingItems(blockingReq());
+
+    expect(injected[0].text).toContain('I had nothing to add');
+  });
+
+  it('fails soft to ALL-pass (with a chat note) when the query throws', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('monitor query timed out'));
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decisions = await session.reviewBlockingItems(blockingReq());
+
+    expect(decisions.map((d) => d.action)).toEqual(['pass', 'pass']);
+    expect(injected[0].text).toContain('could not look at the pending items');
+  });
+
+  it('posts NOTHING when the run was aborted mid-consult', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const controller = new AbortController();
+    const structuredQuery: StructuredQueryFn = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return { items: [] };
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    await session.reviewBlockingItems(blockingReq(), controller.signal);
+
+    expect(injected).toEqual([]);
   });
 });

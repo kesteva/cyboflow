@@ -31,6 +31,8 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
 import type { AdversarialFinding } from '../../../../shared/types/adversarialReview';
 import type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
   BuildBreakGroup,
   ControllerHost,
   ControllerStepContext,
@@ -50,7 +52,7 @@ import type {
   VisualVerifyGate,
 } from './types';
 import type { HumanGateOpenedSnapshot, HumanGateResolver } from './humanGate';
-import type { BlockingItemsResolver } from './blockingItemsGate';
+import type { BlockingItemsResolver, PendingBlockingItem } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import {
@@ -58,6 +60,7 @@ import {
   composeSupervisorRecommendation,
   readMarkdownSection,
 } from '../../../../shared/types/reviews';
+import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
 import { buildBreakGroupKey } from './buildBreakDetector';
@@ -112,6 +115,57 @@ function escalationReviewDisabled(): boolean {
  * first, so what survives the cap is what the run did most recently.
  */
 export const ESCALATION_REVIEW_ITEM_CAP = 30;
+
+/**
+ * Most blocking findings the supervisor may RESOLVE on one pass over a step
+ * boundary (in-memory, per host instance = per walk).
+ *
+ * Small on purpose. A boundary that hands back four autonomous resolutions is
+ * already an unusual run; one that hands back twenty is a supervisor clearing
+ * its own defect queue, which is the exact failure this seam has to be unable to
+ * produce. Past the cap a `resolve` is downgraded to a `recommend`, so nothing is
+ * lost — the item keeps blocking and the human sees the advice.
+ */
+export const MONITOR_WALK_RESOLVE_CAP = 4;
+
+/**
+ * Most blocking findings the supervisor may resolve across the WHOLE run,
+ * counted from the `escalation-resolve` audit findings already committed for it.
+ *
+ * The walk cap alone is defeated by a restart or a rewind: both mint a fresh
+ * host with a zeroed counter, so a run that crash-looped could resolve four
+ * items per attempt forever. This one is read from the database before each
+ * resolve, so the budget survives everything that resets process state.
+ */
+export const MONITOR_RUN_RESOLVE_CAP = 8;
+
+/** Grouping category for the supervisor's autonomous-resolve audit findings. */
+const ESCALATION_RESOLVE_FINDING_CATEGORY = 'escalation-resolve';
+
+/** The recommendation menu for a blocking FINDING — keep it, or drop it. */
+const FINDING_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = ['continue', 'dismiss'];
+
+/** The recommendation menu for any other blocking item (a decision gate, a pause). */
+const DECISION_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = [
+  'revise',
+  'approve',
+  'reject',
+];
+
+/**
+ * Normalize the supervisor's free-text `choice` onto the menu this item's KIND
+ * actually offers, defaulting to the menu's FIRST entry.
+ *
+ * The defaults are chosen to be the least consequential answer of each menu:
+ * `continue` keeps a finding blocking (today's behaviour), and `revise` sends a
+ * decision back rather than emphasizing the approve or reject button on advice
+ * the supervisor did not actually name.
+ */
+function normalizeBlockingChoice(kind: ReviewItemKind, choice: string | undefined): SupervisorRecommendationChoice {
+  const menu = kind === 'finding' ? FINDING_RECOMMENDATION_CHOICES : DECISION_RECOMMENDATION_CHOICES;
+  const found = menu.find((c) => c === choice?.trim().toLowerCase());
+  return found ?? menu[0];
+}
 
 /** The `ReviewItemError.code` a refusal carries when the human answered first. */
 const INVALID_STATUS_CODE = 'invalid_status';
@@ -398,6 +452,39 @@ export interface ProgrammaticRunHostArgs {
    */
   annotateReviewItem?: (input: { reviewItemId: string; markdown: string }) => Promise<void>;
   /**
+   * REVIEW-WRITE BARRIER (CR-3): resolve once every review-item write already
+   * enqueued for this project has committed
+   * (`ReviewItemRouter.awaitProjectWritesSettled`).
+   *
+   * Awaited at EVERY step boundary, before any read of the blocking queue —
+   * including the plain no-consult path. The MCP `report_finding` reply lands
+   * before its create drains the router's per-project queue, so a boundary that
+   * read `review_items` directly could march straight past the blocking finding
+   * the step it just finished had filed. That is a pre-existing race; this is
+   * where it is closed. Fail-soft: absent or throwing ⇒ the boundary proceeds
+   * unbarriered, exactly as it did before.
+   */
+  awaitReviewWritesSettled?: (projectId: number) => Promise<void>;
+  /**
+   * AUTONOMOUS-RESOLVE sink: close one blocking FINDING as the supervisor,
+   * through the `ReviewItemRouter` `resolve` op with actor `monitor`.
+   *
+   * The only host seam that can clear a human-audience blocking item without a
+   * human, which is why it is paired with two caps and an audit finding on every
+   * use. Absent ⇒ a `resolve` verdict is downgraded to a recommendation (the
+   * item keeps blocking) rather than dropped.
+   */
+  resolveReviewItemAsMonitor?: (input: { reviewItemId: string; resolution: string }) => Promise<void>;
+  /**
+   * DURABLE RESOLVE COUNTER: how many `escalation-resolve` audit findings this
+   * run already carries. Read before EACH autonomous resolve so
+   * {@link MONITOR_RUN_RESOLVE_CAP} survives restarts and rewinds, which both
+   * mint a fresh host with a zeroed in-memory counter. Absent ⇒ only the walk
+   * cap applies; throwing ⇒ the resolve is downgraded (a budget that cannot be
+   * read is treated as spent, never as free).
+   */
+  countMonitorResolves?: (runId: string) => Promise<number>;
+  /**
    * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
    * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
    * composition root to the SAME ReviewItemRouter chokepoint verdictDelivery
@@ -452,6 +539,19 @@ function fenceSafeReason(reason: string): string {
 }
 
 export class ProgrammaticRunHost implements ControllerHost {
+  /**
+   * Review items the supervisor has already answered on THIS walk. A run that
+   * parks, is unparked by a human, and reaches the next boundary must not pay
+   * for a second opinion on the items it was already asked about — and above
+   * all must not get a second chance to `resolve` one it passed on. Per host
+   * instance, i.e. per walk: a restart deliberately starts fresh, because the
+   * durable cap is what bounds the run as a whole.
+   */
+  private readonly reviewedBlockingIds = new Set<string>();
+
+  /** Autonomous resolves spent on this walk — see {@link MONITOR_WALK_RESOLVE_CAP}. */
+  private walkResolveCount = 0;
+
   constructor(private readonly args: ProgrammaticRunHostArgs) {}
 
   reportStep(stepId: string, status: WorkflowStepReportStatus): void {
@@ -692,8 +792,271 @@ export class ProgrammaticRunHost implements ControllerHost {
    * blockingGate; a run built without one proceeds immediately (fast no-op).
    */
   async awaitBlockingReviewItems(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'> {
-    if (!this.args.blockingGate) return 'proceed';
-    return this.args.blockingGate.awaitClear({ runId, projectId: this.args.projectId, signal });
+    const gate = this.args.blockingGate;
+    if (!gate) return 'proceed';
+    // (1) WRITE BARRIER FIRST, always — before the consult's read AND before
+    // awaitClear's own fast-path read. See `awaitReviewWritesSettled`: without
+    // it a boundary can march past the very finding the step just filed.
+    await this.awaitReviewWritesSettled();
+    // (2) The supervisor's escalation review. Never throws, never parks, and
+    // never gates: whatever it does or fails to do, awaitClear still decides.
+    await this.reviewBlockingItems(gate, runId, signal);
+    return gate.awaitClear({ runId, projectId: this.args.projectId, signal });
+  }
+
+  /**
+   * Await the review-item write barrier, fail-soft.
+   *
+   * An absent or throwing barrier degrades to the PRE-BARRIER behaviour (read
+   * whatever has committed so far), which is survivable; letting it reject would
+   * abort a walk over a queue-drain hiccup, which is not.
+   */
+  private async awaitReviewWritesSettled(): Promise<void> {
+    try {
+      await this.args.awaitReviewWritesSettled?.(this.args.projectId);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review write barrier failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * ESCALATION-REVIEW seam at a STEP BOUNDARY — consult the supervisor about the
+   * blocking items that are about to park the run, and apply its per-item
+   * verdicts.
+   *
+   * The gate sibling (`reviewGateEscalation`) may only ANNOTATE. This one may
+   * also RESOLVE, because a blocking finding is a claim the run itself filed and
+   * may itself have already closed — but only a `finding`, only within
+   * {@link MONITOR_WALK_RESOLVE_CAP} and {@link MONITOR_RUN_RESOLVE_CAP}, and
+   * only with an audit finding recording what was closed and why.
+   *
+   * Order of business, each arm short-circuiting to today's behaviour (the run
+   * parks for a human):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_ESCALATION_REVIEW=1`) ⇒ return without
+   *      even reading the queue. A rollback lever should cost nothing.
+   *   2. No monitor, or one with no `reviewBlockingItems` ⇒ return.
+   *   3. Nothing pending, or nothing NOT ALREADY REVIEWED ON THIS WALK ⇒ return.
+   *      The second half is what stops a run that parks, is unparked, and parks
+   *      again from re-litigating the same items.
+   *   4. Consult, mark every item reviewed, then apply the verdicts one by one.
+   *
+   * NEVER THROWS and never delays the park beyond its own consult: the caller
+   * awaits it only so the applies land before `awaitClear` reads the queue (a
+   * resolve that arrived later would park the run and then unpark it, which
+   * looks like a flicker to the human).
+   */
+  private async reviewBlockingItems(
+    gate: BlockingItemsResolver,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      if (escalationReviewDisabled()) {
+        this.args.logger?.info('[ProgrammaticRunHost] blocking-items review disabled by kill switch', { runId });
+        return;
+      }
+      const monitor = this.args.monitor;
+      if (!monitor?.reviewBlockingItems) return;
+
+      const pending = gate.listPendingBlockingItems?.(runId) ?? [];
+      const fresh = pending.filter((i) => !this.reviewedBlockingIds.has(i.id));
+      if (fresh.length === 0) return;
+
+      const req: BlockingItemsEscalationRequest = { kind: 'blocking-items', items: fresh };
+      const decisions = await monitor.reviewBlockingItems(req, signal);
+      // Mark BEFORE applying: an item the supervisor was shown has had its one
+      // look, whether or not the apply below succeeds. Re-asking on the next
+      // boundary would spend another query to reach the same verdict — and,
+      // worse, would give a passed-on item a second chance at a resolve.
+      for (const item of fresh) this.reviewedBlockingIds.add(item.id);
+
+      const byId = new Map(fresh.map((i) => [i.id, i]));
+      for (const decision of decisions) {
+        const item = byId.get(decision.reviewItemId);
+        if (item === undefined) continue;
+        await this.applyBlockingItemDecision(runId, item, decision);
+      }
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] blocking-items review failed (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Apply ONE per-item verdict. Each call is independently try/caught, so a
+   * refused resolve or a broken annotate degrades that item alone — never the
+   * rest of the batch, and never the park that follows.
+   */
+  private async applyBlockingItemDecision(
+    runId: string,
+    item: PendingBlockingItem,
+    decision: BlockingItemDecision,
+  ): Promise<void> {
+    try {
+      if (decision.action === 'pass') return;
+      // A `resolve` survives only for a FINDING, with a resolve sink wired and
+      // budget left. Every other case falls through to the recommendation —
+      // which is the honest degradation: the supervisor's reasoning still
+      // reaches the human, and the item keeps blocking.
+      if (
+        decision.action === 'resolve' &&
+        item.kind === 'finding' &&
+        this.args.resolveReviewItemAsMonitor !== undefined &&
+        (await this.canSpendResolve(runId))
+      ) {
+        await this.resolveBlockingFinding(runId, item, decision.rationale);
+        return;
+      }
+      await this.annotateBlockingItem(runId, item, decision);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] blocking-item verdict not applied (fail-soft)', {
+        runId,
+        reviewItemId: item.id,
+        action: decision.action,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Both resolve budgets, checked in the cheap-then-durable order.
+   *
+   * A durable read that THROWS counts as spent, not as free: the whole point of
+   * {@link MONITOR_RUN_RESOLVE_CAP} is that a run cannot resolve its way past a
+   * human, and a budget nobody can read is exactly when that guarantee matters.
+   */
+  private async canSpendResolve(runId: string): Promise<boolean> {
+    if (this.walkResolveCount >= MONITOR_WALK_RESOLVE_CAP) {
+      this.args.logger?.info('[ProgrammaticRunHost] walk resolve cap reached; downgrading to a recommendation', {
+        runId,
+        cap: MONITOR_WALK_RESOLVE_CAP,
+      });
+      return false;
+    }
+    const counter = this.args.countMonitorResolves;
+    if (counter === undefined) return true;
+    try {
+      const spent = await counter(runId);
+      if (spent >= MONITOR_RUN_RESOLVE_CAP) {
+        this.args.logger?.info('[ProgrammaticRunHost] run resolve cap reached; downgrading to a recommendation', {
+          runId,
+          spent,
+          cap: MONITOR_RUN_RESOLVE_CAP,
+        });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] resolve budget unreadable; downgrading to a recommendation', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Close one blocking finding as the supervisor and file the audit record.
+   *
+   * The walk counter is incremented on the RESOLVE landing, not on the audit
+   * finding: the resolve is what unblocks the run, and a dropped audit note must
+   * not hand the walk a free extra resolve. The audit finding is filed after and
+   * is fail-soft in its own right (`fileMonitorAuditFinding`) — a run that closed
+   * an item but could not record it is bad, and one that closed it twice would
+   * be worse.
+   */
+  private async resolveBlockingFinding(
+    runId: string,
+    item: PendingBlockingItem,
+    rationale: string,
+  ): Promise<void> {
+    await this.args.resolveReviewItemAsMonitor?.({
+      reviewItemId: item.id,
+      resolution: `resolved by supervisor: ${rationale}`,
+    });
+    this.walkResolveCount += 1;
+    this.args.logger?.info('[ProgrammaticRunHost] blocking finding resolved by the supervisor', {
+      runId,
+      reviewItemId: item.id,
+      walkSpent: this.walkResolveCount,
+    });
+    await this.fileMonitorAuditFinding(
+      `Resolved blocking finding: ${item.title}`,
+      `${rationale}\n\nResolved item: \`${item.id}\` — ${item.title}`,
+      ESCALATION_RESOLVE_FINDING_CATEGORY,
+    );
+  }
+
+  /**
+   * File one non-blocking `monitor`-sourced audit finding, fail-soft.
+   *
+   * The paper trail for an action the human never confirmed. Deliberately
+   * SWALLOWS its failure: the action it records has already happened, and losing
+   * the note must not also lose (or, worse, half-undo) the action. It is also
+   * what {@link MONITOR_RUN_RESOLVE_CAP} counts, so an unfiled note costs the
+   * run one unit of durable budget it will never get back — the safe direction.
+   */
+  private async fileMonitorAuditFinding(title: string, body: string, category: string): Promise<void> {
+    if (!this.args.fileMonitorFinding) return;
+    try {
+      await this.args.fileMonitorFinding({ title, body, category });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] supervisor audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        title,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Write the supervisor's recommendation onto a still-blocking item.
+   *
+   * Shares the `invalid_status` treatment with the gate path: a human who
+   * triaged the item while the consult was in flight is the DESIGNED outcome of
+   * a consult that runs beside an open queue, so it is a debug line, not a
+   * warning.
+   */
+  private async annotateBlockingItem(
+    runId: string,
+    item: PendingBlockingItem,
+    decision: BlockingItemDecision,
+  ): Promise<void> {
+    const sink = this.args.annotateReviewItem;
+    const choice = normalizeBlockingChoice(item.kind, decision.choice);
+    if (!sink) {
+      this.args.logger?.info('[ProgrammaticRunHost] no annotate sink; blocking-item recommendation logged only', {
+        runId,
+        reviewItemId: item.id,
+        choice,
+        rationale: decision.rationale,
+      });
+      return;
+    }
+    // Same head/tail rule as the gate annotate: a one-sentence rationale IS the
+    // headline, so repeating it underneath would print it twice.
+    const head = firstSentence(decision.rationale);
+    const tail = decision.rationale.trim();
+    try {
+      await sink({
+        reviewItemId: item.id,
+        markdown: composeSupervisorRecommendation(choice, head, tail === head ? undefined : tail),
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        this.args.logger?.debug('[ProgrammaticRunHost] blocking item triaged before the recommendation landed', {
+          runId,
+          reviewItemId: item.id,
+        });
+        return;
+      }
+      throw err;
+    }
   }
 
   /**

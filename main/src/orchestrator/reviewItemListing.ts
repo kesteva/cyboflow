@@ -32,6 +32,7 @@ import type {
   DecisionPayload,
   PermissionPayload,
   ReviewItem,
+  ReviewItemKind,
   FindingProposedTarget,
   FindingPriority,
 } from '../../../shared/types/reviews';
@@ -482,6 +483,14 @@ function transitionReviewItemRow(
 // ---------------------------------------------------------------------------
 
 /**
+ * The HUMAN-AUDIENCE predicate shared by every aggregate-unblock read, so the
+ * count that parks a run and the list the supervisor is shown can never drift
+ * apart (item 9: a supervisor that could resolve an item the count does not see
+ * would be acting on a different queue than the one holding the walk).
+ */
+const HUMAN_AUDIENCE_CLAUSE = `(audience IS NULL OR audience != 'machine')`;
+
+/**
  * Count the still-PENDING blocking review items for a run. The aggregate-unblock
  * invariant: a run may only leave awaiting_review/awaiting_input when this count
  * reaches 0 (ALL blocking items resolved/dismissed). Returns 0 when the table is
@@ -508,7 +517,7 @@ export function countPendingBlockingReviewItems(
   // safe direction — never hide a blocking item from a human); the NOT NULL column
   // default makes NULL impossible post-migration, but SQL three-valued logic would
   // otherwise drop a NULL row from a bare `!= 'machine'` predicate.
-  const audienceClause = `(audience IS NULL OR audience != 'machine')`;
+  const audienceClause = HUMAN_AUDIENCE_CLAUSE;
   const row =
     excludeIds.length > 0
       ? (db
@@ -530,6 +539,53 @@ export function countPendingBlockingReviewItems(
 /** True when the run has at least one pending blocking review item. */
 export function hasPendingBlockingReviewItems(db: DatabaseLike, runId: string): boolean {
   return countPendingBlockingReviewItems(db, runId) > 0;
+}
+
+/** One pending blocking row as the supervisor's escalation review reads it. */
+export interface PendingBlockingItemRow {
+  id: string;
+  kind: ReviewItemKind;
+  source: string | null;
+  severity: string | null;
+  title: string;
+  body: string;
+}
+
+/**
+ * The ROWS behind {@link countPendingBlockingReviewItems} — the same run,
+ * blocking, pending, human-audience predicate — for the supervisor's
+ * step-boundary escalation review (item 9).
+ *
+ * Deliberately NOT `selectPendingBlockingReviewItems`: that one omits the
+ * audience filter and shapes a full `ReviewItem`, so it would offer the
+ * supervisor machine-audience rows the aggregate-unblock count ignores. This
+ * one is the count's own list, plus the bodies the consult has to read to judge
+ * whether an item is already addressed.
+ *
+ * Oldest first, matching the order the queue renders: when a cap ever bites, the
+ * item that has been holding the run longest is the one that survives.
+ */
+export function selectPendingBlockingItemRows(
+  db: DatabaseLike,
+  runId: string,
+): PendingBlockingItemRow[] {
+  if (!hasReviewItemsTable(db)) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, kind, source, severity, title, body
+         FROM review_items
+        WHERE run_id = ? AND blocking = 1 AND status = 'pending' AND ${HUMAN_AUDIENCE_CLAUSE}
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(runId) as Partial<Record<keyof PendingBlockingItemRow, unknown>>[];
+  return rows.map((r) => ({
+    id: typeof r.id === 'string' ? r.id : '',
+    kind: (typeof r.kind === 'string' ? r.kind : 'finding') as ReviewItemKind,
+    source: typeof r.source === 'string' && r.source.length > 0 ? r.source : null,
+    severity: typeof r.severity === 'string' && r.severity.length > 0 ? r.severity : null,
+    title: typeof r.title === 'string' ? r.title : '',
+    body: typeof r.body === 'string' ? r.body : '',
+  }));
 }
 
 /**

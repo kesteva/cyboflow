@@ -38,6 +38,8 @@ import {
   countPendingBlockingReviewItems,
   countRunPendingFindings,
   hasReviewItemsTable,
+  selectPendingBlockingItemRows,
+  type PendingBlockingItemRow,
 } from './reviewItemListing';
 import {
   APPROVE_DESIGN_STEP_ID,
@@ -277,6 +279,23 @@ export class HumanStepManager {
   hasPendingBlockingItems(runId: string): boolean {
     if (!hasReviewItemsTable(this.db)) return false;
     return countPendingBlockingReviewItems(this.db, runId) > 0;
+  }
+
+  /**
+   * The ROWS behind {@link hasPendingBlockingItems} — same predicate, plus the
+   * bodies — for the supervisor's step-boundary escalation review (item 9). The
+   * gate delegates here, so the queue the supervisor is asked about is by
+   * construction the same queue that is holding the walk.
+   *
+   * Fail-soft to `[]`: a broken read degrades to "no consult" (the run parks as
+   * it always did), never to a thrown step boundary.
+   */
+  listPendingBlockingItems(runId: string): PendingBlockingItemRow[] {
+    try {
+      return selectPendingBlockingItemRows(this.db, runId);
+    } catch {
+      return [];
+    }
   }
 
   /**

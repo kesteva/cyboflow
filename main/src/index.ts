@@ -3191,8 +3191,7 @@ async function initializeServices(): Promise<boolean> {
     // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
     // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
     // recommendation, i.e. today's card exactly.
-    runReviewItemReader: (r) => (gateEscalationSinks ? gateEscalationSinks.listRunReviewItems(r) : Promise.resolve([])),
-    gateAnnotateSink: (r, i) => (gateEscalationSinks ? gateEscalationSinks.annotate(r, i) : Promise.resolve()),
+    escalationSinks: () => gateEscalationSinks,
     // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
     // closure the scheduler's §3.2 degrade gate and the health panel's badge use
     // — there must never be a third reading of `verify_runbook_local.status`.
@@ -5065,6 +5064,7 @@ app.whenReady().then(async () => {
       runProjectId,
       applyReviewItem: (projectId, change) =>
         ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+      awaitProjectWritesSettled: (projectId) => ReviewItemRouter.getInstance().awaitProjectWritesSettled(projectId),
       taskMutations: taskMutationDeps,
       describeTaskFailure: (result) => mapTaskResult(result).message,
       logger: loggerLike,

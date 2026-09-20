@@ -28,6 +28,8 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
   ControllerEscalation,
   GateEscalationDecision,
   GateEscalationRequest,
@@ -41,6 +43,12 @@ import type {
   TriageDecision,
 } from './types';
 import type { SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { PendingBlockingItem } from './blockingItemsGate';
+// The two resolve budgets the blocking-items prompt must quote. They live on the
+// HOST (it is what enforces them); this edge is type-erased in the other
+// direction (programmaticRunHost imports MonitorSession as a type), so there is
+// no runtime cycle — the same import monitorActionSinks.ts already makes.
+import { MONITOR_RUN_RESOLVE_CAP, MONITOR_WALK_RESOLVE_CAP } from './programmaticRunHost';
 import { normalizeAdversarialId } from '../../../../shared/types/adversarialReview';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
@@ -697,7 +705,14 @@ export function parseReviewLoopOutput(structured: unknown, req: ReviewLoopReques
 // Gate escalation schema + parsing
 // ---------------------------------------------------------------------------
 
-export type { EscalationReviewItemSummary, GateEscalationDecision, GateEscalationRequest, RunDigest };
+export type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
+  EscalationReviewItemSummary,
+  GateEscalationDecision,
+  GateEscalationRequest,
+  RunDigest,
+};
 
 /**
  * The approve-design gate's own three-way menu. `continue` logs every surviving
@@ -799,6 +814,115 @@ export function parseGateEscalationOutput(
   if (!isRecommendationChoice(o.choice)) return { action: 'pass', rationale };
   if (!gateChoiceMenu(req).includes(o.choice)) return { action: 'pass', rationale };
   return { action: 'recommend', choice: o.choice, rationale };
+}
+
+// ---------------------------------------------------------------------------
+// Blocking-items escalation schema + parsing (item 9)
+// ---------------------------------------------------------------------------
+
+/**
+ * JSON schema the SDK `outputFormat` enforces for a BLOCKING-ITEMS verdict — the
+ * supervisor's per-item answer at a step boundary the run is about to park on.
+ *
+ * `additionalProperties: false` at both levels so the SDK rejects extra fields.
+ * The CAPS are NOT expressed here and cannot be: how many resolves are still
+ * available depends on this walk's counter and on findings already committed for
+ * the run, which only the host can read — so a `resolve` past either cap is
+ * DOWNGRADED there, not rejected here.
+ */
+export const MONITOR_BLOCKING_ITEMS_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items'],
+  properties: {
+    items: {
+      type: 'array',
+      description:
+        'One entry per blocking item you were shown. Omitting an item is read as `pass` on it; an entry naming an item you were not shown is discarded.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['reviewItemId', 'action', 'rationale'],
+        properties: {
+          reviewItemId: {
+            type: 'string',
+            description: 'The id of the item this entry answers, copied exactly from the list above.',
+          },
+          action: {
+            type: 'string',
+            enum: ['resolve', 'recommend', 'pass'],
+            description:
+              'resolve = close this FINDING yourself, because the evidence shows it is already addressed, out of scope, or a false positive; recommend = leave it for the human but name the answer you would give; pass = no opinion, it stays exactly as it is.',
+          },
+          choice: {
+            type: 'string',
+            description:
+              'recommend only: the answer you would give. For a finding that is `dismiss` (drop it) or `continue` (keep it blocking and let the human act on it); for a decision it is `approve`, `reject` or `revise`. Anything else falls back to the safe default for that kind.',
+          },
+          rationale: {
+            type: 'string',
+            description:
+              'One sentence naming the CONCRETE evidence (a file, a commit, a step outcome), then 1-2 more of detail. It is written into the audit record and read by the human, so it must stand alone.',
+          },
+        },
+      },
+    },
+  },
+};
+
+/** Every action a per-item verdict may carry. */
+function isBlockingItemAction(v: unknown): v is BlockingItemDecision['action'] {
+  return v === 'resolve' || v === 'recommend' || v === 'pass';
+}
+
+/**
+ * Parse the SDK's structured blocking-items output into host-safe
+ * {@link BlockingItemDecision}s.
+ *
+ * Lenient and never throws. Every degradation lands on the arm that CHANGES
+ * NOTHING, because the do-nothing arm here is also the safe one: an item left
+ * alone keeps parking the run for a human, which is exactly today's behaviour.
+ *
+ *   1. non-object / null / missing `items` array ⇒ every shown item `pass`
+ *   2. entry naming an unknown `reviewItemId`     ⇒ dropped
+ *   3. `resolve` on a non-`finding` kind          ⇒ `recommend` (a designed gate
+ *      or a permission prompt is never closed autonomously — out of scope)
+ *   4. blank / missing rationale                  ⇒ "(none given)"
+ *
+ * Cap downgrades (`resolve` → `recommend` past the walk or run budget) are NOT
+ * done here: the counters live on the host, which is the only party that can
+ * read them.
+ */
+export function parseBlockingItemsOutput(
+  structured: unknown,
+  req: BlockingItemsEscalationRequest,
+): BlockingItemDecision[] {
+  const allPass = (): BlockingItemDecision[] =>
+    req.items.map((i) => ({ reviewItemId: i.id, action: 'pass', rationale: NO_RATIONALE }));
+  if (typeof structured !== 'object' || structured === null) return allPass();
+  const raw = (structured as { items?: unknown }).items;
+  if (!Array.isArray(raw)) return allPass();
+
+  const byId = new Map(req.items.map((i) => [i.id, i]));
+  const out: BlockingItemDecision[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const reviewItemId = typeof e.reviewItemId === 'string' ? e.reviewItemId : '';
+    const item = byId.get(reviewItemId);
+    // An id we never showed is a hallucinated target — dropping it is the whole
+    // point of checking, since acting on it would resolve an unrelated row.
+    if (item === undefined || seen.has(reviewItemId)) continue;
+    seen.add(reviewItemId);
+    if (!isBlockingItemAction(e.action)) continue;
+    const rationaleRaw = typeof e.rationale === 'string' ? e.rationale.trim() : '';
+    const rationale = rationaleRaw.length > 0 ? rationaleRaw : NO_RATIONALE;
+    const action = e.action === 'resolve' && item.kind !== 'finding' ? 'recommend' : e.action;
+    const choice = typeof e.choice === 'string' && e.choice.trim().length > 0 ? e.choice.trim() : undefined;
+    out.push({ reviewItemId, action, rationale, ...(choice !== undefined ? { choice } : {}) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1419,66 @@ NEVER ANSWER THE GATE. Nothing you return resolves it, ends the run, or spends a
 \`rationale\` must CITE THE CONCRETE REASON in its first sentence (a named entry, a file, a step outcome — not "it looks fine"): that sentence is rendered next to the button and has to stand on its own. Add 2-3 more sentences of detail after it if they help.
 
 Return only the structured { action, choice?, rationale } object.`;
+}
+
+/** Render ONE pending blocking item for the step-boundary consult: header + fenced body. */
+function digestBlockingItem(item: PendingBlockingItem): string {
+  const body = item.body.trim();
+  const meta = [item.kind, item.severity ?? undefined, item.source ? `source: ${item.source}` : undefined]
+    .filter((p): p is string => p !== undefined)
+    .join(', ');
+  return `### ${item.title}
+- id: \`${item.id}\` (${meta})
+
+${body.length > 0 ? `\`\`\`markdown\n${body}\n\`\`\`` : '(this item has no body — judge from its title and the run history)'}`;
+}
+
+/**
+ * Compose the BLOCKING-ITEMS prompt for a step boundary the run is about to park
+ * on. Pure (output depends only on its args).
+ *
+ * The contrast with {@link buildGateEscalationPrompt} is the whole design, and
+ * the prompt states it outright: at a gate the supervisor may only advise, while
+ * here a `resolve` CLOSES the item and the walk continues without a human. That
+ * is defensible only for a finding the run itself filed and that the evidence
+ * shows is already answered — so the menu paragraph demands cited evidence from
+ * the worktree, names the two caps, and says plainly that a designed decision is
+ * never resolved this way.
+ *
+ * `pass` is deliberately framed as the ordinary answer, not the failure answer:
+ * a blocking finding exists precisely because something asked for a human, and
+ * the supervisor's job here is to remove the ones that demonstrably no longer
+ * need one — not to clear the queue.
+ */
+export function buildBlockingItemsPrompt(
+  ctx: MonitorContext,
+  history: MonitorHistory,
+  req: BlockingItemsEscalationRequest,
+): string {
+  return `${monitorCharter(ctx)}
+
+This run has reached a STEP BOUNDARY and is about to PARK: ${req.items.length} blocking review item${req.items.length === 1 ? '' : 's'} ${req.items.length === 1 ? 'is' : 'are'} still pending, and the walk cannot continue past any of them until they clear. You are being asked about each one before the run stops.
+
+The blocking items, in the order they were filed:
+${req.items.map(digestBlockingItem).join('\n\n')}${digestRunSection(history)}
+
+Step timeline so far:
+${digestSteps(history.steps)}${laneSection(history)}
+
+Recent conversation:
+${digestConversation(history.conversation)}
+
+Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — for a finding that claims a defect, go and look at the code it names. Then answer EACH item with one of:
+
+- \`resolve\` — ONLY for a \`finding\`, and ONLY when the evidence shows it is already addressed in the worktree, out of scope for this run, or a false positive. CITE THAT EVIDENCE in the rationale (the file you read, the commit, the step that fixed it). This CLOSES the item and the run continues with no human involved.
+- \`recommend\` — a human should decide, but one answer is clearly better. Name it in \`choice\`: for a finding \`dismiss\` (drop it) or \`continue\` (keep it blocking and act on it); for a decision \`approve\`, \`reject\` or \`revise\`. The item KEEPS BLOCKING; your answer is written onto it as one line of advice.
+- \`pass\` — anything else. This is the ordinary answer: the item blocks because somebody wanted a human, and it keeps doing so.
+
+A \`decision\` item is NEVER resolved here — recommend or pass. Resolving a designed gate is out of scope for you, whatever the evidence says.
+
+AUTONOMOUS EXECUTION: a \`resolve\` is executed by the host IMMEDIATELY, with no human confirmation — the finding is closed and the walk proceeds. Every resolve files a non-blocking audit finding naming the item and quoting your rationale, so the human sees at the next gate exactly what you closed and why. Resolves are CAPPED (${MONITOR_WALK_RESOLVE_CAP} per pass over this boundary, ${MONITOR_RUN_RESOLVE_CAP} for the whole run, counted across restarts); past a cap your \`resolve\` is downgraded to a \`recommend\` and the item keeps blocking.
+
+Return only the structured { items: [{ reviewItemId, action, choice?, rationale }] } object, with one entry per item above.`;
 }
 
 /**
@@ -2159,6 +2343,28 @@ export interface MonitorSession {
   ): Promise<GateEscalationDecision>;
 
   /**
+   * Look at the PENDING BLOCKING items that are about to park the run at a step
+   * boundary and answer each one: resolve it, recommend an answer, or pass.
+   *
+   * The blocking-findings sibling of `reviewGateEscalation`, and the one consult
+   * on this interface that may close a review item. That is bounded twice over —
+   * only a `finding` is ever resolvable, and the HOST caps how many resolves a
+   * walk and a run may spend — because the alternative (a supervisor that can
+   * clear its own run's defect queue without limit) is the failure mode this
+   * whole seam has to avoid.
+   *
+   * Fail-soft: any error, timeout or abort → every item `pass`, i.e. the run
+   * parks exactly as it does today. Serialized on the same `sendChain` as the
+   * other consults and OWNS its chat rendering (one note per consult). OPTIONAL
+   * on the interface for the usual reason: the many faked sessions across the
+   * suite omit it, and the host treats an absent method as "no consult".
+   */
+  reviewBlockingItems?(
+    req: BlockingItemsEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<BlockingItemDecision[]>;
+
+  /**
    * Conduct one full chat exchange in the run's unified Chat pane (the human seam
    * the tRPC `cyboflow.monitor.send` mutation drives — see Slice E). Owns the
    * inject→answer→inject orchestration so the router stays thin:
@@ -2300,6 +2506,34 @@ function gateEscalationSummary(req: GateEscalationRequest, decision: GateEscalat
     return `• Gate **${req.stepName}**: no recommendation from me — this one is a judgement call.${decision.rationale !== '(none given)' ? ` ${decision.rationale}` : ''}`;
   }
   return `• Gate **${req.stepName}**: I recommend **${decision.choice}** — ${decision.rationale} (advice only; the decision is yours).`;
+}
+
+/**
+ * The chat turn reporting the supervisor's answers at a blocking-items boundary.
+ *
+ * ONE note for the whole consult, not one per item: a run that parks on five
+ * findings would otherwise post five turns at the same instant, and the thing
+ * the human needs to see is the SHAPE of the answer — what was closed
+ * autonomously versus what is still waiting for them. Resolves are listed first
+ * and named, because those are the ones that happened without asking.
+ */
+function blockingItemsSummary(
+  req: BlockingItemsEscalationRequest,
+  decisions: BlockingItemDecision[],
+): string {
+  const titleOf = (id: string): string => req.items.find((i) => i.id === id)?.title ?? id;
+  const resolved = decisions.filter((d) => d.action === 'resolve');
+  const recommended = decisions.filter((d) => d.action === 'recommend');
+  if (resolved.length === 0 && recommended.length === 0) {
+    return `• Blocking review: ${req.items.length} item${req.items.length === 1 ? '' : 's'} still need${req.items.length === 1 ? 's' : ''} you — I had nothing to add. The run is parked.`;
+  }
+  const lines = [
+    ...resolved.map((d) => `  - resolved **${titleOf(d.reviewItemId)}** — ${d.rationale}`),
+    ...recommended.map(
+      (d) => `  - **${titleOf(d.reviewItemId)}**: I would ${d.choice ?? 'leave it to you'} — ${d.rationale}`,
+    ),
+  ];
+  return `• Blocking review (${req.items.length} item${req.items.length === 1 ? '' : 's'}):\n${lines.join('\n')}`;
 }
 
 /**
@@ -2600,6 +2834,78 @@ export class DefaultMonitorSession implements MonitorSession {
         );
       }
       return { action: 'pass', rationale: `gate escalation failed: ${message}` };
+    }
+  }
+
+  /**
+   * Answer each pending blocking item at a step boundary — see
+   * `MonitorSession.reviewBlockingItems`. Serialized on the SAME `sendChain` as
+   * every other consult that posts chat, for the same reason: it fires the
+   * instant a walk reaches a boundary and would otherwise land inside a human's
+   * exchange.
+   */
+  async reviewBlockingItems(
+    req: BlockingItemsEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<BlockingItemDecision[]> {
+    const exchange = this.sendChain.then(() => this.reviewBlockingItemsOnce(req, signal));
+    this.sendChain = exchange.then(
+      () => undefined,
+      () => undefined,
+    );
+    return exchange;
+  }
+
+  /**
+   * One blocking-items exchange (serialized by `reviewBlockingItems`): read the
+   * whole history fresh → structured query → parse → ONE chat note.
+   *
+   * Fail-soft at every step: a thrown history read / query / parse, a timeout or
+   * an abort all yield ALL-`pass`, which is a run that parks exactly as it does
+   * today. An ABORTED run posts nothing — a canceled walk has no boundary left.
+   */
+  private async reviewBlockingItemsOnce(
+    req: BlockingItemsEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<BlockingItemDecision[]> {
+    try {
+      // withRunDigest: judging whether a finding is already addressed needs what
+      // the run actually produced, not just which steps ran.
+      const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
+      const prompt = buildBlockingItemsPrompt(this.ctx, history, req);
+      const structured = await this.structuredQuery({
+        prompt,
+        schema: MONITOR_BLOCKING_ITEMS_SCHEMA,
+        cwd: this.ctx.worktreePath,
+        ...(this.model ? { model: this.model } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const decisions = parseBlockingItemsOutput(structured, req);
+      this.logger?.info('[Monitor] blocking-items verdict', {
+        runId: this.ctx.runId,
+        items: req.items.length,
+        resolved: decisions.filter((d) => d.action === 'resolve').length,
+        recommended: decisions.filter((d) => d.action === 'recommend').length,
+      });
+      if (signal?.aborted !== true) {
+        this.tryInject(buildAssistantTextEvent(blockingItemsSummary(req, decisions)));
+      }
+      return decisions;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn('[Monitor] blocking-items review failed; every item passes', {
+        runId: this.ctx.runId,
+        items: req.items.length,
+        error: message,
+      });
+      if (signal?.aborted !== true) {
+        this.tryInject(
+          buildAssistantTextEvent(
+            `⚠ Blocking review: I could not look at the pending items (${message}) — the run parks for you as usual.`,
+          ),
+        );
+      }
+      return req.items.map((i) => ({ reviewItemId: i.id, action: 'pass' as const, rationale: NO_RATIONALE }));
     }
   }
 

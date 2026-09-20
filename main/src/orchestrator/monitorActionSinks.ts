@@ -2,8 +2,10 @@
  * monitorActionSinks — the composition-root collaborators for the supervisor's
  * AUTONOMOUS actions on the programmatic plane: the lane-triage trio (read a
  * task, adjust its body, audit the rescue), the two review-loop sinks (audit the
- * consult, file a set-aside entry), and the escalation-review pair (read the
- * run's review queue for a gate consult, annotate the gate with its verdict).
+ * consult, file a set-aside entry), and the escalation-review bag (read the run's
+ * review queue for a gate consult, annotate an item with its verdict, close a
+ * blocking finding autonomously, count how many such closes the run has spent,
+ * and await the chokepoint's write barrier before a step boundary reads).
  *
  * WHY A MODULE AND NOT index.ts. These are built where the `TaskMutationDeps`
  * and review-queue seams the monitor's own chat actions use are built, so that
@@ -77,6 +79,12 @@ export interface MonitorActionSinkDeps {
   runProjectId: (runId: string) => number | undefined;
   /** The review-item chokepoint. */
   applyReviewItem: ReviewItemRouter['applyReviewItem'];
+  /**
+   * The chokepoint's read-back BARRIER (item 9 / CR-3). Optional so every
+   * existing construction of this deps bag keeps compiling; absent ⇒ the
+   * boundary reads unbarriered, exactly as it did before.
+   */
+  awaitProjectWritesSettled?: ReviewItemRouter['awaitProjectWritesSettled'];
   /** The SAME TaskMutationDeps the monitor's chat `edit_task` action routes through. */
   taskMutations: TaskMutationDeps;
   /**
@@ -248,7 +256,34 @@ export interface GateEscalationSinks {
   listRunReviewItems(runId: string): Promise<EscalationReviewItemSummary[]>;
   /** Upsert the recommendation section into a PENDING item's body. */
   annotate(runId: string, input: { reviewItemId: string; markdown: string }): Promise<void>;
+  /**
+   * Close one blocking FINDING as the supervisor (item 9), through the router's
+   * `resolve` op with actor `monitor` — the same chokepoint every other write
+   * here uses. Rejects rather than throws for the expected `invalid_status`
+   * race (a human triaged it first); the host tells that apart from a real
+   * failure, so the error must reach it.
+   */
+  resolveAsMonitor(runId: string, input: { reviewItemId: string; resolution: string }): Promise<void>;
+  /**
+   * How many autonomous resolves this run has already spent — the DURABLE half
+   * of the resolve budget, counted from the `escalation-resolve` audit findings
+   * the resolves themselves file.
+   */
+  countMonitorResolves(runId: string): Promise<number>;
+  /**
+   * The review-write barrier the step boundary awaits before reading the
+   * blocking queue (CR-3). Project-scoped, not run-scoped: the router's queue is
+   * per project.
+   */
+  awaitWritesSettled(projectId: number): Promise<void>;
 }
+
+/**
+ * The finding category the supervisor's autonomous resolves are audited under —
+ * the SAME string `programmaticRunHost` stamps on the audit finding, because
+ * this counter and that write are the two halves of one budget.
+ */
+const ESCALATION_RESOLVE_CATEGORY = 'escalation-resolve';
 
 /** One `review_items` row as the escalation query selects it. */
 interface EscalationRow {
@@ -330,5 +365,41 @@ export function buildGateEscalationSinks(deps: MonitorActionSinkDeps): GateEscal
         runId,
       });
     },
+    resolveAsMonitor: async (runId, input) => {
+      const projectId = deps.runProjectId(runId);
+      if (projectId === undefined) return;
+      await deps.applyReviewItem(projectId, {
+        op: 'resolve',
+        actor: 'monitor',
+        reviewItemId: input.reviewItemId,
+        resolution: input.resolution,
+        runId,
+      });
+    },
+    // A direct read, like `listRunReviewItems` above: the chokepoint rule governs
+    // WRITES. Fail-soft UPWARD here — an unreadable budget reads as EXHAUSTED,
+    // not as empty, because the host downgrades a resolve it cannot afford and
+    // the run merely parks for a human, which is the outcome this cap exists to
+    // preserve.
+    countMonitorResolves: async (runId) => {
+      try {
+        const row = deps.db
+          .prepare(
+            `SELECT COUNT(*) AS n
+               FROM review_items
+              WHERE run_id = ? AND source = 'monitor'
+                AND json_extract(payload_json, '$.category') = ?`,
+          )
+          .get(runId, ESCALATION_RESOLVE_CATEGORY) as { n?: unknown };
+        return typeof row?.n === 'number' ? row.n : 0;
+      } catch (err) {
+        deps.logger?.warn('[monitorActionSinks] autonomous-resolve count failed (treated as exhausted)', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return Number.MAX_SAFE_INTEGER;
+      }
+    },
+    awaitWritesSettled: (projectId) => deps.awaitProjectWritesSettled?.(projectId) ?? Promise.resolve(),
   };
 }

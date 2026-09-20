@@ -81,6 +81,26 @@ import {
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
+/**
+ * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
+ * imported from `orchestrator/monitorActionSinks` (which builds it): that module
+ * reaches into task listing and gate side-effects, and `programmatic/` must stay
+ * standalone-typecheckable. The production bag satisfies this shape by
+ * construction; a test can satisfy it with five `vi.fn()`s.
+ */
+export interface EscalationSinks {
+  /** This run's review-queue rows for the gate consult (bounded, newest first). */
+  listRunReviewItems(runId: string): Promise<EscalationReviewItemSummary[]>;
+  /** Upsert the supervisor's recommendation section into a PENDING item's body. */
+  annotate(runId: string, input: { reviewItemId: string; markdown: string }): Promise<void>;
+  /** Close one blocking FINDING as the supervisor (item 9). */
+  resolveAsMonitor(runId: string, input: { reviewItemId: string; resolution: string }): Promise<void>;
+  /** Autonomous resolves this run has already spent (the durable cap's counter). */
+  countMonitorResolves(runId: string): Promise<number>;
+  /** Review-write barrier awaited before every step-boundary queue read (CR-3). */
+  awaitWritesSettled(projectId: number): Promise<void>;
+}
+
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
   reporter: StepReporter;
@@ -270,19 +290,17 @@ export interface DefaultProgrammaticRunnerDeps {
    */
   setAsideFindingSink?: (runId: string, input: SetAsideFindingInput) => Promise<void>;
   /**
-   * ESCALATION-REVIEW reader: this run's review-queue rows as the gate consult
-   * should see them. Bound in production to the same shared deps the sinks above
-   * use. Absent ⇒ the consult runs with an empty list (still a usable consult —
-   * it just cannot cite what the run already filed).
+   * LATE-BOUND accessor for the ESCALATION-REVIEW collaborator bag
+   * (`monitorActionSinks.buildGateEscalationSinks`). A getter, not the bag
+   * itself: this runner is constructed EARLY in `initializeServices` while the
+   * bag is built in a later nested block, so the only thing available at
+   * construction time is a way to look it up per run.
+   *
+   * Absent or returning null ⇒ every escalation seam degrades to its pre-seam
+   * posture: an empty queue list, a logged-only recommendation, no autonomous
+   * resolve, and an unbarriered boundary read.
    */
-  runReviewItemReader?: (runId: string) => Promise<EscalationReviewItemSummary[]>;
-  /**
-   * ESCALATION-REVIEW writer: the `annotate` op that puts the supervisor's
-   * recommendation on the gate item, through the SAME ReviewItemRouter
-   * chokepoint every other sink here uses. Absent ⇒ a recommendation is logged
-   * and never rendered (the card looks exactly as it does today).
-   */
-  gateAnnotateSink?: (runId: string, input: { reviewItemId: string; markdown: string }) => Promise<void>;
+  escalationSinks?: () => EscalationSinks | null | undefined;
   /**
    * The project's runbook-status resolver — the SAME closure the scheduler's
    * `runbookStatus` dependency and the verify health panel share (index.ts builds
@@ -968,8 +986,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
     const monitorFindingSink = this.deps.monitorFindingSink;
     const setAsideFindingSink = this.deps.setAsideFindingSink;
-    const runReviewItemReader = this.deps.runReviewItemReader;
-    const gateAnnotateSink = this.deps.gateAnnotateSink;
+    const escalationSinks = this.deps.escalationSinks?.() ?? null;
     // Narrowed once here so the two conditional spreads below close over a
     // definitely-defined handle rather than re-narrowing `this.deps` inside a
     // callback (where TS cannot keep the narrowing).
@@ -1027,15 +1044,19 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         : {}),
       // ESCALATION REVIEW. No `onGateOpened` is passed: the host builds its own
       // gate-open hook from `reviewGateEscalation` whenever a capable monitor is
-      // wired, and `args.onGateOpened` stays a test-only override. These two are
-      // the reader/writer that hook needs.
-      ...(runReviewItemReader
-        ? { listRunReviewItems: (runId: string) => runReviewItemReader(runId) }
-        : {}),
-      ...(gateAnnotateSink
+      // wired, and `args.onGateOpened` stays a test-only override. These five are
+      // the readers/writers that hook — and item 9's step-boundary sibling —
+      // need: the queue list, the annotate, the autonomous resolve, its durable
+      // budget, and the write barrier the boundary reads behind.
+      ...(escalationSinks
         ? {
+            listRunReviewItems: (runId: string) => escalationSinks.listRunReviewItems(runId),
             annotateReviewItem: (input: { reviewItemId: string; markdown: string }) =>
-              gateAnnotateSink(ctx.runId, input),
+              escalationSinks.annotate(ctx.runId, input),
+            resolveReviewItemAsMonitor: (input: { reviewItemId: string; resolution: string }) =>
+              escalationSinks.resolveAsMonitor(ctx.runId, input),
+            countMonitorResolves: (runId: string) => escalationSinks.countMonitorResolves(runId),
+            awaitReviewWritesSettled: (projectId: number) => escalationSinks.awaitWritesSettled(projectId),
           }
         : {}),
       // F8 "never skip silently" (docs/proposals/visual-verification-brittleness-
