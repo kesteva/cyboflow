@@ -399,6 +399,85 @@ export function parseResolutionKind(resolution: string | null): ResolutionKind |
 }
 
 // ---------------------------------------------------------------------------
+// Gate-resolution grammar — `<verdict>[<modifier>]: <note>`
+// ---------------------------------------------------------------------------
+
+/** The three-way verdict a human records at a `gate:human-step:*` decision item. */
+export type GateVerdictWord = 'approve' | 'reject' | 'revise';
+
+/** A {@link parseGateResolution} result. `modifier`/`note` are omitted when absent. */
+export interface ParsedGateResolution {
+  verdict: GateVerdictWord;
+  /** The bracketed qualifier, e.g. 'no-findings'. Validated by the HANDLER, not here. */
+  modifier?: string;
+  /** The human's own words after the colon, trimmed. Omitted when empty. */
+  note?: string;
+}
+
+/**
+ * The only modifier the grammar carries today: an approve-design approval that
+ * must NOT log the review's remaining entries as accepted-risk findings.
+ */
+export const GATE_RESOLUTION_MODIFIER_NO_FINDINGS = 'no-findings';
+
+/**
+ * `<verdict>` / `<verdict>[<modifier>]` / `<verdict>: <note>` /
+ * `<verdict>[<modifier>]: <note>`, anchored on the TRIMMED string.
+ *
+ * The `i` flag exists for the VERDICT (legacy writers spelled it 'Approve');
+ * {@link parseGateResolution} normalizes that capture to lower case. It also
+ * lets an upper-case modifier through, which is deliberate — the parser never
+ * throws on an old row, and the resolve handler is the thing that refuses any
+ * modifier it does not recognize.
+ */
+const GATE_RESOLUTION_RE = /^(approve|reject|revise)(?:\[([a-z-]+)\])?(?::\s*([\s\S]*))?$/i;
+
+/**
+ * Build the resolution string stored for an explicit gate verdict.
+ *
+ * WHY A PREFIX. Every verdict reader used to string-sniff the whole resolution
+ * (`r.includes('reject')`), so a human note like "revise: the architecture
+ * rejects empty input" read as a REJECT and ended the run. An anchored verdict
+ * prefix makes the verdict structural and leaves the note free text; readers
+ * parse this first and fall back to the sniff only for legacy rows.
+ *
+ * A blank/whitespace `note` or `modifier` is dropped, so a bare outcome stores
+ * exactly the bare verdict word it stored before this grammar existed.
+ */
+export function composeGateResolution(p: {
+  verdict: GateVerdictWord;
+  modifier?: string;
+  note?: string;
+}): string {
+  const modifier = p.modifier?.trim();
+  const note = p.note?.trim();
+  const head = modifier ? `${p.verdict}[${modifier}]` : p.verdict;
+  return note ? `${head}: ${note}` : head;
+}
+
+/**
+ * Parse a stored resolution written by {@link composeGateResolution}, or null
+ * for anything else — legacy free text ('please revise this', 'approved'), the
+ * serialized `idea-verdicts:` / `design-verdicts:` maps, and the
+ * `promoted:`/`fixed:`/`triaged:` triage prefixes all return null so their
+ * existing readers keep owning them.
+ */
+export function parseGateResolution(
+  resolution: string | null | undefined,
+): ParsedGateResolution | null {
+  if (typeof resolution !== 'string') return null;
+  const m = GATE_RESOLUTION_RE.exec(resolution.trim());
+  if (m === null) return null;
+  const modifier = m[2];
+  const note = (m[3] ?? '').trim();
+  return {
+    verdict: m[1].toLowerCase() as GateVerdictWord,
+    ...(modifier ? { modifier } : {}),
+    ...(note.length > 0 ? { note } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Approve-ideas batch gate — per-idea verdict map
 // ---------------------------------------------------------------------------
 

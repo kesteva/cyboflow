@@ -67,7 +67,11 @@ import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
 import { selectFindingForSeed } from '../reviewItemListing';
-import { findingBucket, type FindingTagBucket } from '../../../../shared/types/reviews';
+import {
+  findingBucket,
+  parseGateResolution,
+  type FindingTagBucket,
+} from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
@@ -516,8 +520,14 @@ export function readSelectedFindingsBlock(
  * offers only Approve / Reject, so `humanGate.parseGateVerdict` string-sniffs the
  * resolution down to approve/reject/revise. The flow's "Pick subset" option is
  * therefore ORCHESTRATED-ONLY. The one trimming signal that survives to `prove`
- * is a qualification a human typed into the note, so the raw string is what we
- * hand over — composeStepPrompt drops it when it is a bare verdict word.
+ * is a qualification a human typed into the note, so the note is what we hand
+ * over.
+ *
+ * PREFIX FIRST: a row written by `composeGateResolution` ('approve: only web')
+ * yields just the NOTE — undefined for a bare verdict, so composeStepPrompt has
+ * nothing to drop. A legacy row (parse returns null) still hands over the raw
+ * string exactly as before, and composeStepPrompt keeps dropping a bare verdict
+ * word there.
  *
  * Fail-soft: a missing review_items table or any thrown query yields undefined.
  */
@@ -532,7 +542,9 @@ export function readApproveRunbookResolution(db: DatabaseLike, runId: string): s
       )
       .get(runId) as { resolution?: string | null } | undefined;
     const resolution = row?.resolution;
-    return typeof resolution === 'string' && resolution.trim().length > 0 ? resolution : undefined;
+    if (typeof resolution !== 'string' || resolution.trim().length === 0) return undefined;
+    const parsed = parseGateResolution(resolution);
+    return parsed !== null ? parsed.note : resolution;
   } catch {
     return undefined;
   }
@@ -579,6 +591,11 @@ export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): 
  * Returns undefined for a bare verdict word — rendering "> Revise" as the human's
  * guidance is noise that reads like an instruction when there is none — and for
  * any thrown query.
+ *
+ * PREFIX FIRST: a row written by `composeGateResolution` ('revise: only AR-2
+ * matters') yields just the NOTE, so the human's words survive verbatim even
+ * when they contain a verdict word. Legacy rows keep today's behaviour: a bare
+ * verdict word is dropped by the regex below, any other free text passes through.
  */
 export function readGateResolutionNote(
   db: DatabaseLike,
@@ -596,6 +613,8 @@ export function readGateResolutionNote(
       .get(runId, `gate:human-step:${stepId}`) as { resolution?: string | null } | undefined;
     const resolution = (row?.resolution ?? '').trim();
     if (resolution.length === 0) return undefined;
+    const parsed = parseGateResolution(resolution);
+    if (parsed !== null) return parsed.note;
     return /^(approve|approved|reject|rejected|revise|retry)$/i.test(resolution) ? undefined : resolution;
   } catch {
     return undefined;

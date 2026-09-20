@@ -338,6 +338,12 @@ export function ReviewItemCard({
   // Free-text answer for an OPTION-LESS recovery gate (malformed AskUserQuestion
   // payload → no recovered options). Still delivered via answerRecoveryGate.
   const [recoveryText, setRecoveryText] = React.useState('');
+  // The human's own words on an approve-design REVISE ("only AR-2 matters, drop
+  // AR-11"). Sent as the resolve's `resolution` next to outcome 'revise', which
+  // the server composes into 'revise: <note>' — the re-run reads it back through
+  // readGateResolutionNote and it outranks the review itself. Empty => no note,
+  // so the stored resolution stays the bare verdict word it is today.
+  const [reviseNote, setReviseNote] = React.useState('');
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -369,8 +375,17 @@ export function ReviewItemCard({
   // findings"): the controller loops back to the design steps with the
   // adversarial review threaded in. It is never 'reject' — that verdict ends the
   // run, which the 2026-09-15 launch smoke hit from this very button.
+  // A REVISE on the approve-design gate may carry the human's note (the textarea
+  // rendered above the buttons). Every other decision sends the bare outcome, so
+  // its stored resolution is byte-identical to today's; an empty textarea is the
+  // same, since `undefined` is dropped before the mutation.
   const handleGateDecision = (outcome: 'approve' | 'reject' | 'revise'): void => {
-    void resolve(item.project_id, item.id, { outcome }).then((r) => {
+    const note =
+      outcome === 'revise' && isApproveDesignGateItem(item) ? reviseNote.trim() || undefined : undefined;
+    void resolve(item.project_id, item.id, {
+      outcome,
+      ...(note !== undefined ? { resolution: note } : {}),
+    }).then((r) => {
       if (r !== null) {
         trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
         onResolved?.();
@@ -730,6 +745,22 @@ export function ReviewItemCard({
         // feedback, so the generic copy would read backwards for it.
         return (
           <>
+            {/* The revise note. Shown only for the approve-design gate and only on
+                the surface that actually offers the revision loop — the queue
+                surface routes to the run instead (usesDefaultActions above), so
+                there is no decision to annotate there. `w-full` makes the flex-wrap
+                row break, which puts the buttons underneath. */}
+            {isApproveDesignGateItem(item) && (
+              <textarea
+                value={reviseNote}
+                onChange={(e) => setReviseNote(e.target.value)}
+                placeholder="Optional: what to change — e.g. only AR-2 matters, drop AR-11"
+                rows={2}
+                disabled={busy}
+                data-testid="design-gate-note"
+                className="w-full rounded border border-border-primary bg-bg-secondary px-2 py-1 text-xs text-text-primary"
+              />
+            )}
             <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
               {isApproveDesignGateItem(item) ? 'Continue, log as findings' : 'Approve & resume'}
             </Button>

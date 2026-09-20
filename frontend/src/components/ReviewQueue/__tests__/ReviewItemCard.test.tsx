@@ -200,6 +200,93 @@ describe('ReviewItemCard', () => {
     expect(mockDismiss).not.toHaveBeenCalled();
   });
 
+  it('the approve-design gate offers a revise note, and only there', () => {
+    // The textarea belongs to the revision loop: it is the human's chance to say
+    // "only AR-2 matters". A generic gate has no such loop, and the QUEUE surface
+    // routes to the run instead of deciding, so neither renders it.
+    const { rerender } = render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    expect(screen.getByTestId('design-gate-note')).toHaveAttribute(
+      'placeholder',
+      'Optional: what to change — e.g. only AR-2 matters, drop AR-11',
+    );
+
+    rerender(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_plan_n', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="session"
+      />,
+    );
+    expect(screen.queryByTestId('design-gate-note')).not.toBeInTheDocument();
+
+    rerender(
+      <ReviewItemCard
+        item={makeItem('decision', {
+          id: 'rvw_note_q',
+          blocking: true,
+          source: 'gate:human-step:approve-design',
+          run_id: 'run_1',
+        })}
+        surface="queue"
+      />,
+    );
+    expect(screen.queryByTestId('design-gate-note')).not.toBeInTheDocument();
+  });
+
+  it("sends the typed note alongside outcome=revise, and nothing when it is blank", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note_send', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    fireEvent.change(screen.getByTestId('design-gate-note'), {
+      target: { value: '  only AR-2 matters, drop AR-11  ' },
+    });
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_send',
+        outcome: 'revise',
+        resolution: 'only AR-2 matters, drop AR-11',
+      }),
+    );
+
+    // Approve never carries the note — it is guidance for a RE-RUN.
+    mockResolve.mockClear();
+    fireEvent.click(screen.getByTestId('decision-resolve'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_send',
+        outcome: 'approve',
+      }),
+    );
+  });
+
+  it('an empty note sends no resolution at all (the stored verdict stays bare)', async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note_empty', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    fireEvent.change(screen.getByTestId('design-gate-note'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_empty',
+        outcome: 'revise',
+      }),
+    );
+  });
+
   it('the approve-design gate also relabels by PAYLOAD when minted on the orchestrated plane (no gate:human-step source)', () => {
     render(
       <ReviewItemCard

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { DefaultProgrammaticRunner, readSelectedFindingsBlock } from '../defaultProgrammaticRunner';
+import {
+  DefaultProgrammaticRunner,
+  readSelectedFindingsBlock,
+  readGateResolutionNote,
+} from '../defaultProgrammaticRunner';
 import type { DatabaseLike } from '../../types';
 import type { StepReporter } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
@@ -833,5 +837,50 @@ describe('readSelectedFindingsBlock', () => {
       },
     } as unknown as DatabaseLike;
     expect(readSelectedFindingsBlock(db, JSON.stringify(['boom', 'ok']))).toContain('Fine');
+  });
+});
+
+describe('readGateResolutionNote', () => {
+  /** A DatabaseLike whose single resolved gate row carries `resolution`. */
+  function dbWithResolution(resolution: string | null): DatabaseLike {
+    return {
+      prepare: () => ({
+        get: () => ({ resolution }),
+        all: () => [],
+        run: () => ({ changes: 0 }),
+      }),
+    } as unknown as DatabaseLike;
+  }
+  const noteOf = (resolution: string | null): string | undefined =>
+    readGateResolutionNote(dbWithResolution(resolution), 'run-1', 'approve-design');
+
+  it('returns the NOTE of a prefixed resolution, verdict words in it and all', () => {
+    // The human's own words reach the re-run through this reader, so a note that
+    // happens to contain 'rejects' must survive verbatim rather than be dropped
+    // or mistaken for the verdict.
+    expect(noteOf('revise: only AR-2 matters, drop AR-11')).toBe('only AR-2 matters, drop AR-11');
+    expect(noteOf('revise: the architecture rejects empty input')).toBe(
+      'the architecture rejects empty input',
+    );
+    expect(noteOf('approve[no-findings]: ship it')).toBe('ship it');
+  });
+
+  it('returns undefined for a bare verdict (nothing to render as guidance)', () => {
+    expect(noteOf('revise')).toBeUndefined();
+    expect(noteOf('approve')).toBeUndefined();
+    expect(noteOf('approve[no-findings]')).toBeUndefined();
+    expect(noteOf('revise:   ')).toBeUndefined();
+  });
+
+  it('keeps legacy rows on their existing behaviour', () => {
+    // Pre-grammar rows: a bare verdict word is still dropped by the regex, any
+    // other free text still passes through whole.
+    expect(noteOf('approved')).toBeUndefined();
+    expect(noteOf('retry')).toBeUndefined();
+    expect(noteOf('the spend screen has no way back to Home')).toBe(
+      'the spend screen has no way back to Home',
+    );
+    expect(noteOf(null)).toBeUndefined();
+    expect(noteOf('   ')).toBeUndefined();
   });
 });

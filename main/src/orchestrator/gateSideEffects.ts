@@ -60,7 +60,11 @@ import {
   adversarialSeverityToReviewSeverity,
   type AdversarialFinding,
 } from '../../../shared/types/adversarialReview';
-import { parseIdeaVerdictMap, parseDesignVerdictMap } from '../../../shared/types/reviews';
+import {
+  parseIdeaVerdictMap,
+  parseDesignVerdictMap,
+  parseGateResolution,
+} from '../../../shared/types/reviews';
 import { parseThoroughnessDeclaration } from '../../../shared/types/thoroughness';
 
 // ---------------------------------------------------------------------------
@@ -108,6 +112,12 @@ export type GateDecision = 'approve' | 'revise' | 'reject' | 'abort';
  * on null would silently stop binding designs on the most common approve path.
  */
 export function gateDecisionFromResolution(resolution: string | null | undefined): GateDecision {
+  // PREFIX FIRST (same contract as parseGateVerdict): a resolution written by
+  // `composeGateResolution` carries an anchored verdict, so the note after the
+  // colon is never sniffed — 'revise: the architecture rejects empty input' is a
+  // REVISE. Only a legacy row (parse returns null) falls through to the sniff.
+  const parsed = parseGateResolution(resolution);
+  if (parsed !== null) return parsed.verdict;
   const r = (resolution ?? '').trim().toLowerCase();
   if (r.includes('reject')) return 'reject';
   if (r.includes('revise') || r.includes('retry')) return 'revise';

@@ -30,6 +30,21 @@ describe('parseGateVerdict', () => {
     // reject still wins over a retry mention in the same note.
     expect(parseGateVerdict('reject — do not retry')).toBe('reject');
   });
+
+  it('reads the anchored verdict prefix without sniffing the note', () => {
+    // THE bug the grammar fixes: 'rejects' inside the human's note used to win
+    // the substring sniff and END the run instead of looping the design back.
+    expect(parseGateVerdict('revise: the architecture rejects empty input')).toBe('revise');
+    expect(parseGateVerdict('approve: reject nothing, this is fine')).toBe('approve');
+    expect(parseGateVerdict('reject')).toBe('reject');
+    expect(parseGateVerdict('approve[no-findings]')).toBe('approve');
+    expect(parseGateVerdict('Revise: mixed case verdict')).toBe('revise');
+  });
+
+  it('still falls back to the legacy sniff for a pre-grammar row', () => {
+    expect(parseGateVerdict('please revise this')).toBe('revise');
+    expect(parseGateVerdict('approved')).toBe('approve');
+  });
 });
 
 describe('ReviewQueueHumanGate', () => {

@@ -197,6 +197,18 @@ describe('gateDecisionFromResolution', () => {
     expect(gateDecisionFromResolution('   ')).toBe('approve');
     expect(gateDecisionFromResolution(undefined)).toBe('approve');
   });
+
+  it('reads the anchored verdict prefix without sniffing the note', () => {
+    // Same contract (and same bug) as parseGateVerdict: the note after the colon
+    // is the human's words, never a verdict source. 'rejects' in it must NOT end
+    // the run.
+    expect(gateDecisionFromResolution('revise: the architecture rejects empty input')).toBe('revise');
+    expect(gateDecisionFromResolution('approve[no-findings]')).toBe('approve');
+    expect(gateDecisionFromResolution('reject: retry later if you must')).toBe('reject');
+    expect(gateDecisionFromResolution('REVISE')).toBe('revise');
+    // Legacy rows keep the sniff.
+    expect(gateDecisionFromResolution('please revise this')).toBe('revise');
+  });
 });
 
 describe('GateSideEffects.apply — launch + approve-ideas', () => {

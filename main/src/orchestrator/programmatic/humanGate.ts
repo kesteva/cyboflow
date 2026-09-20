@@ -20,6 +20,7 @@
 import type { EventEmitter } from 'events';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
+import { parseGateResolution } from '../../../../shared/types/reviews';
 import type { HumanGateDecision } from './types';
 
 export interface HumanGateRequest {
@@ -101,19 +102,29 @@ export interface HumanGateOpener {
 }
 
 /**
- * Map a free-text review-item `resolution` to the three-way gate verdict.
+ * Map a review-item `resolution` to the three-way gate verdict.
  *
- * Convention (mirrors questionRouter's isApproveAnswer string-sniffing): an
- * explicit 'reject', 'revise', or 'retry' anywhere in the resolution selects a
- * verdict; anything else — including an empty note — is an APPROVE, because
- * resolving the blocking gate item IS the human's act of approval unless they
- * said otherwise. 'retry' is an ALIAS for 'revise': a human answering a gate /
- * escalation with "retry" means re-run this step, never approve-and-skip it — so
- * it must route through the revise (loop-back / re-run) path, not approve.
- * Precedence: 'reject' first (a rejection wins over any revise/retry phrasing in
- * the same note), then 'revise', then 'retry' → 'revise', else approve.
+ * PREFIX FIRST. A resolution written by `composeGateResolution` carries the
+ * verdict as an anchored prefix (`revise: only AR-2 matters`), and that verdict
+ * is authoritative — the note after the colon is the human's own words and is
+ * never sniffed. This is the bug the grammar fixes: "revise: the architecture
+ * rejects empty input" used to read as a REJECT (the word 'rejects' appears in
+ * the note) and END the run instead of looping the design steps back.
+ *
+ * LEGACY FALLBACK, unchanged, for every row written before the grammar (and for
+ * free text a human typed by hand): an explicit 'reject', 'revise', or 'retry'
+ * anywhere in the resolution selects a verdict; anything else — including an
+ * empty note — is an APPROVE, because resolving the blocking gate item IS the
+ * human's act of approval unless they said otherwise. 'retry' is an ALIAS for
+ * 'revise': a human answering a gate / escalation with "retry" means re-run this
+ * step, never approve-and-skip it — so it must route through the revise
+ * (loop-back / re-run) path, not approve. Precedence: 'reject' first (a
+ * rejection wins over any revise/retry phrasing in the same note), then
+ * 'revise', then 'retry' → 'revise', else approve.
  */
 export function parseGateVerdict(resolution: string | null | undefined): HumanGateDecision {
+  const parsed = parseGateResolution(resolution);
+  if (parsed !== null) return parsed.verdict;
   const r = (resolution ?? '').trim().toLowerCase();
   if (r.includes('reject')) return 'reject';
   if (r.includes('revise')) return 'revise';
