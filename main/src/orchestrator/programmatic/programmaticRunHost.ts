@@ -909,8 +909,9 @@ export class ProgrammaticRunHost implements ControllerHost {
         this.args.resolveReviewItemAsMonitor !== undefined &&
         (await this.canSpendResolve(runId))
       ) {
-        await this.resolveBlockingFinding(runId, item, decision.rationale);
-        return;
+        // A resolve whose audit record did not land never happened — fall
+        // through to the recommendation like any other refused resolve.
+        if (await this.resolveBlockingFinding(runId, item, decision.rationale)) return;
       }
       await this.annotateBlockingItem(runId, item, decision);
     } catch (err) {
@@ -961,20 +962,40 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   /**
-   * Close one blocking finding as the supervisor and file the audit record.
+   * File the audit record, THEN close one blocking finding as the supervisor.
+   * Returns whether the item was actually resolved, so a caller can fall back to
+   * a recommendation when it was not.
    *
-   * The walk counter is incremented on the RESOLVE landing, not on the audit
-   * finding: the resolve is what unblocks the run, and a dropped audit note must
-   * not hand the walk a free extra resolve. The audit finding is filed after and
-   * is fail-soft in its own right (`fileMonitorAuditFinding`) — a run that closed
-   * an item but could not record it is bad, and one that closed it twice would
-   * be worse.
+   * The order is load-bearing. {@link MONITOR_RUN_RESOLVE_CAP} is enforced by
+   * counting the `escalation-resolve` audit findings already committed for the
+   * run, so a resolve that landed WITHOUT its note is a resolve the durable cap
+   * will never see — an audit sink that is missing or broken would quietly hand
+   * the run an unbounded budget. Filing first inverts that: the only failure mode
+   * left is a note without its resolve, which costs the run one unit of budget it
+   * never spent and leaves the item blocking for the human. That is the safe
+   * direction.
+   *
+   * The walk counter is still incremented on the RESOLVE landing, not on the
+   * audit finding: only a resolve that actually unblocks the run may spend walk
+   * budget.
    */
   private async resolveBlockingFinding(
     runId: string,
     item: PendingBlockingItem,
     rationale: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const audited = await this.fileMonitorAuditFinding(
+      `Resolved blocking finding: ${item.title}`,
+      `${rationale}\n\nResolved item: \`${item.id}\` — ${item.title}`,
+      ESCALATION_RESOLVE_FINDING_CATEGORY,
+    );
+    if (!audited) {
+      this.args.logger?.warn(
+        '[ProgrammaticRunHost] supervisor resolve abandoned: no audit record, recommending instead',
+        { runId, reviewItemId: item.id },
+      );
+      return false;
+    }
     await this.args.resolveReviewItemAsMonitor?.({
       reviewItemId: item.id,
       resolution: `resolved by supervisor: ${rationale}`,
@@ -985,32 +1006,31 @@ export class ProgrammaticRunHost implements ControllerHost {
       reviewItemId: item.id,
       walkSpent: this.walkResolveCount,
     });
-    await this.fileMonitorAuditFinding(
-      `Resolved blocking finding: ${item.title}`,
-      `${rationale}\n\nResolved item: \`${item.id}\` — ${item.title}`,
-      ESCALATION_RESOLVE_FINDING_CATEGORY,
-    );
+    return true;
   }
 
   /**
-   * File one non-blocking `monitor`-sourced audit finding, fail-soft.
+   * File one non-blocking `monitor`-sourced audit finding. NEVER throws; returns
+   * whether the note actually landed.
    *
-   * The paper trail for an action the human never confirmed. Deliberately
-   * SWALLOWS its failure: the action it records has already happened, and losing
-   * the note must not also lose (or, worse, half-undo) the action. It is also
-   * what {@link MONITOR_RUN_RESOLVE_CAP} counts, so an unfiled note costs the
-   * run one unit of durable budget it will never get back — the safe direction.
+   * The paper trail for an action the human never confirmed — and, for the
+   * `escalation-resolve` category, the ledger {@link MONITOR_RUN_RESOLVE_CAP} is
+   * counted from. A caller whose action must stay inside that cap therefore has
+   * to check the return value and ABANDON the action when the note did not land;
+   * see {@link resolveBlockingFinding}.
    */
-  private async fileMonitorAuditFinding(title: string, body: string, category: string): Promise<void> {
-    if (!this.args.fileMonitorFinding) return;
+  private async fileMonitorAuditFinding(title: string, body: string, category: string): Promise<boolean> {
+    if (!this.args.fileMonitorFinding) return false;
     try {
       await this.args.fileMonitorFinding({ title, body, category });
+      return true;
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] supervisor audit finding not filed (fail-soft)', {
         runId: this.args.runId,
         title,
         error: err instanceof Error ? err.message : String(err),
       });
+      return false;
     }
   }
 

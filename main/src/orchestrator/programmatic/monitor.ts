@@ -914,8 +914,11 @@ export function parseBlockingItemsOutput(
     // An id we never showed is a hallucinated target — dropping it is the whole
     // point of checking, since acting on it would resolve an unrelated row.
     if (item === undefined || seen.has(reviewItemId)) continue;
-    seen.add(reviewItemId);
     if (!isBlockingItemAction(e.action)) continue;
+    // Claim the id only once the entry has actually yielded a decision: a
+    // malformed entry that burned the slot here would silently drop a
+    // well-formed retry for the same item later in the list.
+    seen.add(reviewItemId);
     const rationaleRaw = typeof e.rationale === 'string' ? e.rationale.trim() : '';
     const rationale = rationaleRaw.length > 0 ? rationaleRaw : NO_RATIONALE;
     const action = e.action === 'resolve' && item.kind !== 'finding' ? 'recommend' : e.action;

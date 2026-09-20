@@ -3136,7 +3136,7 @@ describe('parseBlockingItemsOutput (downgrade table)', () => {
     expect(out).toEqual([{ reviewItemId: 'rvw_d1', action: 'recommend', rationale: 'the gate is moot.' }]);
   });
 
-  it('keeps the LAST word on an item to one entry (a repeated id is ignored)', () => {
+  it('keeps the FIRST verdict for an item (a repeated id is ignored)', () => {
     const out = parseBlockingItemsOutput(
       {
         items: [
@@ -3173,6 +3173,21 @@ describe('parseBlockingItemsOutput (downgrade table)', () => {
       blockingReq(),
     );
     expect(out).toEqual([]);
+  });
+
+  it('a malformed entry does not burn the id: a later well-formed one still counts', () => {
+    const out = parseBlockingItemsOutput(
+      {
+        items: [
+          { reviewItemId: 'rvw_f1', action: 'delete', rationale: 'x' },
+          { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'dismiss', rationale: 'cosmetic.' },
+        ],
+      },
+      blockingReq(),
+    );
+    expect(out).toEqual([
+      { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'dismiss', rationale: 'cosmetic.' },
+    ]);
   });
 });
 

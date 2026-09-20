@@ -1619,6 +1619,7 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
     const host = new ProgrammaticRunHost({
       runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
       monitor, resolveReviewItemAsMonitor, annotateReviewItem,
+      fileMonitorFinding: vi.fn().mockResolvedValue(undefined),
     });
 
     for (const id of ids) {
@@ -1628,6 +1629,62 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
 
     expect(resolveReviewItemAsMonitor).toHaveBeenCalledTimes(MONITOR_WALK_RESOLVE_CAP);
     // The one past the cap became advice rather than being dropped.
+    expect(annotateReviewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('abandons the resolve when the audit record cannot be filed (the durable cap is counted from it)', async () => {
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed.' }]),
+      resolveReviewItemAsMonitor,
+      annotateReviewItem,
+      fileMonitorFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    // Never resolved — the item keeps blocking and the advice reaches the human.
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+    expect(annotateReviewItem).toHaveBeenCalledTimes(1);
+    expect(blockingGate.trace).toEqual(['list', 'park']);
+
+  });
+
+  it('an abandoned resolve does NOT consume walk budget', async () => {
+    // CAP + 1 boundaries on ONE host, the FIRST audit write failing. If the
+    // abandoned item had spent a walk unit, only CAP - 1 of the rest could
+    // resolve; it spends none, so all CAP of them do.
+    const total = MONITOR_WALK_RESOLVE_CAP + 1;
+    const blockingGate = makeBlockingGate([]);
+    const monitor: MonitorSession = {
+      triage: vi.fn(),
+      answer: vi.fn().mockResolvedValue(''),
+      reviewBlockingItems: vi.fn(async (req: BlockingItemsEscalationRequest) =>
+        req.items.map((i) => ({ reviewItemId: i.id, action: 'resolve' as const, rationale: 'already fixed.' })),
+      ),
+    };
+    const resolveReviewItemAsMonitor = vi.fn(async (input: { reviewItemId: string }) => {
+      blockingGate.items = blockingGate.items.filter((i) => i.id !== input.reviewItemId);
+    });
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const fileMonitorFinding = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('queue down'))
+      .mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor, resolveReviewItemAsMonitor, annotateReviewItem, fileMonitorFinding,
+    });
+
+    for (let i = 0; i < total; i += 1) {
+      blockingGate.items = [blockingItem({ id: `rvw_f${i}` })];
+      await host.awaitBlockingReviewItems('r');
+    }
+
+    expect(resolveReviewItemAsMonitor).toHaveBeenCalledTimes(MONITOR_WALK_RESOLVE_CAP);
     expect(annotateReviewItem).toHaveBeenCalledTimes(1);
   });
 

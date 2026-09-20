@@ -972,6 +972,12 @@ describe('blocking-items escalation at a step boundary (real gate + router)', ()
   /**
    * A spawner that, on its FIRST step, files a pending blocking finding through
    * the router WITHOUT awaiting it — the MCP report_finding shape.
+   *
+   * The create is deliberately queued BEHIND a slow no-op on the same
+   * concurrency-1 project queue. Without it the fire-and-forget write usually
+   * commits before the boundary reads anyway, and the test would pass with the
+   * barrier removed; with it, an un-barriered read provably sees an empty queue,
+   * so the assertion below is about the barrier and nothing else.
    */
   function findingFilingSpawner(router: ReviewItemRouter, runId: string): ClaudeSpawnerLike {
     let filed = false;
@@ -979,6 +985,7 @@ describe('blocking-items escalation at a step boundary (real gate + router)', ()
       spawnCliProcess: vi.fn(async () => {
         if (filed) return;
         filed = true;
+        void router._queueForProject(1).add(() => new Promise<void>((r) => setTimeout(r, 40)));
         void router.applyReviewItem(1, {
           op: 'create',
           actor: 'agent:code-review',
@@ -1053,6 +1060,10 @@ describe('blocking-items escalation at a step boundary (real gate + router)', ()
       blockingGate,
       monitorFactory: () => monitor,
       escalationSinks: () => realEscalationSinks(router, 'run-bi-resolve'),
+      // The supervisor's autonomous resolve is gated on its audit record landing
+      // (the durable cap is counted from those findings), so the sink production
+      // always wires has to be here too.
+      monitorFindingSink: vi.fn().mockResolvedValue(undefined),
     });
 
     await expect(runner.run(ctxFor('run-bi-resolve'))).resolves.toBeUndefined();
@@ -1068,7 +1079,7 @@ describe('blocking-items escalation at a step boundary (real gate + router)', ()
     expect(finding.status).toBe('resolved');
     expect(finding.resolution).toBe('resolved by supervisor: the guard landed in this worktree.');
     expect(finding.resolved_by).toBe('monitor');
-  });
+  }, 30_000);
 
   it('on a PASS the run parks on the finding until a human clears it', async () => {
     const db = buildDb();
@@ -1125,5 +1136,5 @@ describe('blocking-items escalation at a step boundary (real gate + router)', ()
       .get(findingId) as { resolved_by: string | null; resolution: string | null };
     expect(finding.resolved_by).toBe('user');
     expect(finding.resolution).toBe('fixed by hand');
-  });
+  }, 30_000);
 });
