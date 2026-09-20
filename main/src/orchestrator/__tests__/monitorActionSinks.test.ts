@@ -269,7 +269,7 @@ function makeLogger(): LoggerLike & { warn: ReturnType<typeof vi.fn> } {
 
 describe('buildGateEscalationSinks', () => {
   describe('listRunReviewItems', () => {
-    it('selects this run’s PENDING rows plus every monitor-sourced row, newest first, capped', async () => {
+    it('selects this run’s PENDING FINDINGS plus every monitor-sourced row, newest first, capped', async () => {
       const { db, sql, args } = recordingDb([]);
       const { deps } = makeDeps({ db });
 
@@ -282,12 +282,29 @@ describe('buildGateEscalationSinks', () => {
       // CR-9's two-armed predicate: an audit finding a human already triaged
       // still describes something this run did unattended, so the `monitor` arm
       // deliberately ignores status.
-      expect(text).toContain("WHERE run_id = ? AND (status = 'pending' OR source = 'monitor')");
+      expect(text).toContain("WHERE run_id = ? AND ((kind = 'finding' AND status = 'pending') OR source = 'monitor')");
       // Newest first so the cap drops the OLDEST context, not the freshest.
       expect(text).toContain('ORDER BY created_at DESC, id DESC');
       // The LIMIT is the ONLY place the cap is enforced.
       expect(text).toContain('LIMIT ?');
       expect(args).toEqual([['run-1', ESCALATION_REVIEW_ITEM_CAP]]);
+    });
+
+    it('does NOT select a pending DECISION row — the open gate’s own item is not queue context', async () => {
+      // The consult runs while the gate's decision row is itself pending, so an
+      // unqualified `status = 'pending'` arm quotes the gate back at the
+      // supervisor reviewing it, and spends the cap on sibling gates, permission
+      // prompts and notifications too. Asserted against the predicate TEXT
+      // because the read's catch turns any mistake here into a silent [].
+      const { db, sql } = recordingDb([]);
+      const { deps } = makeDeps({ db });
+
+      await buildGateEscalationSinks(deps).listRunReviewItems('run-1');
+
+      const text = sql[0].replace(/\s+/g, ' ').trim();
+      // Every pending arm is qualified by kind; a bare one would match a decision.
+      expect(text).not.toContain("(status = 'pending' OR");
+      expect(text).toContain("kind = 'finding' AND status = 'pending'");
     });
 
     it('maps rows to summaries, defaulting a null source/severity and a non-string kind', async () => {

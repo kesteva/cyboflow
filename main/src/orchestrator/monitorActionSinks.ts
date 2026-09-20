@@ -270,11 +270,17 @@ function nullableStr(v: unknown): string | null {
  *
  * The READ is a direct `review_items` SELECT rather than a router call: it is a
  * read, and the chokepoint rule governs WRITES. Its predicate is deliberately
- * two-armed — every PENDING row of this run, plus every `monitor`-sourced row
- * whatever its status. The second arm is the point of CR-9: an audit finding a
- * human already triaged still describes something this run did unattended, and
+ * two-armed — every PENDING FINDING of this run, plus every `monitor`-sourced
+ * row whatever its status. The second arm is the point of CR-9: an audit finding
+ * a human already triaged still describes something this run did unattended, and
  * the gate reviewer is exactly the person who should see it. Newest first so the
  * cap drops the oldest context, not the freshest.
+ *
+ * The `kind = 'finding'` qualifier on the FIRST arm is what keeps the consult
+ * about the run's OUTSTANDING DEFECTS. Without it every pending row of the run
+ * matches — the open gate's OWN decision row first among them, plus sibling
+ * gates, permission prompts and notifications — so the cap would spend itself
+ * quoting the gate back at the supervisor that is reviewing it.
  *
  * The WRITE goes through the `annotate` op on the SAME `ReviewItemRouter` seam
  * every other sink here uses. It does NOT swallow the router's refusal: the host
@@ -289,7 +295,7 @@ export function buildGateEscalationSinks(deps: MonitorActionSinkDeps): GateEscal
           .prepare(
             `SELECT id, kind, source, severity, status, title
                FROM review_items
-              WHERE run_id = ? AND (status = 'pending' OR source = 'monitor')
+              WHERE run_id = ? AND ((kind = 'finding' AND status = 'pending') OR source = 'monitor')
               ORDER BY created_at DESC, id DESC
               LIMIT ?`,
           )

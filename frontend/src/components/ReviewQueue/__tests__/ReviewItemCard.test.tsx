@@ -982,6 +982,19 @@ describe('ReviewItemCard', () => {
     });
   }
 
+  /**
+   * The ORCHESTRATED plane's approve-design item: discoverable only by payload,
+   * with an `agent:<label>` source. The server refuses the `no-findings`
+   * modifier on it, so it keeps the two-button shape.
+   */
+  function payloadDesignGateItem(id: string): ReviewItem {
+    return makeItem(
+      'decision',
+      { id, blocking: true, source: 'agent:planner' },
+      { kind: 'decision', gate: 'approve-design' } as unknown as ReviewItemPayload,
+    );
+  }
+
   /** The class list is the only observable of a Button's variant. */
   function isPrimary(el: HTMLElement): boolean {
     return el.className.includes('bg-interactive');
@@ -1075,6 +1088,31 @@ describe('ReviewItemCard', () => {
         outcome: 'approve',
         modifier: 'no-findings',
       }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('offers NO third button on the PAYLOAD-discriminated approve-design item', () => {
+    // The orchestrated plane mints this one with source 'agent:<label>'. The
+    // server admits `approve[no-findings]` only on the singular
+    // 'gate:human-step:approve-design' source, so offering the button here would
+    // hand the human a control whose resolve is refused.
+    render(<ReviewItemCard item={payloadDesignGateItem('rvw_orch_nf')} surface="session" />);
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+    expect(screen.getByTestId('design-gate-note')).toBeInTheDocument();
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
+  });
+
+  it('the QUEUE discard on the PAYLOAD-discriminated approve-design item still rejects', async () => {
+    render(<ReviewItemCard item={payloadDesignGateItem('rvw_orch_q')} surface="queue" />);
+    const discard = screen.getByTestId('default-dismiss');
+    expect(discard).toHaveTextContent('Dismiss');
+
+    fireEvent.click(discard);
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_orch_q', outcome: 'reject' }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
   });

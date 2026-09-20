@@ -1232,6 +1232,22 @@ describe('ProgrammaticRunHost.reviewGateEscalation', () => {
     expect(written.markdown).toContain('It costs nothing.');
   });
 
+  it('does not repeat a ONE-SENTENCE rationale under the Recommended line', async () => {
+    // The headline IS the whole rationale here, so writing it as the tail too
+    // would print the same sentence twice in the section.
+    const monitor = makeGateMonitor({ action: 'recommend', choice: 'rerun', rationale: 'AR-2 is a real defect.' });
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor, annotateReviewItem,
+    });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot());
+
+    const written = annotateReviewItem.mock.calls[0][0] as { markdown: string };
+    expect(written.markdown).toBe('Recommended: rerun — AR-2 is a real defect.');
+    expect(written.markdown.split('AR-2 is a real defect.')).toHaveLength(2);
+  });
+
   it('forwards the controller escalation when the gate followed a loop stop', async () => {
     const monitor = makeGateMonitor({ action: 'pass', rationale: 'x' });
     const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });

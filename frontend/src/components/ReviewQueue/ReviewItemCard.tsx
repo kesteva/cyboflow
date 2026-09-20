@@ -336,6 +336,22 @@ function isApproveDesignGateItem(item: ReviewItem): boolean {
 }
 
 /**
+ * The narrower half of {@link isApproveDesignGateItem}: ONLY the programmatic
+ * runner's singular `gate:human-step:approve-design` item.
+ *
+ * This is the discriminant `resolveReviewItemHandler` itself uses to admit the
+ * `no-findings` verdict modifier — it refuses `approve[no-findings]` on anything
+ * whose source is not exactly that string. So the two behaviours that SEND the
+ * modifier (the third in-session button and the queue surface's re-pointed
+ * discard) must key on this, not on the payload-discriminated sibling from the
+ * ORCHESTRATED plane, which would get a refused resolve and no verdict at all.
+ * Copy and layout stay on the wider predicate: they are correct for both.
+ */
+function isProgrammaticApproveDesignGate(item: ReviewItem): boolean {
+  return item.kind === 'decision' && item.source === 'gate:human-step:approve-design';
+}
+
+/**
  * The in-session gate buttons, as emphasis targets. Not the same set as the
  * verdict words: an approve-design gate offers TWO distinct approves (log the
  * surviving entries, or don't), and the plain gates offer no revise button of
@@ -638,7 +654,10 @@ export function ReviewItemCard({
     // so the queue's discard points at THAT instead, and the label says what it
     // does. Every other decision keeps the reject (which is the only thing that
     // runs the gate-specific teardown); findings keep the plain dismiss.
-    const approveDesign = isApproveDesignGateItem(item);
+    // Keyed on the PROGRAMMATIC gate only: the server admits the modifier for no
+    // other source, so the orchestrated plane's approve-design item keeps the
+    // reject rather than sending a verdict that would be refused.
+    const approveDesign = isProgrammaticApproveDesignGate(item);
     const discard = approveDesign
       ? () => handleGateDecision('approve', 'no-findings')
       : item.kind === 'decision'
@@ -881,8 +900,10 @@ export function ReviewItemCard({
             </Button>
             {/* The approve-design gate's THIRD choice: approve the design and
                 drop the surviving review entries instead of logging them. It
-                exists only here — a plain gate has nothing to not-log. */}
-            {isApproveDesignGateItem(item) && (
+                exists only here — a plain gate has nothing to not-log — and only
+                for the PROGRAMMATIC gate, the one source the server accepts the
+                `no-findings` modifier on. */}
+            {isProgrammaticApproveDesignGate(item) && (
               <Button
                 variant={gateVariant('no-findings')}
                 size="sm"

@@ -21,6 +21,7 @@ import {
   MONITOR_LANE_TRIAGE_SCHEMA,
   MONITOR_REVIEW_LOOP_SCHEMA,
   type HistoryReader,
+  type HistoryReadOptions,
   type MonitorContext,
   type MonitorHistory,
   type MonitorSession,
@@ -77,14 +78,26 @@ function laneRow(p: Partial<SprintLaneRow> & { taskId: string; status: SprintLan
   };
 }
 
-/** A fake HistoryReader that records every read and returns a canned snapshot. */
-function fakeHistory(snapshot: MonitorHistory): { reader: HistoryReader; reads: string[] } {
+/**
+ * A fake HistoryReader that records every read and returns a canned snapshot.
+ *
+ * `readOpts` is per-call and parallel to `reads`: the run-deliverables digest is
+ * an OPT-IN read, so which consults ask for it is a behaviour worth pinning.
+ */
+function fakeHistory(snapshot: MonitorHistory): {
+  reader: HistoryReader;
+  reads: string[];
+  readOpts: Array<HistoryReadOptions | undefined>;
+} {
   const reads: string[] = [];
+  const readOpts: Array<HistoryReadOptions | undefined> = [];
   return {
     reads,
+    readOpts,
     reader: {
-      async read(runId: string): Promise<MonitorHistory> {
+      async read(runId: string, opts?: HistoryReadOptions): Promise<MonitorHistory> {
         reads.push(runId);
+        readOpts.push(opts);
         return snapshot;
       },
     },
@@ -2847,23 +2860,97 @@ describe('DefaultHistoryReader run digest', () => {
     return { prepare: () => stmt, transaction: (fn: () => unknown) => fn } as unknown as DatabaseLike;
   }
 
-  it('includes the digest when a reader is wired, and omits the key when it is not', async () => {
+  it('includes the digest when a reader is wired AND asked for, and omits the key when it is not', async () => {
     const db = fakeDbWithoutBatch();
     const digest = { artifacts: [], entities: [] };
 
-    const wired = await new DefaultHistoryReader(db, undefined, () => digest).read('run-1');
+    const wired = await new DefaultHistoryReader(db, undefined, () => digest).read('run-1', { withRunDigest: true });
     expect(wired.runDigest).toBe(digest);
 
-    const unwired = await new DefaultHistoryReader(db).read('run-1');
+    const unwired = await new DefaultHistoryReader(db).read('run-1', { withRunDigest: true });
     expect('runDigest' in unwired).toBe(false);
+  });
+
+  it('does NOT invoke the digest reader without the opt-in — the queries are the cost', async () => {
+    // Four SQLite reads plus JSON parsing of up to the digest's whole char
+    // budget, which only two prompts render. Every other read must skip them.
+    const readRunDigest = vi.fn().mockReturnValue({ artifacts: [], entities: [] });
+    const reader = new DefaultHistoryReader(fakeDbWithoutBatch(), undefined, readRunDigest);
+
+    const plain = await reader.read('run-1');
+    expect(readRunDigest).not.toHaveBeenCalled();
+    expect('runDigest' in plain).toBe(false);
+
+    const explicitlyOff = await reader.read('run-1', { withRunDigest: false });
+    expect(readRunDigest).not.toHaveBeenCalled();
+    expect('runDigest' in explicitlyOff).toBe(false);
+
+    await reader.read('run-1', { withRunDigest: true });
+    expect(readRunDigest).toHaveBeenCalledWith('run-1');
   });
 
   it('is fail-soft: a throwing digest reader costs the section, not the history read', async () => {
     const history = await new DefaultHistoryReader(fakeDbWithoutBatch(), undefined, () => {
       throw new Error('digest boom');
-    }).read('run-1');
+    }).read('run-1', { withRunDigest: true });
     expect(history.runDigest).toBeUndefined();
     expect(history.steps).toEqual([]);
+  });
+});
+
+describe('run-digest opt-in per consult', () => {
+  /** A session over a fake history, with whatever query fns the caller needs. */
+  function sessionOver(
+    snapshot: MonitorHistory,
+    structuredQuery: StructuredQueryFn,
+    textQuery: TextQueryFn,
+  ): { session: DefaultMonitorSession; readOpts: Array<HistoryReadOptions | undefined> } {
+    const { reader, readOpts } = fakeHistory(snapshot);
+    return {
+      readOpts,
+      session: new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery, injectEvent: vi.fn() }),
+    };
+  }
+
+  it('triage and answer read WITHOUT the digest — neither prompt renders it', async () => {
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ action: 'retry', rationale: 'transient', confidence: 0.9 });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('an answer');
+    const { session, readOpts } = sessionOver({ conversation: [], steps: [] }, structuredQuery, textQuery);
+
+    await session.triage(step({ id: 'implement' }), 'boom');
+    await session.answer('what happened?');
+
+    expect(readOpts).toEqual([undefined, undefined]);
+  });
+
+  it('the gate-escalation consult asks for the digest AND renders it', async () => {
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic.' });
+    const { session, readOpts } = sessionOver(digestHistory, structuredQuery, vi.fn());
+
+    await session.reviewGateEscalation(gateReq());
+
+    expect(readOpts).toEqual([{ withRunDigest: true }]);
+    const prompt = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('## Run deliverables');
+    expect(prompt).toContain('## Run entities');
+  });
+
+  it('the review-loop consult asks for the digest AND renders it', async () => {
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ verdict: 'stop', rationale: 'these are product calls' });
+    const { session, readOpts } = sessionOver(digestHistory, structuredQuery, vi.fn());
+
+    await session.adviseReviewLoop(loopReq());
+
+    expect(readOpts).toEqual([{ withRunDigest: true }]);
+    const prompt = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('## Run deliverables');
+    expect(prompt).toContain('## Run entities');
   });
 });
 

@@ -101,13 +101,28 @@ export interface MonitorHistory {
   runDigest?: RunDigest;
 }
 
+/** Per-read opt-ins for the parts of a history only some prompts render. */
+export interface HistoryReadOptions {
+  /**
+   * Read the run-deliverables digest too. OPT-IN because it is four more SQLite
+   * queries plus JSON parsing of up to the digest's whole char budget, and only
+   * the gate-escalation and review-loop prompts render a `## Run deliverables`
+   * section — every chat turn, triage and lane triage would pay for a field it
+   * then throws away.
+   */
+  withRunDigest?: boolean;
+}
+
 /**
  * Reads the whole run history on demand. The default impl reads the canonical
  * `raw_events` transcript (via `selectRunUnifiedMessages`) + the `step_results`
  * timeline (via `StepResultStore`). Fakeable so the brain is unit-testable.
+ *
+ * `opts` is optional on purpose: a fake that ignores it is still a valid reader,
+ * and a caller that omits it gets the cheap read.
  */
 export interface HistoryReader {
-  read(runId: string): Promise<MonitorHistory>;
+  read(runId: string, opts?: HistoryReadOptions): Promise<MonitorHistory>;
 }
 
 /**
@@ -131,11 +146,13 @@ export class DefaultHistoryReader implements HistoryReader {
     private readonly readRunDigest?: (runId: string) => RunDigest | undefined,
   ) {}
 
-  async read(runId: string): Promise<MonitorHistory> {
+  async read(runId: string, opts?: HistoryReadOptions): Promise<MonitorHistory> {
     const conversation = selectRunUnifiedMessages(this.db, runId, this.logger);
     const steps = StepResultStore.tryGetInstance()?.listForRun(runId) ?? [];
     const { lanes, unavailable } = this.readLanes(runId);
-    const runDigest = this.tryReadRunDigest(runId);
+    // Only the prompts that RENDER the deliverables section ask for it; every
+    // other read skips the digest's queries entirely.
+    const runDigest = opts?.withRunDigest === true ? this.tryReadRunDigest(runId) : undefined;
     return {
       conversation,
       steps,
@@ -2457,7 +2474,8 @@ export class DefaultMonitorSession implements MonitorSession {
   ): Promise<ReviewLoopDecision | undefined> {
     this.tryInject(buildAssistantTextEvent(reviewLoopAnnouncement(req)));
     try {
-      const history = await this.history.read(this.ctx.runId);
+      // withRunDigest: this prompt RENDERS the deliverables section.
+      const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
       const prompt = buildReviewLoopPrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
         prompt,
@@ -2543,7 +2561,8 @@ export class DefaultMonitorSession implements MonitorSession {
     signal?: AbortSignal,
   ): Promise<GateEscalationDecision> {
     try {
-      const history = await this.history.read(this.ctx.runId);
+      // withRunDigest: this prompt RENDERS the deliverables section.
+      const history = await this.history.read(this.ctx.runId, { withRunDigest: true });
       const prompt = buildGateEscalationPrompt(this.ctx, history, req);
       const structured = await this.structuredQuery({
         prompt,

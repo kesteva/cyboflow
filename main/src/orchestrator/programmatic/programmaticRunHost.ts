@@ -609,14 +609,16 @@ export class ProgrammaticRunHost implements ControllerHost {
       });
       return;
     }
+    // A ONE-SENTENCE rationale is already the whole headline, so passing it as
+    // the tail too would print it twice under the heading. The tail is dropped
+    // only when it is character-for-character the head; a longer rationale keeps
+    // its full text under the machine-readable line.
+    const head = firstSentence(decision.rationale);
+    const tail = decision.rationale.trim();
     try {
       await sink({
         reviewItemId,
-        markdown: composeSupervisorRecommendation(
-          decision.choice,
-          firstSentence(decision.rationale),
-          decision.rationale,
-        ),
+        markdown: composeSupervisorRecommendation(decision.choice, head, tail === head ? undefined : tail),
       });
       this.args.logger?.info('[ProgrammaticRunHost] gate recommendation annotated', {
         runId: this.args.runId,
