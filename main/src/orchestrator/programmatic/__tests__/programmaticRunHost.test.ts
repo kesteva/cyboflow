@@ -210,6 +210,29 @@ describe('ProgrammaticRunHost', () => {
     expect(() => none.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'done', attempts: 1 })).not.toThrow();
   });
 
+  // ── Adversarial-review artifact read-back (the loopback's durable channel) ──
+  it('readAdversarialReview passes the injected reader through and is fail-soft when it throws or is unset', () => {
+    const wired = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      readAdversarialReview: () => '## Blocking\n\n#### AR-1 — x\n',
+    });
+    expect(wired.readAdversarialReview()).toBe('## Blocking\n\n#### AR-1 — x\n');
+
+    // A thrown read degrades to "no artifact" rather than aborting a walk that is
+    // mid-review.
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const throwing = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      readAdversarialReview: () => { throw new Error('db down'); },
+      logger,
+    });
+    expect(throwing.readAdversarialReview()).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+
+    const none = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
+    expect(none.readAdversarialReview()).toBeUndefined();
+  });
+
   // ── Fan-out lane driver (generalize-parallel-fan-out; LIVE resolution) ──────
   it('exposes the provider-resolved fan-out driver on host.fanOut, consulting the provider on EVERY read', () => {
     const fanOutDriver: FanOutDriver = {

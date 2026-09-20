@@ -930,6 +930,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       gate: this.deps.gate,
       humanGateSkip,
       ...(gateResolutionNote ? { readGateResolutionNote: gateResolutionNote } : {}),
+      // Same reader the revision prompt uses, handed to the controller so a
+      // review whose final text never arrived still loops on its artifact.
+      ...(this.deps.db ? { readAdversarialReview: adversarialReviewMarkdown } : {}),
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),

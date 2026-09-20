@@ -5,7 +5,7 @@
  * (ordering, retries, intra-phase loopback budget, optional-skip, human gates,
  * terminal outcomes) without any SDK / DB / Electron dependency.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { WorkflowController, MAX_STEP_LOOPBACKS, MAX_VISUAL_LOOPBACKS } from '../workflowController';
 import { createRunDirectives } from '../runDirectives';
 import type {
@@ -3464,6 +3464,89 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     await new WorkflowController(runner, host).run('run-ar6', reviewDef(null));
     expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
     expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  // ── Artifact fallback (the reviewer's chat text can simply be missing) ──────
+  /** The promoted, durable form the step agent reports as the run's artifact. */
+  const ARTIFACT_WITH_BLOCKERS = [
+    '# Adversarial review',
+    '',
+    '## Blocking',
+    '',
+    '#### AR-1 — Architecture names no data store',
+    '**Severity:** blocker   **Area:** architecture',
+    '**What:** the spec persists nothing.',
+    '',
+    '## Findings',
+    '',
+    'None.',
+  ].join('\n');
+
+  it('loops on the ARTIFACT when the review result text never arrived, quoting the artifact section', async () => {
+    // The turn completed but captured no final text (a substrate that drops the
+    // last message). The artifact is the durable half, so the blockers are still
+    // there — reading only the text would advance a phase the reviewer blocked.
+    const runner = reviewRunner(['', CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => ARTIFACT_WITH_BLOCKERS;
+
+    const result = await new WorkflowController(runner, host).run('run-ar-artifact', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    expect(host.gateCalls).toEqual(['approve-design']);
+    // The quoted note comes from the ARTIFACT's `## Blocking` section.
+    expect(runner.seen[3].gateRevision).toEqual({
+      gateStepId: 'adversarial-review',
+      source: 'adversarial-review',
+      round: 1,
+      note: [
+        '#### AR-1 — Architecture names no data store',
+        '**Severity:** blocker   **Area:** architecture',
+        '**What:** the spec persists nothing.',
+      ].join('\n'),
+    });
+  });
+
+  it('an explicit REVIEW: CLEAN wins over an artifact that still carries blockers', async () => {
+    // The artifact is only consulted when the TEXT carries no verdict — a stale
+    // artifact from the previous round must never re-loop a cleared review.
+    const runner = reviewRunner([CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    const readArtifact = vi.fn(() => ARTIFACT_WITH_BLOCKERS);
+    host.readAdversarialReview = readArtifact;
+
+    await new WorkflowController(runner, host).run('run-ar-clean-wins', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+    expect(host.gateCalls).toEqual(['approve-design']);
+    expect(readArtifact).not.toHaveBeenCalled();
+  });
+
+  it('advances on empty text with no artifact, with an unreadable one, or with one that has no blockers', async () => {
+    // No seam at all — today's behaviour, byte for byte.
+    let runner = reviewRunner(['']);
+    let host = makeHost({ 'approve-design': ['approve'] });
+    await new WorkflowController(runner, host).run('run-ar-noartifact', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+    expect(host.gateCalls).toEqual(['approve-design']);
+
+    // A throwing reader is fail-soft: it reads as "no artifact", never as a crash.
+    runner = reviewRunner(['']);
+    host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => { throw new Error('db down'); };
+    const thrown = await new WorkflowController(runner, host).run('run-ar-artifact-throws', reviewDef());
+    expect(thrown.outcome).toBe('completed');
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+
+    // An artifact whose `## Blocking` is the `None.` placeholder is zero entries.
+    runner = reviewRunner(['']);
+    host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => '## Blocking\n\nNone.\n\n## Findings\n\n#### AR-1 — nit\n';
+    await new WorkflowController(runner, host).run('run-ar-artifact-clean', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
   });
 
   it('a FAILED optional review skips instead of taking its loopback edge', async () => {

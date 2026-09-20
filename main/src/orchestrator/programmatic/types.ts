@@ -640,6 +640,24 @@ export interface ControllerHost {
   readGateResolutionNote?(stepId: string): string | undefined;
 
   /**
+   * Optional read-back of the run's CURRENT adversarial-review artifact markdown.
+   *
+   * The artifact is the DURABLE half of a review: the step agent reports it
+   * before its turn ends, so it survives even when the turn's final text does
+   * not. The reviewer's captured chat text does not always arrive (a substrate
+   * that drops the final message, a turn that ends on a tool result — a real
+   * failure mode seen in live runs), and an empty text used to read as "no
+   * verdict" and advance a design phase the reviewer had just blocked. The
+   * controller therefore falls back to this reader when the text carries no
+   * verdict of its own.
+   *
+   * Fail-soft: returns undefined when there is no artifact or the host cannot
+   * read it. Absent ⇒ the controller reads only the reviewer's final text
+   * (today's behaviour).
+   */
+  readAdversarialReview?(): string | undefined;
+
+  /**
    * Optional monitor feed. The controller calls this at run/step boundaries.
    * Fail-soft (never throws); the production host no longer implements it (no
    * continuous chat feed), so absent ⇒ the feed is dropped.

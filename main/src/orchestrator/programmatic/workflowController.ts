@@ -34,6 +34,10 @@ import {
   SPRINT_VISUAL_VERIFY_STEP,
 } from '../../../../shared/types/sprintBatch';
 import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import {
+  parseAdversarialReviewDoc,
+  type ParsedAdversarialReview,
+} from '../../../../shared/types/adversarialReview';
 // Pure, shared-type-backed parser (no electron/DB/service deps) — importing it
 // keeps the controller unit-testable with no new mocks, honoring the spirit of
 // the standalone-typecheck invariant (heavy imports only).
@@ -2920,14 +2924,26 @@ export class WorkflowController {
 
   /**
    * Resolve the AUTOMATIC adversarial-review loopback for a step that just
-   * succeeded: returns the jump target, the round number, and the extracted
-   * `## Blocking` section when ALL of these hold — the step's agent is
-   * `adversarial-review`, it declares a resolvable intra-phase `loopback`, its
-   * captured result says `REVIEW: BLOCKING` (or, with no trailer, carries a
-   * populated `## Blocking` section — the same no-trailer tolerance the fan-out
-   * code-review path has), and MAX_REVIEW_AUTO_REVISIONS is not yet spent for
-   * this step id. Null otherwise, so every other step — and a review whose
-   * result could not be captured — advances exactly as before.
+   * succeeded: returns the jump target, the round number, the extracted
+   * `## Blocking` section and the parsed review when ALL of these hold — the
+   * step's agent is `adversarial-review`, it declares a resolvable intra-phase
+   * `loopback`, the round reads as BLOCKING, and MAX_REVIEW_AUTO_REVISIONS is
+   * not yet spent for this step id. Null otherwise, so every other step advances
+   * exactly as before.
+   *
+   * The verdict is read from TWO channels, in this order:
+   *
+   *   1. the reviewer's captured result text — `REVIEW: BLOCKING`, or, with no
+   *      trailer, a populated `## Blocking` section (the same no-trailer
+   *      tolerance the fan-out code-review path has). An explicit
+   *      `REVIEW: CLEAN` always wins and never loops, even over an artifact
+   *      that still carries a previous round's blockers;
+   *   2. failing that, the run's adversarial-review ARTIFACT
+   *      (`host.readAdversarialReview`). The artifact is the DURABLE channel —
+   *      the step agent reports it before its turn ends — while the chat text
+   *      can be empty when the turn's final message was not captured (a real
+   *      failure mode seen in live runs). Reading only the text there advanced a
+   *      design phase the reviewer had just blocked.
    *
    * Keyed on the AGENT rather than on `loopback` alone so a custom flow that
    * puts an on-failure loopback on some other agent step never has its clean
@@ -2938,14 +2954,41 @@ export class WorkflowController {
     phaseSteps: WorkflowStep[],
     resultText: string | null | undefined,
     reviewAutoRevisions: Map<string, number>,
-  ): { index: number; round: number; blocking: string | null } | null {
+  ): {
+    index: number;
+    round: number;
+    blocking: string | null;
+    parsed: ParsedAdversarialReview;
+  } | null {
     if (step.agent !== 'adversarial-review') return null;
     if (step.loopback === undefined || step.loopback.length === 0) return null;
-    if (typeof resultText !== 'string' || resultText.trim().length === 0) return null;
-    const verdict = parseCodeReviewVerdict(resultText);
-    const blocking =
-      verdict === 'blocking' || (verdict === null && blockingSectionHasEntries(resultText));
-    if (!blocking) return null;
+    const text = typeof resultText === 'string' ? resultText : '';
+    const verdict = text.trim().length > 0 ? parseCodeReviewVerdict(text) : null;
+    if (verdict === 'clean') return null; // explicit CLEAN wins over any artifact
+    // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
+    // trailer over a `None.` section hands the re-run the artifact instead.
+    const textHasEntries = blockingSectionHasEntries(text);
+    const textBlocking = verdict === 'blocking' || textHasEntries;
+    let note: string | null;
+    let parsed: ParsedAdversarialReview;
+    if (textBlocking) {
+      // The reviewer's own message carries the section verbatim.
+      note = textHasEntries ? extractBlockingSection(text) : null;
+      parsed = parseAdversarialReviewDoc(text);
+    } else {
+      // No verdict in the text at all (often: no text at all) — fall back to the
+      // artifact. Fail-soft: a throwing reader reads as "no artifact", i.e. as
+      // today's advance.
+      let artifact: string | undefined;
+      try {
+        artifact = this.host.readAdversarialReview?.();
+      } catch {
+        artifact = undefined;
+      }
+      parsed = parseAdversarialReviewDoc(artifact);
+      if (parsed.blocking.length === 0) return null;
+      note = extractBlockingSection(artifact ?? '');
+    }
     const targetIndex = phaseSteps.findIndex((s) => s.id === step.loopback);
     if (targetIndex < 0) return null; // unresolved (validation should prevent this)
     const used = reviewAutoRevisions.get(step.id) ?? 0;
@@ -2960,9 +3003,11 @@ export class WorkflowController {
     return {
       index: targetIndex,
       round: used + 1,
-      // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
-      // trailer over a `None.` section hands the re-run the artifact instead.
-      blocking: blockingSectionHasEntries(resultText) ? extractBlockingSection(resultText) : null,
+      blocking: note,
+      // The round's entries, from whichever channel supplied the verdict. The
+      // caller (and the monitor's per-lap steering) reads the entries rather than
+      // re-parsing the quoted note.
+      parsed,
     };
   }
 

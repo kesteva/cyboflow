@@ -204,6 +204,17 @@ export interface ProgrammaticRunHostArgs {
    */
   readGateResolutionNote?: (stepId: string) => string | undefined;
   /**
+   * Read-back of this run's CURRENT adversarial-review artifact markdown
+   * (ControllerHost.readAdversarialReview, run-bound by the runner) — the same
+   * reader the revision prompt uses. The controller consults it when a review
+   * step's captured text carries no verdict of its own, because the artifact is
+   * the durable channel and the chat text can simply be missing. Injected rather
+   * than read inline because this host holds no DB handle. MUST be fail-soft
+   * (return undefined, never throw). Absent ⇒ the controller reads only the
+   * reviewer's final text.
+   */
+  readAdversarialReview?: () => string | undefined;
+  /**
    * LANE-TRIAGE task reader. Resolves the ref / title / CURRENT body for a
    * fan-out item so `triageLaneFailure` can ENRICH the controller's bare
    * lane/failure facts into the monitor's full `LaneTriageRequest` — the brain
@@ -332,6 +343,25 @@ export class ProgrammaticRunHost implements ControllerHost {
       this.args.logger?.warn('[ProgrammaticRunHost] gate resolution note read failed (fail-soft)', {
         runId: this.args.runId,
         stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * This run's current adversarial-review artifact markdown, for the controller's
+   * loopback verdict. Fail-soft twice over, for the same reason as the gate note:
+   * an absent reader and a throwing one both yield undefined, because degrading to
+   * the reviewer's chat text is survivable while a thrown read would abort a walk
+   * that is mid-review.
+   */
+  readAdversarialReview(): string | undefined {
+    try {
+      return this.args.readAdversarialReview?.();
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] adversarial-review artifact read failed (fail-soft)', {
+        runId: this.args.runId,
         error: err instanceof Error ? err.message : String(err),
       });
       return undefined;
