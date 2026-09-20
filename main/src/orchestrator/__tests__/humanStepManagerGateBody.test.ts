@@ -7,7 +7,7 @@
  *     triage" when the run has pending findings, so the human closing a run out
  *     is told what is waiting instead of discovering it in the queue afterwards.
  *   - the `approve-design` gate LEADS with the run's adversarial review: counts,
- *     blocking titles, the remaining revision budget, and what each button does.
+ *     blocking titles, the revisions taken so far, and what each button does.
  *
  * Driven through the real `openHumanGate` (not the composer directly) so the
  * fail-soft claim is tested where it matters: the composition runs INSIDE the

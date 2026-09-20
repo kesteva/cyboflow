@@ -35,6 +35,7 @@ function buildDb(): Database.Database {
       blocking INTEGER NOT NULL DEFAULT 0,
       audience TEXT DEFAULT 'human',
       source TEXT,
+      resolution TEXT,
       created_at TEXT DEFAULT '2026-09-15T00:00:00.000Z'
     );
   `);
@@ -50,13 +51,21 @@ function seedReview(db: Database.Database, runId: string, markdown: string | nul
   );
 }
 
-function seedGateResolution(db: Database.Database, runId: string, n: number): void {
-  for (let i = 0; i < n; i += 1) {
+/**
+ * One resolved `approve-design` gate row per entry of `resolutions` — the strings
+ * are what the human's answer actually stored, which is the thing the count reads.
+ */
+function seedGateResolution(
+  db: Database.Database,
+  runId: string,
+  resolutions: readonly (string | null)[],
+): void {
+  resolutions.forEach((resolution, i) => {
     db.prepare(
-      `INSERT INTO review_items (id, run_id, kind, status, blocking, source)
-       VALUES (?, ?, 'decision', 'resolved', 1, 'gate:human-step:approve-design')`,
-    ).run(`gate-${runId}-${i}`, runId);
-  }
+      `INSERT INTO review_items (id, run_id, kind, status, blocking, source, resolution)
+       VALUES (?, ?, 'decision', 'resolved', 1, 'gate:human-step:approve-design', ?)`,
+    ).run(`gate-${runId}-${i}`, runId, resolution);
+  });
 }
 
 function seedFinding(
@@ -163,32 +172,30 @@ describe('composeAdversarialReviewGateBody', () => {
     expect(body).toContain('**Approve**');
   });
 
-  it('omits the revision budget on a first visit, then counts up', () => {
+  it('omits the revision count on a first visit, then counts up', () => {
     const db = buildDb();
     seedReview(db, 'run-1', REVIEW_DOC);
-    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1')).not.toContain('Revision budget');
+    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1')).not.toContain(
+      'Revisions so far',
+    );
 
-    seedGateResolution(db, 'run-1', 2);
+    seedGateResolution(db, 'run-1', ['revise', 'revise: drop AR-11']);
     expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1')).toContain(
-      '**Revision budget: 2 of 5 used.**',
+      '**Revisions so far this run: 2.**',
     );
   });
 
-  it('warns at the LAST revision that a further Revise ends the run as rejected', () => {
+  it('never claims a deadline — the enforced bound is the controller\'s, not this count', () => {
     const db = buildDb();
     seedReview(db, 'run-1', REVIEW_DOC);
-    seedGateResolution(db, 'run-1', 4);
-    const penultimate = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
-    expect(penultimate).toContain('One revision remains');
+    seedGateResolution(db, 'run-1', ['revise', 'revise', 'revise', 'revise', 'revise']);
 
-    db.prepare(
-      `INSERT INTO review_items (id, run_id, kind, status, blocking, source)
-       VALUES ('gate-run-1-extra', 'run-1', 'decision', 'resolved', 1, 'gate:human-step:approve-design')`,
-    ).run(); // now 5 of 5
-    const last = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
-    expect(last).toContain('this is the last one');
-    expect(last).toContain('`rejected`');
-    expect(last).toContain('swept when the session is archived');
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
+    expect(body).toContain('**Revisions so far this run: 5.**');
+    expect(body).not.toContain('this is the last one');
+    expect(body).not.toContain('One revision remains');
+    expect(body).not.toContain('of 5 used');
+    expect(body).not.toContain('swept when the session is archived');
   });
 
   it('says nothing about convergence on a FIRST review (there is no ledger to read)', () => {
@@ -270,8 +277,8 @@ describe('composeAdversarialReviewGateBody', () => {
 describe('countApproveDesignRevisionsUsed', () => {
   it('counts only RESOLVED approve-design gates of THIS run', () => {
     const db = buildDb();
-    seedGateResolution(db, 'run-1', 3);
-    seedGateResolution(db, 'run-2', 1);
+    seedGateResolution(db, 'run-1', ['revise', 'revise', 'revise']);
+    seedGateResolution(db, 'run-2', ['revise']);
     // A still-pending gate of the same run does not count (it is the one being opened).
     db.prepare(
       `INSERT INTO review_items (id, run_id, kind, status, blocking, source)
@@ -286,6 +293,36 @@ describe('countApproveDesignRevisionsUsed', () => {
     expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-1')).toBe(3);
     expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-2')).toBe(1);
     expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-none')).toBe(0);
+  });
+
+  it('does NOT count a reject — the run ended rejected and was rewound, not revised', () => {
+    const db = buildDb();
+    seedGateResolution(db, 'run-1', ['reject', 'reject: the architecture is wrong', 'revise']);
+    expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-1')).toBe(1);
+  });
+
+  it('does NOT count an approve, including a null/empty resolution', () => {
+    const db = buildDb();
+    seedGateResolution(db, 'run-1', ['approve', 'approve[no-findings]', null, '']);
+    expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-1')).toBe(0);
+  });
+
+  it('counts a prefixed revise WITH a note, and reads the prefix rather than sniffing the note', () => {
+    const db = buildDb();
+    // The note contains 'reject'; the anchored prefix is what decides.
+    seedGateResolution(db, 'run-1', ['revise: the architecture rejects empty input']);
+    expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-1')).toBe(1);
+  });
+
+  it('counts a LEGACY free-text revise the grammar does not recognize', () => {
+    const db = buildDb();
+    seedGateResolution(db, 'run-1', ['please revise this', 'approved', 'retry the design']);
+    expect(countApproveDesignRevisionsUsed(dbAdapter(db), 'run-1')).toBe(2);
+  });
+
+  it('returns 0 rather than throwing when there is no review_items table', () => {
+    const bare = new Database(':memory:');
+    expect(countApproveDesignRevisionsUsed(dbAdapter(bare), 'run-1')).toBe(0);
   });
 });
 

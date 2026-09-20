@@ -481,7 +481,7 @@ export class HumanStepManager {
    *
    * Three layers, most specific first:
    *   1. `approve-design` — the adversarial reviewer's counts, blocking titles,
-   *      remaining revision budget, and what each button actually does
+   *      revisions taken so far, and what each button actually does
    *      (adversarialReviewGateBody.ts). Null when the run has no critique.
    *   2. A sprint/ship run's partial-lane summary (`partialSprintGateSummary`),
    *      already composed by the caller and passed in.

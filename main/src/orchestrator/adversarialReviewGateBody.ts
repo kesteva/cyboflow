@@ -7,15 +7,13 @@
  * read by nobody, and discarded with the step's turn. Now the critique is a real
  * artifact (`adversarial-review`, migration 136) and this module turns it into the
  * gate's opening text: how many defects were raised, which ones are blocking, how
- * much revision budget is left, and — the part that is genuinely non-obvious —
- * what each button DOES.
+ * many revisions this run has already taken, and — the part that is genuinely
+ * non-obvious — what each button DOES.
  *
  * That last part matters because the two choices are not "yes" and "no". Approve
  * does not discard the findings: it LOGS every one as a non-blocking accepted-risk
  * finding. Revise does not just re-ask: it re-runs the design steps with these
- * findings as feedback, and it is BOUNDED — the sixth one ends the run as
- * `rejected`, which is not a delivered outcome, so the run's findings are swept at
- * session archive. Neither is discoverable from a button label.
+ * findings as feedback. Neither is discoverable from a button label.
  *
  * Pure functions over an injected DatabaseLike: no singletons, no writes, no
  * throwing. `HumanStepManager.openHumanGate` composes the body inside the
@@ -32,25 +30,19 @@ import {
   type AdversarialFinding,
   type PriorEntry,
 } from '../../../shared/types/adversarialReview';
+import { parseGateResolution } from '../../../shared/types/reviews';
+// The legacy free-text sniff, borrowed rather than re-implemented so this count can
+// never disagree with what the gate readers decided the run actually did (CR-13).
+// `gateSideEffects` imports this module back (for `readAdversarialReviewMarkdown`),
+// so the two form a cycle — harmless here because both sides export hoisted function
+// declarations and neither calls the other at module-evaluation time.
+import { gateDecisionFromResolution } from './gateSideEffects';
 
 /** The step id whose gate this module speaks for. */
 export const APPROVE_DESIGN_STEP_ID = 'approve-design';
 
 /** Source stamped on a programmatic human-gate decision item for that step. */
 const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
-
-/**
- * The controller's per-step revise budget.
- *
- * CANONICAL HOME: `MAX_STEP_LOOPBACKS` in
- * main/src/orchestrator/programmatic/workflowController.ts. Duplicated here as a
- * bare literal deliberately — the same reason humanStepManager.ts keeps its own
- * copy of `SYSTEMIC_PAUSE_SOURCE` — to keep this module (and, transitively, the
- * gate-open path) free of a `programmatic/` import. If that constant ever moves,
- * this copy is wrong in the direction of showing the human a budget larger or
- * smaller than the real one, so keep the two in lockstep.
- */
-const MAX_GATE_REVISIONS = 5;
 
 /**
  * The markdown of this run's `adversarial-review` artifact, or undefined when the
@@ -79,23 +71,38 @@ export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): 
 }
 
 /**
- * How many times this run's `approve-design` gate has ALREADY been resolved.
+ * How many of this run's resolved `approve-design` gates were a REVISE.
  *
- * Every prior resolution of this gate was a Revise: an Approve advances the walk
- * and the gate never re-opens, so a resolved item that is being followed by
- * another gate-open can only have been a revise. Fail-soft — an unreadable count
- * yields 0, which understates the budget used and therefore never shows a scarier
- * number than the truth.
+ * NOT simply "how many times the gate was resolved". A resolved gate is not
+ * necessarily a revise: a REJECT also resolves it (the run ends rejected, and the
+ * monitor's `rewind_to_step` can then bring the walk back to the design steps and
+ * re-open the very same gate), and counting one as a revision tells the human they
+ * have spent a round they never spent. So the verdict is READ rather than assumed.
+ *
+ * Verdict reading is the gate readers' own contract: the anchored prefix first
+ * ({@link parseGateResolution}, so `revise: only AR-2 matters` is a revise and a
+ * note that happens to contain the word 'reject' is not), and only a legacy row —
+ * one the grammar does not recognize at all — falls through to
+ * {@link gateDecisionFromResolution}'s free-text sniff, which still catches the
+ * pre-grammar rows spelled 'please revise'.
+ *
+ * Fail-soft — an unreadable count yields 0, which understates what the run has
+ * done and therefore never shows a scarier number than the truth.
  */
 export function countApproveDesignRevisionsUsed(db: DatabaseLike, runId: string): number {
   try {
-    const row = db
+    const rows = db
       .prepare(
-        `SELECT COUNT(*) AS n FROM review_items
+        `SELECT resolution FROM review_items
           WHERE run_id = ? AND kind = 'decision' AND status = 'resolved' AND source = ?`,
       )
-      .get(runId, APPROVE_DESIGN_GATE_SOURCE) as { n?: number } | undefined;
-    return typeof row?.n === 'number' && row.n > 0 ? row.n : 0;
+      .all(runId, APPROVE_DESIGN_GATE_SOURCE) as { resolution?: string | null }[];
+    return rows.filter((row) => {
+      const parsed = parseGateResolution(row.resolution);
+      return parsed !== null
+        ? parsed.verdict === 'revise'
+        : gateDecisionFromResolution(row.resolution) === 'revise';
+    }).length;
   } catch {
     return 0;
   }
@@ -164,19 +171,24 @@ function renderConvergence(prior: PriorEntry[], blocking: AdversarialFinding[]):
 }
 
 /**
- * The revision-budget sentence, or null when nothing has been revised yet (saying
- * "0 of 5 used" on a first visit is noise that implies a countdown nobody started).
+ * The revisions-so-far sentence, or null when nothing has been revised yet (saying
+ * "0 revisions so far" on a first visit is noise that implies a countdown nobody
+ * started).
+ *
+ * A COUNT, NOT A BUDGET, and deliberately without a deadline. This used to render
+ * "n of 5 used — this is the last one", which was wrong in both directions. The
+ * enforced bound is the controller's per-walk `MAX_STEP_LOOPBACKS`, which lives in
+ * memory, is scoped to ONE walk, and RESETS on a rewind; the number here is
+ * derived from durable review-item rows that survive every rewind. So the two
+ * disagree by construction (live evidence: a gate reading "5 of 5 used" while the
+ * controller's counter stood at 4), and this side can only ever OVER-count.
+ * Over-counting a fact — "you have revised three times" — is harmless; over-counting
+ * a deadline tells a human their next Revise will end the run as `rejected` when it
+ * will not. Hence no total, no remaining, no warning.
  */
 function renderBudget(used: number): string | null {
   if (used <= 0) return null;
-  const remaining = Math.max(0, MAX_GATE_REVISIONS - used);
-  if (remaining === 0) {
-    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used — this is the last one.** Choosing Revise again ends this run as \`rejected\` rather than looping back, and a rejected run is not a delivered outcome, so the findings it filed are swept when the session is archived.`;
-  }
-  if (remaining === 1) {
-    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.** One revision remains; after it, a further Revise ends the run as \`rejected\`.`;
-  }
-  return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.**`;
+  return `**Revisions so far this run: ${used}.**`;
 }
 
 /**
