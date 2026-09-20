@@ -107,10 +107,19 @@ export class ReviewItemError extends Error {
 // Change request shapes
 // ---------------------------------------------------------------------------
 
-/** Actors that may write review items. Mirrors TaskActor. */
+/**
+ * Actors that may write review items. Mirrors TaskActor.
+ *
+ * `monitor` is the run SUPERVISOR accounting for its own autonomous judgement
+ * (today: the review-loop audit finding). It is deliberately distinct from
+ * `orchestrator`, which is a mechanical write the host made on somebody else's
+ * behalf. The column has no CHECK constraint, so the union is the only
+ * enforcement and widening it needs no migration.
+ */
 export type ReviewActor =
   | 'user'
   | 'orchestrator'
+  | 'monitor'
   | `agent:${string}`
   | 'linear'
   | 'plane'

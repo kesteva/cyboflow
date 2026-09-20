@@ -1240,6 +1240,80 @@ describe('composeStepPrompt', () => {
     expect(noIds).not.toContain('This is round');
   });
 
+  it('renders the supervisor’s steering inside the automatic-revision section, as outranking the review', () => {
+    const base = {
+      step: step({ id: 'expand-spec', name: 'Expand spec', agent: 'expand-spec' }),
+      workflowName: 'planner' as const,
+      attempt: 1,
+    };
+    const reviewMarkdown = '## Blocking\n\n#### AR-1 — no way back\n\n#### AR-2 — no data store';
+
+    const steered = composeStepPrompt({
+      ...base,
+      gateRevision: {
+        gateStepId: 'adversarial-review',
+        source: 'adversarial-review',
+        round: 1,
+        reviewMarkdown,
+        steering: {
+          address: ['AR-1'],
+          setAside: [{ id: 'AR-2', reason: 'a product call, not a defect' }],
+          guidance: 'add a Home affordance',
+        },
+      },
+    });
+    expect(steered).toContain('## Adversarial review: revision requested');
+    expect(steered).toContain("The supervisor's steering — authoritative, outranks the review where they disagree:");
+    expect(steered).toContain('ADDRESS `AR-1` (add a Home affordance).');
+    expect(steered).toContain('SET ASIDE `AR-2` (a product call, not a defect): do not spend this lap on them; they are already filed as findings.');
+    expect(steered).toContain('Reviewer: list set-aside ids under `### Prior entries` as `set-aside`; do not re-raise them as blocking.');
+    // It comes AFTER the review it outranks.
+    expect(steered.indexOf("supervisor's steering")).toBeGreaterThan(steered.indexOf('#### AR-1 — no way back'));
+
+    // A mechanical lap (no supervisor verdict) renders no steering at all.
+    const mechanical = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'adversarial-review', source: 'adversarial-review', round: 1, reviewMarkdown },
+    });
+    expect(mechanical).not.toContain('supervisor');
+    expect(mechanical).not.toContain('SET ASIDE');
+  });
+
+  it('renders only the half of the steering that has entries, and nothing when both are empty', () => {
+    const base = {
+      step: step({ id: 'expand-spec', agent: 'expand-spec' }),
+      workflowName: 'planner' as const,
+      attempt: 1,
+      gateRevision: {
+        gateStepId: 'adversarial-review',
+        source: 'adversarial-review' as const,
+        reviewMarkdown: '## Blocking\n\n#### AR-1 — x',
+      },
+    };
+
+    const addressOnly = composeStepPrompt({
+      ...base,
+      gateRevision: { ...base.gateRevision, steering: { address: ['AR-1'], setAside: [] } },
+    });
+    expect(addressOnly).toContain('ADDRESS `AR-1`.');
+    expect(addressOnly).not.toContain('SET ASIDE');
+    // No guidance ⇒ no empty parenthesis.
+    expect(addressOnly).not.toContain('()');
+
+    const setAsideOnly = composeStepPrompt({
+      ...base,
+      gateRevision: { ...base.gateRevision, steering: { address: [], setAside: [{ id: 'AR-1', reason: '  ' }] } },
+    });
+    expect(setAsideOnly).not.toContain('ADDRESS');
+    expect(setAsideOnly).toContain('SET ASIDE `AR-1` (no reason given)');
+
+    const empty = composeStepPrompt({
+      ...base,
+      gateRevision: { ...base.gateRevision, steering: { address: [], setAside: [] } },
+    });
+    expect(empty).not.toContain("supervisor's steering");
+  });
+
   it('asks the adversarial-review step for the REVIEW verdict trailer, and only promises a loop when the step declares one', () => {
     const review = (loopback?: string): string =>
       composeStepPrompt({

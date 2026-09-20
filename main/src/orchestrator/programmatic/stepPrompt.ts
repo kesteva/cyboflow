@@ -51,6 +51,22 @@ import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudge
 import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
 import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
 
+/**
+ * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
+ * imported from `./types`: this module composes prompt text from shared types
+ * only, and the controller's `ReviewLoopSteering` is assignable to it, so the
+ * two stay in step without stepPrompt taking on the controller protocol's
+ * import graph.
+ */
+interface MonitorSteering {
+  /** `AR-n` ids this lap must close. */
+  address: string[];
+  /** `AR-n` ids this lap must NOT spend itself on, each with the reason a human will read. */
+  setAside: { id: string; reason: string }[];
+  /** Free-text advice for the whole lap. */
+  guidance?: string;
+}
+
 export interface ComposeStepPromptArgs {
   step: WorkflowStep;
   /** The run's workflow name (e.g. 'planner') — orients the agent. */
@@ -230,6 +246,16 @@ export interface ComposeStepPromptArgs {
      * clause; absent ⇒ the clause is dropped and the id list still renders.
      */
     round?: number;
+    /**
+     * The supervisor's steering for THIS lap (the controller's
+     * `ReviewLoopSteering`, declared structurally so this module keeps importing
+     * shared types only). Present only on a supervisor-voted automatic lap:
+     * `address` is the must-fix set for the lap, `setAside` the entries it must
+     * NOT spend itself on (already filed as findings), `guidance` free-text
+     * advice. Absent on a mechanical lap and on every human-gate revision, where
+     * the prompt is byte-identical to before.
+     */
+    steering?: MonitorSteering;
   };
   /**
    * The most recent preceding AGENT step's final text, for a step whose
@@ -669,11 +695,63 @@ function composeReviewRoundNote(reviewMarkdown: string, round: number | undefine
   return `\n\n${roundClause}Ids used so far: ${ids}. Keep them: never renumber an existing \`AR-n\`, continue any NEW entry from AR-${k + 1}, and list every prior id under \`### Prior entries\` with its previous severity.`;
 }
 
+/**
+ * The supervisor's steering, rendered INSIDE the automatic-revision section.
+ *
+ * It outranks the review deliberately, and says so: the review is one critic's
+ * opinion, while the steering is the run supervisor's judgement of which of
+ * those opinions this lap should spend itself on, made with the round-over-round
+ * trend in front of it. Without the precedence line an agent handed both would
+ * reasonably try to satisfy every blocking entry — which is exactly the churn
+ * the set-aside list exists to stop.
+ *
+ * The SET ASIDE half also carries an instruction for the NEXT reviewer: a
+ * set-aside id must come back under `### Prior entries` as `set-aside`, not as a
+ * fresh blocker. Nothing else closes that loop — the reviewer never sees the
+ * steering, so an id dropped without a word would read to it as an unaddressed
+ * defect and be re-raised on the next round, forever.
+ *
+ * Empty when neither list has an entry (a steering that names nothing has
+ * nothing to outrank).
+ */
+function composeMonitorSteeringSection(steering: MonitorSteering): string {
+  const address = steering.address.filter((id) => id.trim().length > 0);
+  const setAside = steering.setAside.filter((entry) => entry.id.trim().length > 0);
+  if (address.length === 0 && setAside.length === 0) return '';
+  const guidance = (steering.guidance ?? '').trim();
+  const lines: string[] = [
+    '',
+    '',
+    '### The supervisor\'s steering',
+    '',
+    "The supervisor's steering — authoritative, outranks the review where they disagree:",
+  ];
+  if (address.length > 0) {
+    lines.push(
+      '',
+      `ADDRESS ${address.map((id) => `\`${id}\``).join(', ')}${guidance.length > 0 ? ` (${guidance})` : ''}.`,
+    );
+  }
+  if (setAside.length > 0) {
+    const rendered = setAside
+      .map((entry) => `\`${entry.id}\` (${entry.reason.trim().length > 0 ? entry.reason.trim() : 'no reason given'})`)
+      .join(', ');
+    lines.push(
+      '',
+      `SET ASIDE ${rendered}: do not spend this lap on them; they are already filed as findings.`,
+      '',
+      'Reviewer: list set-aside ids under `### Prior entries` as `set-aside`; do not re-raise them as blocking.',
+    );
+  }
+  return lines.join('\n');
+}
+
 function composeAdversarialRevisionSection(
   reviewStepId: string,
   blockingNote: string,
   reviewMarkdown: string,
   round: number | undefined,
+  steering: MonitorSteering | undefined,
 ): string {
   const body =
     reviewMarkdown.length > 0
@@ -681,7 +759,10 @@ function composeAdversarialRevisionSection(
       : blockingNote.length > 0
         ? `\n\n### Blocking entries from the previous round\n\nThe full review artifact could not be read back, so these are the \`## Blocking\` entries as the review step reported them. Address EVERY one; state in your output which \`AR-n\` ids you resolved and how, and name — with your reason — any you deliberately did not.\n\n${blockingNote}`
         : `\n\nNeither the review artifact nor its blocking entries could be read back, so you have the verdict and nothing else. Re-examine your previous output against the spec and the brief, fix what you judge weakest, and state that judgement explicitly in your summary — do NOT re-emit the same result and do NOT ask a question; nothing in this step can answer one.`;
-  return `\n\n## Adversarial review: revision requested\n\nThis run's adversarial review (the \`${reviewStepId}\` step) found must-fix defects in the design, and the workflow sent the refine phase back to address them AUTOMATICALLY — no human has seen the design gate yet, and this re-run is what they will see when it opens. You are part of the RE-RUN: the review found your previous output wanting, and repeating it unchanged wastes the revision and hands the human the same defects. Produce a revised result that answers the entries below that fall within this step's remit, and say plainly in your summary what you changed.${body}`;
+  // The steering renders AFTER the review it outranks, so the agent reads the
+  // critique first and the instruction about which parts of it to act on last.
+  const steeringSection = steering !== undefined ? composeMonitorSteeringSection(steering) : '';
+  return `\n\n## Adversarial review: revision requested\n\nThis run's adversarial review (the \`${reviewStepId}\` step) found must-fix defects in the design, and the workflow sent the refine phase back to address them AUTOMATICALLY — no human has seen the design gate yet, and this re-run is what they will see when it opens. You are part of the RE-RUN: the review found your previous output wanting, and repeating it unchanged wastes the revision and hands the human the same defects. Produce a revised result that answers the entries below that fall within this step's remit, and say plainly in your summary what you changed.${body}${steeringSection}`;
 }
 
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
@@ -786,7 +867,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
           workflowName,
           // The verdict-trailer routing sentence is only true on a review step
           // that declares a loopback — the controller's automatic revision keys
-          // on it (see WorkflowController.tryAdversarialReviewLoopback).
+          // on it (see WorkflowController.readAdversarialReviewResult).
           step.agent === 'adversarial-review' && step.loopback !== undefined && step.loopback.length > 0,
         )
       : '';
@@ -910,7 +991,13 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     revision === undefined
       ? ''
       : revision.source === 'adversarial-review'
-        ? composeAdversarialRevisionSection(revision.gateStepId, revisionNote, revisionReview, revision.round)
+        ? composeAdversarialRevisionSection(
+            revision.gateStepId,
+            revisionNote,
+            revisionReview,
+            revision.round,
+            revision.steering,
+          )
         : `\n\n## Design gate: revision requested\n\nA human reviewed this run's design at the \`${revision.gateStepId}\` gate and sent it back. You are part of the RE-RUN: your previous output was not accepted, and repeating it unchanged wastes the revision. Produce a revised result that answers what is below, and say plainly in your summary what you changed.${
           revisionNote.length > 0
             ? `\n\nThe reviewer's own words, verbatim — this is the authoritative instruction and it outranks the review below where the two disagree:\n\n> ${revisionNote.replace(/\n/g, '\n> ')}`

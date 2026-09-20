@@ -29,6 +29,7 @@
 import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
+import type { AdversarialFinding } from '../../../../shared/types/adversarialReview';
 import type {
   BuildBreakGroup,
   ControllerHost,
@@ -37,6 +38,9 @@ import type {
   HumanGateDecision,
   LaneRescueOutcome,
   LaneTriageFailure,
+  ReviewLoopDecision,
+  ReviewLoopRequest,
+  SetAsideFindingInput,
   StepReport,
   SystemicPauseVerdict,
   TriageDecision,
@@ -65,6 +69,20 @@ function laneTriageDisabled(): boolean {
 }
 
 /**
+ * Rollback lever for the SUPERVISED adversarial-review loop (sibling of
+ * LANE_TRIAGE_KILL_SWITCH_ENV). With it set to '1' the host never consults the
+ * monitor about a blocking review round, so the controller falls back to its
+ * MECHANICAL revision budget — i.e. exactly the one-lap behaviour that shipped
+ * before this seam existed. No query cost, no findings, no chat.
+ */
+export const REVIEW_LOOP_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_REVIEW_LOOP_TRIAGE';
+
+/** True when the operator has disabled the supervised review loop for this process. */
+function reviewLoopTriageDisabled(): boolean {
+  return process.env[REVIEW_LOOP_KILL_SWITCH_ENV] === '1';
+}
+
+/**
  * The task facts the monitor's lane-triage prompt needs but the CONTROLLER does
  * not have (it only ever sees opaque fan-out item ids). Resolved by the injected
  * {@link ProgrammaticRunHostArgs.readLaneTask} reader.
@@ -83,6 +101,9 @@ export interface LaneTriageAdjustResult {
   /** Machine-readable refusal reason, surfaced in the chat note + the finding. */
   reason?: string;
 }
+
+/** Grouping category for the supervisor's review-loop audit findings in the review queue. */
+const REVIEW_LOOP_FINDING_CATEGORY = 'review-loop';
 
 /** Longest before/after body excerpt rendered into the audit finding. */
 const FINDING_BODY_EXCERPT = 1200;
@@ -246,6 +267,25 @@ export interface ProgrammaticRunHostArgs {
    * throwing/absent sink never blocks the rescue it was supposed to audit.
    */
   fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
+  /**
+   * SUPERVISOR-AUDIT sink. Files the NON-BLOCKING record of ONE review-loop
+   * consult — the verdict, its rationale, and the steering the re-run will be
+   * given — so an autonomous decision to spend (or not spend) another design
+   * lap is visible in the review queue before the human reaches the gate. Bound
+   * by the composition root to the SAME ReviewItemRouter seam the lane-triage
+   * audit uses, with actor `monitor`. Fail-soft at the call site: a throwing or
+   * absent sink never costs the decision it was supposed to record.
+   */
+  fileMonitorFinding?: (input: { title: string; body: string; category?: string }) => Promise<void>;
+  /**
+   * SET-ASIDE sink. Files one non-blocking finding per adversarial-review entry
+   * the supervisor set aside, IMMEDIATELY — which is what makes setting an entry
+   * aside safe: the entry leaves the lap but not the run. Composed to match the
+   * approve-design gate's accepted-risk findings exactly (same title shape, same
+   * category, same severity mapping) so `filedAdversarialIds` dedupes it there
+   * rather than filing it twice. Fail-soft at the call site.
+   */
+  fileSetAsideFinding?: (input: SetAsideFindingInput) => Promise<void>;
   /**
    * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
    * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
@@ -660,6 +700,161 @@ export class ProgrammaticRunHost implements ControllerHost {
         },
       );
       return systemic ? { kind: 'systemic', error: message } : { kind: 'give_up' };
+    }
+  }
+
+  /**
+   * REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling. Consulted on
+   * every blocking adversarial-review round for which automatic laps remain,
+   * BEFORE the controller decides whether to take one. Resolves the executable
+   * verdict only, so the controller never learns what a monitor or a finding is.
+   *
+   * Order of business, each arm short-circuiting to the pre-seam behaviour (the
+   * controller's MECHANICAL revision budget):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_REVIEW_LOOP_TRIAGE=1`) ⇒ undefined. No
+   *      consult, no chat turn (a rollback lever should be silent) — just a log.
+   *   2. No monitor, or a monitor with no `adviseReviewLoop` (the many faked
+   *      sessions across the suite) ⇒ undefined.
+   *   3. Consult `monitor.adviseReviewLoop`. It OWNS its chat rendering (the
+   *      blocking announcement + the verdict turn), so this method injects NO
+   *      turn of its own — a host turn here would double-render.
+   *   4. RECORD, before returning: one audit finding for the consult, and one
+   *      finding per SET-ASIDE entry. The set-asides are what make the verdict
+   *      safe to execute unattended — an entry the supervisor drops from the lap
+   *      must still reach the human — so they are filed on BOTH arms (a `stop`
+   *      can set entries aside too), each fail-soft and awaited.
+   *
+   * Fail-soft overall: `DefaultMonitorSession.adviseReviewLoop` already never
+   * rejects, so the try/catch is belt-and-braces. An ABORTED run also resolves
+   * undefined: a canceled walk has no lap to take.
+   */
+  async adviseReviewLoop(
+    req: ReviewLoopRequest,
+    ctx: ControllerStepContext,
+  ): Promise<ReviewLoopDecision | undefined> {
+    if (reviewLoopTriageDisabled()) {
+      this.args.logger?.info('[ProgrammaticRunHost] review-loop triage disabled by kill switch; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+      });
+      return undefined;
+    }
+    const monitor = this.args.monitor;
+    if (!monitor?.adviseReviewLoop) {
+      this.args.logger?.info('[ProgrammaticRunHost] no review-loop-capable monitor; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+      });
+      return undefined;
+    }
+    try {
+      const decision = await monitor.adviseReviewLoop(req, ctx.signal);
+      if (decision === undefined) return undefined;
+      await this.fileReviewLoopAudit(req, decision);
+      const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
+      await this.fileSetAsideFindings(req, setAside);
+      return decision;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review-loop consult failed; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * File the NON-BLOCKING audit record for one review-loop consult.
+   *
+   * The decision is autonomous and unconfirmed — it spends design turns, or ends
+   * the automatic loop early — so it needs the same paper trail a lane rescue
+   * gets: the verdict, the rationale a human will weigh at the gate, and the
+   * exact steering the re-run is about to be handed. Fail-soft: the decision is
+   * already made, and losing its paper trail must not lose the decision.
+   */
+  private async fileReviewLoopAudit(req: ReviewLoopRequest, decision: ReviewLoopDecision): Promise<void> {
+    if (!this.args.fileMonitorFinding) return;
+    try {
+      const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
+      const lines = [
+        `The run supervisor reviewed round ${req.round} of \`${req.stepId}\` (${req.parsed.blocking.length} blocking entr` +
+          `${req.parsed.blocking.length === 1 ? 'y' : 'ies'}) and voted **${decision.verdict}**.`,
+        '',
+        `- Automatic revisions used: ${req.lapsUsed} of ${req.maxLaps}`,
+        `- Rationale: ${decision.rationale}`,
+      ];
+      if (decision.verdict === 'loop') {
+        lines.push(
+          `- Re-running from \`${req.loopbackStepId}\`, addressing: ${decision.steering.address.join(', ')}`,
+        );
+        if (decision.steering.guidance !== undefined) {
+          lines.push('', '## Guidance threaded into the re-run', '', decision.steering.guidance.trim());
+        }
+      } else {
+        lines.push('- No further automatic revision — the surviving entries go to the human design gate.');
+      }
+      if (setAside.length > 0) {
+        lines.push(
+          '',
+          '## Set aside for this round',
+          '',
+          ...setAside.map((entry) => `- ${entry.id}: ${entry.reason}`),
+          '',
+          'Each is filed as its own non-blocking finding — set aside for the lap, not dropped from the run.',
+        );
+      }
+      await this.args.fileMonitorFinding({
+        title: `Review loop — ${req.stepId} round ${req.round}: ${decision.verdict}`,
+        body: lines.join('\n'),
+        category: REVIEW_LOOP_FINDING_CATEGORY,
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review-loop audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * File one non-blocking finding per set-aside entry, NOW.
+   *
+   * "Set aside" is only defensible because of this call: the entry leaves the
+   * lap the moment the supervisor says so, and the finding is the only thing
+   * that keeps it in the run. Each entry is filed independently — one entry the
+   * queue refuses must not cost the others their record — and the whole thing is
+   * fail-soft, because the verdict is already decided.
+   *
+   * An id the supervisor named but the round's review does not carry is dropped
+   * silently: `parseReviewLoopOutput` already validated against the round's
+   * ids, so reaching here means the entry genuinely does not exist.
+   */
+  private async fileSetAsideFindings(
+    req: ReviewLoopRequest,
+    setAside: readonly { id: string; reason: string }[],
+  ): Promise<void> {
+    const sink = this.args.fileSetAsideFinding;
+    if (!sink || setAside.length === 0) return;
+    const byId = new Map<string, AdversarialFinding>();
+    for (const entry of [...req.parsed.blocking, ...req.parsed.findings]) byId.set(entry.id, entry);
+    for (const { id, reason } of setAside) {
+      const entry = byId.get(id);
+      if (entry === undefined) continue;
+      try {
+        await sink({ entry, reason, round: req.round });
+      } catch (err) {
+        this.args.logger?.warn('[ProgrammaticRunHost] set-aside finding not filed (fail-soft)', {
+          runId: this.args.runId,
+          stepId: req.stepId,
+          arId: id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 

@@ -45,7 +45,7 @@ import {
   type VerificationPostureDeps,
 } from '../verify/verificationPosture';
 import { sweepBuildBreaks } from './buildBreakDetector';
-import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
+import type { FanOutDriver, SetAsideFindingInput, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
@@ -245,6 +245,24 @@ export interface DefaultProgrammaticRunnerDeps {
    * always reaches the human's review queue. Absent ⇒ rescues are logged only.
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
+  /**
+   * SUPERVISOR-AUDIT sink (the review loop). Bound in production to the SAME
+   * ReviewItemRouter seam `laneTriageFindingSink` uses, with actor `monitor`, so
+   * an autonomous decision about whether to spend another design lap always
+   * reaches the human's review queue. Absent ⇒ the decision is logged only.
+   */
+  monitorFindingSink?: (
+    runId: string,
+    input: { title: string; body: string; category?: string },
+  ) => Promise<void>;
+  /**
+   * SET-ASIDE sink (the review loop). Files one non-blocking finding per
+   * adversarial-review entry the supervisor excluded from a lap — the thing that
+   * makes a set-aside safe. Bound in production to the same chokepoint, composed
+   * to match the approve-design gate's accepted-risk findings so the gate dedupes
+   * rather than double-files. Absent ⇒ set-aside entries are logged only.
+   */
+  setAsideFindingSink?: (runId: string, input: SetAsideFindingInput) => Promise<void>;
   /**
    * The project's runbook-status resolver — the SAME closure the scheduler's
    * `runbookStatus` dependency and the verify health panel share (index.ts builds
@@ -917,6 +935,8 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageTaskReader = this.deps.laneTriageTaskReader;
     const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+    const monitorFindingSink = this.deps.monitorFindingSink;
+    const setAsideFindingSink = this.deps.setAsideFindingSink;
     // Narrowed once here so the two conditional spreads below close over a
     // definitely-defined handle rather than re-narrowing `this.deps` inside a
     // callback (where TS cannot keep the narrowing).
@@ -955,6 +975,15 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
             fileLaneTriageFinding: (input: { title: string; body: string }) =>
               laneTriageFindingSink(ctx.runId, input),
           }
+        : {}),
+      ...(monitorFindingSink
+        ? {
+            fileMonitorFinding: (input: { title: string; body: string; category?: string }) =>
+              monitorFindingSink(ctx.runId, input),
+          }
+        : {}),
+      ...(setAsideFindingSink
+        ? { fileSetAsideFinding: (input: SetAsideFindingInput) => setAsideFindingSink(ctx.runId, input) }
         : {}),
       // F8 "never skip silently" (docs/proposals/visual-verification-brittleness-
       // fixes.md): a visual verification dropped BEFORE a request row exists

@@ -158,8 +158,16 @@ function normalizeSeverity(raw: string | undefined, fallback: AdversarialSeverit
   return hit ?? fallback;
 }
 
-/** `AR-3`, `AR 3`, `ar3` all normalize to `AR-3` so idempotence keys line up. */
-function normalizeId(raw: string): string {
+/**
+ * `AR-3`, `AR 3`, `ar3` all normalize to `AR-3` so idempotence keys line up.
+ *
+ * Exported because the id is a CONTRACT between producers that never see each
+ * other's text: the reviewer writes it, the parser buckets it, the gate dedupes
+ * findings on it, and the supervisor's steering names it back. A second, private
+ * spelling of this rule in any one of them would silently drop an entry the
+ * others kept.
+ */
+export function normalizeAdversarialId(raw: string): string {
   const digits = /(\d+)/.exec(raw);
   return digits ? `AR-${digits[1]}` : raw.trim().toUpperCase();
 }
@@ -190,7 +198,7 @@ function parsePriorLine(line: string): PriorEntry | null {
   const statusMatch = PRIOR_STATUS_RE.exec(m[3]);
   if (statusMatch === null) return null;
 
-  const entry: PriorEntry = { id: normalizeId(m[1]), status: normalizePriorStatus(statusMatch[1]) };
+  const entry: PriorEntry = { id: normalizeAdversarialId(m[1]), status: normalizePriorStatus(statusMatch[1]) };
 
   const declared = (m[2] ?? '').trim().toLowerCase();
   const severity = ADVERSARIAL_SEVERITIES.find((s) => declared.startsWith(s));
@@ -199,7 +207,7 @@ function parsePriorLine(line: string): PriorEntry | null {
   let rest = m[3].slice(statusMatch[0].length);
   const refMatch = PRIOR_REF_RE.exec(rest);
   if (refMatch !== null) {
-    entry.ref = normalizeId(refMatch[1]);
+    entry.ref = normalizeAdversarialId(refMatch[1]);
     rest = rest.slice(refMatch[0].length);
   }
   const note = cleanField(rest.replace(/^[ \t]*[—–:-][ \t]*/, ''));
@@ -315,7 +323,7 @@ export function parseAdversarialReviewDoc(markdown: string | null | undefined): 
         bucket,
         body: [],
         entry: {
-          id: normalizeId(entryMatch[1]),
+          id: normalizeAdversarialId(entryMatch[1]),
           title: entryMatch[2].replace(/\s+/g, ' ').trim(),
           severity: bucket === 'blocking' ? 'blocker' : 'advisory',
         },

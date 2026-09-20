@@ -10,8 +10,11 @@ import { WorkflowController, MAX_STEP_LOOPBACKS, MAX_VISUAL_LOOPBACKS } from '..
 import { createRunDirectives } from '../runDirectives';
 import type {
   ControllerHost,
+  ControllerStepContext,
   FanOutDriver,
   HumanGateDecision,
+  ReviewLoopDecision,
+  ReviewLoopRequest,
   StepRunResult,
   StepRunner,
   SupervisorEvent,
@@ -3647,5 +3650,277 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     const result = await new WorkflowController(runner, makeHost()).run('run-ar8', d);
     expect(result.outcome).toBe('completed');
     expect(seen).toEqual(['a', 'b']);
+  });
+});
+
+describe('WorkflowController — supervised adversarial-review loop (cap 3)', () => {
+  /**
+   * The same refine phase in miniature as the mechanical suite above, so the two
+   * differ ONLY in whether the host implements `adviseReviewLoop`.
+   */
+  function reviewDef(): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+  }
+
+  /** A review document with two blocking entries and one advisory finding. */
+  const REVIEW_DOC = [
+    'Reported the adversarial review.',
+    '',
+    '## Blocking',
+    '',
+    '#### AR-1 — Spend screen has no way back',
+    '**Severity:** blocker   **Area:** prototype',
+    '**What:** no Home affordance.',
+    '',
+    '#### AR-2 — No data store named',
+    '**Severity:** major   **Area:** architecture',
+    '**What:** the spec persists nothing.',
+    '',
+    '## Findings',
+    '',
+    '#### AR-3 — Copy nit',
+    '**Severity:** advisory',
+    '**What:** "Submit" should be "Save".',
+    '',
+    'REVIEW: BLOCKING',
+  ].join('\n');
+  const CLEAN_RESULT = 'Reported.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
+
+  type Seen = {
+    id: string;
+    gateRevision?: ControllerStepContext['gateRevision'];
+  };
+
+  function reviewRunner(reviewResults: string[]): StepRunner & { seen: Seen[] } {
+    const seen: Seen[] = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      async runStep(s, ctx) {
+        seen.push({ id: s.id, ...(ctx.gateRevision ? { gateRevision: ctx.gateRevision } : {}) });
+        if (s.id === 'adversarial-review') return { status: 'ok', resultText: queue.shift() ?? CLEAN_RESULT };
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  /**
+   * A host that records the full ctx of every gate call (so a test can assert
+   * `ctx.escalation`) and routes `adviseReviewLoop` to a scripted queue.
+   */
+  function supervisedHost(
+    decisions: Array<ReviewLoopDecision | undefined>,
+    gates: Record<string, HumanGateDecision[]> = {},
+  ): ControllerHost & {
+    gateCtxs: ControllerStepContext[];
+    requests: ReviewLoopRequest[];
+    gateCalls: string[];
+  } {
+    const queues: Record<string, HumanGateDecision[]> = {};
+    for (const [k, v] of Object.entries(gates)) queues[k] = [...v];
+    const scripted = [...decisions];
+    const gateCtxs: ControllerStepContext[] = [];
+    const requests: ReviewLoopRequest[] = [];
+    const gateCalls: string[] = [];
+    return {
+      gateCtxs,
+      requests,
+      gateCalls,
+      reportStep() {},
+      async requestHumanGate(s, ctx) {
+        gateCalls.push(s.id);
+        gateCtxs.push(ctx);
+        return queues[s.id]?.shift() ?? 'approve';
+      },
+      async adviseReviewLoop(req) {
+        requests.push(req);
+        return scripted.length > 0 ? scripted.shift() : undefined;
+      },
+    };
+  }
+
+  const LOOP: ReviewLoopDecision = {
+    verdict: 'loop',
+    rationale: 'both blockers are concrete and one lap can close them',
+    steering: {
+      address: ['AR-1'],
+      setAside: [{ id: 'AR-2', reason: 'the data store is a product call, not a defect' }],
+      guidance: 'add a Home affordance to the spend screen',
+    },
+  };
+
+  it('laps on a supervisor `loop`, threading the steering into every re-driven step', async () => {
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+
+    const result = await new WorkflowController(runner, host).run('run-loop', reviewDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'adversarial-review',
+      'expand-spec', 'adversarial-review',
+      'epics',
+    ]);
+    expect(runner.seen[2].gateRevision?.steering).toEqual(LOOP.steering);
+    expect(runner.seen[2].gateRevision?.source).toBe('adversarial-review');
+    expect(runner.seen[2].gateRevision?.round).toBe(1);
+    // The gate opened once, AFTER the lap, and carries no escalation (nothing stopped).
+    expect(host.gateCalls).toEqual(['approve-design']);
+    expect(host.gateCtxs[0].escalation).toBeUndefined();
+  });
+
+  it('takes THREE supervised laps before the cap sends the round to the gate', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([LOOP, LOOP, LOOP, LOOP]);
+
+    await new WorkflowController(runner, host).run('run-cap', reviewDef());
+
+    expect(runner.seen.filter((s) => s.id === 'adversarial-review')).toHaveLength(4);
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(4);
+    // The 4th blocking round is over the cap: no consult is spent on it.
+    expect(host.requests).toHaveLength(3);
+    expect(host.requests.map((r) => r.lapsUsed)).toEqual([0, 1, 2]);
+    expect(host.requests.map((r) => r.maxLaps)).toEqual([3, 3, 3]);
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('a `stop` advances to the gate WITHOUT a lap and hands the gate its escalation', async () => {
+    const runner = reviewRunner([REVIEW_DOC]);
+    const host = supervisedHost([
+      {
+        verdict: 'stop',
+        rationale: 'the remaining blocker is a product decision the brief does not settle',
+        setAside: [{ id: 'AR-3', reason: 'copy nit, not worth a design lap' }],
+      },
+    ]);
+
+    await new WorkflowController(runner, host).run('run-stop', reviewDef());
+
+    // No lap: expand-spec ran exactly once.
+    expect(runner.seen.map((s) => s.id)).toEqual(['expand-spec', 'adversarial-review', 'epics']);
+    expect(host.gateCtxs[0].escalation).toEqual({
+      loopStopRationale: 'the remaining blocker is a product decision the brief does not settle',
+      setAsideIds: ['AR-3'],
+    });
+    // Consumed by that one gate — the step after it carries no revision at all.
+    expect(runner.seen[2].gateRevision).toBeUndefined();
+  });
+
+  it('falls back to ONE mechanical lap when the supervisor returns no verdict', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([undefined, undefined, undefined]);
+
+    await new WorkflowController(runner, host).run('run-mech', reviewDef());
+
+    // One lap (the mechanical budget), then the gate — cap 3 never applies.
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+    expect(runner.seen[2].gateRevision?.steering).toBeUndefined();
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('a THROWN consult is the mechanical path, not a failure', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([]);
+    host.adviseReviewLoop = async () => {
+      throw new Error('monitor down');
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-throw', reviewDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+  });
+
+  it('discards a verdict that arrives after the run was canceled', async () => {
+    const controller = new AbortController();
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([]);
+    // The run is canceled WHILE the consult is in flight — the verdict is real
+    // but no longer actionable, so it must read as "no verdict" rather than
+    // steering a lap of a dead run.
+    host.adviseReviewLoop = async () => {
+      controller.abort();
+      return LOOP;
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-abort', reviewDef(), controller.signal);
+
+    expect(result.outcome).toBe('canceled');
+    expect(runner.seen.every((s) => s.gateRevision?.steering === undefined)).toBe(true);
+  });
+
+  it('grows priorRounds one entry per COMPLETED round, clean rounds included', async () => {
+    // Round 1 blocking (consulted with no prior rounds), round 2 clean, then a
+    // human revise re-runs the review for round 3 — which IS consulted, and must
+    // see both earlier rounds, the clean one with an empty id list.
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT, REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP], { 'approve-design': ['revise', 'approve'] });
+
+    await new WorkflowController(runner, host).run('run-prior', reviewDef());
+
+    expect(host.requests).toHaveLength(2);
+    expect(host.requests[0].round).toBe(1);
+    expect(host.requests[0].priorRounds).toEqual([]);
+    expect(host.requests[1].round).toBe(3);
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1', 'AR-2'], blockingTitles: ['Spend screen has no way back', 'No data store named'] },
+      { round: 2, blockingIds: [], blockingTitles: [] },
+    ]);
+  });
+
+  it('prefers the ARTIFACT for the request’s markdown/parse even when the verdict came from the text', async () => {
+    // The reviewer's final message carries only `## Blocking`, so a text-only
+    // parse has no `findings` at all — and the supervisor could then never
+    // validate a set-aside id that lives under `## Findings`.
+    const textOnly = ['## Blocking', '', '#### AR-1 — a defect', '**What:** x', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '# Adversarial review',
+      '',
+      '## Blocking',
+      '',
+      '#### AR-1 — a defect',
+      '**What:** x',
+      '',
+      '## Findings',
+      '',
+      '#### AR-4 — advisory only',
+      '**What:** y',
+    ].join('\n');
+    const runner = reviewRunner([textOnly, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+    host.readAdversarialReview = () => artifact;
+
+    await new WorkflowController(runner, host).run('run-artifact-pref', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-4']);
+    expect(host.requests[0].loopbackStepId).toBe('expand-spec');
+    expect(host.requests[0].stepId).toBe('adversarial-review');
+  });
+
+  it('never consults when the review is CLEAN or the step declares no loopback', async () => {
+    const clean = reviewRunner([CLEAN_RESULT]);
+    const cleanHost = supervisedHost([LOOP]);
+    await new WorkflowController(clean, cleanHost).run('run-clean', reviewDef());
+    expect(cleanHost.requests).toHaveLength(0);
+
+    const noLoopback = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true }),
+        step({ id: 'approve-design', agent: 'human', human: true }),
+      ]),
+    ]);
+    const blocked = reviewRunner([REVIEW_DOC]);
+    const blockedHost = supervisedHost([LOOP]);
+    await new WorkflowController(blocked, blockedHost).run('run-noloop', noLoopback);
+    expect(blockedHost.requests).toHaveLength(0);
   });
 });

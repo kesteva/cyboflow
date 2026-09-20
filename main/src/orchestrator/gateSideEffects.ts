@@ -79,8 +79,13 @@ const DESIGN_FLOWS = new Set(['launch', 'planner', 'ship']);
 /** Provenance stamped on every accepted-risk finding this module files. */
 export const ADVERSARIAL_FINDING_SOURCE = 'agent:adversarial-review';
 
-/** Grouping category for the accepted-risk findings in the review queue. */
-const ADVERSARIAL_FINDING_CATEGORY = 'design-review';
+/**
+ * Grouping category for the accepted-risk findings in the review queue.
+ * Exported because the supervisor's SET-ASIDE sink files the same entries early
+ * (monitorActionSinks.ts) and the two must be indistinguishable in the queue —
+ * a second spelling would split one defect across two groups.
+ */
+export const ADVERSARIAL_FINDING_CATEGORY = 'design-review';
 
 // The verdict sniff lives in its own leaf module so `adversarialReviewGateBody`
 // (which this file imports for the review markdown) can borrow it without a
@@ -502,8 +507,13 @@ export class GateSideEffects {
  * line that says how this finding came to exist. Without that line the finding
  * reads as a fresh defect report rather than as a risk somebody already weighed
  * and chose to carry.
+ *
+ * Exported for the supervisor's SET-ASIDE sink (monitorActionSinks.ts), which
+ * files the same entry EARLY — mid-loop rather than at the gate — and prefixes
+ * this body with the supervisor's reason. Sharing the renderer is what keeps a
+ * set-aside entry and its eventual gate twin one finding rather than two.
  */
-function renderAcceptedRiskBody(entry: AdversarialFinding): string {
+export function renderAcceptedRiskBody(entry: AdversarialFinding): string {
   const lines: string[] = [];
   if (entry.what !== undefined) lines.push(entry.what);
   if (entry.why !== undefined) lines.push('', `**Why it matters:** ${entry.why}`);

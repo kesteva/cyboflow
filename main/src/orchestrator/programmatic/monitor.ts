@@ -27,7 +27,15 @@ import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
-import type { LaneFailureKind, TriageDecision } from './types';
+import type {
+  LaneFailureKind,
+  ReviewLoopDecision,
+  ReviewLoopPriorRound,
+  ReviewLoopRequest,
+  ReviewLoopSteering,
+  TriageDecision,
+} from './types';
+import { normalizeAdversarialId } from '../../../../shared/types/adversarialReview';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
@@ -428,6 +436,153 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
 }
 
 // ---------------------------------------------------------------------------
+// Review-loop schema + parsing (the supervisor steering each automatic lap)
+// ---------------------------------------------------------------------------
+
+/**
+ * The controller/host protocol types for the review loop, re-exported here for
+ * the same reason `LaneFailureKind` is: they are canonical in `./types` (which
+ * must stay free of this file's heavier import graph), and a consumer that
+ * imports the brain should not have to know that.
+ */
+export type { ReviewLoopDecision, ReviewLoopPriorRound, ReviewLoopRequest, ReviewLoopSteering };
+
+/**
+ * JSON schema the SDK `outputFormat` enforces for a structured REVIEW-LOOP
+ * verdict — the supervisor's decision about a blocking adversarial-review round.
+ * `additionalProperties: false` so the SDK rejects extra fields.
+ *
+ * Only `verdict` + `rationale` are schema-required: `address` / `setAside` /
+ * `guidance` are verdict-specific and enforced (by DOWNGRADE, never an error) in
+ * `parseReviewLoopOutput`.
+ */
+export const MONITOR_REVIEW_LOOP_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'rationale'],
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['loop', 'stop'],
+      description:
+        'loop = take another automatic revision lap now, addressing the ids you list in `address`; stop = do not lap, advance to the human design gate with the surviving entries. A `loop` with an empty `address` is downgraded to `stop` — there would be nothing for the lap to do.',
+    },
+    rationale: {
+      type: 'string',
+      description:
+        '2-4 sentences: why this verdict. For stop, say what makes the remaining blockers a human call (a product decision, churn round over round, an unclosable set on the last lap). The human reads this at the gate.',
+    },
+    address: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'loop (REQUIRED in practice): the `AR-n` ids the re-run MUST fix this lap. Ids not present in this round’s review are dropped.',
+    },
+    setAside: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'reason'],
+        properties: {
+          id: { type: 'string', description: 'The `AR-n` id to set aside.' },
+          reason: {
+            type: 'string',
+            description: 'One line a human will read as a finding: why this entry is not worth this lap.',
+          },
+        },
+      },
+      description:
+        'Entries that are advisory in substance, speculative, or out of the idea’s stated scope. Each is filed as a non-blocking finding IMMEDIATELY, so setting one aside never drops it.',
+    },
+    guidance: {
+      type: 'string',
+      description: 'loop (optional): what the lap should do DIFFERENTLY. Rendered to the re-run as outranking the review.',
+    },
+  },
+};
+
+/** The ids this round’s review actually raised — the allow-list steering is validated against. */
+function reviewLoopValidIds(req: ReviewLoopRequest): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of [...req.parsed.blocking, ...req.parsed.findings]) {
+    ids.add(normalizeAdversarialId(entry.id));
+  }
+  return ids;
+}
+
+/** Normalize, validate against the round’s ids, and dedupe an `address` list. */
+function cleanAddressIds(raw: unknown, valid: Set<string>): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const id = normalizeAdversarialId(item);
+    if (!valid.has(id) || out.includes(id)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Normalize, validate and dedupe the `setAside` list, dropping anything already
+ * in `address` — an id in BOTH lists is kept in `address`, because the
+ * conservative reading of a contradictory verdict is "fix it".
+ */
+function cleanSetAside(raw: unknown, valid: Set<string>, address: string[]): { id: string; reason: string }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: { id: string; reason: string }[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.id !== 'string') continue;
+    const id = normalizeAdversarialId(entry.id);
+    if (!valid.has(id) || address.includes(id) || out.some((kept) => kept.id === id)) continue;
+    const reason = typeof entry.reason === 'string' ? entry.reason.trim() : '';
+    out.push({ id, reason: reason.length > 0 ? reason : '(no reason given)' });
+  }
+  return out;
+}
+
+/**
+ * Parse the SDK’s structured review-loop output into a host-safe
+ * `ReviewLoopDecision`, or `undefined` when there is no usable verdict at all.
+ *
+ * Lenient and never throws; the ladder is deliberately asymmetric, because the
+ * two fallbacks differ in kind. `undefined` means "the supervisor said nothing"
+ * and returns the controller to its MECHANICAL budget (pre-seam behaviour);
+ * every other degradation lands on `stop`, the conservative verdict — the human
+ * sees the entries either way, and only a lap can waste work.
+ *
+ *   1. non-object / null / verdict not `loop`|`stop`  ⇒ undefined
+ *   2. blank rationale                                ⇒ kept, "(none given)"
+ *   3. ids not in this round’s review               ⇒ dropped
+ *   4. an id in BOTH lists                            ⇒ kept in `address`
+ *   5. duplicate ids                                  ⇒ deduped (first wins)
+ *   6. a set-aside entry with a blank reason          ⇒ "(no reason given)"
+ *   7. `loop` with an empty `address` after all that  ⇒ DOWNGRADE to `stop`
+ */
+export function parseReviewLoopOutput(structured: unknown, req: ReviewLoopRequest): ReviewLoopDecision | undefined {
+  if (typeof structured !== 'object' || structured === null) return undefined;
+  const o = structured as Record<string, unknown>;
+  if (o.verdict !== 'loop' && o.verdict !== 'stop') return undefined;
+  const rationaleRaw = typeof o.rationale === 'string' ? o.rationale.trim() : '';
+  const rationale = rationaleRaw.length > 0 ? rationaleRaw : '(none given)';
+  const valid = reviewLoopValidIds(req);
+  const address = o.verdict === 'loop' ? cleanAddressIds(o.address, valid) : [];
+  const setAside = cleanSetAside(o.setAside, valid, address);
+  if (o.verdict === 'stop' || address.length === 0) {
+    return { verdict: 'stop', rationale, setAside };
+  }
+  const guidance = typeof o.guidance === 'string' ? o.guidance.trim() : '';
+  return {
+    verdict: 'loop',
+    rationale,
+    steering: { address, setAside, ...(guidance.length > 0 ? { guidance } : {}) },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // History digesting (compact, prompt-friendly)
 // ---------------------------------------------------------------------------
 
@@ -644,6 +799,79 @@ AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, w
 \`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry" (and is IGNORED for "append_correction", which re-drives nothing). It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
 
 Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
+}
+
+/** Render the prior-round ledger: one line per round, `AR-n` ids with their titles. */
+function digestPriorRounds(rounds: ReviewLoopPriorRound[]): string {
+  if (rounds.length === 0) return '- (this is the first round)';
+  return rounds
+    .map((r) => {
+      if (r.blockingIds.length === 0) return `- round ${r.round}: no blocking entries`;
+      const entries = r.blockingIds
+        .map((id, idx) => `${id} (${r.blockingTitles[idx] ?? 'untitled'})`)
+        .join('; ');
+      return `- round ${r.round}: ${entries}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Compose the REVIEW-LOOP prompt for one blocking adversarial-review round. Pure
+ * (output depends only on its args). Mirrors `buildLaneTriagePrompt`'s framing
+ * (SUPERVISOR of the run; host code runs the steps) and reuses the SAME digest
+ * scaffolding, then adds what only this decision needs:
+ *
+ *   - the ROUND and the laps used / available, so the model knows how much rope
+ *     is left before the human sees this anyway;
+ *   - the current review VERBATIM (fenced), because the steering names its ids
+ *     and a summary would make them unverifiable;
+ *   - the PRIOR rounds' blocking ids + titles, which is the only place CHURN is
+ *     visible — `step_results` collapses every lap of a step into one row, so a
+ *     run that looped three times looks exactly like one that ran once;
+ *   - the AUTONOMOUS-EXECUTION notice: a `loop` re-runs the design steps NOW and
+ *     every set-aside entry is filed as a finding NOW, with no human in between.
+ *
+ * The menu is written to make `stop` a real option rather than a failure: an
+ * automatic lap that cannot converge is strictly worse than the gate, because
+ * the human ends up reading the same entries after paying for two more design
+ * turns.
+ */
+export function buildReviewLoopPrompt(
+  ctx: MonitorContext,
+  history: MonitorHistory,
+  req: ReviewLoopRequest,
+): string {
+  const lapsLeft = Math.max(0, req.maxLaps - req.lapsUsed);
+  const blockingCount = req.parsed.blocking.length;
+  const findingCount = req.parsed.findings.length;
+  const review = (req.reviewMarkdown ?? '').trim();
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. The run's adversarial reviewer has just returned a BLOCKING verdict on the design, and you must decide whether the flow takes another automatic revision lap or hands the surviving entries to the human design gate.
+
+Review step: \`${req.stepId}\` — round ${req.round}. Automatic laps used: ${req.lapsUsed} of ${req.maxLaps} (${lapsLeft} left).
+An automatic lap re-runs the design steps from \`${req.loopbackStepId}\` with your steering attached.
+This round raised ${blockingCount} blocking entr${blockingCount === 1 ? 'y' : 'ies'} and ${findingCount} advisory finding${findingCount === 1 ? '' : 's'}.
+
+This round's review, verbatim:
+${review.length > 0 ? `\`\`\`markdown\n${review}\n\`\`\`` : '(the review document could not be read back — judge from the step timeline and the conversation below)'}
+
+Blocking entries of the EARLIER rounds (the trend — is this review converging or churning?):
+${digestPriorRounds(req.priorRounds)}
+
+Step timeline so far:
+${digestSteps(history.steps)}${laneSection(history)}
+
+Recent conversation:
+${digestConversation(history.conversation)}
+
+Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the blocking entries describe defects the design steps can actually close. Then decide ONE verdict and return it as structured output:
+- "loop" — a CONCRETE, BOUNDED fix set exists and the remaining laps can plausibly clear it. List the \`AR-n\` ids the lap must fix in \`address\` (an empty \`address\` is downgraded to "stop"); put anything the lap should do differently in \`guidance\`.
+- "stop" — the remaining blockers are PRODUCT CALLS the brief does not settle; or the trend shows CHURN (new ids replacing old ones, regressions, the same entry re-raised in different words); or this is the last lap and the set is not clearly closable. The human sees every surviving entry at the design gate, so "stop" loses nothing but the lap.
+
+\`setAside\` works with EITHER verdict: use it for entries that are advisory in substance, speculative, or out of the idea's stated scope. Give each a one-line \`reason\` — a human reads it verbatim as a finding. A set-aside entry is NOT dropped: it is filed in the run's review queue immediately, and the next reviewer is told to carry it under \`### Prior entries\` as \`set-aside\` rather than re-raise it.
+
+AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A "loop" re-runs the design steps right now with your \`address\`/\`setAside\`/\`guidance\` rendered as authoritative instructions that OUTRANK the review. Every set-aside entry is filed as a non-blocking finding right now. Your verdict and your rationale are audited at the run's design gate before anything is approved.
+
+Return only the structured { verdict, rationale, address?, setAside?, guidance? } object. \`rationale\` should be 2-4 sentences — the human reads it at the gate.`;
 }
 
 /**
@@ -1460,6 +1688,25 @@ export interface MonitorSession {
   triageLane?(req: LaneTriageRequest, signal?: AbortSignal): Promise<LaneTriageDecision>;
 
   /**
+   * Decide whether a BLOCKING adversarial-review round earns another AUTOMATIC
+   * revision lap, and — when it does — which `AR-n` ids that lap must close and
+   * which it must leave alone. Reads the whole history fresh, runs a structured
+   * query, returns the parsed verdict.
+   *
+   * Fail-soft: any error → `undefined`, which returns the controller to its
+   * MECHANICAL revision budget (exactly the behaviour of a run without this
+   * seam). `undefined` is therefore a real answer, not an error channel.
+   *
+   * Like `triageLane` — and unlike `triage` — this method OWNS its chat
+   * rendering (the announcement + the verdict turn) and is serialized on the
+   * same chain as `converse`, so an autonomous lap can never interleave its
+   * turns with a human exchange. OPTIONAL on the interface for the same reason:
+   * the many faked sessions across the suite omit it, and the host treats an
+   * absent method exactly like "no verdict".
+   */
+  adviseReviewLoop?(req: ReviewLoopRequest, signal?: AbortSignal): Promise<ReviewLoopDecision | undefined>;
+
+  /**
    * Conduct one full chat exchange in the run's unified Chat pane (the human seam
    * the tRPC `cyboflow.monitor.send` mutation drives — see Slice E). Owns the
    * inject→answer→inject orchestration so the router stays thin:
@@ -1555,6 +1802,37 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
       // assumes the lane got another attempt.
       return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
   }
+}
+
+/**
+ * The chat turn announcing that a review round came back blocking, injected
+ * BEFORE the (potentially slow) consult so the user sees the verdict the moment
+ * it lands rather than only once the supervisor has made up its mind.
+ */
+function reviewLoopAnnouncement(req: ReviewLoopRequest): string {
+  const n = req.parsed.blocking.length;
+  return `⚠ Adversarial review round ${req.round} on \`${req.stepId}\` is BLOCKING (${n} entr${n === 1 ? 'y' : 'ies'}), ${req.lapsUsed}/${req.maxLaps} automatic revisions used. Deciding whether to revise again…`;
+}
+
+/**
+ * The chat turn reporting the supervisor's review-loop verdict. Phrased as a
+ * DECISION the host will execute, never as a completed act — the same rule
+ * `laneDecisionSummary` follows, and for the same reason: the host may still
+ * decline (an aborted run), and a turn that claimed success would then be a lie
+ * nobody corrects.
+ */
+function reviewLoopSummary(req: ReviewLoopRequest, decision: ReviewLoopDecision): string {
+  const setAside =
+    (decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside)
+      .map((entry) => `\`${entry.id}\` (${entry.reason})`)
+      .join(', ');
+  const setAsideLine = setAside.length > 0 ? `\n\nSet aside (filed as findings): ${setAside}` : '';
+  if (decision.verdict === 'stop') {
+    return `✖ Review round ${req.round}: no further automatic revision — the surviving entries go to the design gate. ${decision.rationale}${setAsideLine}`;
+  }
+  const address = decision.steering.address.map((id) => `\`${id}\``).join(', ');
+  const guidance = decision.steering.guidance !== undefined ? `\n\nGuidance: ${decision.steering.guidance}` : '';
+  return `▶ Review round ${req.round}: revising again from \`${req.loopbackStepId}\` — address ${address}. ${decision.rationale}${guidance}${setAsideLine}`;
 }
 
 /**
@@ -1696,6 +1974,82 @@ export class DefaultMonitorSession implements MonitorSession {
       );
       const decision = laneGiveUp(LANE_TRIAGE_FAILED);
       return systemic ? { ...decision, systemicError: message } : decision;
+    }
+  }
+
+  /**
+   * Advise on one blocking review round (see `MonitorSession.adviseReviewLoop`).
+   * Serialized on the SAME `sendChain` as `converse`/`triageLane` — it injects
+   * chat turns of its own and fires without anyone's involvement, so it could
+   * otherwise land in the middle of a human's exchange. The chain tail swallows
+   * outcomes so one failure never poisons later exchanges.
+   */
+  async adviseReviewLoop(req: ReviewLoopRequest, signal?: AbortSignal): Promise<ReviewLoopDecision | undefined> {
+    const exchange = this.sendChain.then(() => this.adviseReviewLoopOnce(req, signal));
+    this.sendChain = exchange.then(
+      () => undefined,
+      () => undefined,
+    );
+    return exchange;
+  }
+
+  /**
+   * One review-loop exchange (serialized by `adviseReviewLoop`): announce the
+   * blocking round → read the whole history fresh → structured query → parse →
+   * announce the decision. Fail-soft at every step: a thrown history read /
+   * query / parse yields `undefined` plus an explanatory chat note, so a broken
+   * supervisor degrades to the controller's mechanical revision budget instead
+   * of stranding the walk.
+   */
+  private async adviseReviewLoopOnce(
+    req: ReviewLoopRequest,
+    signal?: AbortSignal,
+  ): Promise<ReviewLoopDecision | undefined> {
+    this.tryInject(buildAssistantTextEvent(reviewLoopAnnouncement(req)));
+    try {
+      const history = await this.history.read(this.ctx.runId);
+      const prompt = buildReviewLoopPrompt(this.ctx, history, req);
+      const structured = await this.structuredQuery({
+        prompt,
+        schema: MONITOR_REVIEW_LOOP_SCHEMA,
+        cwd: this.ctx.worktreePath,
+        ...(this.model ? { model: this.model } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const decision = parseReviewLoopOutput(structured, req);
+      this.logger?.info('[Monitor] review loop verdict', {
+        runId: this.ctx.runId,
+        stepId: req.stepId,
+        round: req.round,
+        verdict: decision?.verdict ?? 'none',
+        rationale: decision?.rationale ?? '',
+      });
+      if (decision === undefined) {
+        // No usable verdict is not an error — say so plainly rather than
+        // leaving the announcement hanging with no follow-up.
+        this.tryInject(
+          buildAssistantTextEvent(
+            `⚠ Review round ${req.round}: I could not produce a usable verdict — the run falls back to its default revision budget.`,
+          ),
+        );
+        return undefined;
+      }
+      this.tryInject(buildAssistantTextEvent(reviewLoopSummary(req, decision)));
+      return decision;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn('[Monitor] review loop advice failed; falling back to the mechanical budget', {
+        runId: this.ctx.runId,
+        stepId: req.stepId,
+        round: req.round,
+        error: message,
+      });
+      this.tryInject(
+        buildAssistantTextEvent(
+          `⚠ Review round ${req.round}: the revision decision could not run (${message}) — the run falls back to its default revision budget.`,
+        ),
+      );
+      return undefined;
     }
   }
 

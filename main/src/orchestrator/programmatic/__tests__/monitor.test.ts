@@ -7,19 +7,27 @@ import {
   buildAnswerPrompt,
   buildActionAnswerPrompt,
   buildLaneTriagePrompt,
+  buildReviewLoopPrompt,
   parseTriageAdvice,
   parseConverseOutput,
   parseLaneTriageOutput,
+  parseReviewLoopOutput,
   MONITOR_TRIAGE_SCHEMA,
   MONITOR_CONVERSE_SCHEMA,
   MONITOR_LANE_TRIAGE_SCHEMA,
+  MONITOR_REVIEW_LOOP_SCHEMA,
   type HistoryReader,
   type MonitorContext,
   type MonitorHistory,
   type MonitorSession,
   type MonitorActions,
   type LaneTriageRequest,
+  type ReviewLoopRequest,
 } from '../monitor';
+import type {
+  AdversarialFinding,
+  AdversarialSeverity,
+} from '../../../../../shared/types/adversarialReview';
 import type { StructuredQueryFn, TextQueryFn } from '../monitorQuery';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
@@ -2247,5 +2255,271 @@ describe('MonitorRegistry', () => {
   it('is a singleton', () => {
     MonitorRegistry._resetForTesting();
     expect(MonitorRegistry.getInstance()).toBe(MonitorRegistry.getInstance());
+  });
+});
+
+// ── Supervised adversarial-review loop ──────────────────────────────────────
+
+/** An `AdversarialFinding` with only the fields these tests care about. */
+function arEntry(id: string, title: string, severity: AdversarialSeverity = 'blocker'): AdversarialFinding {
+  return { id, title, severity };
+}
+
+function loopReq(p: Partial<ReviewLoopRequest> = {}): ReviewLoopRequest {
+  return {
+    stepId: 'adversarial-review',
+    loopbackStepId: 'expand-spec',
+    round: 2,
+    lapsUsed: 1,
+    maxLaps: 3,
+    reviewMarkdown: '## Blocking\n\n#### AR-1 — Spend screen has no way back\n**What:** no Home affordance.',
+    parsed: {
+      blocking: [arEntry('AR-1', 'Spend screen has no way back'), arEntry('AR-2', 'No data store named', 'major')],
+      findings: [arEntry('AR-3', 'Copy nit', 'advisory')],
+      prior: [],
+    },
+    priorRounds: [{ round: 1, blockingIds: ['AR-1', 'AR-9'], blockingTitles: ['Spend screen has no way back', 'Retired'] }],
+    ...p,
+  };
+}
+
+describe('MONITOR_REVIEW_LOOP_SCHEMA', () => {
+  it('requires verdict + rationale, offers the two verdicts, and forbids extra fields', () => {
+    const props = MONITOR_REVIEW_LOOP_SCHEMA.properties as Record<string, { enum?: string[]; description?: string }>;
+    expect(props.verdict.enum).toEqual(['loop', 'stop']);
+    expect(MONITOR_REVIEW_LOOP_SCHEMA.required).toEqual(['verdict', 'rationale']);
+    expect(MONITOR_REVIEW_LOOP_SCHEMA.additionalProperties).toBe(false);
+    // The downgrade the parser performs must be stated where the model reads it.
+    expect(props.verdict.description).toContain('downgraded to `stop`');
+    for (const key of ['address', 'setAside', 'guidance']) expect(props[key]).toBeDefined();
+  });
+});
+
+describe('parseReviewLoopOutput (downgrade table)', () => {
+  it('parses a well-formed loop, keeping the steering verbatim', () => {
+    expect(
+      parseReviewLoopOutput(
+        {
+          verdict: 'loop',
+          rationale: 'one lap can close AR-1',
+          address: ['AR-1'],
+          setAside: [{ id: 'AR-3', reason: 'copy nit' }],
+          guidance: 'add a Home affordance',
+        },
+        loopReq(),
+      ),
+    ).toEqual({
+      verdict: 'loop',
+      rationale: 'one lap can close AR-1',
+      steering: { address: ['AR-1'], setAside: [{ id: 'AR-3', reason: 'copy nit' }], guidance: 'add a Home affordance' },
+    });
+  });
+
+  it('parses a well-formed stop', () => {
+    expect(
+      parseReviewLoopOutput(
+        { verdict: 'stop', rationale: 'a product call', setAside: [{ id: 'AR-2', reason: 'out of scope' }] },
+        loopReq(),
+      ),
+    ).toEqual({ verdict: 'stop', rationale: 'a product call', setAside: [{ id: 'AR-2', reason: 'out of scope' }] });
+  });
+
+  it('returns undefined (the MECHANICAL path) for anything with no usable verdict', () => {
+    for (const bad of [null, undefined, 'loop', 42, {}, { verdict: 'maybe' }, { rationale: 'x' }]) {
+      expect(parseReviewLoopOutput(bad, loopReq())).toBeUndefined();
+    }
+  });
+
+  it('keeps the verdict but fills in a blank rationale', () => {
+    const decision = parseReviewLoopOutput({ verdict: 'loop', rationale: '   ', address: ['AR-1'] }, loopReq());
+    expect(decision?.rationale).toBe('(none given)');
+  });
+
+  it('drops ids this round’s review does not carry, and normalizes the rest', () => {
+    const decision = parseReviewLoopOutput(
+      { verdict: 'loop', rationale: 'x', address: ['ar 1', 'AR-99', 7, 'AR-3'], setAside: [{ id: 'AR-42', reason: 'y' }] },
+      loopReq(),
+    );
+    // `ar 1` normalizes to AR-1; AR-99 and the non-string are dropped; AR-3 is a
+    // FINDING of this round, so it is a valid id too.
+    expect(decision).toEqual({
+      verdict: 'loop',
+      rationale: 'x',
+      steering: { address: ['AR-1', 'AR-3'], setAside: [] },
+    });
+  });
+
+  it('keeps an id that appears in BOTH lists in `address`, and dedupes duplicates', () => {
+    const decision = parseReviewLoopOutput(
+      {
+        verdict: 'loop',
+        rationale: 'x',
+        address: ['AR-1', 'AR-1', 'AR-2'],
+        setAside: [{ id: 'AR-1', reason: 'never mind' }, { id: 'AR-3', reason: 'nit' }, { id: 'AR-3', reason: 'again' }],
+      },
+      loopReq(),
+    );
+    expect(decision).toEqual({
+      verdict: 'loop',
+      rationale: 'x',
+      steering: { address: ['AR-1', 'AR-2'], setAside: [{ id: 'AR-3', reason: 'nit' }] },
+    });
+  });
+
+  it('fills in a blank set-aside reason rather than dropping the entry', () => {
+    const decision = parseReviewLoopOutput(
+      { verdict: 'stop', rationale: 'x', setAside: [{ id: 'AR-2', reason: '  ' }, { id: 'AR-3' }] },
+      loopReq(),
+    );
+    expect(decision).toEqual({
+      verdict: 'stop',
+      rationale: 'x',
+      setAside: [{ id: 'AR-2', reason: '(no reason given)' }, { id: 'AR-3', reason: '(no reason given)' }],
+    });
+  });
+
+  it('downgrades a `loop` with no surviving address to `stop`, keeping the set-asides', () => {
+    expect(
+      parseReviewLoopOutput(
+        { verdict: 'loop', rationale: 'x', address: ['AR-77'], setAside: [{ id: 'AR-2', reason: 'later' }] },
+        loopReq(),
+      ),
+    ).toEqual({ verdict: 'stop', rationale: 'x', setAside: [{ id: 'AR-2', reason: 'later' }] });
+    expect(parseReviewLoopOutput({ verdict: 'loop', rationale: 'x' }, loopReq())).toEqual({
+      verdict: 'stop',
+      rationale: 'x',
+      setAside: [],
+    });
+  });
+});
+
+describe('buildReviewLoopPrompt', () => {
+  const history: MonitorHistory = {
+    conversation: [assistantMsg('designing the spend screen')],
+    steps: [stepRow({ stepId: 'adversarial-review', outcome: 'done' })],
+  };
+
+  it('presents the round, the budget, the review verbatim, and the prior rounds', () => {
+    const p = buildReviewLoopPrompt(ctx, history, loopReq());
+    expect(p).toContain('SUPERVISOR');
+    expect(p).toContain('round 2');
+    expect(p).toContain('Automatic laps used: 1 of 3 (2 left)');
+    // The review itself, verbatim.
+    expect(p).toContain('#### AR-1 — Spend screen has no way back');
+    expect(p).toContain('no Home affordance');
+    // The churn signal: the earlier round's ids AND titles.
+    expect(p).toContain('round 1: AR-1 (Spend screen has no way back); AR-9 (Retired)');
+    expect(p).toContain('converging or churning');
+    // The shared digests.
+    expect(p).toContain('designing the spend screen');
+    expect(p).toContain('Read/Grep/Glob');
+  });
+
+  it('offers both verdicts with the plan’s menu and the autonomous-execution notice', () => {
+    const p = buildReviewLoopPrompt(ctx, history, loopReq());
+    expect(p).toContain('"loop"');
+    expect(p).toContain('"stop"');
+    expect(p).toContain('BOUNDED fix set');
+    expect(p).toContain('PRODUCT CALLS');
+    expect(p).toContain('CHURN');
+    expect(p).toContain('setAside');
+    expect(p).toContain('one-line `reason`');
+    expect(p).toContain('`set-aside`');
+    expect(p).toContain('AUTONOMOUS EXECUTION');
+    expect(p).toContain('no human confirmation');
+    expect(p).toContain('OUTRANK the review');
+  });
+
+  it('degrades gracefully with no readable review and no prior rounds', () => {
+    const p = buildReviewLoopPrompt(ctx, history, loopReq({ reviewMarkdown: undefined, priorRounds: [], round: 1 }));
+    expect(p).toContain('could not be read back');
+    expect(p).toContain('(this is the first round)');
+  });
+});
+
+describe('DefaultMonitorSession.adviseReviewLoop', () => {
+  it('announces, queries with the loop schema, parses, and reports the decision', async () => {
+    const { reader, reads } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      verdict: 'loop',
+      rationale: 'AR-1 is a one-line fix',
+      address: ['AR-1'],
+      setAside: [{ id: 'AR-3', reason: 'copy nit' }],
+      guidance: 'add a Home affordance',
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, model: 'opus' });
+    const controller = new AbortController();
+
+    const decision = await session.adviseReviewLoop(loopReq(), controller.signal);
+
+    expect(decision?.verdict).toBe('loop');
+    expect(reads).toEqual(['run-1']);
+    const args = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(args.schema).toBe(MONITOR_REVIEW_LOOP_SCHEMA);
+    expect(args.cwd).toBe('/wt');
+    expect(args.model).toBe('opus');
+    expect(args.signal).toBe(controller.signal);
+    // Announcement BEFORE the verdict turn, both as assistant turns.
+    expect(injected.map((m) => m.role)).toEqual(['assistant', 'assistant']);
+    expect(injected[0].text).toContain('BLOCKING');
+    expect(injected[1].text).toContain('revising again');
+    expect(injected[1].text).toContain('`AR-1`');
+    expect(injected[1].text).toContain('Set aside');
+  });
+
+  it('reports a stop without claiming a revision', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ verdict: 'stop', rationale: 'the blockers are product calls' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.adviseReviewLoop(loopReq());
+
+    expect(decision).toEqual({ verdict: 'stop', rationale: 'the blockers are product calls', setAside: [] });
+    expect(injected[1].text).toContain('no further automatic revision');
+    expect(injected[1].text).not.toContain('revising again');
+  });
+
+  it('fails soft to undefined (with a chat note) when the query throws', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    expect(await session.adviseReviewLoop(loopReq())).toBeUndefined();
+    expect(injected).toHaveLength(2);
+    expect(injected[1].text).toContain('could not run');
+    expect(injected[1].text).toContain('sdk down');
+    expect(injected[1].text).toContain('default revision budget');
+  });
+
+  it('serializes on the SAME sendChain as converse (no interleaved turns)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    let resolveFirst: (v: unknown) => void = () => {};
+    const gate = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue({ verdict: 'stop', rationale: 'second' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const first = session.adviseReviewLoop(loopReq());
+    const second = session.adviseReviewLoop(loopReq({ round: 3 }));
+    // Let the first exchange reach its (hanging) query.
+    await vi.waitFor(() => expect(structuredQuery).toHaveBeenCalledTimes(1));
+    // The second exchange has not even announced itself while the first is in flight.
+    expect(injected).toHaveLength(1);
+
+    resolveFirst({ verdict: 'stop', rationale: 'first' });
+    await Promise.all([first, second]);
+    expect(injected.map((m) => m.text.includes('first') || m.text.includes('second'))).toEqual([
+      false, true, false, true,
+    ]);
   });
 });

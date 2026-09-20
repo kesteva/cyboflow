@@ -49,12 +49,16 @@ import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
   BuildBreakGroup,
   CommitIntegrityProbe,
+  ControllerEscalation,
   ControllerHost,
   ControllerResult,
   ControllerStepContext,
   HumanGateDecision,
   LaneFailureKind,
   LaneRescueOutcome,
+  ReviewLoopDecision,
+  ReviewLoopPriorRound,
+  ReviewLoopSteering,
   StepReport,
   StepRunner,
   SupervisorEvent,
@@ -140,17 +144,53 @@ function blockingSectionHasEntries(text: string): boolean {
   return !/^none\.?$/i.test(body.trim());
 }
 
+/** Whether a run's cancel signal has fired (re-read per call — see consultReviewLoop). */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/**
+ * How a log line names WHERE an adversarial-review verdict was read from.
+ *
+ * The two channels fail differently — a missing trailer in a captured text is a
+ * substrate problem, a stale artifact is a reporting problem — and a log that
+ * asserts `returned REVIEW: BLOCKING` for a turn that returned no text at all
+ * sends the reader looking for a line that was never written.
+ */
+function reviewVerdictSourceNote(source: 'text' | 'artifact'): string {
+  return source === 'artifact'
+    ? 'from the review artifact; no verdict in the captured text'
+    : 'from the review result text';
+}
+
 /**
  * Maximum number of AUTOMATIC design revisions an adversarial-review step may
  * trigger per run: a `REVIEW: BLOCKING` result loops the refine phase back to the
  * step's declared `loopback` target this many times, each re-run threaded with the
- * review's `## Blocking` entries; the next BLOCKING verdict falls through to the
- * human design gate, which presents the surviving entries. One round is the
- * deliberate bound — the reviewer is a critic, not the arbiter of the design, and
- * a second disagreement is the human's call, not another automated lap through
- * prototype + architecture.
+ * review's `## Blocking` entries; past it the step advances and the human design
+ * gate presents the surviving entries.
+ *
+ * THREE, not one, because the lap is no longer blind. The bound used to be one
+ * for a good reason — the reviewer is a critic, not the arbiter of the design,
+ * and an unsupervised second lap through prototype + architecture is as likely
+ * to churn (new ids replacing old ones) as to converge. A SUPERVISOR that reads
+ * the round-over-round trend and votes on each lap removes exactly that risk:
+ * it stops the moment the trend turns, so the cap only has to bound a loop
+ * somebody is already watching. It applies ONLY to laps the supervisor voted
+ * for — see MAX_REVIEW_MECHANICAL_REVISIONS.
  */
-export const MAX_REVIEW_AUTO_REVISIONS = 1;
+export const MAX_REVIEW_AUTO_REVISIONS = 3;
+
+/**
+ * Maximum automatic design revisions when there is NO supervisor verdict — a
+ * kill switch, a run with no monitor, a thrown or aborted consult.
+ *
+ * Deliberately the OLD `MAX_REVIEW_AUTO_REVISIONS` value: with nobody reading
+ * the trend, a second unsupervised lap is the very thing the original bound
+ * ruled out, so the fail-soft path must be byte-identical to pre-seam behaviour
+ * rather than inheriting the supervised cap.
+ */
+export const MAX_REVIEW_MECHANICAL_REVISIONS = 1;
 
 /**
  * Maximum number of intra-phase loopback JUMPS allowed per step id across a whole
@@ -451,7 +491,13 @@ export class WorkflowController {
     // having re-opened, the revision has been answered). The fan-out path never
     // reads it — lanes carry their own per-lane channels.
     let pendingGateRevision:
-      | { gateStepId: string; note?: string; source?: 'adversarial-review'; round?: number }
+      | {
+          gateStepId: string;
+          note?: string;
+          source?: 'adversarial-review';
+          round?: number;
+          steering?: ReviewLoopSteering;
+        }
       | undefined;
     // Per-step-id count of AUTOMATIC adversarial-review revisions taken this walk
     // (bounded by MAX_REVIEW_AUTO_REVISIONS). Separate from `loopbacks` so the
@@ -466,6 +512,17 @@ export class WorkflowController {
     // like every other map here: a restart or a rewind resets it, and nothing
     // persists it (the DB's revision count is a different, unreliable quantity).
     const reviewRounds = new Map<string, number>();
+    // Per-step-id ledger of every COMPLETED review round's blocking ids/titles,
+    // oldest first. Walk state for the same reason `reviewRounds` is: it exists
+    // so the supervisor can see the round-over-round TREND (a shrinking blocking
+    // set vs. churn), and `step_results` cannot supply it — every lap of a step
+    // collapses into one row there.
+    const priorRounds = new Map<string, ReviewLoopPriorRound[]>();
+    // Provenance for the NEXT human gate, armed when the supervisor stops the
+    // automatic review loop and consumed by the one gate that follows (cleared
+    // the moment that gate's call returns). Never sticky: it describes one gate
+    // presentation, not a standing property of the run.
+    let escalation: ControllerEscalation | undefined;
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -692,7 +749,9 @@ export class WorkflowController {
                 stepIndex: i,
                 signal,
                 attempt: 1,
+                ...(escalation !== undefined ? { escalation } : {}),
               });
+              escalation = undefined; // consumed by this gate
               const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
               if (next.terminal) return this.finish(next.result, runId);
               i = next.i;
@@ -737,6 +796,11 @@ export class WorkflowController {
             // the skip (epics/tasks re-running as if a human had just asked for
             // changes that nobody is ever shown).
             pendingGateRevision = undefined;
+            // Same reasoning for the escalation: it describes the NEXT gate
+            // presentation, and a skipped gate IS that presentation. Leaving it
+            // armed would attach a stale "the supervisor stopped the review
+            // loop" note to some unrelated later gate.
+            escalation = undefined;
             i += 1;
             continue;
           }
@@ -762,7 +826,12 @@ export class WorkflowController {
         // ── Pure human gate (no agent work) ──────────────────────────────────
         if (isPureHumanGate(step)) {
           this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
-          const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt: 1 });
+          const decision = await this.host.requestHumanGate(step, {
+            ...baseCtx,
+            attempt: 1,
+            ...(escalation !== undefined ? { escalation } : {}),
+          });
+          escalation = undefined; // consumed by this gate
           const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
           if (next.terminal) return this.finish(next.result, runId);
           // Every gate decision REPLACES the pending revision: a revise-with-target
@@ -860,42 +929,80 @@ export class WorkflowController {
           // section with no trailer) sends the refine phase back AUTOMATICALLY —
           // the same verdict-driven loopback the sprint lane's code-review takes —
           // instead of parking the run at the design gate with defects the flow
-          // could have fixed itself. Bounded by MAX_REVIEW_AUTO_REVISIONS; past it
+          // could have fixed itself. Bounded by MAX_REVIEW_AUTO_REVISIONS (or,
+          // with no supervisor verdict, MAX_REVIEW_MECHANICAL_REVISIONS); past it
           // the step advances and the human gate presents the surviving entries.
-          // One completed review result = one round, whatever the verdict and
-          // whoever asked for it. Counted BEFORE the loopback decision so a clean
-          // result (which takes no lap) still advances the number a later human
-          // Revise will quote.
-          if (step.agent === 'adversarial-review') {
-            reviewRounds.set(step.id, (reviewRounds.get(step.id) ?? 0) + 1);
-          }
-          const reviewJump = this.tryAdversarialReviewLoopback(
-            step, phase.steps, okResultText, reviewAutoRevisions,
-          );
-          if (reviewJump !== null) {
-            this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
-            this.host.reportStep(step.id, 'done');
-            this.host.log?.(
-              'warn',
-              `step '${step.id}' returned REVIEW: BLOCKING; looping back to '${phase.steps[reviewJump.index].id}' for an automatic revision (${reviewJump.round}/${MAX_REVIEW_AUTO_REVISIONS})`,
-            );
-            // Deliberate revisit — same purge the gate's revise performs.
-            this.clearCompletedFrom(remainingCompleted, phase.steps, reviewJump.index);
-            const lapRound = reviewRounds.get(step.id);
-            pendingGateRevision = {
-              gateStepId: step.id,
-              source: 'adversarial-review',
-              ...(reviewJump.blocking !== null ? { note: reviewJump.blocking } : {}),
-              ...(lapRound !== undefined ? { round: lapRound } : {}),
-            };
-            i = reviewJump.index;
-            continue;
+          const review =
+            step.agent === 'adversarial-review'
+              ? this.readAdversarialReviewResult(step, phase.steps, okResultText)
+              : null;
+          if (review !== null) {
+            // One completed review result = one round, whatever the verdict and
+            // whoever asked for it. Counted BEFORE the loopback decision so a
+            // clean result (which takes no lap) still advances the number a later
+            // human Revise will quote — and recorded in `priorRounds` at the same
+            // place, so the supervisor sees EVERY round's blocking set, clean
+            // rounds (empty) included.
+            const round = (reviewRounds.get(step.id) ?? 0) + 1;
+            reviewRounds.set(step.id, round);
+            const earlier = priorRounds.get(step.id) ?? [];
+            priorRounds.set(step.id, [
+              ...earlier,
+              {
+                round,
+                blockingIds: review.parsed.blocking.map((e) => e.id),
+                blockingTitles: review.parsed.blocking.map((e) => e.title),
+              },
+            ]);
+            if (review.blocking && review.index >= 0) {
+              const used = reviewAutoRevisions.get(step.id) ?? 0;
+              const outcome = await this.decideReviewLoop({
+                step,
+                loopbackStepId: phase.steps[review.index].id,
+                round,
+                used,
+                review,
+                priorRounds: earlier,
+                ctx: { ...baseCtx, attempt },
+                signal,
+              });
+              if (outcome.lap) {
+                reviewAutoRevisions.set(step.id, used + 1);
+                this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
+                this.host.reportStep(step.id, 'done');
+                this.host.log?.(
+                  'warn',
+                  `step '${step.id}' is BLOCKING (${reviewVerdictSourceNote(review.source)}); looping back to ` +
+                    `'${phase.steps[review.index].id}' for an automatic revision (${used + 1}/${MAX_REVIEW_AUTO_REVISIONS})`,
+                );
+                // Deliberate revisit — same purge the gate's revise performs.
+                this.clearCompletedFrom(remainingCompleted, phase.steps, review.index);
+                pendingGateRevision = {
+                  gateStepId: step.id,
+                  source: 'adversarial-review',
+                  ...(review.note !== null ? { note: review.note } : {}),
+                  round,
+                  ...(outcome.steering !== undefined ? { steering: outcome.steering } : {}),
+                };
+                i = review.index;
+                continue;
+              }
+              // No lap: the step advances and the human gate presents the
+              // surviving entries. A supervisor `stop` also hands that gate its
+              // provenance — why the loop ended here rather than at the cap.
+              if (outcome.escalation !== undefined) escalation = outcome.escalation;
+            }
           }
           // Agent succeeded. If the step ALSO carries a human checkpoint, open the
           // gate now (agent-then-gate); otherwise advance.
           if (hasTrailingGate(step)) {
             this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
-            const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt });
+            const decision = await this.host.requestHumanGate(step, {
+              ...baseCtx,
+              attempt,
+              ...(escalation !== undefined ? { escalation } : {}),
+            });
+            escalation = undefined; // consumed by this gate
             const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt);
             if (next.terminal) return this.finish(next.result, runId);
             pendingGateRevision = next.gateRevision;
@@ -2923,13 +3030,23 @@ export class WorkflowController {
   }
 
   /**
-   * Resolve the AUTOMATIC adversarial-review loopback for a step that just
-   * succeeded: returns the jump target, the round number, the extracted
-   * `## Blocking` section and the parsed review when ALL of these hold — the
-   * step's agent is `adversarial-review`, it declares a resolvable intra-phase
-   * `loopback`, the round reads as BLOCKING, and MAX_REVIEW_AUTO_REVISIONS is
-   * not yet spent for this step id. Null otherwise, so every other step advances
-   * exactly as before.
+   * Read a COMPLETED adversarial-review step's result: the verdict, the entries,
+   * the `## Blocking` section worth quoting, WHICH channel the verdict came
+   * from, and the intra-phase index an automatic lap would jump to. Null only
+   * when the step is not an `adversarial-review` agent — every review result is
+   * reported, blocking or clean, because the round ledger must record all of
+   * them and only the CALLER knows the budget.
+   *
+   * Keyed on the AGENT rather than on `loopback` alone so a custom flow that
+   * puts an on-failure loopback on some other agent step never has its clean
+   * result re-parsed as a review verdict. `index` is -1 when the step declares
+   * no resolvable `loopback` (ship/launch today): the round still counts, but no
+   * lap is expressible.
+   *
+   * DELIBERATELY BUDGET-FREE. It used to consume the lap budget itself, which
+   * made "is this blocking?" and "may we lap?" one indivisible question — and
+   * the supervisor has to answer the second one, so it has to be asked
+   * separately (see `decideReviewLoop`).
    *
    * The verdict is read from TWO channels, in this order:
    *
@@ -2945,70 +3062,189 @@ export class WorkflowController {
    *      failure mode seen in live runs). Reading only the text there advanced a
    *      design phase the reviewer had just blocked.
    *
-   * Keyed on the AGENT rather than on `loopback` alone so a custom flow that
-   * puts an on-failure loopback on some other agent step never has its clean
-   * result re-parsed as a review verdict.
+   * `source` names which channel answered, so the walk's log lines can say where
+   * a verdict came from instead of asserting a trailer the text may not carry.
    */
-  private tryAdversarialReviewLoopback(
+  private readAdversarialReviewResult(
     step: WorkflowStep,
     phaseSteps: WorkflowStep[],
     resultText: string | null | undefined,
-    reviewAutoRevisions: Map<string, number>,
   ): {
+    /** Index of the loopback target within `phaseSteps`, or -1 when unresolvable. */
     index: number;
-    round: number;
-    blocking: string | null;
+    blocking: boolean;
+    note: string | null;
     parsed: ParsedAdversarialReview;
+    source: 'text' | 'artifact';
   } | null {
     if (step.agent !== 'adversarial-review') return null;
-    if (step.loopback === undefined || step.loopback.length === 0) return null;
+    const targetIndex =
+      step.loopback !== undefined && step.loopback.length > 0
+        ? phaseSteps.findIndex((sibling) => sibling.id === step.loopback)
+        : -1;
     const text = typeof resultText === 'string' ? resultText : '';
     const verdict = text.trim().length > 0 ? parseCodeReviewVerdict(text) : null;
-    if (verdict === 'clean') return null; // explicit CLEAN wins over any artifact
-    // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
-    // trailer over a `None.` section hands the re-run the artifact instead.
-    const textHasEntries = blockingSectionHasEntries(text);
-    const textBlocking = verdict === 'blocking' || textHasEntries;
-    let note: string | null;
-    let parsed: ParsedAdversarialReview;
-    if (textBlocking) {
-      // The reviewer's own message carries the section verbatim.
-      note = textHasEntries ? extractBlockingSection(text) : null;
-      parsed = parseAdversarialReviewDoc(text);
-    } else {
-      // No verdict in the text at all (often: no text at all) — fall back to the
-      // artifact. Fail-soft: a throwing reader reads as "no artifact", i.e. as
-      // today's advance.
-      let artifact: string | undefined;
-      try {
-        artifact = this.host.readAdversarialReview?.();
-      } catch {
-        artifact = undefined;
-      }
-      parsed = parseAdversarialReviewDoc(artifact);
-      if (parsed.blocking.length === 0) return null;
-      note = extractBlockingSection(artifact ?? '');
+    if (verdict === 'clean') {
+      // Explicit CLEAN wins over any artifact — a stale artifact from the
+      // previous round must never re-loop a cleared review.
+      return { index: targetIndex, blocking: false, note: null, parsed: parseAdversarialReviewDoc(text), source: 'text' };
     }
-    const targetIndex = phaseSteps.findIndex((s) => s.id === step.loopback);
-    if (targetIndex < 0) return null; // unresolved (validation should prevent this)
-    const used = reviewAutoRevisions.get(step.id) ?? 0;
+    // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
+    // trailer over a `None.` section still loops, but with no quoted note (the
+    // re-run gets the full result text via the lane).
+    const textHasEntries = blockingSectionHasEntries(text);
+    if (verdict === 'blocking' || textHasEntries) {
+      // The reviewer's own message carries the section verbatim.
+      return {
+        index: targetIndex,
+        blocking: true,
+        note: textHasEntries ? extractBlockingSection(text) : null,
+        parsed: parseAdversarialReviewDoc(text),
+        source: 'text',
+      };
+    }
+    // No verdict in the text at all (often: no text at all) — fall back to the
+    // artifact. Fail-soft: a throwing reader reads as "no artifact", i.e. as
+    // today's advance.
+    const artifact = this.readAdversarialReviewArtifact();
+    const parsed = parseAdversarialReviewDoc(artifact);
+    if (parsed.blocking.length === 0) {
+      return { index: targetIndex, blocking: false, note: null, parsed, source: 'artifact' };
+    }
+    return {
+      index: targetIndex,
+      blocking: true,
+      note: extractBlockingSection(artifact ?? ''),
+      parsed,
+      source: 'artifact',
+    };
+  }
+
+  /** The run's adversarial-review artifact, or undefined (a throwing reader reads as absent). */
+  private readAdversarialReviewArtifact(): string | undefined {
+    try {
+      return this.host.readAdversarialReview?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Decide what ONE blocking adversarial-review round does: take another
+   * automatic lap (optionally steered), or fall through to the human gate.
+   *
+   * The ladder, in order:
+   *   1. BUDGET. `used >= MAX_REVIEW_AUTO_REVISIONS` ⇒ no lap, no consult — the
+   *      cap is the controller's, not the supervisor's, and spending a query to
+   *      be told something we cannot act on is pure cost.
+   *   2. CONSULT `host.adviseReviewLoop`. Fail-soft in every direction: an
+   *      absent seam, a throw, or a run canceled mid-consult all read as "no
+   *      verdict". The consult is NOT awaited inside any gate promise or
+   *      transaction — it sits between two step boundaries.
+   *   3. APPLY. 'loop' ⇒ lap with the steering attached to the revision;
+   *      'stop' ⇒ no lap, and the gate that follows carries the rationale and
+   *      the set-aside ids as its provenance; no verdict ⇒ the MECHANICAL
+   *      budget, i.e. exactly the pre-seam behaviour.
+   */
+  private async decideReviewLoop(args: {
+    step: WorkflowStep;
+    loopbackStepId: string;
+    round: number;
+    used: number;
+    review: { note: string | null; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    priorRounds: ReviewLoopPriorRound[];
+    ctx: ControllerStepContext;
+    signal?: AbortSignal;
+  }): Promise<{ lap: true; steering?: ReviewLoopSteering } | { lap: false; escalation?: ControllerEscalation }> {
+    const { step, round, used, review } = args;
+    const sourceNote = reviewVerdictSourceNote(review.source);
     if (used >= MAX_REVIEW_AUTO_REVISIONS) {
       this.host.log?.(
         'warn',
-        `step '${step.id}' returned REVIEW: BLOCKING again after ${used} automatic revision(s); advancing to the design gate`,
+        `step '${step.id}' is BLOCKING (${sourceNote}) again after ${used} automatic revision(s); advancing to the design gate`,
       );
-      return null;
+      return { lap: false };
     }
-    reviewAutoRevisions.set(step.id, used + 1);
-    return {
-      index: targetIndex,
-      round: used + 1,
-      blocking: note,
-      // The round's entries, from whichever channel supplied the verdict. The
-      // caller (and the monitor's per-lap steering) reads the entries rather than
-      // re-parsing the quoted note.
-      parsed,
-    };
+
+    const decision = await this.consultReviewLoop(args);
+    if (decision === undefined) {
+      if (used < MAX_REVIEW_MECHANICAL_REVISIONS) return { lap: true };
+      this.host.log?.(
+        'warn',
+        `step '${step.id}' is BLOCKING (${sourceNote}) again after ${used} automatic revision(s) and no supervisor verdict; advancing to the design gate`,
+      );
+      return { lap: false };
+    }
+    if (decision.verdict === 'stop') {
+      this.host.log?.(
+        'warn',
+        `step '${step.id}' is BLOCKING (${sourceNote}) on round ${round}; the supervisor voted stop after ` +
+          `${used}/${MAX_REVIEW_AUTO_REVISIONS} automatic revision(s); advancing to the design gate`,
+      );
+      const setAsideIds = decision.setAside.map((entry) => entry.id);
+      return {
+        lap: false,
+        escalation: {
+          ...(decision.rationale.length > 0 ? { loopStopRationale: decision.rationale } : {}),
+          ...(setAsideIds.length > 0 ? { setAsideIds } : {}),
+        },
+      };
+    }
+    return { lap: true, steering: decision.steering };
+  }
+
+  /**
+   * Ask the host's supervisor seam about one blocking review round. Resolves
+   * `undefined` — the mechanical path — for an absent seam, an aborted run, or
+   * any throw, so a broken supervisor can never cost the walk a step.
+   *
+   * The request PREFERS the run's artifact over the reviewer's captured text for
+   * `reviewMarkdown`/`parsed`, even when the verdict itself came from the text:
+   * the reviewer's final message carries only its `## Blocking` section, so a
+   * text-only parse has no `findings` at all and the supervisor could never
+   * validate a set-aside id that lives under `## Findings`. The VERDICT keeps
+   * its own channel order (an explicit `REVIEW: CLEAN` in the text still wins).
+   */
+  private async consultReviewLoop(args: {
+    step: WorkflowStep;
+    loopbackStepId: string;
+    round: number;
+    used: number;
+    review: { note: string | null; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    priorRounds: ReviewLoopPriorRound[];
+    ctx: ControllerStepContext;
+    signal?: AbortSignal;
+  }): Promise<ReviewLoopDecision | undefined> {
+    const advise = this.host.adviseReviewLoop;
+    if (advise === undefined) return undefined;
+    // Read through a call so the check is re-evaluated AFTER the await below —
+    // an inline `args.signal?.aborted` is narrowed by the first test and the
+    // second one becomes a no-op the compiler rejects.
+    if (isAborted(args.signal)) return undefined;
+    const artifact = this.readAdversarialReviewArtifact();
+    const useArtifact = typeof artifact === 'string' && artifact.trim().length > 0;
+    const reviewMarkdown = useArtifact ? artifact : (args.review.note ?? undefined);
+    const parsed = useArtifact ? parseAdversarialReviewDoc(artifact) : args.review.parsed;
+    try {
+      const decision = await advise.call(this.host, {
+        stepId: args.step.id,
+        loopbackStepId: args.loopbackStepId,
+        round: args.round,
+        lapsUsed: args.used,
+        maxLaps: MAX_REVIEW_AUTO_REVISIONS,
+        ...(reviewMarkdown !== undefined && reviewMarkdown.length > 0 ? { reviewMarkdown } : {}),
+        parsed,
+        priorRounds: args.priorRounds,
+      }, args.ctx);
+      if (isAborted(args.signal)) return undefined;
+      return decision;
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `step '${args.step.id}' review-loop consult failed (${err instanceof Error ? err.message : String(err)}); falling back to the mechanical revision budget`,
+      );
+      return undefined;
+    }
   }
 
   /**

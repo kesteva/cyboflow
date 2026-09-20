@@ -24,6 +24,10 @@
 import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type {
+  AdversarialFinding,
+  ParsedAdversarialReview,
+} from '../../../../shared/types/adversarialReview';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -154,7 +158,29 @@ export interface ControllerStepContext {
    * round clause and keeps the rest. It is WALK state, not run state: a restart
    * or a rewind resets it, which is why it is never persisted.
    */
-  gateRevision?: { gateStepId: string; note?: string; source?: 'adversarial-review'; round?: number };
+  gateRevision?: {
+    gateStepId: string;
+    note?: string;
+    source?: 'adversarial-review';
+    round?: number;
+    /**
+     * The supervisor's steering for THIS automatic lap — present only on a
+     * `source: 'adversarial-review'` revision whose lap the supervisor voted
+     * for. It names the entries the lap must close and the ones it must NOT
+     * spend itself on, and the prompt renders it as outranking the review
+     * itself. Absent on a mechanical lap (no supervisor verdict) and on every
+     * human-gate revision, where the prompt is byte-identical to before.
+     */
+    steering?: ReviewLoopSteering;
+  };
+  /**
+   * Provenance for the gate this ctx opens, when a supervisor intervention put
+   * it there (today: a `stop` verdict that ended the automatic review loop).
+   * Set on the ONE `requestHumanGate` call that follows the intervention and
+   * cleared the moment that call returns — it is about this gate presentation,
+   * not a standing property of the run. Absent on every ordinary gate.
+   */
+  escalation?: ControllerEscalation;
   /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see
@@ -424,6 +450,120 @@ export type LaneRescueOutcome =
   | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
 
+// ---------------------------------------------------------------------------
+// Adversarial-review LOOP protocol (the supervisor steering each automatic lap)
+// ---------------------------------------------------------------------------
+
+/**
+ * One EARLIER adversarial-review round of the same review step, as the
+ * controller recorded it when that round completed.
+ *
+ * The supervisor needs the round-over-round trend to tell a CONVERGING review
+ * (the blocking set shrinking) from CHURN (new ids replacing old ones), and it
+ * cannot read that anywhere else: `step_results` collapses every lap of a step
+ * into ONE row, so a run that looped three times looks exactly like one that
+ * ran once. The controller therefore keeps the ledger in walk state and passes
+ * it explicitly. Ids and titles only — the full text of a superseded round is
+ * both large and no longer true.
+ */
+export interface ReviewLoopPriorRound {
+  /** 1-based round number (the `reviewRounds` counter at the time). */
+  round: number;
+  /** The `AR-n` ids that round listed under `## Blocking`. */
+  blockingIds: string[];
+  /** Those entries' titles, positionally aligned with `blockingIds`. */
+  blockingTitles: string[];
+}
+
+/**
+ * Everything the supervisor needs to decide what ONE blocking adversarial-review
+ * round should do next. Assembled by the controller (which knows the budget and
+ * the walk's round ledger) and handed to `ControllerHost.adviseReviewLoop`; the
+ * HOST enriches nothing here — unlike a lane triage, every fact is already in
+ * the controller's hands.
+ */
+export interface ReviewLoopRequest {
+  /** The adversarial-review step whose result just came back BLOCKING. */
+  stepId: string;
+  /** The intra-phase step id an automatic lap would jump back to. */
+  loopbackStepId: string;
+  /** The review round that just completed (`reviewRounds.get(stepId)`). */
+  round: number;
+  /** Automatic laps already taken for this step this walk. */
+  lapsUsed: number;
+  /** The cap on automatic laps (MAX_REVIEW_AUTO_REVISIONS). */
+  maxLaps: number;
+  /**
+   * The review document the verdict was read from — the run's artifact when
+   * there is one (preferred: it carries BOTH `## Blocking` and `## Findings`),
+   * else the reviewer's captured text. Absent when neither could be read.
+   */
+  reviewMarkdown?: string;
+  /** `reviewMarkdown` parsed — the id allow-list the steering is validated against. */
+  parsed: ParsedAdversarialReview;
+  /** Every EARLIER round of this step, oldest first (empty on round 1). */
+  priorRounds: ReviewLoopPriorRound[];
+}
+
+/**
+ * The supervisor's per-entry instruction for ONE automatic lap.
+ *
+ * `address` is the must-fix set the re-run is told to close; `setAside` names
+ * entries judged not worth this lap (each filed as a finding IMMEDIATELY, so
+ * setting one aside never drops it); `guidance` is free-text advice for the
+ * whole lap. Rendered into the re-run's prompt as the authoritative instruction
+ * — it OUTRANKS the review where the two disagree.
+ */
+export interface ReviewLoopSteering {
+  address: string[];
+  setAside: { id: string; reason: string }[];
+  guidance?: string;
+}
+
+/**
+ * What the supervisor decided about a blocking review round:
+ *   - 'loop' — take another automatic lap, steered by `steering`.
+ *   - 'stop' — do NOT lap; advance to the human gate now, with `rationale`
+ *              (and any set-aside ids) carried into the gate as an escalation.
+ * Absent (`undefined` from the host) means the supervisor had no verdict at all
+ * — the controller then falls back to the pre-seam MECHANICAL budget.
+ */
+export type ReviewLoopDecision =
+  | { verdict: 'loop'; rationale: string; steering: ReviewLoopSteering }
+  | { verdict: 'stop'; rationale: string; setAside: { id: string; reason: string }[] };
+
+/**
+ * What the controller carries INTO the next human gate after a supervisor
+ * intervention the human should know about. Present only on the ctx handed to
+ * `requestHumanGate` immediately after a `stop`, and consumed by that one gate
+ * (the controller clears it as soon as the call returns) — it describes THAT
+ * gate's provenance, not a standing run property.
+ */
+export interface ControllerEscalation {
+  /** Why the supervisor stopped looping instead of taking another lap. */
+  loopStopRationale?: string;
+  /** The `AR-n` ids it set aside (already filed as findings by the host). */
+  setAsideIds?: string[];
+}
+
+/**
+ * One adversarial-review entry the supervisor set aside, on its way to the
+ * review queue as a non-blocking finding.
+ *
+ * The ENTRY travels rather than a pre-rendered body so the sink can compose the
+ * finding exactly the way the approve-design gate composes its accepted-risk
+ * findings (same title shape, same severity mapping, same category) — which is
+ * what makes `gateSideEffects.filedAdversarialIds` dedupe a set-aside entry
+ * instead of filing it twice when the human later approves the gate.
+ */
+export interface SetAsideFindingInput {
+  entry: AdversarialFinding;
+  /** The supervisor's one-line reason, rendered as the body's first line. */
+  reason: string;
+  /** The review round the entry was set aside on. */
+  round: number;
+}
+
 /**
  * The outcome of awaiting an async visual merge-gate verdict for ONE lane
  * (programmatic actuation — closes the merge-gate's prose-only boundary). The
@@ -692,6 +832,28 @@ export interface ControllerHost {
    * controller settles the lane failed exactly as before the seam existed.
    */
   triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
+
+  /**
+   * Optional REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling.
+   * Consulted on EVERY blocking adversarial-review round for which automatic
+   * laps remain, BEFORE the controller decides whether to take one.
+   *
+   * The production host asks the ON-DEMAND monitor whether another lap is worth
+   * it and, if so, which entries the lap must close (`steering.address`) and
+   * which it must leave alone (`steering.setAside`, filed as findings by the
+   * host there and then). The controller stays dumb: it branches on
+   * loop / stop / undefined and never learns what a monitor or a finding is.
+   *
+   * `undefined` is the FAIL-SOFT value and means "no supervisor verdict" — a
+   * kill switch, a missing monitor, a thrown consult, an aborted run. The
+   * controller then falls back to MAX_REVIEW_MECHANICAL_REVISIONS, i.e. exactly
+   * the behaviour of a run without this seam. MUST never reject and MUST honour
+   * `ctx.signal`.
+   */
+  adviseReviewLoop?(
+    req: ReviewLoopRequest,
+    ctx: ControllerStepContext,
+  ): Promise<ReviewLoopDecision | undefined>;
 
   /**
    * Optional per-step result sink (Stage 3, migration 033). The controller calls

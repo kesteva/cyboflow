@@ -196,15 +196,17 @@ import {
   addTaskToRun,
   removeTaskFromRun,
   editRunTask,
-  adjustRunTaskForLaneTriage,
   type TaskMutationDeps,
   type TaskMutationResult,
   type TaskMutationNoOpReason,
 } from './orchestrator/taskMutationHandler';
-import type {
-  LaneTriageAdjustResult,
-  LaneTriageTaskFacts,
-} from './orchestrator/programmatic/programmaticRunHost';
+import {
+  buildLaneTriageActions,
+  buildMonitorFindingSink,
+  buildSetAsideFindingSink,
+  type LaneTriageActions,
+  type MonitorActionSinkDeps,
+} from './orchestrator/monitorActionSinks';
 import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
@@ -547,28 +549,18 @@ interface MonitorSteeringActions {
 let monitorSteeringActions: MonitorSteeringActions | null = null;
 
 /**
- * Composition-root collaborators for AUTONOMOUS LANE TRIAGE (the monitor rescuing
- * a sprint fan-out lane that exhausted its automatic budget — see
- * `ProgrammaticRunHost.triageLaneFailure`).
- *
- * Late-bound in a holder for the same reason `monitorSteeringActions` is: the
- * DefaultProgrammaticRunner is constructed EARLY in initializeServices, while the
- * `TaskMutationDeps` / review-queue seams these actions reuse are built in a
- * later nested block — and reusing THOSE objects (rather than minting parallel
- * ones) is the point, so every backlog write still lands on the TaskChangeRouter
- * chokepoint and every audit note on the same ReviewItemRouter seam the monitor's
- * `fileNote` action uses. Null until that block runs ⇒ the host behaves exactly
- * as it does with no lane triage wired (give_up), which is the safe default.
+ * Composition-root collaborators for the monitor's AUTONOMOUS actions on the
+ * programmatic plane — lane triage and the supervised review loop. Built in
+ * `monitorActionSinks.ts`; late-bound in holders for the same reason
+ * `monitorSteeringActions` is: the DefaultProgrammaticRunner is constructed
+ * EARLY in initializeServices, while the `TaskMutationDeps` / review-queue seams
+ * these reuse are built in a later nested block. Null until that block runs ⇒
+ * the host behaves exactly as it does with nothing wired (give_up / the
+ * mechanical revision budget), which is the safe default.
  */
-interface LaneTriageActions {
-  /** Enrich a bare fan-out item id with the task's ref/title/current body. */
-  readTask(runId: string, itemId: string): LaneTriageTaskFacts | undefined;
-  /** Apply the monitor's `adjust_and_retry` body replacement (a refusal is ok:false). */
-  adjustTask(runId: string, input: { taskRef: string; body: string }): Promise<LaneTriageAdjustResult>;
-  /** File the non-blocking audit record for one autonomous rescue. */
-  fileFinding(runId: string, input: { title: string; body: string }): Promise<void>;
-}
 let laneTriageActions: LaneTriageActions | null = null;
+let monitorFindingSink: ReturnType<typeof buildMonitorFindingSink> | null = null;
+let setAsideFindingSink: ReturnType<typeof buildSetAsideFindingSink> | null = null;
 /** Fallback when a steering action fires before the dep-wiring block ran. */
 const STEERING_NOT_WIRED: MonitorActionResult = {
   ok: false,
@@ -3219,6 +3211,13 @@ async function initializeServices(): Promise<boolean> {
         : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
+    // ── SUPERVISED REVIEW LOOP (monitor steering each automatic design lap) ──
+    // Same late-bound posture: unwired, the audit note and the set-aside
+    // findings are dropped, which is exactly the no-supervisor behaviour.
+    monitorFindingSink: (runId, input) =>
+      monitorFindingSink ? monitorFindingSink(runId, input) : Promise.resolve(),
+    setAsideFindingSink: (runId, input) =>
+      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.resolve(),
     // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
     // closure the scheduler's §3.2 degrade gate and the health panel's badge use
     // — there must never be a third reading of `verify_runbook_local.status`.
@@ -5082,69 +5081,27 @@ app.whenReady().then(async () => {
     };
     console.log('[Main] monitor steering actions wired');
 
-    // Autonomous LANE-TRIAGE collaborators (the monitor rescuing a sprint lane
-    // that exhausted its automatic budget). Deliberately built HERE, alongside the
-    // steering actions, so all three reuse the objects those actions already
-    // route through: the SAME `taskMutationDeps` (⇒ TaskChangeRouter chokepoint),
-    // the SAME review-queue seam `fileNote` uses, and the SAME run→project
-    // resolution. Consumed by the DefaultProgrammaticRunner deps above through the
-    // `laneTriageActions` holder.
-    laneTriageActions = {
-      // The controller only ever holds opaque fan-out item ids; the host needs the
-      // task's ref/title/CURRENT body to ask the monitor whether the acceptance
-      // criteria conflict with repo reality. Fail-soft (the consult still runs
-      // with an empty body — it just cannot end in an adjust).
-      readTask: (_runId, itemId) => {
-        try {
-          const task = selectTaskById(db, itemId);
-          if (!task) return undefined;
-          return {
-            ...(task.ref ? { taskRef: task.ref } : {}),
-            ...(task.title ? { taskTitle: task.title } : {}),
-            ...(task.body ? { taskBody: task.body } : {}),
-          };
-        } catch (err) {
-          loggerLike.warn('[Main] lane-triage task read failed (fail-soft)', {
-            itemId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return undefined;
-        }
-      },
-      // The monitor's AUTONOMOUS requirements adjustment. adjustRunTaskForLaneTriage
-      // is body-only and deliberately bypasses edit_task's queued-only lane guard
-      // (safe because lane prompts re-read the body per spawn and the host always
-      // pairs the edit with a lane rewind) — but it still routes through the SAME
-      // TaskChangeRouter chokepoint via the SAME deps object edit_task uses. A
-      // refusal is reported with the same human-readable text the chat action
-      // would show, so the host's downgrade note and the audit finding read alike.
-      adjustTask: async (runId, input) => {
-        const result = await adjustRunTaskForLaneTriage(runId, input, taskMutationDeps);
-        if (result.ok) return { ok: true };
-        return { ok: false, reason: mapTaskResult(result).message };
-      },
-      // Non-blocking audit record for one autonomous rescue — the SAME
-      // ReviewItemRouter create the monitor's fileNote action performs, filed as a
-      // 'finding' (a record to review, not a chore to do) sourced 'monitor'. Never
-      // blocking: nothing merges without the run's existing human gate anyway, and
-      // a rescue that PARKED the run would defeat the point of self-healing.
-      fileFinding: async (runId, input) => {
-        const projectId = runProjectId(runId);
-        if (projectId === undefined) return;
-        await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-          op: 'create',
-          actor: 'orchestrator',
-          kind: 'finding',
-          title: input.title,
-          body: input.body,
-          severity: 'info',
-          blocking: false,
-          source: 'monitor',
-          runId,
-        });
-      },
+    // Autonomous MONITOR-ACTION sinks (the supervisor rescuing a sprint lane
+    // that exhausted its automatic budget, and steering the adversarial-review
+    // loop). Deliberately built HERE, alongside the steering actions, so all of
+    // them reuse the objects those actions already route through: the SAME
+    // `taskMutationDeps` (⇒ TaskChangeRouter chokepoint), the SAME review-queue
+    // chokepoint `fileNote` uses, and the SAME run→project resolution. The logic
+    // lives in orchestrator/monitorActionSinks.ts; consumed by the
+    // DefaultProgrammaticRunner deps above through the holders.
+    const monitorActionSinkDeps: MonitorActionSinkDeps = {
+      db,
+      runProjectId,
+      applyReviewItem: (projectId, change) =>
+        ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+      taskMutations: taskMutationDeps,
+      describeTaskFailure: (result) => mapTaskResult(result).message,
+      logger: loggerLike,
     };
-    console.log('[Main] monitor lane-triage actions wired');
+    laneTriageActions = buildLaneTriageActions(monitorActionSinkDeps);
+    monitorFindingSink = buildMonitorFindingSink(monitorActionSinkDeps);
+    setAsideFindingSink = buildSetAsideFindingSink(monitorActionSinkDeps);
+    console.log('[Main] monitor action sinks wired');
 
     // Lazy monitor rehydration: after an app restart the in-process
     // MonitorRegistry is empty, and boot recovery only re-drives

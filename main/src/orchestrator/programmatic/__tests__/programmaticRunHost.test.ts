@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   ProgrammaticRunHost,
   LANE_TRIAGE_KILL_SWITCH_ENV,
+  REVIEW_LOOP_KILL_SWITCH_ENV,
   type StepReporter,
 } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
@@ -12,8 +13,14 @@ import type {
   ControllerStepContext,
   FanOutDriver,
   LaneTriageFailure,
+  ReviewLoopDecision,
+  ReviewLoopRequest,
   SystemicPauseVerdict,
 } from '../types';
+import type {
+  AdversarialFinding,
+  AdversarialSeverity,
+} from '../../../../../shared/types/adversarialReview';
 import type { SystemicPauseResolver } from '../systemicPauseGate';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
@@ -815,6 +822,170 @@ describe('ProgrammaticRunHost', () => {
       // Let the rejection settle — an unhandled rejection would fail the suite.
       await Promise.resolve();
       await Promise.resolve();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The SUPERVISED adversarial-review loop (ControllerHost.adviseReviewLoop)
+  // -------------------------------------------------------------------------
+
+  describe('adviseReviewLoop', () => {
+    function arEntry(id: string, title: string, severity: AdversarialSeverity = 'blocker'): AdversarialFinding {
+      return { id, title, severity, fix: `fix ${id}` };
+    }
+
+    const req: ReviewLoopRequest = {
+      stepId: 'adversarial-review',
+      loopbackStepId: 'expand-spec',
+      round: 2,
+      lapsUsed: 1,
+      maxLaps: 3,
+      reviewMarkdown: '## Blocking\n\n#### AR-1 — Spend screen',
+      parsed: {
+        blocking: [arEntry('AR-1', 'Spend screen has no way back')],
+        findings: [arEntry('AR-3', 'Copy nit', 'advisory')],
+        prior: [],
+      },
+      priorRounds: [],
+    };
+
+    const LOOP: ReviewLoopDecision = {
+      verdict: 'loop',
+      rationale: 'AR-1 is a one-line fix',
+      steering: { address: ['AR-1'], setAside: [{ id: 'AR-3', reason: 'copy nit' }], guidance: 'add a Home affordance' },
+    };
+
+    /** A monitor whose adviseReviewLoop returns a canned verdict. */
+    function makeLoopMonitor(
+      decision: ReviewLoopDecision | undefined,
+    ): MonitorSession & { adviseReviewLoop: ReturnType<typeof vi.fn> } {
+      return {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        adviseReviewLoop: vi.fn().mockResolvedValue(decision),
+      };
+    }
+
+    afterEach(() => {
+      delete process.env[REVIEW_LOOP_KILL_SWITCH_ENV];
+    });
+
+    it('returns undefined WITHOUT consulting the monitor when the kill switch is set', async () => {
+      process.env[REVIEW_LOOP_KILL_SWITCH_ENV] = '1';
+      const monitor = makeLoopMonitor(LOOP);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor, injectEvent: (e) => injected.push(e),
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
+      expect(monitor.adviseReviewLoop).not.toHaveBeenCalled();
+      // A rollback lever is silent — no chat turn beyond the log.
+      expect(injected).toHaveLength(0);
+    });
+
+    it('returns undefined when no monitor is wired, and when it has no adviseReviewLoop', async () => {
+      const bare = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
+      expect(await bare.adviseReviewLoop(req, ctx)).toBeUndefined();
+
+      const monitor: MonitorSession = { triage: vi.fn(), answer: vi.fn().mockResolvedValue('') };
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+      expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
+    });
+
+    it('files the audit finding + one set-aside finding, and injects NO chat turn of its own', async () => {
+      const monitor = makeLoopMonitor(LOOP);
+      const injected: ClaudeStreamEvent[] = [];
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const fileSetAsideFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        injectEvent: (e) => injected.push(e),
+        fileMonitorFinding,
+        fileSetAsideFinding,
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toEqual(LOOP);
+      expect(monitor.adviseReviewLoop).toHaveBeenCalledWith(req, ctx.signal);
+
+      const audit = fileMonitorFinding.mock.calls[0][0] as { title: string; body: string; category?: string };
+      expect(audit.title).toBe('Review loop — adversarial-review round 2: loop');
+      expect(audit.category).toBe('review-loop');
+      expect(audit.body).toContain('AR-1 is a one-line fix');
+      expect(audit.body).toContain('`expand-spec`');
+      expect(audit.body).toContain('add a Home affordance');
+      expect(audit.body).toContain('- AR-3: copy nit');
+
+      // The set-aside travels as the ENTRY, so the sink can compose the finding
+      // exactly like the approve-design gate's accepted-risk twin.
+      expect(fileSetAsideFinding).toHaveBeenCalledTimes(1);
+      expect(fileSetAsideFinding.mock.calls[0][0]).toEqual({
+        entry: req.parsed.findings[0],
+        reason: 'copy nit',
+        round: 2,
+      });
+      // The brain owns its rendering — a host turn here would double-render.
+      expect(injected).toHaveLength(0);
+    });
+
+    it('files set-asides on a STOP too (an entry set aside must still reach the human)', async () => {
+      const monitor = makeLoopMonitor({
+        verdict: 'stop',
+        rationale: 'a product call',
+        setAside: [{ id: 'AR-1', reason: 'out of scope' }],
+      });
+      const fileSetAsideFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileSetAsideFinding,
+      });
+
+      await host.adviseReviewLoop(req, ctx);
+
+      expect(fileSetAsideFinding.mock.calls[0][0]).toEqual({
+        entry: req.parsed.blocking[0],
+        reason: 'out of scope',
+        round: 2,
+      });
+    });
+
+    it('a THROWING sink does not cost the decision', async () => {
+      const monitor = makeLoopMonitor(LOOP);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+        fileSetAsideFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toEqual(LOOP);
+    });
+
+    it('a THROWING consult resolves undefined (the mechanical budget)', async () => {
+      const monitor: MonitorSession = {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        adviseReviewLoop: vi.fn().mockRejectedValue(new Error('sdk down')),
+      };
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
+    });
+
+    it('files nothing when the monitor returns no verdict', async () => {
+      const monitor = makeLoopMonitor(undefined);
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding,
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
+      expect(fileMonitorFinding).not.toHaveBeenCalled();
     });
   });
 });
