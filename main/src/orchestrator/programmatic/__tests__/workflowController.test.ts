@@ -3522,6 +3522,34 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     expect(runner.seen[6].gateRevision).toBeUndefined();
   });
 
+  it('an OPERATOR-skipped gate clears the armed revision the same way', async () => {
+    // Same leak, other skip path: a RunDirectives skip of the gate step (monitor
+    // `skip_step`) also never opens it, so it must also answer the revision.
+    const skippableGateDef = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, optional: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost();
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('approve-design');
+
+    const result = await new WorkflowController(runner, host).run(
+      'run-ar-opskip', skippableGateDef, undefined, undefined, undefined, directives,
+    );
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual([]);
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'adversarial-review', 'expand-spec', 'adversarial-review', 'epics',
+    ]);
+    expect(runner.seen[2].gateRevision?.source).toBe('adversarial-review');
+    expect(runner.seen[4].gateRevision).toBeUndefined();
+  });
+
   it('a plain step with an on-failure loopback still ignores REVIEW: BLOCKING in its result', async () => {
     // The verdict routing is keyed on the adversarial-review AGENT, not on the
     // presence of `loopback`.

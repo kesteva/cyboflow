@@ -229,7 +229,12 @@ export function maxAdversarialId(markdown: string | null | undefined): number {
 }
 
 /**
- * Parse an adversarial-review document into its two buckets.
+ * Parse an adversarial-review document into its three buckets.
+ *
+ * `## Prior entries` / `### Prior entries` (the re-review's carry-forward ledger)
+ * is recognized only OUTSIDE fenced code blocks; a ledger line whose status word
+ * is not one of the five is dropped rather than guessed at; and a `#### AR-n`
+ * heading under the ledger is a re-statement, never an entry.
  *
  * `None.` (or an empty section) yields an empty array for that bucket, which is
  * the reviewer's way of saying "nothing here" and must read as zero rather than
@@ -322,6 +327,11 @@ export function parseAdversarialReviewDoc(markdown: string | null | undefined): 
     if (sectionMatch) {
       flush();
       const classified = classifySection(sectionMatch[1]);
+      // A real Blocking / Findings heading cannot sit inside a fence in any
+      // document this parser reads, so it RESYNCS the fence state: an unclosed
+      // fence in an entry's `**Fix:**` field must not swallow every ledger line
+      // that follows the next section.
+      if (classified === 'blocking' || classified === 'findings') inFence = false;
       // A `## Prior entries` heading inside a fence is an EXAMPLE of the format,
       // not the section itself — fall through as if it were unrecognized.
       if (classified === 'prior' && inFence) continue;

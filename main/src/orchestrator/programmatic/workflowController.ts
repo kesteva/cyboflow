@@ -577,6 +577,11 @@ export class WorkflowController {
           });
           this.host.log?.('warn', `step '${step.id}' skipped by operator request`);
           this.host.reportStep(step.id, 'skipped');
+          // An operator-skipped GATE answers the pending revision exactly like the
+          // self-skipped optional gate below does: the walk reached the gate and
+          // moved on, so the "revision requested" section must not leak into the
+          // steps after it.
+          if (isPureHumanGate(step)) pendingGateRevision = undefined;
           i += 1;
           continue;
         }

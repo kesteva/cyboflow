@@ -416,7 +416,10 @@ export interface ApproveIdeasBatchRow {
  * to review, so it keeps skipping.
  *
  * FAIL-OPEN toward the gate: any thrown query returns true, so a read error
- * opens the human gate rather than silently skipping a review step.
+ * opens the human gate rather than silently skipping a review step. The one
+ * exception is the review read at the end, which is independently fail-soft
+ * (an unreadable payload reads as "no review") and can therefore only ever ADD
+ * a reason to open the gate, never a reason to skip one.
  */
 export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boolean {
   try {

@@ -284,6 +284,29 @@ describe('parseAdversarialReviewDoc — the `Prior entries` carry-forward ledger
     expect(parsed.blocking.map((f) => f.id)).toEqual(['AR-1']);
   });
 
+  it('resyncs fence state on a real section heading so an unclosed fence cannot swallow the ledger', () => {
+    const parsed = parseAdversarialReviewDoc(
+      [
+        '## Blocking',
+        '',
+        '#### AR-1 — Real',
+        '**Fix:** run this:',
+        '```sh',
+        'echo unclosed',
+        '',
+        '## Findings',
+        '',
+        'None.',
+        '',
+        '## Prior entries',
+        '',
+        '- AR-1 (blocker) — unresolved — still open',
+      ].join('\n'),
+    );
+    expect(parsed.blocking.map((f) => f.id)).toEqual(['AR-1']);
+    expect(parsed.prior).toEqual([{ id: 'AR-1', previousSeverity: 'blocker', status: 'unresolved', note: 'still open' }]);
+  });
+
   it('tolerates a hyphen separator, a missing severity, and a missing note', () => {
     const parsed = parseAdversarialReviewDoc(
       ['## Prior entries', '', '- AR-7 - unresolved - still open', '* ar 8 — resolved'].join('\n'),
