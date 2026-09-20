@@ -436,6 +436,26 @@ describe('ReviewQueueHumanGate', () => {
     }
   });
 
+  it('degrades to awaiting the change event when the read-back THROWS', async () => {
+    // The read runs inside the `.then` whose trailing `.catch` REJECTS the gate,
+    // so an unwrapped throw here would abort a run parked at a gate nobody can
+    // answer. It must behave exactly as a reader that cannot answer does.
+    const events = new EventEmitter();
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue('ri-boom'),
+      readGateItem: vi.fn(() => {
+        throw new Error('review_items is gone');
+      }),
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+    await Promise.resolve();
+    events.emit('review-project-1', { reviewItemId: 'ri-boom', action: 'resolved', item: { resolution: 'approve' } });
+
+    await expect(pending).resolves.toBe('approve');
+  });
+
   // ── onOpened: fire-and-forget gate-open hook ────────────────────────────────
 
   it('fires onOpened AFTER the target is armed, with the item snapshot, and still settles', async () => {

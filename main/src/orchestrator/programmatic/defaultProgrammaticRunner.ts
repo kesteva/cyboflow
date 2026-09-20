@@ -45,7 +45,13 @@ import {
   type VerificationPostureDeps,
 } from '../verify/verificationPosture';
 import { sweepBuildBreaks } from './buildBreakDetector';
-import type { FanOutDriver, SetAsideFindingInput, StepReport, VisualVerifyGate } from './types';
+import type {
+  EscalationReviewItemSummary,
+  FanOutDriver,
+  SetAsideFindingInput,
+  StepReport,
+  VisualVerifyGate,
+} from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
@@ -263,6 +269,20 @@ export interface DefaultProgrammaticRunnerDeps {
    * rather than double-files. Absent ⇒ set-aside entries are logged only.
    */
   setAsideFindingSink?: (runId: string, input: SetAsideFindingInput) => Promise<void>;
+  /**
+   * ESCALATION-REVIEW reader: this run's review-queue rows as the gate consult
+   * should see them. Bound in production to the same shared deps the sinks above
+   * use. Absent ⇒ the consult runs with an empty list (still a usable consult —
+   * it just cannot cite what the run already filed).
+   */
+  runReviewItemReader?: (runId: string) => Promise<EscalationReviewItemSummary[]>;
+  /**
+   * ESCALATION-REVIEW writer: the `annotate` op that puts the supervisor's
+   * recommendation on the gate item, through the SAME ReviewItemRouter
+   * chokepoint every other sink here uses. Absent ⇒ a recommendation is logged
+   * and never rendered (the card looks exactly as it does today).
+   */
+  gateAnnotateSink?: (runId: string, input: { reviewItemId: string; markdown: string }) => Promise<void>;
   /**
    * The project's runbook-status resolver — the SAME closure the scheduler's
    * `runbookStatus` dependency and the verify health panel share (index.ts builds
@@ -948,6 +968,8 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
     const monitorFindingSink = this.deps.monitorFindingSink;
     const setAsideFindingSink = this.deps.setAsideFindingSink;
+    const runReviewItemReader = this.deps.runReviewItemReader;
+    const gateAnnotateSink = this.deps.gateAnnotateSink;
     // Narrowed once here so the two conditional spreads below close over a
     // definitely-defined handle rather than re-narrowing `this.deps` inside a
     // callback (where TS cannot keep the narrowing).
@@ -1002,6 +1024,19 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         : {}),
       ...(setAsideFindingSink
         ? { fileSetAsideFinding: (input: SetAsideFindingInput) => setAsideFindingSink(ctx.runId, input) }
+        : {}),
+      // ESCALATION REVIEW. No `onGateOpened` is passed: the host builds its own
+      // gate-open hook from `reviewGateEscalation` whenever a capable monitor is
+      // wired, and `args.onGateOpened` stays a test-only override. These two are
+      // the reader/writer that hook needs.
+      ...(runReviewItemReader
+        ? { listRunReviewItems: (runId: string) => runReviewItemReader(runId) }
+        : {}),
+      ...(gateAnnotateSink
+        ? {
+            annotateReviewItem: (input: { reviewItemId: string; markdown: string }) =>
+              gateAnnotateSink(ctx.runId, input),
+          }
         : {}),
       // F8 "never skip silently" (docs/proposals/visual-verification-brittleness-
       // fixes.md): a visual verification dropped BEFORE a request row exists

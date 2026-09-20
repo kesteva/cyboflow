@@ -7,14 +7,17 @@ import {
   buildTriagePrompt,
   buildAnswerPrompt,
   buildActionAnswerPrompt,
+  buildGateEscalationPrompt,
   buildLaneTriagePrompt,
   buildReviewLoopPrompt,
   parseTriageAdvice,
   parseConverseOutput,
+  parseGateEscalationOutput,
   parseLaneTriageOutput,
   parseReviewLoopOutput,
   MONITOR_TRIAGE_SCHEMA,
   MONITOR_CONVERSE_SCHEMA,
+  MONITOR_GATE_ESCALATION_SCHEMA,
   MONITOR_LANE_TRIAGE_SCHEMA,
   MONITOR_REVIEW_LOOP_SCHEMA,
   type HistoryReader,
@@ -22,6 +25,7 @@ import {
   type MonitorHistory,
   type MonitorSession,
   type MonitorActions,
+  type GateEscalationRequest,
   type LaneTriageRequest,
   type ReviewLoopRequest,
 } from '../monitor';
@@ -2638,6 +2642,326 @@ describe('DefaultMonitorSession.adviseReviewLoop', () => {
     await Promise.all([first, second]);
     expect(injected.map((m) => m.text.includes('first') || m.text.includes('second'))).toEqual([
       false, true, false, true,
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate escalation (item 8b) — the supervisor's NON-BINDING recommendation at an
+// open human gate, plus the run-deliverables digest both it and the review-loop
+// prompt carry.
+// ---------------------------------------------------------------------------
+
+function gateReq(p: Partial<GateEscalationRequest> = {}): GateEscalationRequest {
+  return {
+    kind: 'gate',
+    stepId: 'approve-design',
+    stepName: 'Approve design',
+    reviewItemId: 'ri-1',
+    title: 'Approve the design for IDEA-004',
+    body: 'The adversarial reviewer raised 2 blocking entries.\n\n#### AR-1 — no way back',
+    reviewItems: [
+      {
+        id: 'ri-9',
+        kind: 'finding',
+        source: 'monitor',
+        severity: 'info',
+        status: 'pending',
+        title: 'AR-3 — Copy nit',
+      },
+    ],
+    ...p,
+  };
+}
+
+const digestHistory: MonitorHistory = {
+  conversation: [assistantMsg('designing the spend screen')],
+  steps: [stepRow({ stepId: 'adversarial-review', outcome: 'done' })],
+  runDigest: {
+    artifacts: [{ atype: 'project-brief', label: 'Project brief', markdown: 'THOROUGHNESS: balanced' }],
+    entities: [{ kind: 'idea', ref: 'IDEA-004', title: 'Spend tracker', body: 'Track spend per category.' }],
+  },
+};
+
+describe('MONITOR_GATE_ESCALATION_SCHEMA', () => {
+  it('requires action + rationale, offers the six choices, and forbids extra fields', () => {
+    const props = MONITOR_GATE_ESCALATION_SCHEMA.properties as Record<string, { enum?: string[]; description?: string }>;
+    expect(MONITOR_GATE_ESCALATION_SCHEMA.required).toEqual(['action', 'rationale']);
+    expect(MONITOR_GATE_ESCALATION_SCHEMA.additionalProperties).toBe(false);
+    expect(props.action.enum).toEqual(['recommend', 'pass']);
+    expect(props.choice.enum).toEqual(['approve', 'reject', 'revise', 'continue', 'rerun', 'dismiss']);
+    // The supervisor must never think it can settle the gate.
+    expect(props.choice.enum).not.toContain('resolve');
+    // The downgrade the parser performs has to be stated where the model reads it.
+    expect(props.action.description).toContain('downgraded to `pass`');
+  });
+});
+
+describe('parseGateEscalationOutput (downgrade table)', () => {
+  it('parses a well-formed in-menu recommendation', () => {
+    expect(
+      parseGateEscalationOutput({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic.' }, gateReq()),
+    ).toEqual({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic.' });
+  });
+
+  it('parses an explicit pass', () => {
+    expect(parseGateEscalationOutput({ action: 'pass', rationale: 'a product call' }, gateReq())).toEqual({
+      action: 'pass',
+      rationale: 'a product call',
+    });
+  });
+
+  it('downgrades a choice OUTSIDE this gate’s menu to pass', () => {
+    // 'revise' is a valid choice word but not an approve-design control.
+    expect(
+      parseGateEscalationOutput({ action: 'recommend', choice: 'revise', rationale: 'x' }, gateReq()),
+    ).toEqual({ action: 'pass', rationale: 'x' });
+    // ...and the mirror: 'continue' is not on a plain gate's menu.
+    expect(
+      parseGateEscalationOutput(
+        { action: 'recommend', choice: 'continue', rationale: 'x' },
+        gateReq({ stepId: 'approve-plan', stepName: 'Approve plan' }),
+      ),
+    ).toEqual({ action: 'pass', rationale: 'x' });
+  });
+
+  it('accepts the plain three-way menu on a non-design gate', () => {
+    for (const choice of ['approve', 'reject', 'revise'] as const) {
+      expect(
+        parseGateEscalationOutput(
+          { action: 'recommend', choice, rationale: 'x' },
+          gateReq({ stepId: 'approve-plan', stepName: 'Approve plan' }),
+        ),
+      ).toEqual({ action: 'recommend', choice, rationale: 'x' });
+    }
+  });
+
+  it('downgrades a recommend with no / unknown choice to pass', () => {
+    for (const bad of [undefined, null, 7, 'resolve', 'maybe']) {
+      expect(
+        parseGateEscalationOutput({ action: 'recommend', choice: bad, rationale: 'x' }, gateReq()),
+      ).toEqual({ action: 'pass', rationale: 'x' });
+    }
+  });
+
+  it('passes for anything malformed', () => {
+    for (const bad of [null, undefined, 'recommend', 42, {}, { action: 'settle' }]) {
+      expect(parseGateEscalationOutput(bad, gateReq()).action).toBe('pass');
+    }
+  });
+
+  it('fills in a blank rationale', () => {
+    expect(parseGateEscalationOutput({ action: 'pass', rationale: '  ' }, gateReq()).rationale).toBe('(none given)');
+    expect(parseGateEscalationOutput({ action: 'recommend', choice: 'rerun' }, gateReq()).rationale).toBe(
+      '(none given)',
+    );
+  });
+});
+
+describe('buildGateEscalationPrompt', () => {
+  it('carries the gate body, the review-queue rows, the digest, and the design menu', () => {
+    const p = buildGateEscalationPrompt(ctx, digestHistory, gateReq());
+    expect(p).toContain('SUPERVISOR');
+    expect(p).toContain('Approve design');
+    expect(p).toContain('Approve the design for IDEA-004');
+    // The gate body, verbatim and fenced.
+    expect(p).toContain('#### AR-1 — no way back');
+    // The review queue (CR-9): the supervisor's own autonomous record reaches
+    // the person reviewing the gate.
+    expect(p).toContain('AR-3 — Copy nit');
+    expect(p).toContain('source: monitor');
+    // The run digest (CR-6).
+    expect(p).toContain('## Run deliverables');
+    expect(p).toContain('THOROUGHNESS: balanced');
+    expect(p).toContain('## Run entities');
+    expect(p).toContain('**IDEA-004**');
+    expect(p).toContain('Track spend per category.');
+    // The approve-design menu, with the meanings that are not inferable.
+    expect(p).toContain('"continue"');
+    expect(p).toContain('"rerun"');
+    expect(p).toContain('"dismiss"');
+    expect(p).toContain('WITHOUT logging');
+    // The one rule this consult exists under.
+    expect(p).toContain('NEVER ANSWER THE GATE');
+    expect(p).toContain('Read/Grep/Glob');
+  });
+
+  it('renders the OTHER gates’ three-way menu instead', () => {
+    const p = buildGateEscalationPrompt(ctx, digestHistory, gateReq({ stepId: 'approve-plan', stepName: 'Approve plan' }));
+    expect(p).toContain('"approve"');
+    expect(p).toContain('"reject"');
+    expect(p).toContain('"revise"');
+    expect(p).not.toContain('"continue"');
+  });
+
+  it('renders the supervisor’s own loop stop + set-aside ids when the gate followed one', () => {
+    const p = buildGateEscalationPrompt(
+      ctx,
+      digestHistory,
+      gateReq({ escalation: { loopStopRationale: 'the blockers are product calls', setAsideIds: ['AR-3', 'AR-7'] } }),
+    );
+    expect(p).toContain('YOUR own earlier decisions');
+    expect(p).toContain('the blockers are product calls');
+    expect(p).toContain('AR-3, AR-7');
+  });
+
+  it('omits the escalation + digest sections entirely when neither is present', () => {
+    const bare: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildGateEscalationPrompt(ctx, bare, gateReq({ reviewItems: [] }));
+    expect(p).not.toContain('YOUR own earlier decisions');
+    expect(p).not.toContain('## Run deliverables');
+    expect(p).not.toContain('## Run entities');
+    expect(p).toContain('this run has filed nothing in the review queue');
+  });
+
+  it('degrades gracefully with an empty gate body', () => {
+    expect(buildGateEscalationPrompt(ctx, digestHistory, gateReq({ body: '   ' }))).toContain(
+      'the gate body is empty',
+    );
+  });
+});
+
+describe('run digest in buildReviewLoopPrompt', () => {
+  it('folds the deliverables + entities into the review-loop prompt too', () => {
+    const p = buildReviewLoopPrompt(ctx, digestHistory, loopReq());
+    expect(p).toContain('## Run deliverables');
+    expect(p).toContain('## Run entities');
+  });
+
+  it('leaves the prompt byte-identical when no digest is wired', () => {
+    const withoutDigest: MonitorHistory = { conversation: digestHistory.conversation, steps: digestHistory.steps };
+    const p = buildReviewLoopPrompt(ctx, withoutDigest, loopReq());
+    expect(p).not.toContain('## Run deliverables');
+    expect(p).not.toContain('## Run entities');
+  });
+});
+
+describe('DefaultHistoryReader run digest', () => {
+  /** A DatabaseLike whose reads answer "no rows, no batch" — a non-sprint run. */
+  function fakeDbWithoutBatch(): DatabaseLike {
+    const stmt: PreparedStatement = {
+      run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      get: () => ({}),
+      all: () => [],
+    };
+    return { prepare: () => stmt, transaction: (fn: () => unknown) => fn } as unknown as DatabaseLike;
+  }
+
+  it('includes the digest when a reader is wired, and omits the key when it is not', async () => {
+    const db = fakeDbWithoutBatch();
+    const digest = { artifacts: [], entities: [] };
+
+    const wired = await new DefaultHistoryReader(db, undefined, () => digest).read('run-1');
+    expect(wired.runDigest).toBe(digest);
+
+    const unwired = await new DefaultHistoryReader(db).read('run-1');
+    expect('runDigest' in unwired).toBe(false);
+  });
+
+  it('is fail-soft: a throwing digest reader costs the section, not the history read', async () => {
+    const history = await new DefaultHistoryReader(fakeDbWithoutBatch(), undefined, () => {
+      throw new Error('digest boom');
+    }).read('run-1');
+    expect(history.runDigest).toBeUndefined();
+    expect(history.steps).toEqual([]);
+  });
+});
+
+describe('DefaultMonitorSession.reviewGateEscalation', () => {
+  it('queries with the escalation schema, parses, and posts ONE advice note', async () => {
+    const { reader, reads } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic.' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, model: 'opus' });
+    const controller = new AbortController();
+
+    const decision = await session.reviewGateEscalation(gateReq(), controller.signal);
+
+    expect(decision).toEqual({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic.' });
+    expect(reads).toEqual(['run-1']);
+    const args = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(args.schema).toBe(MONITOR_GATE_ESCALATION_SCHEMA);
+    expect(args.cwd).toBe('/wt');
+    expect(args.model).toBe('opus');
+    expect(args.signal).toBe(controller.signal);
+    // Exactly ONE turn — no announcement: a gate opening is already the loudest
+    // thing in the UI.
+    expect(injected).toHaveLength(1);
+    expect(injected[0].text).toContain('I recommend **continue**');
+    expect(injected[0].text).toContain('the decision is yours');
+  });
+
+  it('reports a pass as advice withheld, never as an answer', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ action: 'pass', rationale: 'a genuine product call' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    expect(await session.reviewGateEscalation(gateReq())).toEqual({
+      action: 'pass',
+      rationale: 'a genuine product call',
+    });
+    expect(injected).toHaveLength(1);
+    expect(injected[0].text).toContain('no recommendation from me');
+  });
+
+  it('fails soft to pass (with a chat note) when the query throws or times out', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('monitor query timed out'));
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.reviewGateEscalation(gateReq());
+
+    expect(decision.action).toBe('pass');
+    expect(decision.rationale).toContain('monitor query timed out');
+    expect(injected).toHaveLength(1);
+    expect(injected[0].text).toContain('could not review it');
+  });
+
+  it('posts NOTHING when the run was aborted mid-consult', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const controller = new AbortController();
+    const structuredQuery: StructuredQueryFn = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      return { action: 'recommend', choice: 'continue', rationale: 'x' };
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    await session.reviewGateEscalation(gateReq(), controller.signal);
+
+    expect(injected).toEqual([]);
+  });
+
+  it('serializes on the SAME sendChain as converse (no interleaved turns)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    let resolveFirst: (v: unknown) => void = () => {};
+    const gate = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue({ action: 'pass', rationale: 'second' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const first = session.reviewGateEscalation(gateReq());
+    const second = session.reviewGateEscalation(gateReq({ reviewItemId: 'ri-2' }));
+    await vi.waitFor(() => expect(structuredQuery).toHaveBeenCalledTimes(1));
+    // The second consult has not run at all while the first is in flight.
+    expect(injected).toHaveLength(0);
+
+    resolveFirst({ action: 'pass', rationale: 'first' });
+    await Promise.all([first, second]);
+    expect(injected.map((m) => m.text)).toEqual([
+      expect.stringContaining('first'),
+      expect.stringContaining('second'),
     ]);
   });
 });

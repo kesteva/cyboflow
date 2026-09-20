@@ -963,4 +963,136 @@ describe('ReviewItemCard', () => {
       unmount();
     }
   });
+
+  // -- "Continue without logging" + recommendation-driven emphasis ------------
+  //
+  // The approve-design gate's THIRD choice, and the only place the supervisor's
+  // advice becomes actionable rather than informational: the recommended button
+  // is the primary one.
+
+  /** The approve-design gate item, optionally annotated with a recommendation. */
+  function designGateItem(id: string, choice?: string): ReviewItem {
+    return makeItem('decision', {
+      id,
+      blocking: true,
+      source: 'gate:human-step:approve-design',
+      ...(choice !== undefined
+        ? { body: `The gate body.\n\n## Supervisor recommendation\n\nRecommended: ${choice} — because\n` }
+        : {}),
+    });
+  }
+
+  /** The class list is the only observable of a Button's variant. */
+  function isPrimary(el: HTMLElement): boolean {
+    return el.className.includes('bg-interactive');
+  }
+
+  it('renders THREE buttons in-session for the approve-design gate', () => {
+    render(<ReviewItemCard item={designGateItem('rvw_d3')} surface="session" />);
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+    expect(screen.getByTestId('decision-continue-no-findings')).toHaveTextContent('Continue without logging');
+  });
+
+  it('offers NO third button on a plain decision gate', () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_plain3', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="session"
+      />,
+    );
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
+  });
+
+  it('"Continue without logging" resolves approve WITH the no-findings modifier', async () => {
+    render(<ReviewItemCard item={designGateItem('rvw_nf')} surface="session" />);
+    fireEvent.click(screen.getByTestId('decision-continue-no-findings'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_nf',
+        outcome: 'approve',
+        modifier: 'no-findings',
+      }),
+    );
+  });
+
+  it('emphasizes the recommended button and demotes the others', () => {
+    const cases: Array<[string, string]> = [
+      ['continue', 'decision-resolve'],
+      ['rerun', 'decision-reject'],
+      ['dismiss', 'decision-continue-no-findings'],
+    ];
+    const all = ['decision-resolve', 'decision-reject', 'decision-continue-no-findings'];
+    for (const [choice, expected] of cases) {
+      const { unmount } = render(
+        <ReviewItemCard item={designGateItem(`rvw_emph_${choice}`, choice)} surface="session" />,
+      );
+      for (const id of all) {
+        expect(isPrimary(screen.getByTestId(id))).toBe(id === expected);
+      }
+      unmount();
+    }
+  });
+
+  it('keeps today’s emphasis (approve primary) when there is no recommendation', () => {
+    render(<ReviewItemCard item={designGateItem('rvw_noemph')} surface="session" />);
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(false);
+    expect(isPrimary(screen.getByTestId('decision-continue-no-findings'))).toBe(false);
+  });
+
+  it('emphasizes Reject for a reject OR revise recommendation on a plain gate', () => {
+    for (const choice of ['reject', 'revise']) {
+      const { unmount } = render(
+        <ReviewItemCard
+          item={makeItem('decision', {
+            id: `rvw_plain_${choice}`,
+            blocking: true,
+            source: 'gate:human-step:approve-plan',
+            body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
+          })}
+          surface="session"
+        />,
+      );
+      expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(true);
+      expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(false);
+      unmount();
+    }
+  });
+
+  it('the QUEUE discard on an approve-design gate continues without logging — it no longer rejects the run', async () => {
+    render(<ReviewItemCard item={designGateItem('rvw_q_design')} surface="queue" />);
+    const discard = screen.getByTestId('default-dismiss');
+    expect(discard).toHaveTextContent('Continue without logging');
+
+    fireEvent.click(discard);
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_q_design',
+        outcome: 'approve',
+        modifier: 'no-findings',
+      }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('the QUEUE discard on every OTHER decision gate still rejects', async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_q_other', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="queue"
+      />,
+    );
+    const discard = screen.getByTestId('default-dismiss');
+    expect(discard).toHaveTextContent('Dismiss');
+
+    fireEvent.click(discard);
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_other', outcome: 'reject' }),
+    );
+  });
 });

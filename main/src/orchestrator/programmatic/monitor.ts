@@ -28,13 +28,19 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
+  ControllerEscalation,
+  GateEscalationDecision,
+  GateEscalationRequest,
+  EscalationReviewItemSummary,
   LaneFailureKind,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
   ReviewLoopRequest,
   ReviewLoopSteering,
+  RunDigest,
   TriageDecision,
 } from './types';
+import type { SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import { normalizeAdversarialId } from '../../../../shared/types/adversarialReview';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
@@ -82,6 +88,17 @@ export interface MonitorHistory {
    * collapsed-timeline reasoning this whole change exists to prevent.
    */
   lanesUnavailable?: boolean;
+  /**
+   * What the run PRODUCED — its payload-carrying artifacts and the backlog
+   * entities it owns (CR-6). The timeline above says which steps ran; this is
+   * the only channel carrying what they wrote, which is the whole substance of
+   * a design-gate or review-loop judgement.
+   *
+   * OPTIONAL, and absent means NO SECTION: every prompt built without a digest
+   * reader wired (the whole existing test suite, and any host that never got
+   * one) renders byte-identically to before this field existed.
+   */
+  runDigest?: RunDigest;
 }
 
 /**
@@ -103,13 +120,47 @@ export class DefaultHistoryReader implements HistoryReader {
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
+    /**
+     * The run-deliverables reader (CR-6), injected rather than imported so this
+     * brain-adjacent module keeps its standalone-typecheck invariant and so a
+     * reader is genuinely optional: unwired, `read()` returns no `runDigest` at
+     * all and every prompt renders exactly as it did before the seam.
+     * Fail-soft is the READER's contract (`readRunDigest` never throws), and the
+     * call below is wrapped anyway.
+     */
+    private readonly readRunDigest?: (runId: string) => RunDigest | undefined,
   ) {}
 
   async read(runId: string): Promise<MonitorHistory> {
     const conversation = selectRunUnifiedMessages(this.db, runId, this.logger);
     const steps = StepResultStore.tryGetInstance()?.listForRun(runId) ?? [];
     const { lanes, unavailable } = this.readLanes(runId);
-    return { conversation, steps, lanes, ...(unavailable ? { lanesUnavailable: true } : {}) };
+    const runDigest = this.tryReadRunDigest(runId);
+    return {
+      conversation,
+      steps,
+      lanes,
+      ...(unavailable ? { lanesUnavailable: true } : {}),
+      ...(runDigest ? { runDigest } : {}),
+    };
+  }
+
+  /**
+   * The run's deliverables digest, or undefined. A thrown reader degrades the
+   * prompt by one section — never the history read, which every consult depends
+   * on — so it is swallowed here rather than trusted to the injected reader.
+   */
+  private tryReadRunDigest(runId: string): RunDigest | undefined {
+    if (!this.readRunDigest) return undefined;
+    try {
+      return this.readRunDigest(runId);
+    } catch (err) {
+      this.logger?.warn('[Monitor] run digest read failed — prompt omits the deliverables section', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
   }
 
   /**
@@ -626,6 +677,114 @@ export function parseReviewLoopOutput(structured: unknown, req: ReviewLoopReques
 }
 
 // ---------------------------------------------------------------------------
+// Gate escalation schema + parsing
+// ---------------------------------------------------------------------------
+
+export type { EscalationReviewItemSummary, GateEscalationDecision, GateEscalationRequest, RunDigest };
+
+/**
+ * The approve-design gate's own three-way menu. `continue` logs every surviving
+ * adversarial-review entry as an accepted-risk finding and advances; `rerun`
+ * re-runs the design steps against the review; `dismiss` advances and logs
+ * nothing.
+ */
+const APPROVE_DESIGN_CHOICES: readonly SupervisorRecommendationChoice[] = ['continue', 'rerun', 'dismiss'];
+
+/** Every other human gate's menu — the plain three-way verdict. */
+const DEFAULT_GATE_CHOICES: readonly SupervisorRecommendationChoice[] = ['approve', 'reject', 'revise'];
+
+/** The gate step whose menu is the approve-design trio rather than the default. */
+const APPROVE_DESIGN_GATE_STEP_ID = 'approve-design';
+
+/**
+ * The choices valid for THIS gate. The menu is per-gate because recommending
+ * `revise` at an approve-design gate (whose button says "Rerun planning with
+ * findings") would name a control the human cannot see, and recommending
+ * `continue` at an approve-plan gate would do the same in the other direction.
+ */
+function gateChoiceMenu(req: GateEscalationRequest): readonly SupervisorRecommendationChoice[] {
+  return req.stepId === APPROVE_DESIGN_GATE_STEP_ID ? APPROVE_DESIGN_CHOICES : DEFAULT_GATE_CHOICES;
+}
+
+/**
+ * JSON schema the SDK `outputFormat` enforces for a GATE-ESCALATION verdict —
+ * the supervisor's non-binding recommendation at an open human gate.
+ *
+ * `additionalProperties: false` so the SDK rejects extra fields. Only `action`
+ * and `rationale` are schema-required; `choice` is action-specific and enforced
+ * (by DOWNGRADE to `pass`, never an error) in {@link parseGateEscalationOutput},
+ * because the valid enum depends on WHICH gate is open and a JSON schema cannot
+ * see that.
+ *
+ * Note what is NOT in the enum: there is no `resolve`, no `answer`, no way at
+ * all to settle the gate. The supervisor advises; the human decides.
+ */
+export const MONITOR_GATE_ESCALATION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['action', 'rationale'],
+  properties: {
+    action: {
+      type: 'string',
+      enum: ['recommend', 'pass'],
+      description:
+        'recommend = the evidence supports ONE of this gate’s choices clearly, and you name it in `choice`; pass = you have no recommendation (the human decides with no hint from you). A `recommend` without a valid in-menu `choice` is downgraded to `pass`.',
+    },
+    choice: {
+      type: 'string',
+      enum: ['approve', 'reject', 'revise', 'continue', 'rerun', 'dismiss'],
+      description:
+        'recommend only: the choice you recommend. It MUST be one of the choices this gate actually offers (listed in the prompt) — anything else is downgraded to `pass`.',
+    },
+    rationale: {
+      type: 'string',
+      description:
+        'One sentence naming the CONCRETE reason, then (optionally) 2-3 more of detail. The human reads the first sentence next to the button, so it must stand alone.',
+    },
+  },
+};
+
+/** True when `v` is one of the six recommendation choices. */
+function isRecommendationChoice(v: unknown): v is SupervisorRecommendationChoice {
+  return (
+    v === 'approve' || v === 'reject' || v === 'revise' || v === 'continue' || v === 'rerun' || v === 'dismiss'
+  );
+}
+
+/** The rationale text a blank/missing rationale falls back to. */
+const NO_RATIONALE = '(none given)';
+
+/**
+ * Parse the SDK’s structured gate-escalation output into a host-safe
+ * {@link GateEscalationDecision}.
+ *
+ * Lenient and never throws. Every degradation lands on `pass`, which is the
+ * conservative arm in the only direction that matters: a `pass` leaves the card
+ * exactly as it renders today, whereas a bad recommendation EMPHASIZES a button
+ * and is the one outcome that could push a human toward the wrong answer.
+ *
+ *   1. non-object / null / unknown `action`          ⇒ pass
+ *   2. `recommend` with no / non-string `choice`     ⇒ pass
+ *   3. `recommend` with a choice outside THIS gate’s menu ⇒ pass
+ *   4. blank rationale                                ⇒ kept, "(none given)"
+ */
+export function parseGateEscalationOutput(
+  structured: unknown,
+  req: GateEscalationRequest,
+): GateEscalationDecision {
+  if (typeof structured !== 'object' || structured === null) {
+    return { action: 'pass', rationale: NO_RATIONALE };
+  }
+  const o = structured as Record<string, unknown>;
+  const rationaleRaw = typeof o.rationale === 'string' ? o.rationale.trim() : '';
+  const rationale = rationaleRaw.length > 0 ? rationaleRaw : NO_RATIONALE;
+  if (o.action !== 'recommend') return { action: 'pass', rationale };
+  if (!isRecommendationChoice(o.choice)) return { action: 'pass', rationale };
+  if (!gateChoiceMenu(req).includes(o.choice)) return { action: 'pass', rationale };
+  return { action: 'recommend', choice: o.choice, rationale };
+}
+
+// ---------------------------------------------------------------------------
 // History digesting (compact, prompt-friendly)
 // ---------------------------------------------------------------------------
 
@@ -722,6 +881,43 @@ function laneSection(history: MonitorHistory): string {
     'the run’s workflow definition).\n' +
     rows
   );
+}
+
+/**
+ * Render the run's DELIVERABLES + ENTITIES section, or '' when no digest reader
+ * is wired (CR-6).
+ *
+ * Returning '' for an absent digest is load-bearing: every prompt that includes
+ * this section is built in dozens of tests (and in every host without a reader)
+ * with no `runDigest` at all, and those prompts must stay byte-identical to what
+ * they were before the section existed.
+ *
+ * Artifact markdown is fenced so a deliverable containing its own `##` headings
+ * cannot be mistaken for the prompt's own structure; entity bodies are indented
+ * under a ref/title line for the same reason, at one line of overhead instead of
+ * a fence per task. The reader has already capped and marked every body
+ * (`runDigestReader`), so nothing here truncates again.
+ */
+function digestRunSection(history: MonitorHistory): string {
+  const digest = history.runDigest;
+  if (digest === undefined) return '';
+  const parts: string[] = [];
+  if (digest.artifacts.length > 0) {
+    const rows = digest.artifacts
+      .map((a) => `### ${a.label} (\`${a.atype}\`)\n\n\`\`\`markdown\n${a.markdown}\n\`\`\``)
+      .join('\n\n');
+    parts.push(`\n\n## Run deliverables (what this run has actually produced)\n\n${rows}`);
+  }
+  if (digest.entities.length > 0) {
+    const rows = digest.entities
+      .map((e) => {
+        const body = e.body.trim();
+        return `- **${e.ref}** (${e.kind}) — ${e.title}${body.length > 0 ? `\n\n${body}` : ''}`;
+      })
+      .join('\n\n');
+    parts.push(`\n\n## Run entities (the ideas / epics / tasks this run owns)\n\n${rows}`);
+  }
+  return parts.join('');
 }
 
 /** Build the compact recent-conversation digest (last MAX_DIGEST_TURNS turns). */
@@ -950,7 +1146,7 @@ This round's review, verbatim:
 ${review.length > 0 ? `\`\`\`markdown\n${review}\n\`\`\`` : '(the review document could not be read back — judge from the step timeline and the conversation below)'}
 
 Blocking entries of the EARLIER rounds (the trend — is this review converging or churning?):
-${digestPriorRounds(req.priorRounds)}
+${digestPriorRounds(req.priorRounds)}${digestRunSection(history)}
 
 Step timeline so far:
 ${digestSteps(history.steps)}${laneSection(history)}
@@ -967,6 +1163,121 @@ Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE decid
 AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A "loop" re-runs the design steps right now with your \`address\`/\`setAside\`/\`guidance\` rendered as authoritative instructions that OUTRANK the review. Every set-aside entry is filed as a non-blocking finding right now. Your verdict and your rationale are audited at the run's design gate before anything is approved.
 
 Return only the structured { verdict, rationale, address?, setAside?, guidance? } object. \`rationale\` should be 2-4 sentences — the human reads it at the gate.`;
+}
+
+/** One line per review-queue row the gate reviewer should know about. */
+function digestEscalationItems(items: EscalationReviewItemSummary[]): string {
+  if (items.length === 0) return '- (this run has filed nothing in the review queue)';
+  return items
+    .map(
+      (i) =>
+        `- [${i.status}] ${i.kind}${i.severity ? `/${i.severity}` : ''}${i.source ? ` (source: ${i.source})` : ''} — ${i.title}`,
+    )
+    .join('\n');
+}
+
+/**
+ * Render the supervisor's OWN prior interventions on the way into this gate: why
+ * it stopped looping, and which entries it set aside. Absent on every gate that
+ * did not follow a loop stop — and then the section is omitted entirely rather
+ * than rendered empty, so an ordinary gate's prompt says nothing about a loop
+ * that never ran.
+ */
+function digestGateEscalation(escalation: ControllerEscalation | undefined): string {
+  if (escalation === undefined) return '';
+  const lines: string[] = [];
+  if (escalation.loopStopRationale !== undefined && escalation.loopStopRationale.trim().length > 0) {
+    lines.push(`- Why the automatic revision loop stopped: ${escalation.loopStopRationale.trim()}`);
+  }
+  if (escalation.setAsideIds !== undefined && escalation.setAsideIds.length > 0) {
+    lines.push(
+      `- Entries you set aside (each already filed as a non-blocking finding): ${escalation.setAsideIds.join(', ')}`,
+    );
+  }
+  if (lines.length === 0) return '';
+  return `\n\nHow this gate was reached — YOUR own earlier decisions on this run:\n${lines.join('\n')}`;
+}
+
+/**
+ * The menu paragraph for this gate, with what each choice actually DOES.
+ *
+ * The meanings are not inferable from the words: at the approve-design gate
+ * "continue" logs every surviving review entry as an accepted-risk finding while
+ * "dismiss" logs nothing, and a model that read them as synonyms would recommend
+ * silently discarding a critique. Every other gate keeps the plain three-way
+ * verdict, whose semantics the controller owns.
+ */
+function gateChoiceMenuText(req: GateEscalationRequest): string {
+  if (req.stepId === APPROVE_DESIGN_GATE_STEP_ID) {
+    return `- "continue" — approve the design and LOG every remaining adversarial-review entry as a non-blocking accepted-risk finding, then continue. The entries survive as findings the human can act on later.
+- "rerun"    — send the design back: the flow re-runs its design steps against the review. Costs design turns; recommend it only when the entries name defects those steps can actually close.
+- "dismiss"  — continue WITHOUT logging anything. The remaining entries are dropped from the run entirely. Recommend it only when the surviving entries are genuinely not worth a record.`;
+  }
+  return `- "approve" — accept and resume the run.
+- "reject"  — end the run rejected (its drafts are torn down). Irreversible in practice; recommend it only when the work should not continue at all.
+- "revise"  — send the step back for another pass with the human's feedback.`;
+}
+
+/**
+ * Compose the GATE-ESCALATION prompt for one OPEN human gate. Pure (output
+ * depends only on its args). Opens with the shared `monitorCharter`, then adds
+ * what only this decision needs:
+ *
+ *   - the gate's own TITLE and BODY, verbatim and fenced — the actual question
+ *     the human is looking at, which exists nowhere until the gate is open;
+ *   - the supervisor's own prior interventions (`escalation`), so a gate reached
+ *     by a loop stop is judged in the light of why the loop stopped;
+ *   - the run's REVIEW QUEUE, which is where every autonomous act of this run
+ *     was recorded — set-aside entries, lane rescues, loop-stop audits. This is
+ *     the channel by which the supervisor's own history reaches the person
+ *     reviewing it (CR-9);
+ *   - the RUN DIGEST (what the run produced), plus the usual timeline / lane /
+ *     conversation scaffolding.
+ *
+ * The one thing the prompt is emphatic about is what this consult may NOT do:
+ * it never answers the gate. The output is annotated onto the review item as
+ * advice; the human still clicks the button. That has to be stated, because
+ * every OTHER structured consult this brain runs (`triage`, `triageLane`,
+ * `adviseReviewLoop`) IS executed autonomously, and a model calibrated on those
+ * would reasonably assume this one is too.
+ */
+export function buildGateEscalationPrompt(
+  ctx: MonitorContext,
+  history: MonitorHistory,
+  req: GateEscalationRequest,
+): string {
+  const body = req.body.trim();
+  return `${monitorCharter(ctx)}
+
+A HUMAN GATE of this run has just opened, and you may attach ONE non-binding recommendation to it. You are NOT answering it.
+
+Gate step: **${req.stepName}** (id: \`${req.stepId}\`)
+Gate title: ${req.title}
+
+What the human is being asked, verbatim:
+${body.length > 0 ? `\`\`\`markdown\n${body}\n\`\`\`` : '(the gate body is empty — judge from the run history below)'}${digestGateEscalation(req.escalation)}
+
+This run's review queue (every finding it filed, and every autonomous action you took — these are what the human is accountable for reviewing here):
+${digestEscalationItems(req.reviewItems)}${digestRunSection(history)}
+
+Step timeline so far:
+${digestSteps(history.steps)}${laneSection(history)}
+
+Recent conversation:
+${digestConversation(history.conversation)}
+
+Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the run's output actually matches what the gate claims. This gate offers the human these choices:
+${gateChoiceMenuText(req)}
+
+Then return ONE structured answer:
+- \`action: "recommend"\` with \`choice\` set to one of the choices ABOVE — only when the evidence supports that one choice CLEARLY. A choice outside this gate's list is discarded and read as a pass.
+- \`action: "pass"\` — you have no recommendation. This is the right answer whenever the call is a genuine judgement between defensible options, or the evidence is thin.
+
+NEVER ANSWER THE GATE. Nothing you return resolves it, ends the run, or spends a design turn. Your recommendation is written onto the review item as one line of advice, the matching button is emphasized, and the human still decides — so a recommendation is worth making only when you would be able to defend it to them.
+
+\`rationale\` must CITE THE CONCRETE REASON in its first sentence (a named entry, a file, a step outcome — not "it looks fine"): that sentence is rendered next to the button and has to stand on its own. Add 2-3 more sentences of detail after it if they help.
+
+Return only the structured { action, choice?, rationale } object.`;
 }
 
 /**
@@ -1806,6 +2117,31 @@ export interface MonitorSession {
   adviseReviewLoop?(req: ReviewLoopRequest, signal?: AbortSignal): Promise<ReviewLoopDecision | undefined>;
 
   /**
+   * Look at ONE open human gate and, if the evidence supports one choice
+   * clearly, recommend it — non-bindingly. Reads the whole history fresh, runs a
+   * structured query, returns the parsed verdict.
+   *
+   * This consult ANSWERS NOTHING. Its output is annotated onto the gate's review
+   * item as a line of advice next to an emphasized button; the human still
+   * decides. That is the entire difference from `triage` / `triageLane` /
+   * `adviseReviewLoop`, all of which the host executes without confirmation.
+   *
+   * Fail-soft: any error, timeout or abort → `{ action: 'pass' }`, which leaves
+   * the card exactly as it renders today. Like `triageLane` it OWNS its chat
+   * rendering (one note per consult) and is serialized on the same `sendChain`,
+   * so an unattended consult can never interleave with a human exchange.
+   * OPTIONAL on the interface for the usual reason: the many faked sessions
+   * across the suite omit it, and the host treats an absent method as "pass".
+   *
+   * (Item 9 adds the blocking-findings sibling on the same request family — its
+   * `kind` discriminant is why the request carries one.)
+   */
+  reviewGateEscalation?(
+    req: GateEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<GateEscalationDecision>;
+
+  /**
    * Conduct one full chat exchange in the run's unified Chat pane (the human seam
    * the tRPC `cyboflow.monitor.send` mutation drives — see Slice E). Owns the
    * inject→answer→inject orchestration so the router stays thin:
@@ -1932,6 +2268,21 @@ function reviewLoopSummary(req: ReviewLoopRequest, decision: ReviewLoopDecision)
   const address = decision.steering.address.map((id) => `\`${id}\``).join(', ');
   const guidance = decision.steering.guidance !== undefined ? `\n\nGuidance: ${decision.steering.guidance}` : '';
   return `▶ Review round ${req.round}: revising again from \`${req.loopbackStepId}\` — address ${address}. ${decision.rationale}${guidance}${setAsideLine}`;
+}
+
+/**
+ * The chat turn reporting the supervisor's gate recommendation.
+ *
+ * Phrased as ADVICE, never as an act: this consult resolves nothing, and the
+ * gate is still sitting there waiting for a person. A turn that said "approved"
+ * would be read as the run having moved on — which is exactly the confusion the
+ * prompt spends a paragraph preventing.
+ */
+function gateEscalationSummary(req: GateEscalationRequest, decision: GateEscalationDecision): string {
+  if (decision.action === 'pass') {
+    return `• Gate **${req.stepName}**: no recommendation from me — this one is a judgement call.${decision.rationale !== '(none given)' ? ` ${decision.rationale}` : ''}`;
+  }
+  return `• Gate **${req.stepName}**: I recommend **${decision.choice}** — ${decision.rationale} (advice only; the decision is yours).`;
 }
 
 /**
@@ -2149,6 +2500,87 @@ export class DefaultMonitorSession implements MonitorSession {
         ),
       );
       return undefined;
+    }
+  }
+
+  /**
+   * Recommend (or decline to recommend) a choice at one open human gate — see
+   * `MonitorSession.reviewGateEscalation`. Serialized on the SAME `sendChain` as
+   * `converse`/`triageLane`/`adviseReviewLoop`: it posts a chat note of its own
+   * and fires the instant a gate opens, so without the chain it could land in
+   * the middle of a human's exchange. The chain tail swallows outcomes so one
+   * failure never poisons later exchanges.
+   */
+  async reviewGateEscalation(
+    req: GateEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<GateEscalationDecision> {
+    const exchange = this.sendChain.then(() => this.reviewGateEscalationOnce(req, signal));
+    this.sendChain = exchange.then(
+      () => undefined,
+      () => undefined,
+    );
+    return exchange;
+  }
+
+  /**
+   * One gate-escalation exchange (serialized by `reviewGateEscalation`): read the
+   * whole history fresh → structured query → parse → ONE chat note.
+   *
+   * NO announcement turn, unlike `triageLane`/`adviseReviewLoop`. Those announce
+   * because the event they react to (a lane dying, a review coming back blocking)
+   * is otherwise invisible in the chat; a gate opening is already the loudest
+   * thing in the UI, and a "thinking about it…" turn would just push the gate up
+   * the pane. One note per consult, after the fact.
+   *
+   * Fail-soft at every step: a thrown history read / query / parse, a timeout, or
+   * an abort all yield `{ action: 'pass' }` — the card then renders exactly as it
+   * does today. An ABORTED run posts nothing at all: a canceled walk has no gate
+   * left to advise on, and a note about it would outlive the reason for it.
+   */
+  private async reviewGateEscalationOnce(
+    req: GateEscalationRequest,
+    signal?: AbortSignal,
+  ): Promise<GateEscalationDecision> {
+    try {
+      const history = await this.history.read(this.ctx.runId);
+      const prompt = buildGateEscalationPrompt(this.ctx, history, req);
+      const structured = await this.structuredQuery({
+        prompt,
+        schema: MONITOR_GATE_ESCALATION_SCHEMA,
+        cwd: this.ctx.worktreePath,
+        ...(this.model ? { model: this.model } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const decision = parseGateEscalationOutput(structured, req);
+      this.logger?.info('[Monitor] gate escalation verdict', {
+        runId: this.ctx.runId,
+        stepId: req.stepId,
+        reviewItemId: req.reviewItemId,
+        action: decision.action,
+        choice: decision.action === 'recommend' ? decision.choice : '',
+        rationale: decision.rationale,
+      });
+      if (signal?.aborted !== true) {
+        this.tryInject(buildAssistantTextEvent(gateEscalationSummary(req, decision)));
+      }
+      return decision;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn('[Monitor] gate escalation failed; no recommendation', {
+        runId: this.ctx.runId,
+        stepId: req.stepId,
+        reviewItemId: req.reviewItemId,
+        error: message,
+      });
+      if (signal?.aborted !== true) {
+        this.tryInject(
+          buildAssistantTextEvent(
+            `⚠ Gate **${req.stepName}**: I could not review it (${message}) — no recommendation; it is yours to decide.`,
+          ),
+        );
+      }
+      return { action: 'pass', rationale: `gate escalation failed: ${message}` };
     }
   }
 

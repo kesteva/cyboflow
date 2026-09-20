@@ -60,7 +60,12 @@ import {
   adversarialSeverityToReviewSeverity,
   type AdversarialFinding,
 } from '../../../shared/types/adversarialReview';
-import { parseIdeaVerdictMap, parseDesignVerdictMap } from '../../../shared/types/reviews';
+import {
+  GATE_RESOLUTION_MODIFIER_NO_FINDINGS,
+  parseIdeaVerdictMap,
+  parseDesignVerdictMap,
+  parseGateResolution,
+} from '../../../shared/types/reviews';
 import { parseThoroughnessDeclaration } from '../../../shared/types/thoroughness';
 
 // ---------------------------------------------------------------------------
@@ -116,7 +121,9 @@ export interface GateSideEffectArgs {
   /**
    * The resolution note the human's answer was recorded under. For a batch gate
    * it carries the serialized per-idea verdict map, which is how an
-   * `approve-ideas` bind learns WHICH ideas were approved.
+   * `approve-ideas` bind learns WHICH ideas were approved. It also carries the
+   * verdict MODIFIER (`approve[no-findings]`), which is how the approve-design
+   * arm learns the human chose "Continue without logging".
    */
   resolution?: string | null;
 }
@@ -201,7 +208,22 @@ export class GateSideEffects {
           await this.bind(args.runId, meta.projectId, listRunOwnedIdeaIds(this.deps.db, args.runId));
           // The human approved with the critique in front of them, so every
           // remaining entry is an ACCEPTED risk — recorded, not discarded.
-          await this.fileAcceptedRiskFindings(args.runId, meta.projectId);
+          //
+          // UNLESS they took the third choice, "Continue without logging"
+          // (`approve[no-findings]`). That is an explicit instruction to drop the
+          // surviving entries rather than carry them, taken with the same critique
+          // in front of them — so the bind still happens (the design WAS approved)
+          // and the filing does not. The modifier is the only thing that suppresses
+          // it; a plain approve, a legacy free-text 'approve', and every other
+          // modifier still file.
+          if (parseGateResolution(args.resolution)?.modifier !== GATE_RESOLUTION_MODIFIER_NO_FINDINGS) {
+            await this.fileAcceptedRiskFindings(args.runId, meta.projectId);
+          } else {
+            this.deps.logger?.info('[gateSideEffects] design approved without logging — accepted-risk findings skipped', {
+              runId: args.runId,
+              stepId: args.stepId,
+            });
+          }
           return;
 
         case APPROVE_BRIEF:

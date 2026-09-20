@@ -88,12 +88,17 @@ export interface TelemetryEventMap {
     // 'approve' / 'reject' are the explicit programmatic human-gate verdicts
     // (reviewItems.resolve `outcome`); 'resolve'/'dismiss'/'promote_to_task' are
     // the generic triage actions; 'launch_separate_planner'/'return_idea_to_backlog'
-    // are the big-idea guard's two CTAs (IDEA-009).
+    // are the big-idea guard's two CTAs (IDEA-009). 'approve[no-findings]' is the
+    // approve-design gate's third choice ("Continue without logging") — it is an
+    // approve whose MODIFIER suppresses the accepted-risk findings, and it is
+    // distinct from a plain approve precisely because that is the thing worth
+    // counting: how often people choose to drop a critique rather than carry it.
     action:
       | 'resolve'
       | 'dismiss'
       | 'promote_to_task'
       | 'approve'
+      | 'approve[no-findings]'
       | 'reject'
       | 'revise'
       | 'launch_separate_planner'

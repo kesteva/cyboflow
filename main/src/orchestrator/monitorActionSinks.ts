@@ -1,8 +1,9 @@
 /**
  * monitorActionSinks — the composition-root collaborators for the supervisor's
  * AUTONOMOUS actions on the programmatic plane: the lane-triage trio (read a
- * task, adjust its body, audit the rescue) and the two review-loop sinks (audit
- * the consult, file a set-aside entry).
+ * task, adjust its body, audit the rescue), the two review-loop sinks (audit the
+ * consult, file a set-aside entry), and the escalation-review pair (read the
+ * run's review queue for a gate consult, annotate the gate with its verdict).
  *
  * WHY A MODULE AND NOT index.ts. These are built where the `TaskMutationDeps`
  * and review-queue seams the monitor's own chat actions use are built, so that
@@ -46,7 +47,10 @@ import type {
   LaneTriageAdjustResult,
   LaneTriageTaskFacts,
 } from './programmatic/programmaticRunHost';
-import type { SetAsideFindingInput } from './programmatic/types';
+import { ESCALATION_REVIEW_ITEM_CAP } from './programmatic/programmaticRunHost';
+import type { EscalationReviewItemSummary, SetAsideFindingInput } from './programmatic/types';
+import { SUPERVISOR_RECOMMENDATION_HEADING } from '../../../shared/types/reviews';
+import type { ReviewItemKind } from '../../../shared/types/reviews';
 
 /**
  * The autonomous LANE-RESCUE collaborators, keyed by run id because the runner
@@ -228,5 +232,97 @@ export function buildSetAsideFindingSink(
         proposedTarget: 'backlog',
       },
     });
+  };
+}
+
+/**
+ * The two ESCALATION-REVIEW collaborators: read this run's review queue for the
+ * gate consult, and write the supervisor's recommendation back onto the gate
+ * item.
+ *
+ * Run-scoped through their arguments, like {@link LaneTriageActions}, and for
+ * the same reason (built once for the process, bound per run by the runner).
+ */
+export interface GateEscalationSinks {
+  /** This run's review-queue rows as the consult sees them (≤ the cap, newest first). */
+  listRunReviewItems(runId: string): Promise<EscalationReviewItemSummary[]>;
+  /** Upsert the recommendation section into a PENDING item's body. */
+  annotate(runId: string, input: { reviewItemId: string; markdown: string }): Promise<void>;
+}
+
+/** One `review_items` row as the escalation query selects it. */
+interface EscalationRow {
+  id?: unknown;
+  kind?: unknown;
+  source?: unknown;
+  severity?: unknown;
+  status?: unknown;
+  title?: unknown;
+}
+
+/** A DB column that is actually a non-empty string, else null. */
+function nullableStr(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/**
+ * Build the escalation-review sinks over the shared deps.
+ *
+ * The READ is a direct `review_items` SELECT rather than a router call: it is a
+ * read, and the chokepoint rule governs WRITES. Its predicate is deliberately
+ * two-armed — every PENDING row of this run, plus every `monitor`-sourced row
+ * whatever its status. The second arm is the point of CR-9: an audit finding a
+ * human already triaged still describes something this run did unattended, and
+ * the gate reviewer is exactly the person who should see it. Newest first so the
+ * cap drops the oldest context, not the freshest.
+ *
+ * The WRITE goes through the `annotate` op on the SAME `ReviewItemRouter` seam
+ * every other sink here uses. It does NOT swallow the router's refusal: the host
+ * distinguishes the expected `invalid_status` race (the human answered first)
+ * from a real failure, and can only do that if the error reaches it.
+ */
+export function buildGateEscalationSinks(deps: MonitorActionSinkDeps): GateEscalationSinks {
+  return {
+    listRunReviewItems: async (runId) => {
+      try {
+        const rows = deps.db
+          .prepare(
+            `SELECT id, kind, source, severity, status, title
+               FROM review_items
+              WHERE run_id = ? AND (status = 'pending' OR source = 'monitor')
+              ORDER BY created_at DESC, id DESC
+              LIMIT ?`,
+          )
+          .all(runId, ESCALATION_REVIEW_ITEM_CAP) as EscalationRow[];
+        return rows.map((row) => ({
+          id: typeof row.id === 'string' ? row.id : '',
+          kind: (typeof row.kind === 'string' ? row.kind : 'finding') as ReviewItemKind,
+          source: nullableStr(row.source),
+          severity: nullableStr(row.severity),
+          status: typeof row.status === 'string' ? row.status : 'pending',
+          title: typeof row.title === 'string' ? row.title : '',
+        }));
+      } catch (err) {
+        // Fail-soft: the consult still runs, just without the queue context. A
+        // thrown read here must never cost a gate its recommendation.
+        deps.logger?.warn('[monitorActionSinks] escalation review-item read failed (fail-soft)', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return [];
+      }
+    },
+    annotate: async (runId, input) => {
+      const projectId = deps.runProjectId(runId);
+      if (projectId === undefined) return;
+      await deps.applyReviewItem(projectId, {
+        op: 'annotate',
+        actor: 'monitor',
+        reviewItemId: input.reviewItemId,
+        heading: SUPERVISOR_RECOMMENDATION_HEADING,
+        markdown: input.markdown,
+        runId,
+      });
+    },
   };
 }

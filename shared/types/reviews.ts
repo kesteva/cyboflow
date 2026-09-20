@@ -7,7 +7,9 @@
  * main/src/orchestrator/reviewItemRouter.ts must all match these shapes
  * field-for-field. entitySchemaParity.test.ts pins ReviewItemRow <-> the table.
  *
- * (This module stays runtime-free; the QuestionPayload import below is type-only.)
+ * (This module stays free of Node.js built-ins; the QuestionPayload import below
+ * is type-only, and the one value import — `makeFenceState` — is a pure shared
+ * helper with the same constraint.)
  *
  * The review queue is the unified human-attention inbox. Five item kinds funnel
  * into one table:
@@ -32,6 +34,10 @@
 // ---------------------------------------------------------------------------
 
 import type { QuestionPayload } from './questions';
+// The ONE fence-aware markdown line walker (artifacts.ts). Imported rather than
+// re-derived so this module's section boundaries can never drift from the
+// arch-design / design-spec extractors' reading of the same syntax.
+import { makeFenceState } from './artifacts';
 
 /** The five review-item kinds (DB CHECK on review_items.kind). */
 export type ReviewItemKind = 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
@@ -669,13 +675,6 @@ export type SupervisorRecommendationChoice =
   | 'rerun'
   | 'dismiss';
 
-/**
- * A markdown line that opens or closes a fenced code block: at most three
- * leading spaces, then three-or-more backticks or tildes. Captured so a closing
- * fence can be matched against the marker that opened the block.
- */
-const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
 /** An ATX H1/H2 heading line: `# text` or `## text` (at most three indents). */
 const H1_H2_RE = /^ {0,3}(#{1,2})\s+(.*)$/;
 
@@ -691,27 +690,20 @@ function normalizeHeading(text: string): string {
  * ``` block ("## Supervisor recommendation" as an EXAMPLE) must not have that
  * example treated as a real section — replacing it would rewrite the human's
  * sample, and reading it would parse a recommendation nobody made.
+ *
+ * The fence scan itself is {@link makeFenceState}, the ONE fence-aware line
+ * walker every section extractor in the codebase shares (artifacts.ts documents
+ * it as such). Re-implementing it here was how this module ended up with its own
+ * subtly different CommonMark reading — notably the backtick-fence-with-a-
+ * backtick-in-its-info-string case, which the shared state declines to open and a
+ * local copy happily swallowed to EOF.
  */
 function indexHeadings(lines: string[]): Array<{ line: number; level: number; text: string }> {
   const out: Array<{ line: number; level: number; text: string }> = [];
-  let fence: string | null = null;
+  const fence = makeFenceState();
   for (let i = 0; i < lines.length; i++) {
-    const fenceMatch = FENCE_RE.exec(lines[i]);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
-      if (fence === null) {
-        // Opening fence (any info string).
-        fence = marker;
-        continue;
-      }
-      // A closing fence must use the same character, be at least as long, and
-      // carry no info string (CommonMark). Anything else is block content.
-      if (marker[0] === fence[0] && marker.length >= fence.length && fenceMatch[2].trim() === '') {
-        fence = null;
-      }
-      continue;
-    }
-    if (fence !== null) continue;
+    if (fence.handleLine(lines[i])) continue;
+    if (fence.inFence()) continue;
     const headingMatch = H1_H2_RE.exec(lines[i]);
     if (headingMatch) {
       out.push({ line: i, level: headingMatch[1].length, text: headingMatch[2] });

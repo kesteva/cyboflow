@@ -201,9 +201,11 @@ import {
   type TaskMutationNoOpReason,
 } from './orchestrator/taskMutationHandler';
 import {
+  buildGateEscalationSinks,
   buildLaneTriageActions,
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
+  type GateEscalationSinks,
   type LaneTriageActions,
   type MonitorActionSinkDeps,
 } from './orchestrator/monitorActionSinks';
@@ -271,6 +273,7 @@ import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
+import { readRunDigest } from './orchestrator/runDigestReader';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -549,18 +552,16 @@ interface MonitorSteeringActions {
 let monitorSteeringActions: MonitorSteeringActions | null = null;
 
 /**
- * Composition-root collaborators for the monitor's AUTONOMOUS actions on the
- * programmatic plane — lane triage and the supervised review loop. Built in
- * `monitorActionSinks.ts`; late-bound in holders for the same reason
- * `monitorSteeringActions` is: the DefaultProgrammaticRunner is constructed
- * EARLY in initializeServices, while the `TaskMutationDeps` / review-queue seams
- * these reuse are built in a later nested block. Null until that block runs ⇒
- * the host behaves exactly as it does with nothing wired (give_up / the
- * mechanical revision budget), which is the safe default.
+ * Composition-root collaborators for the monitor's AUTONOMOUS actions — lane
+ * triage, the supervised review loop, the gate escalation review. Built in
+ * `monitorActionSinks.ts` (see its header); late-bound like
+ * `monitorSteeringActions`, and null until that block runs ⇒ the host behaves
+ * exactly as it does with nothing wired, which is the safe default.
  */
 let laneTriageActions: LaneTriageActions | null = null;
 let monitorFindingSink: ReturnType<typeof buildMonitorFindingSink> | null = null;
 let setAsideFindingSink: ReturnType<typeof buildSetAsideFindingSink> | null = null;
+let gateEscalationSinks: GateEscalationSinks | null = null;
 /** Fallback when a steering action fires before the dep-wiring block ran. */
 const STEERING_NOT_WIRED: MonitorActionResult = {
   ok: false,
@@ -2881,29 +2882,28 @@ async function initializeServices(): Promise<boolean> {
       logger: cyboflowLogger,
     }),
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
-    // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
-    // planes into one token-frugal `MonitorSession` rendering in the run's existing
-    // Chat pane. ALWAYS ON for programmatic runs (the supervisor-role redesign,
-    // 2026-07-05 — the old `programmaticSupervisor` opt-in config is gone): the
-    // supervisor is a Q&A partner the human can query at ANY point in the run, and
-    // escalations surface in BOTH the chat and the human review queue rather than
-    // routing to one or the other. A `DefaultMonitorSession` over the real
-    // on-demand query fns (monitorQuery.ts) + a HistoryReader bound to cyboflowDb.
-    // The session reads the WHOLE run history ONLY when it must act (triage a
-    // failure / answer a human chat turn); it consumes zero tokens during routine
-    // progress. The run's `injectEvent` (threaded as the 2nd factory arg from the
-    // run context, Slice B) is owned by the session so its `converse` renders the
-    // human turn + the monitor's reply into the run's Chat pane (the tRPC
-    // `monitor.send` seam). The runner registers the session in MonitorRegistry so
-    // the router reaches it. NOT headlessly verifiable — it makes a real Claude
-    // call (monitorQuery.ts).
+    // human-seam plane, folding the old Stage 3 supervisor + supervisor-chat into
+    // one token-frugal `MonitorSession` in the run's existing Chat pane. ALWAYS ON
+    // for programmatic runs (supervisor-role redesign, 2026-07-05 — the old
+    // `programmaticSupervisor` opt-in is gone): the supervisor is a Q&A partner the
+    // human can query at ANY point, and escalations surface in BOTH the chat and
+    // the review queue. A `DefaultMonitorSession` over the real on-demand query fns
+    // (monitorQuery.ts) + a HistoryReader bound to cyboflowDb; it reads the WHOLE
+    // history ONLY when it must act, and costs zero tokens during routine progress.
+    // The run's `injectEvent` (2nd factory arg, from the run context — Slice B) is
+    // owned by the session so `converse` renders both sides of an exchange into the
+    // Chat pane (the tRPC `monitor.send` seam); the runner registers the session in
+    // MonitorRegistry so the router reaches it. NOT headlessly verifiable — it
+    // makes a real Claude call.
     monitorFactory: ((): ((
       ctx: MonitorContext,
       injectEvent: (event: ClaudeStreamEvent) => void,
     ) => MonitorSession | undefined) => {
       const structuredQuery = makeSdkStructuredQuery(claudeExecutablePath, cyboflowLogger);
       const textQuery = makeSdkTextQuery(claudeExecutablePath, cyboflowLogger);
-      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
+      // 3rd arg = the RUN-DELIVERABLES reader (CR-6): what this run produced,
+      // folded into the gate + review-loop prompts.
+      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger, (r) => readRunDigest(cyboflowDb, r, cyboflowLogger));
       // Also published to the module-scoped buildMonitorSession holder so the
       // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
       // byte-identical sessions when reviving a run's chat after an app restart.
@@ -3173,10 +3173,7 @@ async function initializeServices(): Promise<boolean> {
     // ── Autonomous LANE TRIAGE (monitor lane rescue) ────────────────────────
     // All three route through the late-bound `laneTriageActions` holder so they
     // reuse the SAME TaskMutationDeps / ReviewItemRouter seams the monitor's chat
-    // actions use (built in a later block — see the holder's docblock). Unwired
-    // (before that block, or if it never ran) each degrades to the no-lane-triage
-    // posture: no task facts, a refused adjust (⇒ the host downgrades to a plain
-    // rescue), and a dropped audit note (⇒ the rescue still proceeds).
+    // actions use. Unwired, each degrades to the no-lane-triage posture.
     laneTriageTaskReader: (runId, itemId) => laneTriageActions?.readTask(runId, itemId),
     laneTriageAdjustTask: (runId, input) =>
       laneTriageActions
@@ -3191,6 +3188,11 @@ async function initializeServices(): Promise<boolean> {
       monitorFindingSink ? monitorFindingSink(runId, input) : Promise.resolve(),
     setAsideFindingSink: (runId, input) =>
       setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.resolve(),
+    // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
+    // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
+    // recommendation, i.e. today's card exactly.
+    runReviewItemReader: (r) => (gateEscalationSinks ? gateEscalationSinks.listRunReviewItems(r) : Promise.resolve([])),
+    gateAnnotateSink: (r, i) => (gateEscalationSinks ? gateEscalationSinks.annotate(r, i) : Promise.resolve()),
     // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
     // closure the scheduler's §3.2 degrade gate and the health panel's badge use
     // — there must never be a third reading of `verify_runbook_local.status`.
@@ -5054,14 +5056,10 @@ app.whenReady().then(async () => {
     };
     console.log('[Main] monitor steering actions wired');
 
-    // Autonomous MONITOR-ACTION sinks (the supervisor rescuing a sprint lane
-    // that exhausted its automatic budget, and steering the adversarial-review
-    // loop). Deliberately built HERE, alongside the steering actions, so all of
-    // them reuse the objects those actions already route through: the SAME
-    // `taskMutationDeps` (⇒ TaskChangeRouter chokepoint), the SAME review-queue
-    // chokepoint `fileNote` uses, and the SAME run→project resolution. The logic
-    // lives in orchestrator/monitorActionSinks.ts; consumed by the
-    // DefaultProgrammaticRunner deps above through the holders.
+    // Autonomous MONITOR-ACTION sinks (lane rescue, review-loop steering, gate
+    // escalation). Built HERE, alongside the steering actions, so all of them
+    // reuse the SAME `taskMutationDeps`, review-queue chokepoint and run→project
+    // resolution those actions route through. Logic: monitorActionSinks.ts.
     const monitorActionSinkDeps: MonitorActionSinkDeps = {
       db,
       runProjectId,
@@ -5074,6 +5072,7 @@ app.whenReady().then(async () => {
     laneTriageActions = buildLaneTriageActions(monitorActionSinkDeps);
     monitorFindingSink = buildMonitorFindingSink(monitorActionSinkDeps);
     setAsideFindingSink = buildSetAsideFindingSink(monitorActionSinkDeps);
+    gateEscalationSinks = buildGateEscalationSinks(monitorActionSinkDeps);
     console.log('[Main] monitor action sinks wired');
 
     // Lazy monitor rehydration: after an app restart the in-process

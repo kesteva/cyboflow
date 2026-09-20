@@ -7,17 +7,26 @@
  * The set-aside sink's shape is the load-bearing one: it must be byte-compatible
  * with the accepted-risk finding `gateSideEffects` files for the same `AR-n`
  * entry, or the gate stops deduping and one defect reaches the human twice.
+ *
+ * The escalation READ is the other load-bearing one, for the opposite reason:
+ * it is wrapped in a catch that returns `[]`, so a misspelled column or a
+ * mis-bound parameter would silently deliver an EMPTY queue to every gate
+ * consult forever with the whole suite still green. Its SQL text and bound
+ * arguments are therefore asserted directly.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
+  buildGateEscalationSinks,
   buildLaneTriageActions,
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
   type MonitorActionSinkDeps,
 } from '../monitorActionSinks';
 import { ADVERSARIAL_FINDING_SOURCE } from '../gateSideEffects';
+import { ESCALATION_REVIEW_ITEM_CAP } from '../programmatic/programmaticRunHost';
 import type { AdversarialFinding } from '../../../../shared/types/adversarialReview';
-import type { DatabaseLike } from '../types';
+import { SUPERVISOR_RECOMMENDATION_HEADING } from '../../../../shared/types/reviews';
+import type { DatabaseLike, LoggerLike } from '../types';
 import type { TaskMutationDeps } from '../taskMutationHandler';
 
 /** The change is captured as a plain record so a test can read any field off it. */
@@ -220,5 +229,163 @@ describe('buildLaneTriageActions', () => {
     }).adjustTask('run-1', { taskRef: 'TASK-014', body: '## New' });
 
     expect(result).toEqual({ ok: false, reason: 'the lane is already running' });
+  });
+});
+
+/**
+ * A DB that records the SQL text and the bound arguments of every `.all()`, and
+ * replays a fixed row set. This is the only guard the escalation read has: its
+ * catch turns a misspelled column into `[]`, which no consumer can tell from
+ * "this run has no review items".
+ */
+function recordingDb(rows: unknown[]): {
+  db: DatabaseLike;
+  sql: string[];
+  args: unknown[][];
+} {
+  const sql: string[] = [];
+  const args: unknown[][] = [];
+  const db = {
+    prepare: (text: string) => {
+      sql.push(text);
+      return {
+        all: (...params: unknown[]) => {
+          args.push(params);
+          return rows;
+        },
+        get: () => undefined,
+        run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      };
+    },
+    transaction: vi.fn(),
+  } as unknown as DatabaseLike;
+  return { db, sql, args };
+}
+
+/** A LoggerLike whose four methods are spies. */
+function makeLogger(): LoggerLike & { warn: ReturnType<typeof vi.fn> } {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
+describe('buildGateEscalationSinks', () => {
+  describe('listRunReviewItems', () => {
+    it('selects this run’s PENDING rows plus every monitor-sourced row, newest first, capped', async () => {
+      const { db, sql, args } = recordingDb([]);
+      const { deps } = makeDeps({ db });
+
+      await buildGateEscalationSinks(deps).listRunReviewItems('run-1');
+
+      const text = sql[0].replace(/\s+/g, ' ').trim();
+      // The exact columns the row mapper below reads back.
+      expect(text).toContain('SELECT id, kind, source, severity, status, title');
+      expect(text).toContain('FROM review_items');
+      // CR-9's two-armed predicate: an audit finding a human already triaged
+      // still describes something this run did unattended, so the `monitor` arm
+      // deliberately ignores status.
+      expect(text).toContain("WHERE run_id = ? AND (status = 'pending' OR source = 'monitor')");
+      // Newest first so the cap drops the OLDEST context, not the freshest.
+      expect(text).toContain('ORDER BY created_at DESC, id DESC');
+      // The LIMIT is the ONLY place the cap is enforced.
+      expect(text).toContain('LIMIT ?');
+      expect(args).toEqual([['run-1', ESCALATION_REVIEW_ITEM_CAP]]);
+    });
+
+    it('maps rows to summaries, defaulting a null source/severity and a non-string kind', async () => {
+      const { db } = recordingDb([
+        { id: 'ri-1', kind: 'decision', source: 'monitor', severity: 'error', status: 'resolved', title: 'Loop stop' },
+        // An old row: NULL provenance columns, a kind the DB somehow holds as a
+        // number, and a missing title. None of these may become `undefined` on
+        // the wire — the consult prompt renders every field verbatim.
+        { id: 'ri-2', kind: 7, source: null, severity: null, status: null, title: undefined },
+      ]);
+      const { deps } = makeDeps({ db });
+
+      const items = await buildGateEscalationSinks(deps).listRunReviewItems('run-1');
+
+      expect(items).toEqual([
+        {
+          id: 'ri-1',
+          kind: 'decision',
+          source: 'monitor',
+          severity: 'error',
+          status: 'resolved',
+          title: 'Loop stop',
+        },
+        { id: 'ri-2', kind: 'finding', source: null, severity: null, status: 'pending', title: '' },
+      ]);
+    });
+
+    it('treats an empty-string source/severity as absent', async () => {
+      const { db } = recordingDb([{ id: 'ri-1', kind: 'finding', source: '', severity: '', status: 'pending', title: 't' }]);
+      const { deps } = makeDeps({ db });
+
+      const items = await buildGateEscalationSinks(deps).listRunReviewItems('run-1');
+
+      expect(items[0].source).toBeNull();
+      expect(items[0].severity).toBeNull();
+    });
+
+    it('fails soft to an empty list and WARNS when the read throws', async () => {
+      // makeDeps' bare `prepare: vi.fn()` returns undefined, so `.all` throws —
+      // exactly what a wrong column name would do against the real DB.
+      const logger = makeLogger();
+      const { deps } = makeDeps({ logger });
+
+      const items = await buildGateEscalationSinks(deps).listRunReviewItems('run-1');
+
+      expect(items).toEqual([]);
+      // The warn is the ONLY trace a broken query leaves; without it the empty
+      // list is indistinguishable from an empty queue.
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn.mock.calls[0][0]).toContain('escalation review-item read failed');
+      expect(logger.warn.mock.calls[0][1]).toMatchObject({ runId: 'run-1' });
+    });
+  });
+
+  describe('annotate', () => {
+    it('upserts the recommendation through the annotate op as the MONITOR', async () => {
+      const { deps, ops } = makeDeps();
+
+      await buildGateEscalationSinks(deps).annotate('run-1', {
+        reviewItemId: 'ri-gate',
+        markdown: 'Recommended: rerun — the review is unaddressed.',
+      });
+
+      expect(ops).toHaveLength(1);
+      expect(ops[0].projectId).toBe(7);
+      expect(ops[0].change).toEqual({
+        op: 'annotate',
+        actor: 'monitor',
+        reviewItemId: 'ri-gate',
+        // The closed heading set — writer and parser must never drift.
+        heading: SUPERVISOR_RECOMMENDATION_HEADING,
+        markdown: 'Recommended: rerun — the review is unaddressed.',
+        runId: 'run-1',
+      });
+    });
+
+    it('writes nothing for a run with no resolvable project', async () => {
+      const { deps, ops } = makeDeps({ runProjectId: () => undefined });
+
+      await buildGateEscalationSinks(deps).annotate('run-gone', { reviewItemId: 'ri-gate', markdown: 'x' });
+
+      expect(ops).toHaveLength(0);
+    });
+
+    it('PROPAGATES the router’s refusal rather than swallowing it', async () => {
+      // The host classifies `invalid_status` (the human answered first) as a
+      // debug-level race and everything else as a warn; it can only do that if
+      // the error reaches it, so this sink must not catch.
+      const err = Object.assign(new Error('item is not pending'), { code: 'invalid_status' });
+      const { deps } = makeDeps({
+        applyReviewItem: async () => {
+          throw err;
+        },
+      });
+
+      await expect(
+        buildGateEscalationSinks(deps).annotate('run-1', { reviewItemId: 'ri-gate', markdown: 'x' }),
+      ).rejects.toBe(err);
+    });
   });
 });

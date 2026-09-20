@@ -1,17 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   ProgrammaticRunHost,
+  ESCALATION_REVIEW_KILL_SWITCH_ENV,
   LANE_TRIAGE_KILL_SWITCH_ENV,
   REVIEW_LOOP_KILL_SWITCH_ENV,
+  firstSentence,
   type StepReporter,
 } from '../programmaticRunHost';
-import type { HumanGateResolver } from '../humanGate';
+import type { HumanGateOpenedSnapshot, HumanGateResolver } from '../humanGate';
 import type { LaneTriageDecision, MonitorSession } from '../monitor';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type {
   ControllerStepContext,
   FanOutDriver,
+  GateEscalationDecision,
   LaneTriageFailure,
   ReviewLoopDecision,
   ReviewLoopRequest,
@@ -1170,5 +1173,213 @@ describe('ProgrammaticRunHost', () => {
       expect(await host.adviseReviewLoop(req, ctx)).toBeUndefined();
       expect(fileMonitorFinding).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate escalation (item 8b) — the supervisor's recommendation at an open gate.
+// ---------------------------------------------------------------------------
+
+/** A monitor whose `reviewGateEscalation` returns a canned decision. */
+function makeGateMonitor(
+  decision: GateEscalationDecision,
+): MonitorSession & { reviewGateEscalation: ReturnType<typeof vi.fn> } {
+  return {
+    triage: vi.fn(),
+    answer: vi.fn().mockResolvedValue(''),
+    reviewGateEscalation: vi.fn().mockResolvedValue(decision),
+  };
+}
+
+function snapshot(p: Partial<HumanGateOpenedSnapshot> = {}): HumanGateOpenedSnapshot {
+  return { reviewItemId: 'ri-1', title: 'Approve the design', body: 'the gate body', resumed: false, ...p };
+}
+
+describe('ProgrammaticRunHost.reviewGateEscalation', () => {
+  afterEach(() => {
+    delete process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV];
+  });
+
+  it('consults the monitor and annotates the item with the composed recommendation', async () => {
+    const monitor = makeGateMonitor({ action: 'recommend', choice: 'continue', rationale: 'AR-1 is cosmetic. It costs nothing.' });
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const listRunReviewItems = vi.fn().mockResolvedValue([
+      { id: 'ri-9', kind: 'finding' as const, source: 'monitor', severity: 'info', status: 'pending', title: 'AR-3 — nit' },
+    ]);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      monitor, annotateReviewItem, listRunReviewItems,
+    });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design', name: 'Approve design' }), ctx, snapshot());
+
+    expect(monitor.reviewGateEscalation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'gate',
+        stepId: 'approve-design',
+        stepName: 'Approve design',
+        reviewItemId: 'ri-1',
+        body: 'the gate body',
+        reviewItems: [expect.objectContaining({ id: 'ri-9' })],
+      }),
+      ctx.signal,
+    );
+    const written = annotateReviewItem.mock.calls[0][0] as { reviewItemId: string; markdown: string };
+    expect(written.reviewItemId).toBe('ri-1');
+    // The machine-readable first line carries the FIRST sentence; the whole
+    // rationale follows.
+    expect(written.markdown.split('\n')[0]).toBe('Recommended: continue — AR-1 is cosmetic.');
+    expect(written.markdown).toContain('It costs nothing.');
+  });
+
+  it('forwards the controller escalation when the gate followed a loop stop', async () => {
+    const monitor = makeGateMonitor({ action: 'pass', rationale: 'x' });
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });
+    const escalated: ControllerStepContext = {
+      ...ctx,
+      escalation: { loopStopRationale: 'product call', setAsideIds: ['AR-3'] },
+    };
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), escalated, snapshot());
+
+    expect(monitor.reviewGateEscalation).toHaveBeenCalledWith(
+      expect.objectContaining({ escalation: { loopStopRationale: 'product call', setAsideIds: ['AR-3'] } }),
+      undefined,
+    );
+  });
+
+  it('writes NOTHING on a pass', async () => {
+    const monitor = makeGateMonitor({ action: 'pass', rationale: 'a genuine judgement call' });
+    const annotateReviewItem = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor, annotateReviewItem,
+    });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot());
+
+    expect(annotateReviewItem).not.toHaveBeenCalled();
+  });
+
+  it('does not consult when the kill switch is set', async () => {
+    process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV] = '1';
+    const monitor = makeGateMonitor({ action: 'recommend', choice: 'continue', rationale: 'x' });
+    const annotateReviewItem = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor, annotateReviewItem,
+    });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot());
+
+    expect(monitor.reviewGateEscalation).not.toHaveBeenCalled();
+    expect(annotateReviewItem).not.toHaveBeenCalled();
+  });
+
+  it('does not consult when the body ALREADY carries a recommendation (a resumed, annotated gate)', async () => {
+    const monitor = makeGateMonitor({ action: 'recommend', choice: 'continue', rationale: 'x' });
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });
+    const annotated = snapshot({
+      resumed: true,
+      body: 'the gate body\n\n## Supervisor recommendation\n\nRecommended: continue — already advised.',
+    });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, annotated);
+
+    expect(monitor.reviewGateEscalation).not.toHaveBeenCalled();
+  });
+
+  it('DOES consult a resumed gate that was never annotated', async () => {
+    const monitor = makeGateMonitor({ action: 'pass', rationale: 'x' });
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });
+
+    await host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot({ resumed: true }));
+
+    expect(monitor.reviewGateEscalation).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows the expected invalid_status refusal (the human answered first)', async () => {
+    const monitor = makeGateMonitor({ action: 'recommend', choice: 'continue', rationale: 'x' });
+    const refusal = Object.assign(new Error('review item ri-1 is not pending'), { code: 'invalid_status' });
+    const annotateReviewItem = vi.fn().mockRejectedValue(refusal);
+    const warn = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor, annotateReviewItem,
+      logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    });
+
+    await expect(
+      host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot()),
+    ).resolves.toBeUndefined();
+    // Logged at DEBUG, not warn: this is the designed outcome of the race.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('never throws — a throwing reader, monitor or sink all degrade to no recommendation', async () => {
+    const monitor: MonitorSession = {
+      triage: vi.fn(),
+      answer: vi.fn().mockResolvedValue(''),
+      reviewGateEscalation: vi.fn().mockRejectedValue(new Error('consult boom')),
+    };
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      listRunReviewItems: vi.fn().mockRejectedValue(new Error('read boom')),
+      annotateReviewItem: vi.fn().mockRejectedValue(new Error('write boom')),
+    });
+
+    await expect(
+      host.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot()),
+    ).resolves.toBeUndefined();
+
+    // A monitor with no escalation method is also inert.
+    const bare = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor: makeMonitor('retry') });
+    await expect(bare.reviewGateEscalation(step({ id: 'approve-design' }), ctx, snapshot())).resolves.toBeUndefined();
+  });
+});
+
+describe('ProgrammaticRunHost.requestHumanGate — the onOpened hook', () => {
+  it('forwards (step, ctx, snapshot) to an injected onGateOpened override', async () => {
+    const onGateOpened = vi.fn().mockResolvedValue(undefined);
+    const gate = makeGate('approve');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate, onGateOpened });
+    const gateStep = step({ id: 'approve-design', name: 'Approve design' });
+
+    await host.requestHumanGate(gateStep, ctx);
+
+    const req = gate.resolve.mock.calls[0][0] as { onOpened?: (s: HumanGateOpenedSnapshot) => void };
+    expect(req.onOpened).toBeDefined();
+    const snap = snapshot();
+    req.onOpened?.(snap);
+    expect(onGateOpened).toHaveBeenCalledWith(gateStep, ctx, snap);
+  });
+
+  it('defaults the hook to its OWN escalation review when an escalation-capable monitor is wired', async () => {
+    const monitor = makeGateMonitor({ action: 'pass', rationale: 'x' });
+    const gate = makeGate('approve');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate, monitor });
+
+    await host.requestHumanGate(step({ id: 'approve-design' }), ctx);
+
+    const req = gate.resolve.mock.calls[0][0] as { onOpened?: (s: HumanGateOpenedSnapshot) => void };
+    expect(req.onOpened).toBeDefined();
+    await req.onOpened?.(snapshot());
+    expect(monitor.reviewGateEscalation).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes NO hook when neither an override nor an escalation-capable monitor exists', async () => {
+    const gate = makeGate('approve');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate, monitor: makeMonitor('retry') });
+
+    await host.requestHumanGate(step({ id: 'approve-design' }), ctx);
+
+    expect(gate.resolve.mock.calls[0][0]).not.toHaveProperty('onOpened');
+  });
+});
+
+describe('firstSentence', () => {
+  it('takes the first terminated sentence, or the whole text when there is none', () => {
+    expect(firstSentence('AR-1 is cosmetic. It costs nothing.')).toBe('AR-1 is cosmetic.');
+    expect(firstSentence('  Is this right? Probably.  ')).toBe('Is this right?');
+    expect(firstSentence('no terminator here')).toBe('no terminator here');
+    // A decimal must not split the sentence — there is no whitespace after it.
+    expect(firstSentence('The budget is 3.5 laps. Stop now.')).toBe('The budget is 3.5 laps.');
   });
 });

@@ -60,7 +60,9 @@ const HUMAN_GATE_SOURCE = 'gate:human-step';
  * Provenance prefix stamped on a systemic-pause decision review_item (the
  * canonical constant is `SYSTEMIC_PAUSE_SOURCE` in
  * programmatic/systemicPauseGate.ts — duplicated here as a bare literal to keep
- * this module free of a `programmatic/` import). Cancel-path cleanup
+ * this module free of a RUNTIME `programmatic/` import; the gate-item snapshot
+ * type it now imports from `programmatic/humanGate` is type-only and erases).
+ * Cancel-path cleanup
  * (clearPendingForRun) must dismiss these pause items too, so a canceled run does
  * not strand an orphan "Run paused" decision row in the review queue.
  */

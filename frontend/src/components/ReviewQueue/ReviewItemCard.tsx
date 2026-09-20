@@ -335,6 +335,42 @@ function isApproveDesignGateItem(item: ReviewItem): boolean {
   return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-design');
 }
 
+/**
+ * The in-session gate buttons, as emphasis targets. Not the same set as the
+ * verdict words: an approve-design gate offers TWO distinct approves (log the
+ * surviving entries, or don't), and the plain gates offer no revise button of
+ * their own.
+ */
+type GateButton = 'approve' | 'revise' | 'no-findings' | 'reject';
+
+/**
+ * Which button, if any, the supervisor's recommendation points at.
+ *
+ * The mapping is per-gate because the recommendation names a CHOICE while the
+ * card renders BUTTONS, and the two menus differ: at an approve-design gate
+ * `continue`/`rerun`/`dismiss` are the three controls, while every other gate
+ * has only Approve and Reject — so a `revise` recommendation there emphasizes
+ * Reject, which is the button that actually sends the step back (its in-session
+ * handler resolves 'reject' for a plain gate; there is no third control to
+ * point at). A recommendation naming a choice this gate does not offer
+ * emphasizes nothing, and the card keeps today's emphasis.
+ */
+function recommendedGateButton(
+  choice: SupervisorRecommendationChoice | undefined,
+  approveDesign: boolean,
+): GateButton | null {
+  if (choice === undefined) return null;
+  if (approveDesign) {
+    if (choice === 'continue') return 'approve';
+    if (choice === 'rerun') return 'revise';
+    if (choice === 'dismiss') return 'no-findings';
+    return null;
+  }
+  if (choice === 'approve') return 'approve';
+  if (choice === 'reject' || choice === 'revise') return 'reject';
+  return null;
+}
+
 export function ReviewItemCard({
   item,
   isFocused = false,
@@ -403,15 +439,30 @@ export function ReviewItemCard({
   // rendered above the buttons). Every other decision sends the bare outcome, so
   // its stored resolution is byte-identical to today's; an empty textarea is the
   // same, since `undefined` is dropped before the mutation.
-  const handleGateDecision = (outcome: 'approve' | 'reject' | 'revise'): void => {
+  // The MODIFIER qualifies an approve: `no-findings` is the approve-design
+  // gate's third choice ("Continue without logging"), which approves the design
+  // while telling gateSideEffects NOT to log the surviving adversarial-review
+  // entries as accepted-risk findings. It rides the stored resolution as
+  // `approve[no-findings]`; the server refuses it on any other outcome or gate.
+  const handleGateDecision = (
+    outcome: 'approve' | 'reject' | 'revise',
+    modifier?: 'no-findings',
+  ): void => {
     const note =
       outcome === 'revise' && isApproveDesignGateItem(item) ? reviseNote.trim() || undefined : undefined;
     void resolve(item.project_id, item.id, {
       outcome,
+      ...(modifier !== undefined ? { modifier } : {}),
       ...(note !== undefined ? { resolution: note } : {}),
     }).then((r) => {
       if (r !== null) {
-        trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
+        trackEvent('review_item_resolved', {
+          kind: item.kind,
+          // `approve[no-findings]` is counted apart from a plain approve: the
+          // interesting number is how often a critique is dropped, not approved.
+          action: modifier === 'no-findings' ? 'approve[no-findings]' : outcome,
+          blocking: item.blocking,
+        });
         onResolved?.();
       }
     });
@@ -547,6 +598,25 @@ export function ReviewItemCard({
   const usesDefaultActions = surface === 'queue' && item.run_id !== null;
 
   /**
+   * The emphasis for one in-session gate button.
+   *
+   * With a supervisor recommendation, the button it points at is `primary` and
+   * every other one `secondary` — the chip in the header says whose advice it
+   * is, and the emphasis is what makes it actionable at a glance. Without one,
+   * this collapses to today's fixed emphasis (approve primary, the rest
+   * secondary), so an un-annotated card is byte-identical to before this seam.
+   */
+  const recommendedButton = recommendedGateButton(recommendation?.choice, isApproveDesignGateItem(item));
+  const gateVariant = (button: GateButton): 'primary' | 'secondary' =>
+    recommendedButton === null
+      ? button === 'approve'
+        ? 'primary'
+        : 'secondary'
+      : button === recommendedButton
+        ? 'primary'
+        : 'secondary';
+
+  /**
    * The DEFAULT actions for an escalation that provided no options of its own:
    * route to the run, or drop the item. Never a resolve — settling a gate nobody
    * opened is exactly what these branches used to get wrong.
@@ -561,14 +631,26 @@ export function ReviewItemCard({
    * not a gate, so it keeps the plain dismiss (aggregate-unblock resume).
    */
   function defaultEscalationActions(): React.ReactElement {
-    const discard = item.kind === 'decision' ? () => handleGateDecision('reject') : handleDismiss;
+    // APPROVE-DESIGN is carved out of the decision arm. "Dismiss" there used to
+    // resolve `reject`, which ENDS THE RUN — a human tidying a card they had
+    // already dealt with in the session would kill the walk. The design gate has
+    // a real "drop the entries and carry on" verdict (`approve[no-findings]`),
+    // so the queue's discard points at THAT instead, and the label says what it
+    // does. Every other decision keeps the reject (which is the only thing that
+    // runs the gate-specific teardown); findings keep the plain dismiss.
+    const approveDesign = isApproveDesignGateItem(item);
+    const discard = approveDesign
+      ? () => handleGateDecision('approve', 'no-findings')
+      : item.kind === 'decision'
+        ? () => handleGateDecision('reject')
+        : handleDismiss;
     return (
       <>
         <Button variant="primary" size="sm" onClick={openInSession} data-testid="open-in-session">
           Open in session →
         </Button>
         <Button variant="secondary" size="sm" disabled={busy} onClick={discard} data-testid="default-dismiss">
-          Dismiss
+          {approveDesign ? 'Continue without logging' : 'Dismiss'}
         </Button>
       </>
     );
@@ -785,12 +867,32 @@ export function ReviewItemCard({
                 className="w-full rounded border border-border-primary bg-bg-secondary px-2 py-1 text-xs text-text-primary"
               />
             )}
-            <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
+            <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
               {isApproveDesignGateItem(item) ? 'Continue, log as findings' : 'Approve & resume'}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision(isApproveDesignGateItem(item) ? 'revise' : 'reject')} data-testid="decision-reject">
+            <Button
+              variant={gateVariant(isApproveDesignGateItem(item) ? 'revise' : 'reject')}
+              size="sm"
+              disabled={busy}
+              onClick={() => handleGateDecision(isApproveDesignGateItem(item) ? 'revise' : 'reject')}
+              data-testid="decision-reject"
+            >
               {isApproveDesignGateItem(item) ? 'Rerun planning with findings' : 'Reject'}
             </Button>
+            {/* The approve-design gate's THIRD choice: approve the design and
+                drop the surviving review entries instead of logging them. It
+                exists only here — a plain gate has nothing to not-log. */}
+            {isApproveDesignGateItem(item) && (
+              <Button
+                variant={gateVariant('no-findings')}
+                size="sm"
+                disabled={busy}
+                onClick={() => handleGateDecision('approve', 'no-findings')}
+                data-testid="decision-continue-no-findings"
+              >
+                Continue without logging
+              </Button>
+            )}
           </>
         );
       }

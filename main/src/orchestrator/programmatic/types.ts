@@ -28,6 +28,7 @@ import type {
   AdversarialFinding,
   ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
+import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -551,6 +552,81 @@ export interface ControllerEscalation {
   loopStopRationale?: string;
   /** The `AR-n` ids it set aside (already filed as findings by the host). */
   setAsideIds?: string[];
+}
+
+/**
+ * One review-queue row as the GATE-ESCALATION consult sees it — a header, never
+ * the body.
+ *
+ * The bodies are deliberately left out: a run can carry dozens of findings and
+ * the whole point of this list is that the supervisor's OWN autonomous actions
+ * (set-aside entries, loop stops, lane rescues) reach the human's gate reviewer,
+ * which the titles alone already establish. A body the supervisor needs it can
+ * read from the worktree or the run digest.
+ */
+export interface EscalationReviewItemSummary {
+  id: string;
+  kind: ReviewItemKind;
+  /** Provenance tag, e.g. `monitor` / `adversarial-review`. Null on old rows. */
+  source: string | null;
+  severity: string | null;
+  status: string;
+  title: string;
+}
+
+/**
+ * The ESCALATION consult request for one open human gate: what the human is
+ * being asked, plus everything the supervisor needs to judge whether one answer
+ * is clearly right.
+ *
+ * `title`/`body` are the gate review item's own text, which exists only once the
+ * gate is open (the body is composed inside the gate-open transaction), which is
+ * why this consult is driven from the gate-open hook rather than before it.
+ *
+ * `kind` discriminates this request from item 9's blocking-items sibling on the
+ * same `MonitorSession` method family.
+ */
+export interface GateEscalationRequest {
+  kind: 'gate';
+  stepId: string;
+  stepName: string;
+  /** The review item the recommendation would be annotated onto. */
+  reviewItemId: string;
+  title: string;
+  body: string;
+  /** The supervisor's own loop-stop rationale + set-aside ids, when this gate follows one. */
+  escalation?: ControllerEscalation;
+  /** Bounded (≤ 30) summaries of this run's pending + monitor-authored items. */
+  reviewItems: EscalationReviewItemSummary[];
+}
+
+/**
+ * The supervisor's answer to a gate escalation: a NON-BINDING recommendation, or
+ * an explicit pass.
+ *
+ * There is no third arm, and deliberately no way to ANSWER the gate: everything
+ * this consult can do is annotate the item with advice the human may ignore. A
+ * malformed verdict, a choice outside the gate's own menu, or a consult that
+ * timed out all land on `pass` — the card then renders exactly as it does today.
+ */
+export type GateEscalationDecision =
+  | { action: 'recommend'; choice: SupervisorRecommendationChoice; rationale: string }
+  | { action: 'pass'; rationale: string };
+
+/**
+ * The run's own DELIVERABLES and ENTITIES, folded into the supervisor's prompts
+ * (CR-6).
+ *
+ * The step timeline and the chat digest say what HAPPENED; neither says what the
+ * run actually produced. A supervisor asked whether a design gate should be
+ * approved was reading a list of step names — so this carries the payload-bearing
+ * artifacts (the adversarial review, the brief, the runbook proposal…) and the
+ * ideas/epics/tasks the run owns, which is the content the templated `idea-spec`
+ * / `decomposed-stories` tabs re-derive.
+ */
+export interface RunDigest {
+  artifacts: { atype: string; label: string; markdown: string }[];
+  entities: { kind: 'idea' | 'epic' | 'task'; ref: string; title: string; body: string }[];
 }
 
 /**

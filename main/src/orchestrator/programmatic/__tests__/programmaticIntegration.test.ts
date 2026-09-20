@@ -28,14 +28,20 @@ import { ReviewQueueHumanGate } from '../humanGate';
 import { MonitorRegistry, type MonitorSession } from '../monitor';
 import type { StepReporter } from '../programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
-import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
+import {
+  ReviewItemRouter,
+  reviewItemChangeEvents,
+  reviewItemProjectChannel,
+} from '../../reviewItemRouter';
+import { SUPERVISOR_RECOMMENDATION_HEADING } from '../../../../../shared/types/reviews';
+import type { DatabaseLike } from '../../types';
 import { buildStepTransitionEvent } from '../../stepTransitionBridge';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
-import type { FanOutDriver } from '../types';
+import type { FanOutDriver, GateEscalationDecision, GateEscalationRequest } from '../types';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -708,5 +714,183 @@ describe('programmatic integration — host-driven fanOut walk drives lanes to i
       current_step_id: string | null;
     };
     expect(finalStep.current_step_id).toBe('verify');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate escalation (item 8b, CR-15) — the supervisor's recommendation reaching a
+// LIVE gate, against the real HumanStepManager + the real ReviewItemRouter.
+// ---------------------------------------------------------------------------
+
+/** Read one review item's body + status straight out of the DB. */
+function reviewItemRow(db: Database.Database, id: string): { body: string | null; status: string } {
+  return db.prepare('SELECT body, status FROM review_items WHERE id = ?').get(id) as {
+    body: string | null;
+    status: string;
+  };
+}
+
+/**
+ * A fake escalation-capable monitor whose consult resolves ON DEMAND, so a test
+ * can interleave the human's answer with the consult still in flight.
+ */
+function makeEscalationMonitor(): {
+  monitor: MonitorSession;
+  requests: GateEscalationRequest[];
+  release: (decision: GateEscalationDecision) => void;
+} {
+  const requests: GateEscalationRequest[] = [];
+  let release: (decision: GateEscalationDecision) => void = () => {};
+  const monitor: MonitorSession = {
+    triage: vi.fn().mockResolvedValue({ decision: 'escalate', rationale: '' }),
+    answer: vi.fn().mockResolvedValue(''),
+    reviewGateEscalation: vi.fn((req: GateEscalationRequest) => {
+      requests.push(req);
+      return new Promise<GateEscalationDecision>((resolve) => {
+        release = resolve;
+      });
+    }),
+  };
+  return { monitor, requests, release: (d) => release(d) };
+}
+
+describe('gate escalation against the real gate + review-item router', () => {
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+  });
+
+  /**
+   * Runner deps wiring the escalation seam onto the REAL router, exactly as
+   * index.ts does via monitorActionSinks (the annotate op, actor `monitor`).
+   */
+  function escalationDeps(adapter: DatabaseLike, monitor: MonitorSession) {
+    const router = ReviewItemRouter.initialize(adapter);
+    const annotated: Array<{ ok: boolean; code?: string }> = [];
+    return {
+      annotated,
+      deps: {
+        monitorFactory: () => monitor,
+        runReviewItemReader: async () => [],
+        gateAnnotateSink: async (_runId: string, input: { reviewItemId: string; markdown: string }) => {
+          try {
+            await router.applyReviewItem(1, {
+              op: 'annotate' as const,
+              actor: 'monitor' as const,
+              reviewItemId: input.reviewItemId,
+              heading: SUPERVISOR_RECOMMENDATION_HEADING,
+              markdown: input.markdown,
+            });
+            annotated.push({ ok: true });
+          } catch (err) {
+            annotated.push({ ok: false, code: (err as { code?: string }).code });
+            throw err;
+          }
+        },
+      },
+    };
+  }
+
+  it('a human who answers DURING the consult wins: the annotate is refused invalid_status and the walk uses their verdict', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    seedRun(db, 'run-esc-race');
+
+    const spawner = makeSpawner();
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const { monitor, requests, release } = makeEscalationMonitor();
+    const { annotated, deps } = escalationDeps(adapter, monitor);
+
+    // The human answers each gate the moment it exists — i.e. while the
+    // fire-and-forget consult is still hanging.
+    const answered: string[] = [];
+    const approver = (payload: unknown): void => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action === 'created' && p.reviewItemId) {
+        const id = p.reviewItemId;
+        answered.push(id);
+        setTimeout(() => void mgr.resolveHumanGate('run-esc-race', id, 'user', 'approve'), 0);
+      }
+    };
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate, ...deps });
+    const walk = runner.run(ctxFor('run-esc-race'));
+    // Let the first gate open + be answered, then let the consult come back late.
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(answered.length).toBeGreaterThan(0));
+    release({ action: 'recommend', choice: 'approve', rationale: 'looks right. and here is why.' });
+
+    await expect(walk).resolves.toBeUndefined();
+
+    // The human's verdict stands: the item is resolved and carries NO section.
+    const row = reviewItemRow(db, answered[0]);
+    expect(row.status).toBe('resolved');
+    expect(row.body ?? '').not.toContain('## Supervisor recommendation');
+    // ...and the refusal the host swallows is exactly `invalid_status`.
+    expect(annotated.some((a) => !a.ok && a.code === 'invalid_status')).toBe(true);
+  });
+
+  it('a RESUMED gate is consulted when it carries no section, and left alone when it does', async () => {
+    for (const preAnnotated of [false, true]) {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const mgr = HumanStepManager.initialize(adapter);
+      const runId = `run-esc-resume-${String(preAnnotated)}`;
+      seedRun(db, runId);
+
+      // Open the FIRST gate out-of-band so the resolver re-attaches to it
+      // (findPendingGate) instead of minting one — that is what `resumed` means.
+      const existingId = await mgr.openHumanGate(runId, 'approve-idea', 'Approve idea');
+      // A fresh open always mints an id; narrow it so the rest of the test can
+      // address the row directly.
+      if (existingId === null) throw new Error('expected the out-of-band gate open to mint an item');
+      if (preAnnotated) {
+        db.prepare('UPDATE review_items SET body = ? WHERE id = ?').run(
+          'The gate body.\n\n## Supervisor recommendation\n\nRecommended: approve — advised on the first pass.\n',
+          existingId,
+        );
+      }
+
+      const spawner = makeSpawner();
+      const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+      const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+      const { monitor, requests, release } = makeEscalationMonitor();
+      const { deps } = escalationDeps(adapter, monitor);
+
+      // Answer every gate on a later macrotask (a real human is never synchronous).
+      const approver = (payload: unknown): void => {
+        const p = payload as { reviewItemId?: string; action?: string };
+        if (p?.action === 'created' && p.reviewItemId) {
+          const id = p.reviewItemId;
+          setTimeout(() => void mgr.resolveHumanGate(runId, id, 'user', 'approve'), 0);
+        }
+      };
+      reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+      // The pre-existing gate fires no 'created' event (it already exists), so
+      // it is answered directly.
+      setTimeout(() => void mgr.resolveHumanGate(runId, existingId, 'user', 'approve'), 5);
+
+      const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate, ...deps });
+      const walk = runner.run(ctxFor(runId));
+      // Every later gate's consult must also be released or the walk would
+      // finish with hooks still pending; releasing eagerly is harmless.
+      const pump = setInterval(() => release({ action: 'pass', rationale: 'no advice' }), 5);
+      await expect(walk).resolves.toBeUndefined();
+      clearInterval(pump);
+
+      const resumedRequests = requests.filter((r) => r.reviewItemId === existingId);
+      // The ALREADY-ANNOTATED gate is left alone; the bare one gets its consult.
+      expect(resumedRequests).toHaveLength(preAnnotated ? 0 : 1);
+      if (!preAnnotated) {
+        expect(resumedRequests[0].stepId).toBe('approve-idea');
+        expect(resumedRequests[0].body).not.toBe('');
+      }
+
+      reviewItemChangeEvents.removeAllListeners();
+      HumanStepManager._resetForTesting();
+      ReviewItemRouter._resetForTesting();
+    }
   });
 });

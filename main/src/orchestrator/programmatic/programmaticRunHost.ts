@@ -37,6 +37,8 @@ import type {
   FanOutDriver,
   HumanGateDecision,
   LaneRescueOutcome,
+  EscalationReviewItemSummary,
+  GateEscalationDecision,
   LaneTriageFailure,
   ReviewLoopDecision,
   ReviewLoopRequest,
@@ -51,6 +53,11 @@ import type { HumanGateOpenedSnapshot, HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
+import {
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  composeSupervisorRecommendation,
+  readMarkdownSection,
+} from '../../../../shared/types/reviews';
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
 import { buildBreakGroupKey } from './buildBreakDetector';
@@ -80,6 +87,57 @@ export const REVIEW_LOOP_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_REVIEW_LOOP_TRIAGE'
 /** True when the operator has disabled the supervised review loop for this process. */
 function reviewLoopTriageDisabled(): boolean {
   return process.env[REVIEW_LOOP_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * Rollback lever for the SUPERVISOR'S ESCALATION REVIEW — the recommendation it
+ * attaches to an open human gate (this item) and, from item 9, to a run parked
+ * on blocking findings. With it set to '1' no gate is ever consulted about and
+ * no review item is ever annotated, so every card renders exactly as it did
+ * before the seam existed. No query cost, no writes, no chat.
+ */
+export const ESCALATION_REVIEW_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_ESCALATION_REVIEW';
+
+/** True when the operator has disabled the supervisor's escalation review. */
+function escalationReviewDisabled(): boolean {
+  return process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * Most review-queue rows folded into ONE escalation consult.
+ *
+ * The list is context, not the decision: a run that filed sixty findings would
+ * otherwise push the gate body, the deliverables and the timeline out of the
+ * model's attention with rows it does not need to read individually. Newest
+ * first, so what survives the cap is what the run did most recently.
+ */
+export const ESCALATION_REVIEW_ITEM_CAP = 30;
+
+/** The `ReviewItemError.code` a refusal carries when the human answered first. */
+const INVALID_STATUS_CODE = 'invalid_status';
+
+/** True for the EXPECTED refusal: the human resolved the gate mid-consult. */
+function isInvalidStatusRefusal(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === INVALID_STATUS_CODE
+  );
+}
+
+/**
+ * The first sentence of a rationale — what the card renders next to the button.
+ *
+ * Sentence-splitting on `.`/`!`/`?` + whitespace is deliberately crude: the
+ * FULL rationale is written underneath either way, so a bad split costs a
+ * slightly long headline, never any meaning. A rationale with no terminator at
+ * all is used whole.
+ */
+export function firstSentence(text: string): string {
+  const trimmed = text.trim();
+  const m = /^(.+?[.!?])(\s|$)/s.exec(trimmed);
+  return (m ? m[1] : trimmed).trim();
 }
 
 /**
@@ -315,6 +373,31 @@ export interface ProgrammaticRunHostArgs {
     snapshot: HumanGateOpenedSnapshot,
   ) => Promise<void>;
   /**
+   * ESCALATION-REVIEW reader: this run's review-queue rows as the gate consult
+   * should see them — its PENDING items plus every `monitor`-sourced one
+   * whatever its status, newest first, capped at
+   * {@link ESCALATION_REVIEW_ITEM_CAP} rows.
+   *
+   * This is how the supervisor's own autonomous history (set-aside entries, lane
+   * rescues, loop-stop audits) reaches the person reviewing the gate — CR-9. The
+   * `monitor`-sourced arm ignores status on purpose: an audit finding somebody
+   * already triaged still describes an action this run took unattended.
+   * Run-bound by the composition root; MUST be fail-soft. Absent ⇒ the consult
+   * runs with an empty list.
+   */
+  listRunReviewItems?: (runId: string) => Promise<EscalationReviewItemSummary[]>;
+  /**
+   * ESCALATION-REVIEW writer: upsert the supervisor's recommendation section
+   * into a still-pending review item's body, through the `ReviewItemRouter`
+   * `annotate` op (the only sanctioned path — see the chokepoint rule).
+   *
+   * REJECTS rather than throws for the expected race: the gate is annotated
+   * fire-and-forget while it is open, so a human who answers first leaves the
+   * router refusing with `invalid_status`. The caller logs that at debug and
+   * anything else at warn. Absent ⇒ a recommendation is logged only.
+   */
+  annotateReviewItem?: (input: { reviewItemId: string; markdown: string }) => Promise<void>;
+  /**
    * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
    * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
    * composition root to the SAME ReviewItemRouter chokepoint verdictDelivery
@@ -386,18 +469,177 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   async requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision> {
+    // The gate-open hook: the host's OWN escalation review by default, and
+    // `args.onGateOpened` as an explicit override (which is how tests observe
+    // the seam without a monitor). Nothing is passed at all when neither exists,
+    // because the resolver's `onOpened` is optional and an always-present no-op
+    // would make "is anybody listening" untestable here.
+    const hook =
+      this.args.onGateOpened ??
+      (this.args.monitor?.reviewGateEscalation
+        ? (s: WorkflowStep, c: ControllerStepContext, snap: HumanGateOpenedSnapshot) =>
+            this.reviewGateEscalation(s, c, snap)
+        : undefined);
     return this.args.gate.resolve({
       runId: this.args.runId,
       projectId: this.args.projectId,
       step,
       signal: ctx.signal,
-      // Only pass the hook when a sink is injected: the resolver's own `onOpened`
-      // is optional, and an always-present no-op would make "is anybody listening"
-      // untestable at this seam.
-      ...(this.args.onGateOpened
-        ? { onOpened: (snapshot: HumanGateOpenedSnapshot) => this.args.onGateOpened?.(step, ctx, snapshot) }
-        : {}),
+      ...(hook ? { onOpened: (snapshot: HumanGateOpenedSnapshot) => hook(step, ctx, snapshot) } : {}),
     });
+  }
+
+  /**
+   * ESCALATION-REVIEW seam — consult the supervisor about an OPEN human gate and
+   * annotate its review item with a non-binding recommendation.
+   *
+   * Bound as the gate resolver's `onOpened` hook (see `requestHumanGate`), which
+   * fires FIRE-AND-FORGET: this method is never awaited by the gate promise, and
+   * the human may answer while it is still running. That race is the designed
+   * outcome, not a bug — the annotate is then refused `invalid_status` and the
+   * human's verdict stands untouched.
+   *
+   * Order of business, each arm short-circuiting to today's behaviour (a card
+   * with no recommendation):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_ESCALATION_REVIEW=1`) ⇒ return. No
+   *      consult, no chat (a rollback lever should be silent) — just a log.
+   *   2. No monitor, or one with no `reviewGateEscalation` ⇒ return.
+   *   3. ALREADY ANNOTATED ⇒ return. A RESUMED gate whose body already carries
+   *      the section keeps the recommendation the human has been looking at;
+   *      re-consulting would spend a query to overwrite advice with advice
+   *      (CR-5). A resumed gate WITHOUT the section still gets its consult —
+   *      that is a gate whose first consult never landed.
+   *   4. Consult, then annotate on a `recommend`. A `pass` writes nothing: an
+   *      empty "no recommendation" section would be noise in a body the human
+   *      reads to decide.
+   *
+   * NEVER THROWS, at any depth: the resolver logs and swallows a rejection, but
+   * relying on that would make every failure here look like a gate-hook bug.
+   */
+  async reviewGateEscalation(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    snapshot: HumanGateOpenedSnapshot,
+  ): Promise<void> {
+    try {
+      if (escalationReviewDisabled()) {
+        this.args.logger?.info('[ProgrammaticRunHost] escalation review disabled by kill switch', {
+          runId: this.args.runId,
+          stepId: step.id,
+        });
+        return;
+      }
+      const monitor = this.args.monitor;
+      if (!monitor?.reviewGateEscalation) return;
+      if (readMarkdownSection(snapshot.body, SUPERVISOR_RECOMMENDATION_HEADING) !== null) {
+        this.args.logger?.info('[ProgrammaticRunHost] gate already carries a recommendation; not re-consulting', {
+          runId: this.args.runId,
+          stepId: step.id,
+          reviewItemId: snapshot.reviewItemId,
+          resumed: snapshot.resumed,
+        });
+        return;
+      }
+
+      const reviewItems = await this.readEscalationReviewItems();
+      const decision = await monitor.reviewGateEscalation(
+        {
+          kind: 'gate',
+          stepId: step.id,
+          stepName: step.name,
+          reviewItemId: snapshot.reviewItemId,
+          title: snapshot.title,
+          body: snapshot.body,
+          ...(ctx.escalation ? { escalation: ctx.escalation } : {}),
+          reviewItems,
+        },
+        ctx.signal,
+      );
+      if (decision.action !== 'recommend') return;
+
+      await this.annotateGateRecommendation(step, snapshot.reviewItemId, decision);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] gate escalation review failed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId: snapshot.reviewItemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * The run's review-queue summaries for a gate consult. Fail-soft twice over
+   * (absent reader and throwing reader both yield []): the recommendation is an
+   * enrichment, and a consult with a thinner picture beats no consult.
+   */
+  private async readEscalationReviewItems(): Promise<EscalationReviewItemSummary[]> {
+    try {
+      return (await this.args.listRunReviewItems?.(this.args.runId)) ?? [];
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] run review-item read failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Write the recommendation onto the gate item through the injected `annotate`
+   * sink.
+   *
+   * `invalid_status` is the EXPECTED outcome of the race this whole hook runs
+   * inside — the human answered while the consult was in flight — so it is a
+   * debug line, not a warning: the decision is already made and the advice is
+   * correctly discarded. Every other failure is a real one and warns.
+   */
+  private async annotateGateRecommendation(
+    step: WorkflowStep,
+    reviewItemId: string,
+    decision: Extract<GateEscalationDecision, { action: 'recommend' }>,
+  ): Promise<void> {
+    const sink = this.args.annotateReviewItem;
+    if (!sink) {
+      this.args.logger?.info('[ProgrammaticRunHost] no annotate sink; recommendation logged only', {
+        runId: this.args.runId,
+        stepId: step.id,
+        choice: decision.choice,
+        rationale: decision.rationale,
+      });
+      return;
+    }
+    try {
+      await sink({
+        reviewItemId,
+        markdown: composeSupervisorRecommendation(
+          decision.choice,
+          firstSentence(decision.rationale),
+          decision.rationale,
+        ),
+      });
+      this.args.logger?.info('[ProgrammaticRunHost] gate recommendation annotated', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId,
+        choice: decision.choice,
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        this.args.logger?.debug('[ProgrammaticRunHost] gate resolved before the recommendation landed', {
+          runId: this.args.runId,
+          stepId: step.id,
+          reviewItemId,
+        });
+        return;
+      }
+      this.args.logger?.warn('[ProgrammaticRunHost] gate recommendation not annotated (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   shouldSkipHumanGate(step: WorkflowStep): string | null {

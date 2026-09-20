@@ -335,7 +335,22 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
           // waits forever on a gate nobody will answer again. Re-reading the item
           // right after arming closes the window: whatever the event said is still
           // true in the row.
-          const item = this.opener.readGateItem?.(effectiveId) ?? null;
+          // The read is wrapped because this `.then` body's trailing `.catch`
+          // REJECTS the gate: a throwing reader (a missing table, a corrupt row)
+          // would turn a degraded read-back into an aborted run parked at a gate
+          // nobody can answer. Swallowed, it degrades to exactly the pre-read
+          // behaviour — await the change event.
+          let item: HumanGateItemSnapshot | null = null;
+          try {
+            item = this.opener.readGateItem?.(effectiveId) ?? null;
+          } catch (err) {
+            this.logger?.warn('[ReviewQueueHumanGate] gate item read-back failed (fail-soft)', {
+              runId,
+              stepId: step.id,
+              reviewItemId: effectiveId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
           if (item?.status === 'resolved') {
             this.logger?.info('[ReviewQueueHumanGate] gate was already resolved when armed', {
               runId,
