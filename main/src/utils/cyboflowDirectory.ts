@@ -73,9 +73,9 @@ function resolveCliDirOverride(): string | null {
  * where `process.resourcesPath` is undefined — resolves to 'stable', the safe
  * default: a build that cannot prove it is the Dev distributable falls back to
  * the production `~/.cyboflow` directory it historically shared. Only meaningful
- * for packaged builds; the sole caller gates on `app.isPackaged` first.
+ * for packaged builds; callers gate on `app.isPackaged` first.
  */
-function resolvePackagedVariant(): 'stable' | 'dev' {
+export function resolvePackagedVariant(): 'stable' | 'dev' {
   if (cachedPackagedVariant) return cachedPackagedVariant;
 
   const resourcesPath = process.resourcesPath;
