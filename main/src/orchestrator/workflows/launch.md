@@ -201,10 +201,12 @@ own design. There are no per-idea design flags.
 6. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
    `architecture` ran. Delegate to `cyboflow-adversarial-review` with the
    brief (including its architecture section) and the prototype notes. For
-   Compose ONE markdown doc from its `## Result` — a `## Blocking` section and
-   a `## Findings` section, every entry keeping its `#### AR-n — <title>`
-   heading and its Severity / Area / What / Why it matters / Fix fields
-   verbatim, with `None.` under an empty heading — and report it:
+   Compose ONE markdown doc from its `## Result` — a `## Blocking` section, a
+   `## Findings` section, and a `## Prior entries` section (the subagent's
+   ledger, verbatim; `None.` on a first review), every entry keeping its
+   `#### AR-n — <title>` heading and its Severity / Area / What / Why it
+   matters / Fix fields verbatim, with `None.` under an empty heading — and
+   report it:
    `cyboflow_report_artifact(atype: 'adversarial-review', label: 'Adversarial
    review', payload_json: {"markdown": "<the doc>"})`. That doc is the ONLY
    surface the `approve-design` gate reviews; re-reporting the same atype

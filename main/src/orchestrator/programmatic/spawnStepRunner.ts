@@ -122,6 +122,17 @@ export interface SpawnStepRunnerOptions {
    */
   stepGuidance?: (stepId: string) => string | undefined;
   /**
+   * Per-step SUPERVISOR RETRY-guidance resolver. Same thunk shape as
+   * `stepGuidance` above and invoked ONCE per `runStep`, but the thunk the runner
+   * wires CONSUMES its entry (reads then deletes it from
+   * `RunDirectives.retryGuidance`), so the guidance reaches exactly the ONE
+   * attempt the supervisor's triage bought and no later spawn of the same step.
+   * Rendered as its own section AFTER the operator's `stepGuidance`, which is
+   * untouched and still sticky. Absent (or returning undefined) ⇒ no section —
+   * byte-identical to the no-guidance path.
+   */
+  retryGuidance?: (stepId: string) => string | undefined;
+  /**
    * Per-step sprint TASK-SCOPE resolver (the `# Sprint tasks` body). Invoked ONCE
    * per `runStep` (NOT captured at construction), mirroring the `agentPermissionMode`
    * / `stepGuidance` thunks above, so the block is RE-RENDERED from the run's live
@@ -257,6 +268,11 @@ export class SpawnStepRunner implements StepRunner {
     // steering) — never captured at construction — so guidance added mid-run is
     // honored on this step's next spawn, exactly like agentPermissionMode below.
     const userGuidance = this.opts.stepGuidance?.(step.id);
+    // Read the supervisor's one-shot retry guidance for this step. The wired
+    // thunk CONSUMES the entry, so this is the only spawn that ever sees it —
+    // read it right after `userGuidance` so both guidance channels resolve at the
+    // same point in the step's life, even though only one of them is sticky.
+    const retryGuidance = this.opts.retryGuidance?.(step.id);
     // Re-render the sprint task-scope block PER STEP (never captured at
     // construction) so a lane added mid-run is grounded with its real title/body
     // on its first dispatch, exactly like userGuidance/agentPermissionMode.
@@ -283,9 +299,19 @@ export class SpawnStepRunner implements StepRunner {
     // revision is actually in flight, so no other turn pays for the read.
     const gateRevision = ctx.gateRevision
       ? (() => {
-          const reviewMarkdown = this.opts.adversarialReviewMarkdown?.();
+          // A revision that already carries `reviewMarkdown` WINS: the controller
+          // sets it only when it judged the run's artifact to be a previous
+          // round's, so re-reading the artifact here would hand the re-run the
+          // very document the controller just rejected. Absent (every human-gate
+          // revision, and every automatic lap whose artifact was current) ⇒ read
+          // the artifact exactly as before, so that path is byte-identical.
+          const { reviewMarkdown: carried, ...rest } = ctx.gateRevision;
+          const reviewMarkdown =
+            carried !== undefined && carried.trim().length > 0
+              ? carried
+              : this.opts.adversarialReviewMarkdown?.();
           return {
-            ...ctx.gateRevision,
+            ...rest,
             ...(reviewMarkdown !== undefined && reviewMarkdown.trim().length > 0
               ? { reviewMarkdown }
               : {}),
@@ -364,6 +390,7 @@ export class SpawnStepRunner implements StepRunner {
       ...(runbookProposal ? { runbookProposal } : {}),
       ...(approveRunbookResolution ? { approveRunbookResolution } : {}),
       ...(userGuidance ? { userGuidance } : {}),
+      ...(retryGuidance ? { retryGuidance } : {}),
       // Per-LANE rescue guidance (monitor lane triage). Threaded off the ctx, not
       // a thunk: it is per fan-out item, and the `stepGuidance` map the thunk
       // reads is keyed by bare step id and shared across lanes. Absent on every

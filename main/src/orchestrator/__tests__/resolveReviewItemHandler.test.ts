@@ -1160,6 +1160,120 @@ describe('resolveReviewItem — approve-plan reject unwinds the plan ledger', ()
 });
 
 // ---------------------------------------------------------------------------
+// Verdict grammar — `<verdict>[<modifier>]: <note>` composition + modifier guard
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — gate resolution grammar', () => {
+  const APPROVE_DESIGN_SOURCE = 'gate:human-step:approve-design';
+
+  it('composes outcome + note into the prefixed resolution', async () => {
+    // The note used to be DISCARDED (outcome won outright); now it rides along
+    // behind the anchored verdict, so 'rejects' inside it can never be sniffed
+    // back out as the verdict.
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_n', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-n' });
+    const deps = makeDeps(db);
+    const result = await resolveReviewItem(
+      baseInput({
+        reviewItemId: 'rvw_n',
+        outcome: 'revise',
+        resolution: '  the architecture rejects empty input  ',
+      }),
+      deps,
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(resolvedWith(deps)).toBe('revise: the architecture rejects empty input');
+  });
+
+  it('stores the BARE verdict for an outcome with no note (byte-identical to today)', async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_b', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-b' });
+    const deps = makeDeps(db);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_b', outcome: 'revise' }), deps);
+    expect(resolvedWith(deps)).toBe('revise');
+
+    const db2 = buildDb();
+    seedItem(db2, { id: 'rvw_b2', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-b2' });
+    const deps2 = makeDeps(db2);
+    await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_b2', outcome: 'approve', resolution: '   ' }),
+      deps2,
+    );
+    expect(resolvedWith(deps2)).toBe('approve');
+  });
+
+  it('passes free text through untouched when no outcome is given', async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_f', kind: 'finding' });
+    const deps = makeDeps(db);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_f', resolution: 'triaged:accepted-docs' }), deps);
+    expect(resolvedWith(deps)).toBe('triaged:accepted-docs');
+  });
+
+  it("stores approve[no-findings] on the singular approve-design gate", async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_m', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-m' });
+    const deps = makeDeps(db);
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_m', outcome: 'approve', modifier: 'no-findings' }),
+      deps,
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(resolvedWith(deps)).toBe('approve[no-findings]');
+  });
+
+  it('REFUSES a modifier on the wrong verdict, the wrong gate, or with a bad value', async () => {
+    // The modifier changes what an approval DOES, so a misplaced one must refuse
+    // (invalid_payload -> BAD_REQUEST) and leave the gate pending rather than be
+    // stored and silently read back later.
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_v', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-v' });
+    seedItem(db, {
+      id: 'rvw_g',
+      kind: 'decision',
+      source: 'gate:human-step:approve-designs',
+      runId: 'run-g',
+    });
+    const wrongVerdict = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        baseInput({ reviewItemId: 'rvw_v', outcome: 'revise', modifier: 'no-findings' }),
+        wrongVerdict,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    const wrongGate = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        baseInput({ reviewItemId: 'rvw_g', outcome: 'approve', modifier: 'no-findings' }),
+        wrongGate,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    const badValue = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        // A widened union reaching the handler from a non-tRPC caller (the
+        // monitor action) must fail loudly instead of being stored.
+        baseInput({
+          reviewItemId: 'rvw_v',
+          outcome: 'approve',
+          modifier: 'sideways' as ResolveReviewItemInput['modifier'],
+        }),
+        badValue,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    // Nothing was resolved by any of the three refusals.
+    expect(wrongVerdict.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(wrongGate.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(badValue.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_v')).toBe('pending');
+    expect(itemStatus(db, 'rvw_g')).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-222 — attributable-reject guard (stepDeclaresOptionalLoopback)
 //
 // The swift-bison-20260917 incident: a plain 'reject' on the approve-design gate

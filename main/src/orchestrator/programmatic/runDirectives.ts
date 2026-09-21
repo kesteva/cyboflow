@@ -45,6 +45,21 @@ export interface RunDirectives {
    */
   readonly stepGuidance: Map<string, string>;
   /**
+   * stepId → the SUPERVISOR's retry guidance: what the next attempt of that step
+   * must do differently, written by the host when the monitor's triage returns
+   * 'retry'.
+   *
+   * CONSUMED — read and then DELETED — by SpawnStepRunner on that step's next
+   * spawn. That is the one thing that makes it different from `stepGuidance`
+   * above, which is an operator preference and stays sticky for every later
+   * spawn: this guidance describes ONE failed attempt's correction, so leaving it
+   * attached would keep telling later (possibly successful, possibly re-driven
+   * for an unrelated reason) attempts to fix a failure that is already behind
+   * them. The two channels are deliberately separate maps for the same reason —
+   * a consume-on-read `stepGuidance` would silently swallow the operator's steer.
+   */
+  readonly retryGuidance: Map<string, string>;
+  /**
    * PER-LANE rewind requests: fan-out item id (the sprint task's opaque id) → the
    * INNER step id that lane must resume at. Written by the monitor's
    * `rewind_lane_to_step` action (laneRewindHandler), CONSUMED — and deleted — by
@@ -88,6 +103,7 @@ export function createRunDirectives(): RunDirectives {
   return {
     userSkippedStepIds: new Set<string>(),
     stepGuidance: new Map<string, string>(),
+    retryGuidance: new Map<string, string>(),
     laneRewinds: new Map<string, string>(),
     laneInterrupts: new Map<string, () => void>(),
   };

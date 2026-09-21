@@ -52,6 +52,13 @@ export interface ReviewItemActionsState {
    * rejected drafts and lets the controller end the run 'rejected' (no resume).
    * Omit it for non-gate resolves (findings / human tasks).
    *
+   * `resolution` alongside an `outcome` is the human's NOTE: the server composes
+   * the two into `<verdict>: <note>` so the note survives without the verdict
+   * being re-sniffed out of it.
+   *
+   * `modifier` qualifies the verdict (`approve[no-findings]`). The server refuses
+   * it anywhere but an 'approve' on the singular approve-design gate.
+   *
    * `verdicts` is the "Submit decisions" payload for an approve-ideas BATCH gate
    * — a per-idea verdict map keyed by display ref. Ignored (harmless) by the
    * server for every other item; omit it for non-batch resolves.
@@ -67,6 +74,7 @@ export interface ReviewItemActionsState {
     opts?: {
       resolution?: string;
       outcome?: 'approve' | 'reject' | 'revise';
+      modifier?: 'no-findings';
       verdicts?: IdeaVerdictMap;
       surface?: string;
     },
@@ -138,6 +146,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
       opts?: {
         resolution?: string;
         outcome?: 'approve' | 'reject' | 'revise';
+        modifier?: 'no-findings';
         verdicts?: IdeaVerdictMap;
         surface?: string;
       },
@@ -150,6 +159,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
           reviewItemId,
           ...(opts?.resolution !== undefined ? { resolution: opts.resolution } : {}),
           ...(opts?.outcome !== undefined ? { outcome: opts.outcome } : {}),
+          ...(opts?.modifier !== undefined ? { modifier: opts.modifier } : {}),
           ...(opts?.verdicts !== undefined ? { verdicts: opts.verdicts } : {}),
           ...(opts?.surface !== undefined ? { surface: opts.surface } : {}),
         });

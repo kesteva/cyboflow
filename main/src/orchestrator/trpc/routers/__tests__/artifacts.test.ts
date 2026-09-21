@@ -68,6 +68,12 @@ function buildDb(): Database.Database {
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. We only need the column for listBySession's JOIN.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // artifacts.reported_at (migration 143) — the LAST report's instant, which
+  // ArtifactRouter's create path now names in both its INSERT and its enrich
+  // UPDATE. Added directly (like the columns above) since this DB hand-picks a
+  // migration subset predating 143; MUST come after every atype-CHECK recreate
+  // above, since a recreate carries only the columns it names.
+  db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   return db;
 }
 

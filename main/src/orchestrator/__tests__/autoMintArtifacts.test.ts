@@ -116,6 +116,12 @@ function buildDb(): Database.Database {
   // Applied AFTER 091 for the same "recreate carries only what it names" reason
   // 091 documents about running after 089.
   db.exec(readFileSync(join(migDir, '102_idea_summary_atype.sql'), 'utf-8'));
+  // artifacts.reported_at (migration 143) — the LAST report's instant, which
+  // ArtifactRouter's create path now names in both its INSERT and its enrich
+  // UPDATE. Added directly (like the columns above) since this DB hand-picks a
+  // migration subset predating 143; MUST come after every atype-CHECK recreate
+  // above, since a recreate carries only the columns it names.
+  db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));

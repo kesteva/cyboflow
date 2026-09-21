@@ -901,7 +901,10 @@ landings.
   ('idea-spec','decomposed-stories','screenshots','ui-prototype','generic','arch-design')`,
   widened by migration `045_arch_design_atype`); `mode` (`template`
   re-derived-on-read vs `canvas` payload-backed), `committed` / `session_only` / `is_new` flags,
-  `step_origin`, `source_ref` (soft link to the derived-from entity), `payload_json`. `run_id`
+  `step_origin`, `source_ref` (soft link to the derived-from entity), `payload_json`, and
+  `reported_at` (migration 143 — the LAST report's instant, re-stamped on every report
+  including an identical no-op re-report, unlike `revision`; how a reader tells this round's
+  critique from a previous walk's surviving one). `run_id`
   FK→`workflow_runs` ON DELETE CASCADE. All writes go through `ArtifactRouter.apply` (see Entity
   write chokepoints); deltas append to `entity_events` with `entity_type='artifact'`. Templated
   artifacts (idea-spec, decomposed-stories, arch-design) re-derive content from the entity model

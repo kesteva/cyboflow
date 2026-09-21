@@ -417,6 +417,62 @@ describe('SpawnStepRunner', () => {
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('watch the null case');
   });
 
+  // ── supervisor ONE-SHOT retry guidance (RunDirectives.retryGuidance) ───────
+  it('renders the supervisor retry guidance when the retryGuidance thunk returns text', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      retryGuidance: (id) => (id === 'implement' ? 'pin the fixture clock' : undefined),
+    });
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('## Supervisor retry guidance (this attempt only)');
+    expect(passed.prompt).toContain('pin the fixture clock');
+  });
+
+  it('adds NO retry-guidance section when no retryGuidance thunk is bound (byte-identity)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts); // opts has no retryGuidance
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('## Supervisor retry guidance');
+  });
+
+  it('CONSUMES the retry guidance: a second spawn of the same step carries no section, while the operator steer stays sticky', async () => {
+    const spawner = makeSpawner();
+    // The consuming thunk the runner wires in production: read-then-delete.
+    const retry = new Map<string, string>([['implement', 'pin the fixture clock']]);
+    const sticky = new Map<string, string>([['implement', 'prefer the streaming API']]);
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      stepGuidance: (id) => sticky.get(id),
+      retryGuidance: (id) => {
+        const g = retry.get(id);
+        if (g !== undefined) retry.delete(id);
+        return g;
+      },
+    });
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    const first = (calls[0][0] as ClaudeSpawnerOptions).prompt;
+    const second = (calls[1][0] as ClaudeSpawnerOptions).prompt;
+    expect(first).toContain('## Supervisor retry guidance (this attempt only)');
+    expect(first).toContain('pin the fixture clock');
+    // Consumed: the retry's correction expires with the attempt it bought…
+    expect(second).not.toContain('## Supervisor retry guidance');
+    expect(second).not.toContain('pin the fixture clock');
+    // …while the operator's steer is untouched and still sticky.
+    expect(first).toContain('prefer the streaming API');
+    expect(second).toContain('prefer the streaming API');
+  });
+
   it('RE-RENDERS taskScope per step — a lane added mid-run appears in the next step prompt', async () => {
     const spawner = makeSpawner();
     // The task-scope resolver reads the batch LIVE (mirrors buildSeedTasksBlock):
@@ -701,5 +757,59 @@ describe('programmaticDisallowedTools', () => {
       .calls[0][0] as ClaudeSpawnerOptions;
     expect(unseeded.prompt).not.toContain('# Selected findings');
     expect(unseeded.prompt).not.toContain('This run is SEEDED');
+  });
+});
+
+describe('SpawnStepRunner — gateRevision review document (CX-4)', () => {
+  const CARRIED = ['## Blocking', '', '#### AR-2 — this round’s defect', '**What:** z'].join('\n');
+  const ARTIFACT = ['## Blocking', '', '#### AR-1 — last round’s defect', '**What:** x'].join('\n');
+
+  function revisionCtx(reviewMarkdown?: string): ControllerStepContext {
+    return {
+      ...ctx,
+      gateRevision: {
+        gateStepId: 'approve-design',
+        source: 'adversarial-review',
+        round: 2,
+        ...(reviewMarkdown !== undefined ? { reviewMarkdown } : {}),
+      },
+    };
+  }
+
+  it('prefers a revision’s own reviewMarkdown over the run’s artifact', async () => {
+    // The controller only sets it when it judged the artifact to be a PREVIOUS
+    // round's, so re-reading the artifact here would hand the re-run exactly the
+    // document the controller just rejected.
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<() => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx(CARRIED));
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-2 — this round’s defect');
+    expect(passed.prompt).not.toContain('AR-1 — last round’s defect');
+  });
+
+  it('reads the run’s artifact when the revision carries no reviewMarkdown (existing behaviour)', async () => {
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<() => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx());
+
+    expect(readArtifact).toHaveBeenCalledTimes(1);
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
+
+  it('falls back to the artifact when a carried reviewMarkdown is blank', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: () => ARTIFACT });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx('   '));
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-1 — last round’s defect');
   });
 });

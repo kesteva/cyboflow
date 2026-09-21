@@ -811,6 +811,14 @@ export const reviewItemsRouter = router({
          */
         outcome: z.enum(['approve', 'reject', 'revise']).optional(),
         /**
+         * Bracketed qualifier composed into the stored resolution
+         * (`approve[no-findings]`). The enum is the type-parity mirror of
+         * `ResolveReviewItemInput.modifier`; the shared handler still REFUSES it
+         * (invalid_payload) unless it accompanies an 'approve' on the singular
+         * approve-design gate, so a monitor-built input cannot slip past.
+         */
+        modifier: z.enum(['no-findings']).optional(),
+        /**
          * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate —
          * the "Submit decisions" payload, keyed by idea display ref. ONLY consumed
          * for those batch decision gates: the shared handler validates it against

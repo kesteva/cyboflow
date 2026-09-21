@@ -24,6 +24,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { composeMonitorReviewQueueActions } from '../monitorReviewQueueComposition';
+import { parseGateResolution } from '../../../shared/types/reviews';
 import { dbAdapter } from '../orchestrator/__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { ReviewItemRouter } from '../orchestrator/reviewItemRouter';
@@ -172,9 +173,15 @@ describe('composeMonitorReviewQueueActions.resolveReviewItem (TASK-222 provenanc
     expect(result.message).toMatch(/^Sent back for revision on the review item/);
     const item = readItem(db, reviewItemId);
     expect(item.status).toBe('resolved');
-    // The verdict the controller's parseGateVerdict reads — a loopback, never a
-    // terminal reject.
-    expect(item.resolution).toBe('revise');
+    // The stored resolution is the anchored `<verdict>: <note>` grammar: the
+    // verdict the controller reads is the prefix — a loopback, never a terminal
+    // reject — and the human's note rides behind it for the re-run's
+    // readGateResolutionNote instead of being discarded.
+    expect(item.resolution).toBe('revise: the spend screen has no way back to Home');
+    expect(parseGateResolution(item.resolution)).toEqual({
+      verdict: 'revise',
+      note: 'the spend screen has no way back to Home',
+    });
     expect(item.payload).toMatchObject({
       kind: 'decision',
       resolvedOutcome: 'revise',

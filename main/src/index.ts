@@ -122,11 +122,11 @@ import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { DesignHandoffService } from './orchestrator/design/designHandoffService';
-import { GateSideEffects, gateDecisionFromResolution } from './orchestrator/gateSideEffects';
+import { GateSideEffects } from './orchestrator/gateSideEffects';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
-import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
+import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
 import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
@@ -195,15 +195,19 @@ import {
   addTaskToRun,
   removeTaskFromRun,
   editRunTask,
-  adjustRunTaskForLaneTriage,
   type TaskMutationDeps,
   type TaskMutationResult,
   type TaskMutationNoOpReason,
 } from './orchestrator/taskMutationHandler';
-import type {
-  LaneTriageAdjustResult,
-  LaneTriageTaskFacts,
-} from './orchestrator/programmatic/programmaticRunHost';
+import {
+  buildGateEscalationSinks,
+  buildLaneTriageActions,
+  buildMonitorFindingSink,
+  buildSetAsideFindingSink,
+  type GateEscalationSinks,
+  type LaneTriageActions,
+  type MonitorActionSinkDeps,
+} from './orchestrator/monitorActionSinks';
 import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
@@ -273,6 +277,7 @@ import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
+import { readRunDigest } from './orchestrator/runDigestReader';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -551,28 +556,16 @@ interface MonitorSteeringActions {
 let monitorSteeringActions: MonitorSteeringActions | null = null;
 
 /**
- * Composition-root collaborators for AUTONOMOUS LANE TRIAGE (the monitor rescuing
- * a sprint fan-out lane that exhausted its automatic budget — see
- * `ProgrammaticRunHost.triageLaneFailure`).
- *
- * Late-bound in a holder for the same reason `monitorSteeringActions` is: the
- * DefaultProgrammaticRunner is constructed EARLY in initializeServices, while the
- * `TaskMutationDeps` / review-queue seams these actions reuse are built in a
- * later nested block — and reusing THOSE objects (rather than minting parallel
- * ones) is the point, so every backlog write still lands on the TaskChangeRouter
- * chokepoint and every audit note on the same ReviewItemRouter seam the monitor's
- * `fileNote` action uses. Null until that block runs ⇒ the host behaves exactly
- * as it does with no lane triage wired (give_up), which is the safe default.
+ * Composition-root collaborators for the monitor's AUTONOMOUS actions — lane
+ * triage, the supervised review loop, the gate escalation review. Built in
+ * `monitorActionSinks.ts` (see its header); late-bound like
+ * `monitorSteeringActions`, and null until that block runs ⇒ the host behaves
+ * exactly as it does with nothing wired, which is the safe default.
  */
-interface LaneTriageActions {
-  /** Enrich a bare fan-out item id with the task's ref/title/current body. */
-  readTask(runId: string, itemId: string): LaneTriageTaskFacts | undefined;
-  /** Apply the monitor's `adjust_and_retry` body replacement (a refusal is ok:false). */
-  adjustTask(runId: string, input: { taskRef: string; body: string }): Promise<LaneTriageAdjustResult>;
-  /** File the non-blocking audit record for one autonomous rescue. */
-  fileFinding(runId: string, input: { title: string; body: string }): Promise<void>;
-}
 let laneTriageActions: LaneTriageActions | null = null;
+let monitorFindingSink: ReturnType<typeof buildMonitorFindingSink> | null = null;
+let setAsideFindingSink: ReturnType<typeof buildSetAsideFindingSink> | null = null;
+let gateEscalationSinks: GateEscalationSinks | null = null;
 /** Fallback when a steering action fires before the dep-wiring block ran. */
 const STEERING_NOT_WIRED: MonitorActionResult = {
   ok: false,
@@ -2753,38 +2746,11 @@ async function initializeServices(): Promise<boolean> {
       report: (runId, stepId, status) =>
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
     },
-    gate: new ReviewQueueHumanGate(
-      // The opener is HumanStepManager plus ONE extra hook. `onGateResolved` is
-      // awaited inside ReviewQueueHumanGate.settleResumed BEFORE the gate promise
-      // resolves — the single seam the controller genuinely waits on, which is why
-      // the design bind lands here rather than after resolveReviewItem returns.
-      // Anything hung off the resolve would race the resumed walk: the review-item
-      // router's 'resolved' emit fires synchronously inside it and is what wakes
-      // the gate, so by the time the resolve returns the next step is already
-      // spawning and its `cyboflow_get_task` may see no approved_design at all.
-      // GateSideEffects.apply is idempotent and never throws, so awaiting it here
-      // can never hang a run at a gate the human already answered.
-      {
-        openHumanGate: (runId, stepId, stepName, gateHeader) =>
-          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName, gateHeader),
-        findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
-        maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
-        onGateResolved: (args) =>
-          GateSideEffects.getInstance().apply({
-            runId: args.runId,
-            stepId: args.stepId,
-            // The opener reports the raw resolution note; the same sniff the
-            // controller's own parseGateVerdict uses turns it into the verdict. A
-            // DISMISSED gate is a rejection (the resolver itself maps it so) — its
-            // null note must never sniff to 'approve' and bind a declined design.
-            decision: args.dismissed ? 'reject' : gateDecisionFromResolution(args.resolution),
-            resolution: args.resolution,
-          }),
-      },
-      reviewItemChangeEvents,
-      reviewItemProjectChannel,
-      cyboflowLogger,
-    ),
+    gate: buildReviewQueueHumanGate({
+      events: reviewItemChangeEvents,
+      channelFor: reviewItemProjectChannel,
+      logger: cyboflowLogger,
+    }),
     // Per-step idea scope for programmatic prompts. The ownership projection
     // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
     // raw-prompt path picks up the idea its context step creates before optional
@@ -2920,29 +2886,28 @@ async function initializeServices(): Promise<boolean> {
       logger: cyboflowLogger,
     }),
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
-    // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
-    // planes into one token-frugal `MonitorSession` rendering in the run's existing
-    // Chat pane. ALWAYS ON for programmatic runs (the supervisor-role redesign,
-    // 2026-07-05 — the old `programmaticSupervisor` opt-in config is gone): the
-    // supervisor is a Q&A partner the human can query at ANY point in the run, and
-    // escalations surface in BOTH the chat and the human review queue rather than
-    // routing to one or the other. A `DefaultMonitorSession` over the real
-    // on-demand query fns (monitorQuery.ts) + a HistoryReader bound to cyboflowDb.
-    // The session reads the WHOLE run history ONLY when it must act (triage a
-    // failure / answer a human chat turn); it consumes zero tokens during routine
-    // progress. The run's `injectEvent` (threaded as the 2nd factory arg from the
-    // run context, Slice B) is owned by the session so its `converse` renders the
-    // human turn + the monitor's reply into the run's Chat pane (the tRPC
-    // `monitor.send` seam). The runner registers the session in MonitorRegistry so
-    // the router reaches it. NOT headlessly verifiable — it makes a real Claude
-    // call (monitorQuery.ts).
+    // human-seam plane, folding the old Stage 3 supervisor + supervisor-chat into
+    // one token-frugal `MonitorSession` in the run's existing Chat pane. ALWAYS ON
+    // for programmatic runs (supervisor-role redesign, 2026-07-05 — the old
+    // `programmaticSupervisor` opt-in is gone): the supervisor is a Q&A partner the
+    // human can query at ANY point, and escalations surface in BOTH the chat and
+    // the review queue. A `DefaultMonitorSession` over the real on-demand query fns
+    // (monitorQuery.ts) + a HistoryReader bound to cyboflowDb; it reads the WHOLE
+    // history ONLY when it must act, and costs zero tokens during routine progress.
+    // The run's `injectEvent` (2nd factory arg, from the run context — Slice B) is
+    // owned by the session so `converse` renders both sides of an exchange into the
+    // Chat pane (the tRPC `monitor.send` seam); the runner registers the session in
+    // MonitorRegistry so the router reaches it. NOT headlessly verifiable — it
+    // makes a real Claude call.
     monitorFactory: ((): ((
       ctx: MonitorContext,
       injectEvent: (event: ClaudeStreamEvent) => void,
     ) => MonitorSession | undefined) => {
       const structuredQuery = makeSdkStructuredQuery(claudeExecutablePath, cyboflowLogger);
       const textQuery = makeSdkTextQuery(claudeExecutablePath, cyboflowLogger);
-      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
+      // 3rd arg = the RUN-DELIVERABLES reader (CR-6): what this run produced,
+      // folded into the gate + review-loop prompts.
+      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger, (r) => readRunDigest(cyboflowDb, r, cyboflowLogger));
       // Also published to the module-scoped buildMonitorSession holder so the
       // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
       // byte-identical sessions when reviving a run's chat after an app restart.
@@ -3212,10 +3177,7 @@ async function initializeServices(): Promise<boolean> {
     // ── Autonomous LANE TRIAGE (monitor lane rescue) ────────────────────────
     // All three route through the late-bound `laneTriageActions` holder so they
     // reuse the SAME TaskMutationDeps / ReviewItemRouter seams the monitor's chat
-    // actions use (built in a later block — see the holder's docblock). Unwired
-    // (before that block, or if it never ran) each degrades to the no-lane-triage
-    // posture: no task facts, a refused adjust (⇒ the host downgrades to a plain
-    // rescue), and a dropped audit note (⇒ the rescue still proceeds).
+    // actions use. Unwired, each degrades to the no-lane-triage posture.
     laneTriageTaskReader: (runId, itemId) => laneTriageActions?.readTask(runId, itemId),
     laneTriageAdjustTask: (runId, input) =>
       laneTriageActions
@@ -3223,6 +3185,17 @@ async function initializeServices(): Promise<boolean> {
         : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
+    // ── SUPERVISED REVIEW LOOP (monitor steering each automatic design lap) ──
+    // Same late-bound posture: unwired, BOTH reject — the host then abandons a
+    // supervisor resolve, and keeps a set-aside entry in the lap (never dropped).
+    monitorFindingSink: (runId, input) =>
+      monitorFindingSink ? monitorFindingSink(runId, input) : Promise.reject(new Error('monitor finding sink not wired yet')),
+    setAsideFindingSink: (runId, input) =>
+      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.reject(new Error('set-aside finding sink not wired yet')),
+    // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
+    // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
+    // recommendation, i.e. today's card exactly.
+    escalationSinks: () => gateEscalationSinks,
     // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
     // closure the scheduler's §3.2 degrade gate and the health panel's badge use
     // — there must never be a third reading of `verify_runbook_local.status`.
@@ -5030,69 +5003,25 @@ app.whenReady().then(async () => {
     };
     console.log('[Main] monitor steering actions wired');
 
-    // Autonomous LANE-TRIAGE collaborators (the monitor rescuing a sprint lane
-    // that exhausted its automatic budget). Deliberately built HERE, alongside the
-    // steering actions, so all three reuse the objects those actions already
-    // route through: the SAME `taskMutationDeps` (⇒ TaskChangeRouter chokepoint),
-    // the SAME review-queue seam `fileNote` uses, and the SAME run→project
-    // resolution. Consumed by the DefaultProgrammaticRunner deps above through the
-    // `laneTriageActions` holder.
-    laneTriageActions = {
-      // The controller only ever holds opaque fan-out item ids; the host needs the
-      // task's ref/title/CURRENT body to ask the monitor whether the acceptance
-      // criteria conflict with repo reality. Fail-soft (the consult still runs
-      // with an empty body — it just cannot end in an adjust).
-      readTask: (_runId, itemId) => {
-        try {
-          const task = selectTaskById(db, itemId);
-          if (!task) return undefined;
-          return {
-            ...(task.ref ? { taskRef: task.ref } : {}),
-            ...(task.title ? { taskTitle: task.title } : {}),
-            ...(task.body ? { taskBody: task.body } : {}),
-          };
-        } catch (err) {
-          loggerLike.warn('[Main] lane-triage task read failed (fail-soft)', {
-            itemId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return undefined;
-        }
-      },
-      // The monitor's AUTONOMOUS requirements adjustment. adjustRunTaskForLaneTriage
-      // is body-only and deliberately bypasses edit_task's queued-only lane guard
-      // (safe because lane prompts re-read the body per spawn and the host always
-      // pairs the edit with a lane rewind) — but it still routes through the SAME
-      // TaskChangeRouter chokepoint via the SAME deps object edit_task uses. A
-      // refusal is reported with the same human-readable text the chat action
-      // would show, so the host's downgrade note and the audit finding read alike.
-      adjustTask: async (runId, input) => {
-        const result = await adjustRunTaskForLaneTriage(runId, input, taskMutationDeps);
-        if (result.ok) return { ok: true };
-        return { ok: false, reason: mapTaskResult(result).message };
-      },
-      // Non-blocking audit record for one autonomous rescue — the SAME
-      // ReviewItemRouter create the monitor's fileNote action performs, filed as a
-      // 'finding' (a record to review, not a chore to do) sourced 'monitor'. Never
-      // blocking: nothing merges without the run's existing human gate anyway, and
-      // a rescue that PARKED the run would defeat the point of self-healing.
-      fileFinding: async (runId, input) => {
-        const projectId = runProjectId(runId);
-        if (projectId === undefined) return;
-        await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-          op: 'create',
-          actor: 'orchestrator',
-          kind: 'finding',
-          title: input.title,
-          body: input.body,
-          severity: 'info',
-          blocking: false,
-          source: 'monitor',
-          runId,
-        });
-      },
+    // Autonomous MONITOR-ACTION sinks (lane rescue, review-loop steering, gate
+    // escalation). Built HERE, alongside the steering actions, so all of them
+    // reuse the SAME `taskMutationDeps`, review-queue chokepoint and run→project
+    // resolution those actions route through. Logic: monitorActionSinks.ts.
+    const monitorActionSinkDeps: MonitorActionSinkDeps = {
+      db,
+      runProjectId,
+      applyReviewItem: (projectId, change) =>
+        ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+      awaitProjectWritesSettled: (projectId) => ReviewItemRouter.getInstance().awaitProjectWritesSettled(projectId),
+      taskMutations: taskMutationDeps,
+      describeTaskFailure: (result) => mapTaskResult(result).message,
+      logger: loggerLike,
     };
-    console.log('[Main] monitor lane-triage actions wired');
+    laneTriageActions = buildLaneTriageActions(monitorActionSinkDeps);
+    monitorFindingSink = buildMonitorFindingSink(monitorActionSinkDeps);
+    setAsideFindingSink = buildSetAsideFindingSink(monitorActionSinkDeps);
+    gateEscalationSinks = buildGateEscalationSinks(monitorActionSinkDeps);
+    console.log('[Main] monitor action sinks wired');
 
     // Lazy monitor rehydration: after an app restart the in-process
     // MonitorRegistry is empty, and boot recovery only re-drives

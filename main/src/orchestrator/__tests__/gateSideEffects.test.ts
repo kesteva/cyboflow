@@ -197,6 +197,18 @@ describe('gateDecisionFromResolution', () => {
     expect(gateDecisionFromResolution('   ')).toBe('approve');
     expect(gateDecisionFromResolution(undefined)).toBe('approve');
   });
+
+  it('reads the anchored verdict prefix without sniffing the note', () => {
+    // Same contract (and same bug) as parseGateVerdict: the note after the colon
+    // is the human's words, never a verdict source. 'rejects' in it must NOT end
+    // the run.
+    expect(gateDecisionFromResolution('revise: the architecture rejects empty input')).toBe('revise');
+    expect(gateDecisionFromResolution('approve[no-findings]')).toBe('approve');
+    expect(gateDecisionFromResolution('reject: retry later if you must')).toBe('reject');
+    expect(gateDecisionFromResolution('REVISE')).toBe('revise');
+    // Legacy rows keep the sniff.
+    expect(gateDecisionFromResolution('please revise this')).toBe('revise');
+  });
 });
 
 describe('GateSideEffects.apply — launch + approve-ideas', () => {
@@ -345,6 +357,46 @@ describe('GateSideEffects.apply — accepted-risk findings', () => {
       category: 'design-review',
       proposedTarget: 'backlog',
     });
+  });
+
+  it('a plain approve files the findings; approve[no-findings] binds but files none', async () => {
+    // The approve-design gate's THIRD choice ("Continue without logging"). The
+    // design is still approved — the bind must happen — but the human explicitly
+    // said not to carry the surviving entries, so nothing is filed.
+    const plain = setup();
+    const plainIdea = await makeIdea(plain, 'Idea');
+    seedRun(plain, 'run-a', 'planner', plainIdea.id);
+    seedPrototype(plain, 'run-a');
+    seedArtifact(plain, 'run-a', 'adversarial-review', { markdown: REVIEW_DOC });
+    GateSideEffects.initialize(makeDeps(plain));
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-a',
+      stepId: 'approve-design',
+      decision: 'approve',
+      resolution: 'approve',
+    });
+    expect(adversarialFindings(plain, 'run-a')).toHaveLength(2);
+
+    const quiet = setup();
+    const quietIdea = await makeIdea(quiet, 'Idea');
+    seedRun(quiet, 'run-b', 'planner', quietIdea.id);
+    seedPrototype(quiet, 'run-b');
+    seedArtifact(quiet, 'run-b', 'adversarial-review', { markdown: REVIEW_DOC });
+    GateSideEffects.initialize(makeDeps(quiet));
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-b',
+      stepId: 'approve-design',
+      decision: 'approve',
+      resolution: 'approve[no-findings]: dropping the nits',
+    });
+
+    expect(adversarialFindings(quiet, 'run-b')).toEqual([]);
+    // ...and the design IS bound — this is an approve, not a rejection.
+    expect(
+      (quiet.db.prepare('SELECT COUNT(*) AS n FROM approved_designs WHERE idea_id = ?').get(quietIdea.id) as {
+        n: number;
+      }).n,
+    ).toBe(1);
   });
 
   it('files nothing when the run has no adversarial-review artifact', async () => {

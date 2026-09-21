@@ -101,6 +101,24 @@ describe('useReviewItemActions', () => {
     });
   });
 
+  it('resolve forwards the verdict modifier alongside the outcome', async () => {
+    // The server composes 'approve[no-findings]' from the pair, so dropping the
+    // modifier here would silently turn a no-findings approval into a plain one.
+    mockResolve.mockResolvedValue({ reviewItemId: 'rvw_mod', resumed: true });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    await act(async () => {
+      await result.current.resolve(3, 'rvw_mod', { outcome: 'approve', modifier: 'no-findings' });
+    });
+
+    expect(mockResolve).toHaveBeenCalledWith({
+      projectId: 3,
+      reviewItemId: 'rvw_mod',
+      outcome: 'approve',
+      modifier: 'no-findings',
+    });
+  });
+
   it('resolve forwards the resolving surface alongside an outcome (TASK-222 post-mortem trail)', async () => {
     mockResolve.mockResolvedValue({ reviewItemId: 'rvw_gs', resumed: true });
     const { result } = renderHook(() => useReviewItemActions());

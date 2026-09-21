@@ -255,6 +255,97 @@ describe('ReviewItemCard', () => {
     expect(mockDismiss).not.toHaveBeenCalled();
   });
 
+  it('the approve-design gate offers a revise note, and only there', () => {
+    // The textarea belongs to the revision loop: it is the human's chance to say
+    // "only AR-2 matters". A generic gate has no such loop, so it never renders
+    // it; the QUEUE surface renders the same approve-design pair (TASK-222 checks
+    // it before usesDefaultActions), so the note is there too.
+    const { rerender } = render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    expect(screen.getByTestId('design-gate-note')).toHaveAttribute(
+      'placeholder',
+      'Optional: what to change — e.g. only AR-2 matters, drop AR-11',
+    );
+
+    rerender(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_plan_n', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="session"
+      />,
+    );
+    expect(screen.queryByTestId('design-gate-note')).not.toBeInTheDocument();
+
+    rerender(
+      <ReviewItemCard
+        item={makeItem('decision', {
+          id: 'rvw_note_q',
+          blocking: true,
+          source: 'gate:human-step:approve-design',
+          run_id: 'run_1',
+        })}
+        surface="queue"
+      />,
+    );
+    expect(screen.getByTestId('design-gate-note')).toBeInTheDocument();
+  });
+
+  it("sends the typed note alongside outcome=revise, and nothing when it is blank", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note_send', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    fireEvent.change(screen.getByTestId('design-gate-note'), {
+      target: { value: '  only AR-2 matters, drop AR-11  ' },
+    });
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_send',
+        outcome: 'revise',
+        resolution: 'only AR-2 matters, drop AR-11',
+        surface: 'session',
+      }),
+    );
+
+    // Approve never carries the note — it is guidance for a RE-RUN.
+    mockResolve.mockClear();
+    fireEvent.click(screen.getByTestId('decision-resolve'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_send',
+        outcome: 'approve',
+        surface: 'session',
+      }),
+    );
+  });
+
+  it('an empty note sends no resolution at all (the stored verdict stays bare)', async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_note_empty', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    fireEvent.change(screen.getByTestId('design-gate-note'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_note_empty',
+        outcome: 'revise',
+        surface: 'session',
+      }),
+    );
+  });
+
   it('the approve-design gate also relabels by PAYLOAD when minted on the orchestrated plane (no gate:human-step source)', () => {
     render(
       <ReviewItemCard
@@ -899,6 +990,252 @@ describe('ReviewItemCard', () => {
     render(<ReviewItemCard item={item} />);
     expect(screen.getByTestId('approve-ideas-resolved')).toHaveTextContent('Decisions submitted');
     expect(screen.queryByTestId('decision-review-ideas')).not.toBeInTheDocument();
+  });
+
+  // -- Supervisor recommendation chip --------------------------------------
+  //
+  // The monitor's advice lives INSIDE the body as a `## Supervisor recommendation`
+  // section (the router's `annotate` op), so the chip is a pure function of the
+  // body and must render on BOTH surfaces — the queue row is where a human
+  // triaging their inbox sees it first.
+
+  it.each([['queue'], ['session']] as const)('renders the supervisor chip on the %s surface', (surface) => {
+    const item = makeItem('decision', {
+      id: 'rvw_rec',
+      blocking: true,
+      body: 'The gate body.\n\n## Supervisor recommendation\n\nRecommended: rerun — AR-2 is still unaddressed\n',
+    });
+    render(<ReviewItemCard item={item} surface={surface} />);
+    const chip = screen.getByTestId('supervisor-recommendation');
+    // The chip shows the BUTTON COPY, not the raw choice word.
+    expect(chip).toHaveTextContent('Supervisor recommends: Rerun planning with findings');
+    expect(chip).toHaveAttribute('data-choice', 'rerun');
+  });
+
+  it('maps each choice to its button copy', () => {
+    const cases: Array<[string, string]> = [
+      ['approve', 'Approve'],
+      ['reject', 'Reject'],
+      ['continue', 'Continue, log as findings'],
+      ['dismiss', 'Continue without logging'],
+    ];
+    for (const [choice, label] of cases) {
+      const { unmount } = render(
+        <ReviewItemCard
+          item={makeItem('decision', {
+            id: `rvw_${choice}`,
+            body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
+          })}
+        />,
+      );
+      expect(screen.getByTestId('supervisor-recommendation')).toHaveTextContent(`Supervisor recommends: ${label}`);
+      unmount();
+    }
+  });
+
+  it('renders no chip when the body carries no section, a malformed one, or nothing at all', () => {
+    for (const body of [
+      null,
+      'Just the gate body.',
+      // A `Recommended:` line OUTSIDE the section must never emphasize anything.
+      'Recommended: reject — the reviewer quoting itself\n\n## Findings\n\nAR-1\n',
+      '## Supervisor recommendation\n\nprose with no machine line\n',
+    ]) {
+      const { unmount } = render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_none', body })} />);
+      expect(screen.queryByTestId('supervisor-recommendation')).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  // -- "Continue without logging" + recommendation-driven emphasis ------------
+  //
+  // The approve-design gate's THIRD choice, and the only place the supervisor's
+  // advice becomes actionable rather than informational: the recommended button
+  // is the primary one.
+
+  /** The approve-design gate item, optionally annotated with a recommendation. */
+  function designGateItem(id: string, choice?: string): ReviewItem {
+    return makeItem('decision', {
+      id,
+      blocking: true,
+      source: 'gate:human-step:approve-design',
+      ...(choice !== undefined
+        ? { body: `The gate body.\n\n## Supervisor recommendation\n\nRecommended: ${choice} — because\n` }
+        : {}),
+    });
+  }
+
+  /**
+   * The ORCHESTRATED plane's approve-design item: discoverable only by payload,
+   * with an `agent:<label>` source. The server refuses the `no-findings`
+   * modifier on it, so it keeps the two-button shape.
+   */
+  function payloadDesignGateItem(id: string): ReviewItem {
+    return makeItem(
+      'decision',
+      { id, blocking: true, source: 'agent:planner' },
+      { kind: 'decision', gate: 'approve-design' } as unknown as ReviewItemPayload,
+    );
+  }
+
+  /** The class list is the only observable of a Button's variant. */
+  function isPrimary(el: HTMLElement): boolean {
+    return el.className.includes('bg-interactive');
+  }
+
+  it('renders THREE buttons in-session for the approve-design gate', () => {
+    render(<ReviewItemCard item={designGateItem('rvw_d3')} surface="session" />);
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+    expect(screen.getByTestId('decision-continue-no-findings')).toHaveTextContent('Continue without logging');
+  });
+
+  it('offers NO third button on a plain decision gate', () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_plain3', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="session"
+      />,
+    );
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
+  });
+
+  it('"Continue without logging" resolves approve WITH the no-findings modifier', async () => {
+    render(<ReviewItemCard item={designGateItem('rvw_nf')} surface="session" />);
+    fireEvent.click(screen.getByTestId('decision-continue-no-findings'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_nf',
+        outcome: 'approve',
+        modifier: 'no-findings',
+        surface: 'session',
+      }),
+    );
+  });
+
+  it('emphasizes the recommended button and demotes the others', () => {
+    const cases: Array<[string, string]> = [
+      ['continue', 'decision-resolve'],
+      ['rerun', 'decision-reject'],
+      ['dismiss', 'decision-continue-no-findings'],
+    ];
+    const all = ['decision-resolve', 'decision-reject', 'decision-continue-no-findings'];
+    for (const [choice, expected] of cases) {
+      const { unmount } = render(
+        <ReviewItemCard item={designGateItem(`rvw_emph_${choice}`, choice)} surface="session" />,
+      );
+      for (const id of all) {
+        expect(isPrimary(screen.getByTestId(id))).toBe(id === expected);
+      }
+      unmount();
+    }
+  });
+
+  it('keeps today’s emphasis (approve primary) when there is no recommendation', () => {
+    render(<ReviewItemCard item={designGateItem('rvw_noemph')} surface="session" />);
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(false);
+    expect(isPrimary(screen.getByTestId('decision-continue-no-findings'))).toBe(false);
+  });
+
+  const plainGateItem = (id: string, choice: string): ReviewItem =>
+    makeItem('decision', {
+      id,
+      blocking: true,
+      source: 'gate:human-step:approve-plan',
+      body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
+    });
+
+  it('emphasizes Reject for a reject recommendation on a plain gate', () => {
+    render(<ReviewItemCard item={plainGateItem('rvw_plain_reject', 'reject')} surface="session" />);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(false);
+  });
+
+  it('renders NO chip and keeps today’s emphasis for a stale `revise` on a plain gate', () => {
+    // CX-3: a plain gate has no Revise control and its Reject ENDS the run, so
+    // `revise` is off the vocabulary — it must not parse, and must not push the
+    // human at the destructive button.
+    render(<ReviewItemCard item={plainGateItem('rvw_plain_revise', 'revise')} surface="session" />);
+    expect(screen.queryByTestId('supervisor-recommendation')).toBeNull();
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(false);
+  });
+
+  it('the QUEUE surface offers the same three approve-design controls — no default discard can reject the run', async () => {
+    // TASK-222 renders the approve-design pair on every surface (checked before
+    // usesDefaultActions), so the queue gets the third choice too, and the
+    // run-ending default discard is not reachable for this gate at all.
+    render(<ReviewItemCard item={designGateItem('rvw_q_design')} surface="queue" />);
+    expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+
+    fireEvent.click(screen.getByTestId('decision-continue-no-findings'));
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_q_design',
+        outcome: 'approve',
+        modifier: 'no-findings',
+        surface: 'queue',
+      }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('offers NO third button on the PAYLOAD-discriminated approve-design item', () => {
+    // The orchestrated plane mints this one with source 'agent:<label>'. The
+    // server admits `approve[no-findings]` only on the singular
+    // 'gate:human-step:approve-design' source, so offering the button here would
+    // hand the human a control whose resolve is refused.
+    render(<ReviewItemCard item={payloadDesignGateItem('rvw_orch_nf')} surface="session" />);
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+    expect(screen.getByTestId('design-gate-note')).toBeInTheDocument();
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
+  });
+
+  it('the PAYLOAD-discriminated approve-design item on the QUEUE renders the pair without the third button, and its decline is a revise', async () => {
+    render(<ReviewItemCard item={payloadDesignGateItem('rvw_orch_q')} surface="queue" />);
+    expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('decision-reject'));
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_orch_q',
+        outcome: 'revise',
+        surface: 'queue',
+      }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('the QUEUE discard on every OTHER decision gate still rejects', async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_q_other', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="queue"
+      />,
+    );
+    const discard = screen.getByTestId('default-dismiss');
+    expect(discard).toHaveTextContent('Dismiss');
+
+    fireEvent.click(discard);
+
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_q_other',
+        outcome: 'reject',
+        surface: 'queue',
+      }),
+    );
   });
 
   // -- TASK-277: eval-sourced finding triage --------------------------------

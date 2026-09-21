@@ -5,13 +5,16 @@
  * (ordering, retries, intra-phase loopback budget, optional-skip, human gates,
  * terminal outcomes) without any SDK / DB / Electron dependency.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { WorkflowController, MAX_STEP_LOOPBACKS, MAX_VISUAL_LOOPBACKS } from '../workflowController';
 import { createRunDirectives } from '../runDirectives';
 import type {
   ControllerHost,
+  ControllerStepContext,
   FanOutDriver,
   HumanGateDecision,
+  ReviewLoopDecision,
+  ReviewLoopRequest,
   StepRunResult,
   StepRunner,
   SupervisorEvent,
@@ -315,6 +318,76 @@ describe('WorkflowController', () => {
     // The optional-skip path reports 'skipped' for 'a' (then 'b' running → done).
     expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
     expect(host.reports.some((r) => r.id === 'a' && r.status === 'done')).toBe(false);
+    // No triage seam on this host ⇒ no consult at all (the pre-item-7 behaviour).
+  });
+
+  // ── OPTIONAL-step failure consult (item 7D) ────────────────────────────────
+  // An optional failure used to be silent. It now gets ONE supervised retry;
+  // every other verdict — and every fail-soft path — skips exactly as before.
+
+  it('gives a failing OPTIONAL step ONE supervised retry, then skips on the second failure', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }, { status: 'failed', error: 'meh again' }] });
+    const host = makeHost();
+    const triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue('retry');
+    host.triageFailure = triageFailure;
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Two attempts of 'a' (the second is the supervised retry), then the skip.
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(2);
+    // The cap is ONE: the second failure is not consulted again.
+    expect(triageFailure).toHaveBeenCalledTimes(1);
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+    expect(result.steps[1]).toMatchObject({ stepId: 'b', outcome: 'done' });
+    // The granted retry closes the first attempt's boundary as 'done', not 'skipped'.
+    expect(host.reports).toContainEqual({ id: 'a', status: 'done' });
+    expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
+  });
+
+  it('completes the run when the supervised retry of an OPTIONAL step SUCCEEDS', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] }); // second attempt ok
+    const host = makeHost();
+    host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue('retry');
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // The supervised retry re-enters the step like a loopback jump does, so its
+    // in-place `attempt` counter restarts — the step reports 'done' on the retry.
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'done' });
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(2);
+  });
+
+  it("skips an OPTIONAL step on 'escalate' / 'fail' — no gate opens and the run never ends", async () => {
+    for (const decision of ['escalate', 'fail'] as const) {
+      const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] });
+      const host = makeHost();
+      host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockResolvedValue(decision);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+      expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(1);
+      expect(host.gateCalls).toEqual([]);
+    }
+  });
+
+  it('is fail-soft: a THROWING optional-step consult skips exactly as before the seam', async () => {
+    const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
+    const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] });
+    const host = makeHost();
+    host.triageFailure = vi.fn<() => Promise<TriageDecision>>().mockRejectedValue(new Error('triage boom'));
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+    expect(runner.calls.filter((c) => c.id === 'a')).toHaveLength(1);
   });
 
   it('loops back to an intra-phase target on failure, then completes after the rerun succeeds', async () => {
@@ -547,6 +620,29 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('failed');
       // 1 initial + MAX_STEP_LOOPBACKS triage retries.
       expect(runner.calls.filter((c) => c.id === 'a').length).toBe(MAX_STEP_LOOPBACKS + 1);
+    });
+
+    // FB-3: the host must know when a 'retry' verdict could not be honoured, so
+    // it does not narrate a re-drive the controller is about to discard.
+    it("tells the host whether a 'retry' is still spendable (retryAvailable)", async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: Array.from({ length: 50 }, () => ({ status: 'failed' as const })) });
+      const seen: Array<boolean | undefined> = [];
+      const host = makeTriageHost('retry', { a: ['approve'] });
+      host.triageFailure = async (_step, _ctx, _error, opts) => {
+        seen.push(opts?.retryAvailable);
+        // What the production host does on the last consult: no monitor query,
+        // straight to the gate.
+        return opts?.retryAvailable === false ? 'escalate' : 'retry';
+      };
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(seen).toEqual([...Array.from({ length: MAX_STEP_LOOPBACKS }, () => true), false]);
+      // The budget-exhausted consult opened the gate instead of failing silently.
+      expect(host.gateCalls).toEqual(['a']);
+      expect(result.outcome).toBe('completed');
+      expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
     });
 
     it("'escalate' triage opens a human gate; approve SKIPS the failed step and advances", async () => {
@@ -3350,7 +3446,10 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
   ].join('\n');
   const CLEAN_RESULT = 'Reported the adversarial review.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
 
-  type Seen = { id: string; gateRevision?: { gateStepId: string; note?: string; source?: string } };
+  type Seen = {
+    id: string;
+    gateRevision?: ControllerStepContext['gateRevision'];
+  };
 
   /** Scripted review results per adversarial-review turn; every other step is ok. */
   function reviewRunner(reviewResults: string[]): StepRunner & { seen: Seen[] } {
@@ -3388,21 +3487,72 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     // The gate opened exactly once, AFTER the revision round.
     expect(host.gateCalls).toEqual(['approve-design']);
     // First pass carries nothing; every re-run turn carries the review-sourced
-    // revision with the `## Blocking` section as its note.
+    // revision with the `## Blocking` section as its note — and, because this
+    // host publishes no artifact, the selected document is the reviewer's own
+    // text, which the revision carries so the re-run is not left with nothing.
     for (const turn of runner.seen.slice(0, 3)) expect(turn.gateRevision).toBeUndefined();
     for (const turn of runner.seen.slice(3, 6)) {
       expect(turn.gateRevision).toEqual({
         gateStepId: 'adversarial-review',
         source: 'adversarial-review',
+        // One review result has completed, so the re-run is about to write round 2.
+        round: 1,
         note: [
           '#### AR-1 — Spend screen has no way back',
           '**Severity:** blocker   **Area:** prototype',
           '**What:** no Home affordance.',
         ].join('\n'),
+        reviewMarkdown: BLOCKING_RESULT,
       });
     }
     // The gate's approve clears it: epics runs with no revision armed.
     expect(runner.seen[6].gateRevision).toBeUndefined();
+  });
+
+  it('counts one ROUND per completed review result and carries it into a later human revise', async () => {
+    // The round number is the reviewer's only anchor for id continuity, so it has
+    // to count EVERY completed review — the automatic lap's blocking one and the
+    // clean one after it — not just the laps (which stop at their cap).
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar-round', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // automatic lap after the blocking verdict
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // the human then revises the (clean) second round
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    // Lap: one review has completed, so the re-run writes round 2.
+    expect(runner.seen[3].gateRevision?.round).toBe(1);
+    expect(runner.seen[3].gateRevision?.source).toBe('adversarial-review');
+    // Human revise after the lap: two reviews have completed — round 3 next. The
+    // count is attributed to the phase's REVIEW step, not to the gate.
+    expect(runner.seen[6].gateRevision).toEqual({ gateStepId: 'approve-design', round: 2 });
+    expect(runner.seen[8].gateRevision?.round).toBe(2);
+    // Approve clears it.
+    expect(runner.seen[9].gateRevision).toBeUndefined();
+  });
+
+  it('omits the round on a gate whose phase has no adversarial-review step', async () => {
+    const noReview = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+
+    const result = await new WorkflowController(runner, host).run('run-ar-noreview', noReview);
+    expect(result.outcome).toBe('completed');
+    // The re-driven step learns WHICH gate sent it back and nothing more — no
+    // invented round.
+    expect(runner.seen[1].gateRevision).toEqual({ gateStepId: 'approve-design' });
   });
 
   it('falls through to the human gate when the second round is still blocking (bounded to one automatic lap)', async () => {
@@ -3443,6 +3593,89 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     expect(host.gateCalls).toEqual(['approve-design']);
   });
 
+  // ── Artifact fallback (the reviewer's chat text can simply be missing) ──────
+  /** The promoted, durable form the step agent reports as the run's artifact. */
+  const ARTIFACT_WITH_BLOCKERS = [
+    '# Adversarial review',
+    '',
+    '## Blocking',
+    '',
+    '#### AR-1 — Architecture names no data store',
+    '**Severity:** blocker   **Area:** architecture',
+    '**What:** the spec persists nothing.',
+    '',
+    '## Findings',
+    '',
+    'None.',
+  ].join('\n');
+
+  it('loops on the ARTIFACT when the review result text never arrived, quoting the artifact section', async () => {
+    // The turn completed but captured no final text (a substrate that drops the
+    // last message). The artifact is the durable half, so the blockers are still
+    // there — reading only the text would advance a phase the reviewer blocked.
+    const runner = reviewRunner(['', CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => ARTIFACT_WITH_BLOCKERS;
+
+    const result = await new WorkflowController(runner, host).run('run-ar-artifact', reviewDef());
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    expect(host.gateCalls).toEqual(['approve-design']);
+    // The quoted note comes from the ARTIFACT's `## Blocking` section.
+    expect(runner.seen[3].gateRevision).toEqual({
+      gateStepId: 'adversarial-review',
+      source: 'adversarial-review',
+      round: 1,
+      note: [
+        '#### AR-1 — Architecture names no data store',
+        '**Severity:** blocker   **Area:** architecture',
+        '**What:** the spec persists nothing.',
+      ].join('\n'),
+    });
+  });
+
+  it('an explicit REVIEW: CLEAN wins over an artifact that still carries blockers', async () => {
+    // The artifact is only consulted when the TEXT carries no verdict — a stale
+    // artifact from the previous round must never re-loop a cleared review.
+    const runner = reviewRunner([CLEAN_RESULT]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    const readArtifact = vi.fn(() => ARTIFACT_WITH_BLOCKERS);
+    host.readAdversarialReview = readArtifact;
+
+    await new WorkflowController(runner, host).run('run-ar-clean-wins', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+    expect(host.gateCalls).toEqual(['approve-design']);
+    expect(readArtifact).not.toHaveBeenCalled();
+  });
+
+  it('advances on empty text with no artifact, with an unreadable one, or with one that has no blockers', async () => {
+    // No seam at all — today's behaviour, byte for byte.
+    let runner = reviewRunner(['']);
+    let host = makeHost({ 'approve-design': ['approve'] });
+    await new WorkflowController(runner, host).run('run-ar-noartifact', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+    expect(host.gateCalls).toEqual(['approve-design']);
+
+    // A throwing reader is fail-soft: it reads as "no artifact", never as a crash.
+    runner = reviewRunner(['']);
+    host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => { throw new Error('db down'); };
+    const thrown = await new WorkflowController(runner, host).run('run-ar-artifact-throws', reviewDef());
+    expect(thrown.outcome).toBe('completed');
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+
+    // An artifact whose `## Blocking` is the `None.` placeholder is zero entries.
+    runner = reviewRunner(['']);
+    host = makeHost({ 'approve-design': ['approve'] });
+    host.readAdversarialReview = () => '## Blocking\n\nNone.\n\n## Findings\n\n#### AR-1 — nit\n';
+    await new WorkflowController(runner, host).run('run-ar-artifact-clean', reviewDef());
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(1);
+  });
+
   it('a FAILED optional review skips instead of taking its loopback edge', async () => {
     // The loopback exists for the verdict; a crashed reviewer must not re-run the
     // whole design phase.
@@ -3461,6 +3694,72 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     expect(host.reports.filter((r) => r.id === 'adversarial-review').map((r) => r.status)).toContain('skipped');
   });
 
+  it('a SKIPPED optional gate clears the armed revision instead of leaking it into the steps after it', async () => {
+    // The automatic lap arms a review-sourced revision for the re-driven region.
+    // If the gate that would have consumed it self-skips, the steps AFTER it must
+    // not keep receiving "a revision was requested" — nobody ever asked.
+    const skippableGateDef = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'ui-prototype', optional: true }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, optional: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost();
+    const withSkip: ControllerHost = {
+      ...host,
+      shouldSkipHumanGate: (s) => (s.id === 'approve-design' ? 'no design surface to review' : null),
+    };
+
+    const result = await new WorkflowController(runner, withSkip).run('run-ar-skip', skippableGateDef);
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual([]); // the gate never opened
+
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      // automatic lap after the blocking verdict
+      'expand-spec', 'ui-prototype', 'adversarial-review',
+      'epics',
+    ]);
+    // The lap's turns still carry the review-sourced revision…
+    for (const turn of runner.seen.slice(3, 6)) {
+      expect(turn.gateRevision?.source).toBe('adversarial-review');
+    }
+    // …and the skipped gate clears it before `epics`.
+    expect(runner.seen[6].gateRevision).toBeUndefined();
+  });
+
+  it('an OPERATOR-skipped gate clears the armed revision the same way', async () => {
+    // Same leak, other skip path: a RunDirectives skip of the gate step (monitor
+    // `skip_step`) also never opens it, so it must also answer the revision.
+    const skippableGateDef = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, optional: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+    const runner = reviewRunner([BLOCKING_RESULT, CLEAN_RESULT]);
+    const host = makeHost();
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('approve-design');
+
+    const result = await new WorkflowController(runner, host).run(
+      'run-ar-opskip', skippableGateDef, undefined, undefined, undefined, directives,
+    );
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual([]);
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'adversarial-review', 'expand-spec', 'adversarial-review', 'epics',
+    ]);
+    expect(runner.seen[2].gateRevision?.source).toBe('adversarial-review');
+    expect(runner.seen[4].gateRevision).toBeUndefined();
+  });
+
   it('a plain step with an on-failure loopback still ignores REVIEW: BLOCKING in its result', async () => {
     // The verdict routing is keyed on the adversarial-review AGENT, not on the
     // presence of `loopback`.
@@ -3475,5 +3774,635 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     const result = await new WorkflowController(runner, makeHost()).run('run-ar8', d);
     expect(result.outcome).toBe('completed');
     expect(seen).toEqual(['a', 'b']);
+  });
+});
+
+describe('WorkflowController — supervised adversarial-review loop (cap 3)', () => {
+  /**
+   * The same refine phase in miniature as the mechanical suite above, so the two
+   * differ ONLY in whether the host implements `adviseReviewLoop`.
+   */
+  function reviewDef(): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+  }
+
+  /** A review document with two blocking entries and one advisory finding. */
+  const REVIEW_DOC = [
+    'Reported the adversarial review.',
+    '',
+    '## Blocking',
+    '',
+    '#### AR-1 — Spend screen has no way back',
+    '**Severity:** blocker   **Area:** prototype',
+    '**What:** no Home affordance.',
+    '',
+    '#### AR-2 — No data store named',
+    '**Severity:** major   **Area:** architecture',
+    '**What:** the spec persists nothing.',
+    '',
+    '## Findings',
+    '',
+    '#### AR-3 — Copy nit',
+    '**Severity:** advisory',
+    '**What:** "Submit" should be "Save".',
+    '',
+    'REVIEW: BLOCKING',
+  ].join('\n');
+  const CLEAN_RESULT = 'Reported.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
+
+  type Seen = {
+    id: string;
+    gateRevision?: ControllerStepContext['gateRevision'];
+  };
+
+  function reviewRunner(reviewResults: string[]): StepRunner & { seen: Seen[] } {
+    const seen: Seen[] = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      async runStep(s, ctx) {
+        seen.push({ id: s.id, ...(ctx.gateRevision ? { gateRevision: ctx.gateRevision } : {}) });
+        if (s.id === 'adversarial-review') return { status: 'ok', resultText: queue.shift() ?? CLEAN_RESULT };
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  /**
+   * A host that records the full ctx of every gate call (so a test can assert
+   * `ctx.escalation`) and routes `adviseReviewLoop` to a scripted queue.
+   */
+  function supervisedHost(
+    decisions: Array<ReviewLoopDecision | undefined>,
+    gates: Record<string, HumanGateDecision[]> = {},
+  ): ControllerHost & {
+    gateCtxs: ControllerStepContext[];
+    requests: ReviewLoopRequest[];
+    gateCalls: string[];
+  } {
+    const queues: Record<string, HumanGateDecision[]> = {};
+    for (const [k, v] of Object.entries(gates)) queues[k] = [...v];
+    const scripted = [...decisions];
+    const gateCtxs: ControllerStepContext[] = [];
+    const requests: ReviewLoopRequest[] = [];
+    const gateCalls: string[] = [];
+    return {
+      gateCtxs,
+      requests,
+      gateCalls,
+      reportStep() {},
+      async requestHumanGate(s, ctx) {
+        gateCalls.push(s.id);
+        gateCtxs.push(ctx);
+        return queues[s.id]?.shift() ?? 'approve';
+      },
+      async adviseReviewLoop(req) {
+        requests.push(req);
+        return scripted.length > 0 ? scripted.shift() : undefined;
+      },
+    };
+  }
+
+  const LOOP: ReviewLoopDecision = {
+    verdict: 'loop',
+    rationale: 'both blockers are concrete and one lap can close them',
+    steering: {
+      address: ['AR-1'],
+      setAside: [{ id: 'AR-2', reason: 'the data store is a product call, not a defect' }],
+      guidance: 'add a Home affordance to the spend screen',
+    },
+  };
+
+  it('laps on a supervisor `loop`, threading the steering into every re-driven step', async () => {
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+
+    const result = await new WorkflowController(runner, host).run('run-loop', reviewDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec', 'adversarial-review',
+      'expand-spec', 'adversarial-review',
+      'epics',
+    ]);
+    expect(runner.seen[2].gateRevision?.steering).toEqual(LOOP.steering);
+    expect(runner.seen[2].gateRevision?.source).toBe('adversarial-review');
+    expect(runner.seen[2].gateRevision?.round).toBe(1);
+    // The gate opened once, AFTER the lap, and carries no escalation (nothing stopped).
+    expect(host.gateCalls).toEqual(['approve-design']);
+    expect(host.gateCtxs[0].escalation).toBeUndefined();
+  });
+
+  it('takes THREE supervised laps before the cap sends the round to the gate', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([LOOP, LOOP, LOOP, LOOP]);
+
+    await new WorkflowController(runner, host).run('run-cap', reviewDef());
+
+    expect(runner.seen.filter((s) => s.id === 'adversarial-review')).toHaveLength(4);
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(4);
+    // The 4th blocking round is over the cap: no consult is spent on it.
+    expect(host.requests).toHaveLength(3);
+    expect(host.requests.map((r) => r.lapsUsed)).toEqual([0, 1, 2]);
+    expect(host.requests.map((r) => r.maxLaps)).toEqual([3, 3, 3]);
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('a `stop` advances to the gate WITHOUT a lap and hands the gate its escalation', async () => {
+    const runner = reviewRunner([REVIEW_DOC]);
+    const host = supervisedHost([
+      {
+        verdict: 'stop',
+        rationale: 'the remaining blocker is a product decision the brief does not settle',
+        setAside: [{ id: 'AR-3', reason: 'copy nit, not worth a design lap' }],
+      },
+    ]);
+
+    await new WorkflowController(runner, host).run('run-stop', reviewDef());
+
+    // No lap: expand-spec ran exactly once.
+    expect(runner.seen.map((s) => s.id)).toEqual(['expand-spec', 'adversarial-review', 'epics']);
+    expect(host.gateCtxs[0].escalation).toEqual({
+      loopStopRationale: 'the remaining blocker is a product decision the brief does not settle',
+      setAsideIds: ['AR-3'],
+    });
+    // Consumed by that one gate — the step after it carries no revision at all.
+    expect(runner.seen[2].gateRevision).toBeUndefined();
+  });
+
+  it('falls back to ONE mechanical lap when the supervisor returns no verdict', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([undefined, undefined, undefined]);
+
+    await new WorkflowController(runner, host).run('run-mech', reviewDef());
+
+    // One lap (the mechanical budget), then the gate — cap 3 never applies.
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+    expect(runner.seen[2].gateRevision?.steering).toBeUndefined();
+    expect(host.gateCalls).toEqual(['approve-design']);
+  });
+
+  it('a THROWN consult is the mechanical path, not a failure', async () => {
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([]);
+    host.adviseReviewLoop = async () => {
+      throw new Error('monitor down');
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-throw', reviewDef());
+
+    expect(result.outcome).toBe('completed');
+    expect(runner.seen.filter((s) => s.id === 'expand-spec')).toHaveLength(2);
+  });
+
+  it('discards a verdict that arrives after the run was canceled', async () => {
+    const controller = new AbortController();
+    const runner = reviewRunner([REVIEW_DOC, REVIEW_DOC]);
+    const host = supervisedHost([]);
+    // The run is canceled WHILE the consult is in flight — the verdict is real
+    // but no longer actionable, so it must read as "no verdict" rather than
+    // steering a lap of a dead run.
+    host.adviseReviewLoop = async () => {
+      controller.abort();
+      return LOOP;
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-abort', reviewDef(), controller.signal);
+
+    expect(result.outcome).toBe('canceled');
+    expect(runner.seen.every((s) => s.gateRevision?.steering === undefined)).toBe(true);
+  });
+
+  it('grows priorRounds one entry per COMPLETED round, clean rounds included', async () => {
+    // Round 1 blocking (consulted with no prior rounds), round 2 clean, then a
+    // human revise re-runs the review for round 3 — which IS consulted, and must
+    // see both earlier rounds, the clean one with an empty id list.
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT, REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP], { 'approve-design': ['revise', 'approve'] });
+
+    await new WorkflowController(runner, host).run('run-prior', reviewDef());
+
+    expect(host.requests).toHaveLength(2);
+    expect(host.requests[0].round).toBe(1);
+    expect(host.requests[0].priorRounds).toEqual([]);
+    expect(host.requests[1].round).toBe(3);
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1', 'AR-2'], blockingTitles: ['Spend screen has no way back', 'No data store named'] },
+      { round: 2, blockingIds: [], blockingTitles: [] },
+    ]);
+  });
+
+  it('prefers the ARTIFACT for the request’s markdown/parse even when the verdict came from the text', async () => {
+    // The reviewer's final message carries only `## Blocking`, so a text-only
+    // parse has no `findings` at all — and the supervisor could then never
+    // validate a set-aside id that lives under `## Findings`.
+    const textOnly = ['## Blocking', '', '#### AR-1 — a defect', '**What:** x', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '# Adversarial review',
+      '',
+      '## Blocking',
+      '',
+      '#### AR-1 — a defect',
+      '**What:** x',
+      '',
+      '## Findings',
+      '',
+      '#### AR-4 — advisory only',
+      '**What:** y',
+    ].join('\n');
+    const runner = reviewRunner([textOnly, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+    host.readAdversarialReview = () => artifact;
+
+    await new WorkflowController(runner, host).run('run-artifact-pref', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-4']);
+    expect(host.requests[0].loopbackStepId).toBe('expand-spec');
+    expect(host.requests[0].stepId).toBe('adversarial-review');
+  });
+
+  it('falls back to the reviewer’s WHOLE captured text when the run has no artifact', async () => {
+    // Not the extracted `## Blocking` slice: the slice is what a re-run's prompt
+    // quotes, while the supervisor is deciding whether to SPEND a lap and needs
+    // everything the reviewer said — including a `## Findings` entry it may set
+    // aside. `supervisedHost` wires no `readAdversarialReview` at all.
+    const runner = reviewRunner([REVIEW_DOC, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+
+    await new WorkflowController(runner, host).run('run-text-fallback', reviewDef());
+
+    expect(host.requests).toHaveLength(1);
+    expect(host.requests[0].reviewMarkdown).toBe(REVIEW_DOC);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-3']);
+  });
+
+  // ── CX-4 / FB-6: one document per round, and never a stale one ─────────────
+  it('steers from the TEXT when the artifact still carries the previous round’s blocking set', async () => {
+    // Round 2's `cyboflow_report_artifact` failed (or lagged), so the artifact
+    // still holds round 1's AR-1 while the reviewer's text raised AR-2. Handing
+    // the supervisor the artifact steers THIS round's lap at LAST round's defect.
+    // Round 1 is the control: the two id sets agree, so the artifact wins there.
+    const round1Text = ['## Blocking', '', '#### AR-1 — first defect', '**What:** x', '', 'REVIEW: BLOCKING'].join('\n');
+    const round1Artifact = [
+      '## Blocking', '', '#### AR-1 — first defect', '**What:** x', '',
+      '## Findings', '', '#### AR-9 — a nit', '**What:** y',
+    ].join('\n');
+    const round2Text = ['## Blocking', '', '#### AR-2 — second defect', '**What:** z', '', 'REVIEW: BLOCKING'].join('\n');
+    const runner = reviewRunner([round1Text, round2Text, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP]);
+    host.readAdversarialReview = () => round1Artifact; // never updated for round 2
+
+    await new WorkflowController(runner, host).run('run-stale-artifact', reviewDef());
+
+    // Round 1: the ids agree ⇒ the artifact (the only document with `## Findings`).
+    expect(host.requests[0].reviewMarkdown).toBe(round1Artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-9']);
+    // Round 2: the sets disagree ⇒ the reviewer's own text.
+    expect(host.requests[1].reviewMarkdown).toBe(round2Text);
+    expect(host.requests[1].parsed.blocking.map((e) => e.id)).toEqual(['AR-2']);
+    // ...and the ledger that consult reads describes round 1's SELECTED document.
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1'], blockingTitles: ['first defect'] },
+    ]);
+    // The current-artifact lap carries nothing (the re-run reads the artifact
+    // itself, byte-identical to before); the stale-artifact lap carries the text.
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
+    expect(runner.seen[4].gateRevision?.reviewMarkdown).toBe(round2Text);
+  });
+
+  it('uses the artifact when it carries THIS round’s blocking set, and leaves the lap’s revision bare', async () => {
+    const text = ['## Blocking', '', '#### AR-2 — the defect', '**What:** z', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '## Blocking', '', '#### AR-2 — the defect', '**What:** z', '',
+      '## Findings', '', '#### AR-5 — advisory only', '**What:** y',
+    ].join('\n');
+    const readArtifact = vi.fn<() => string | undefined>(() => artifact);
+    const runner = reviewRunner([text, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+    host.readAdversarialReview = readArtifact;
+
+    await new WorkflowController(runner, host).run('run-artifact-current', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-5']);
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
+    // Exactly one read — the blocking round's. The CLEAN round that ends the loop
+    // selects no document at all, so it costs no artifact read.
+    expect(readArtifact).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the ARTIFACT — and its ids in the round ledger — when a BLOCKING trailer has no entries', async () => {
+    // `REVIEW: BLOCKING` over a `None.` section: there is nothing to compare, and
+    // the text holds nothing the artifact does not. Pushing the TEXT parse into
+    // the ledger would record "round 1: no blocking entries" for a round the
+    // artifact says had three, misrepresenting the trend to the next consult.
+    const trailerOnly = ['## Blocking', '', 'None.', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '## Blocking', '',
+      '#### AR-1 — one', '**What:** a', '',
+      '#### AR-2 — two', '**What:** b', '',
+      '#### AR-3 — three', '**What:** c',
+    ].join('\n');
+    const runner = reviewRunner([trailerOnly, trailerOnly, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP]);
+    host.readAdversarialReview = () => artifact;
+
+    await new WorkflowController(runner, host).run('run-trailer-only', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.blocking.map((e) => e.id)).toEqual(['AR-1', 'AR-2', 'AR-3']);
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1', 'AR-2', 'AR-3'], blockingTitles: ['one', 'two', 'three'] },
+    ]);
+    // The artifact IS the current document ⇒ nothing is carried on the lap.
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
+  });
+
+  it('an OPERATOR-skipped gate disarms the escalation a `stop` armed', async () => {
+    // The skipped gate WAS that escalation's presentation — the walk reached it
+    // and moved on — so the NEXT gate must not inherit "the supervisor stopped
+    // the review loop" as if it were about itself.
+    const twoGates = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+        step({ id: 'approve-plan', agent: 'human', human: true }),
+      ]),
+    ]);
+    const runner = reviewRunner([REVIEW_DOC]);
+    const host = supervisedHost([
+      { verdict: 'stop', rationale: 'a product call the brief does not settle', setAside: [] },
+    ]);
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('approve-design');
+
+    const result = await new WorkflowController(runner, host).run(
+      'run-ar-opskip-escalation', twoGates, undefined, undefined, undefined, directives,
+    );
+
+    expect(result.outcome).toBe('completed');
+    expect(host.gateCalls).toEqual(['approve-plan']);
+    expect(host.gateCtxs[0].escalation).toBeUndefined();
+  });
+
+  it('never consults when the review is CLEAN or the step declares no loopback', async () => {
+    const clean = reviewRunner([CLEAN_RESULT]);
+    const cleanHost = supervisedHost([LOOP]);
+    await new WorkflowController(clean, cleanHost).run('run-clean', reviewDef());
+    expect(cleanHost.requests).toHaveLength(0);
+
+    const noLoopback = def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'adversarial-review', agent: 'adversarial-review', optional: true }),
+        step({ id: 'approve-design', agent: 'human', human: true }),
+      ]),
+    ]);
+    const blocked = reviewRunner([REVIEW_DOC]);
+    const blockedHost = supervisedHost([LOOP]);
+    await new WorkflowController(blocked, blockedHost).run('run-noloop', noLoopback);
+    expect(blockedHost.requests).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FB-9 — the adversarial-review FRESHNESS bound
+// ---------------------------------------------------------------------------
+// The critique artifact is ONE row per run, so it outlives the walk that wrote
+// it: after a whole-run rewind or a human Revise the previous walk's critique is
+// still sitting in the table. The controller stamps an instant and hands it to
+// every artifact read so a survivor reads as absent instead of arming a phantom
+// design loop (or opening approve-design over a surface that is gone).
+
+describe('WorkflowController — adversarial-review freshness bound (FB-9)', () => {
+  /** Planner's refine phase in miniature; `gateOptional` arms the skip seam. */
+  function freshnessDef(gateOptional = false): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({
+          id: 'adversarial-review',
+          agent: 'adversarial-review',
+          optional: true,
+          loopback: 'expand-spec',
+        }),
+        step({
+          id: 'approve-design',
+          agent: 'human',
+          human: true,
+          loopback: 'expand-spec',
+          ...(gateOptional ? { optional: true } : {}),
+        }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+  }
+
+  const ARTIFACT = ['## Blocking', '', '#### AR-1 — x', '**What:** y.', '', '## Findings', '', 'None.'].join('\n');
+  const CLEAN = 'Reported.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
+
+  /**
+   * A host clock that ticks 1000ms per read, so every instant the controller
+   * captures is distinguishable and assertable. Walk entry takes the FIRST tick;
+   * each review-step visit takes the next one.
+   */
+  function tickingNow(): () => number {
+    let t = 0;
+    return () => (t += 1000);
+  }
+
+  /** Scripted review results per adversarial-review turn; every other step is ok. */
+  function runnerFor(reviewResults: (string | null)[]): StepRunner & { seen: string[] } {
+    const seen: string[] = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      async runStep(s) {
+        seen.push(s.id);
+        if (s.id === 'adversarial-review') {
+          return { status: 'ok', resultText: queue.length > 0 ? queue.shift()! : CLEAN };
+        }
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it('passes the review-step VISIT instant, and the SAME bound to every read within that visit', async () => {
+    // The reviewer's text carried no verdict, so the verdict falls back to the
+    // artifact AND selectReviewDocument reads it again — the two must agree about
+    // which round the artifact belongs to, or they could disagree about the
+    // verdict itself.
+    const bounds: Array<{ reportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor(['']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) => {
+      bounds.push(opts);
+      return ARTIFACT;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-bound', freshnessDef());
+
+    // Walk entry took tick 1 (1000); the review step's first visit took tick 2.
+    // Two reads in THAT visit — the verdict fallback and the document select —
+    // and both carry the same instant. (The second visit's turn returns CLEAN,
+    // which never consults the artifact at all.)
+    expect(bounds).toHaveLength(2);
+    expect(bounds[0]).toEqual({ reportedSinceMs: 2000 });
+    expect(bounds[1]).toEqual({ reportedSinceMs: 2000 });
+  });
+
+  it('a LAP gets a NEW, later bound on the second visit', async () => {
+    const bounds: number[] = [];
+    const runner = runnerFor(['', '']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) => {
+      if (opts?.reportedSinceMs !== undefined) bounds.push(opts.reportedSinceMs);
+      return ARTIFACT;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-lap', freshnessDef());
+
+    // Visit 1 looped the phase back; visit 2 hit the mechanical cap and advanced.
+    expect(runner.seen.filter((id) => id === 'adversarial-review')).toHaveLength(2);
+    expect(new Set(bounds)).toEqual(new Set([2000, 3000]));
+    expect(Math.max(...bounds)).toBeGreaterThan(Math.min(...bounds));
+  });
+
+  it('a STALE artifact (reported before the bound) advances instead of looping, and logs WHY', async () => {
+    // The reader models the real row: it answers only when the bound is satisfied.
+    const reportedAt = 0; // before this walk even started
+    const log = vi.fn();
+    const runner = runnerFor(['']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.log = log;
+    host.readAdversarialReview = (opts) =>
+      opts?.reportedSinceMs !== undefined && reportedAt < opts.reportedSinceMs ? undefined : ARTIFACT;
+
+    const result = await new WorkflowController(runner, host).run('run-fb9-stale', freshnessDef());
+
+    expect(result.outcome).toBe('completed');
+    // No lap: the phase ran exactly once.
+    expect(runner.seen.filter((id) => id === 'expand-spec')).toHaveLength(1);
+    const infoLines = log.mock.calls.filter((c) => c[0] === 'info').map((c) => String(c[1]));
+    expect(infoLines.some((l) => l.includes("'adversarial-review'") && l.includes('no verdict'))).toBe(true);
+  });
+
+  it('the SAME reader loops when the bound is satisfied — the pre-existing fallback still works', async () => {
+    const reportedAt = Number.MAX_SAFE_INTEGER; // reported after any bound
+    const runner = runnerFor(['', CLEAN]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) =>
+      opts?.reportedSinceMs !== undefined && reportedAt < opts.reportedSinceMs ? undefined : ARTIFACT;
+
+    await new WorkflowController(runner, host).run('run-fb9-fresh', freshnessDef());
+
+    expect(runner.seen.filter((id) => id === 'expand-spec')).toHaveLength(2);
+  });
+
+  it('shouldSkipHumanGate gets the review step VISIT instant when the review step ran this walk', async () => {
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([CLEAN]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-gate', freshnessDef(true));
+
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 2000 }]);
+  });
+
+  it('shouldSkipHumanGate gets NO ctx when the review step completed BEFORE this walk', async () => {
+    // A crash-resume (or a rewind whose target is after the review step) past the
+    // reviewer: the critique belongs to the SURVIVING timeline, so the gate must
+    // see it exactly as it does today.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9-resume',
+      freshnessDef(true),
+      undefined,
+      undefined,
+      new Set(['expand-spec', 'adversarial-review']),
+    );
+
+    expect(runner.seen).not.toContain('adversarial-review');
+    expect(ctxs).toEqual([undefined]);
+  });
+
+  it('shouldSkipHumanGate gets the WALK-START instant when the review step never ran this walk', async () => {
+    // Operator-skipped here, but the shape is general: the review step is in the
+    // definition and was NOT completed before this walk, yet no turn of it ran —
+    // so anything the artifact carries predates this walk.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('adversarial-review');
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9-notrun',
+      freshnessDef(true),
+      undefined,
+      undefined,
+      undefined,
+      directives,
+    );
+
+    expect(runner.seen).not.toContain('adversarial-review');
+    // Tick 1 — the walk's own start, never refined by a visit that did not happen.
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 1000 }]);
+  });
+
+  it('an optional review step that self-skips by FAILING still gets its VISIT instant', async () => {
+    // Deliberate: a turn that reported the artifact and then failed DID report it
+    // this round, so the bound must not fall back to the walk start there.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner: StepRunner & { seen: string[] } = {
+      seen: [],
+      async runStep(s) {
+        (runner as { seen: string[] }).seen.push(s.id);
+        if (s.id === 'adversarial-review') return { status: 'failed', error: 'boom' };
+        return { status: 'ok' };
+      },
+    };
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-selfskip', freshnessDef(true));
+
+    expect(runner.seen).toContain('adversarial-review');
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 2000 }]);
   });
 });

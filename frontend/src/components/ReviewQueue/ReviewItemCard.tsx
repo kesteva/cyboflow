@@ -101,7 +101,9 @@ import {
   LOGGED_FINDING_RESOLUTION,
   isEvalSourcedFinding,
   isEvalAdHocSummary,
+  parseSupervisorRecommendation,
 } from '../../../../shared/types/reviews';
+import type { SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -118,6 +120,24 @@ const TARGET_CHIP_LABEL: Record<FindingProposedTarget, string> = {
   docs: '→ Docs',
   prompt: '→ Prompt',
   fix: '→ Quick fix',
+};
+
+// ---------------------------------------------------------------------------
+// Supervisor-recommendation chip — the run monitor's NON-BINDING advice, written
+// into the item body as a `## Supervisor recommendation` section by the router's
+// `annotate` op. The label is the COPY OF THE BUTTON the recommendation points
+// at, not the raw choice word, so the human reads "the supervisor would press
+// that one" rather than having to map a verb onto a menu. Keyed on the
+// discriminant so a new choice breaks the map at compile time (per
+// docs/CODE-PATTERNS.md "Label maps for shared-type discriminants").
+// ---------------------------------------------------------------------------
+
+const RECOMMENDATION_CHIP_LABEL: Record<SupervisorRecommendationChoice, string> = {
+  approve: 'Approve',
+  reject: 'Reject',
+  continue: 'Continue, log as findings',
+  rerun: 'Rerun planning with findings',
+  dismiss: 'Continue without logging',
 };
 
 // ---------------------------------------------------------------------------
@@ -388,6 +408,59 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
 /** The eligibility shape `runs.canAddressReviewFindings` returns; null while loading. */
 type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' | 'in_progress' } | null;
 
+/**
+ * The narrower half of {@link isApproveDesignGateItem}: ONLY the programmatic
+ * runner's singular `gate:human-step:approve-design` item.
+ *
+ * This is the discriminant `resolveReviewItemHandler` itself uses to admit the
+ * `no-findings` verdict modifier — it refuses `approve[no-findings]` on anything
+ * whose source is not exactly that string. So the two behaviours that SEND the
+ * modifier (the third in-session button and the queue surface's re-pointed
+ * discard) must key on this, not on the payload-discriminated sibling from the
+ * ORCHESTRATED plane, which would get a refused resolve and no verdict at all.
+ * Copy and layout stay on the wider predicate: they are correct for both.
+ */
+function isProgrammaticApproveDesignGate(item: ReviewItem): boolean {
+  return item.kind === 'decision' && item.source === 'gate:human-step:approve-design';
+}
+
+/**
+ * The in-session gate buttons, as emphasis targets. Not the same set as the
+ * verdict words: an approve-design gate offers TWO distinct approves (log the
+ * surviving entries, or don't), and the plain gates offer no revise button of
+ * their own.
+ */
+type GateButton = 'approve' | 'revise' | 'no-findings' | 'reject';
+
+/**
+ * Which button, if any, the supervisor's recommendation points at.
+ *
+ * The mapping is per-gate because the recommendation names a CHOICE while the
+ * card renders BUTTONS, and the two menus differ: at an approve-design gate
+ * `continue`/`rerun`/`dismiss` are the three controls, while every other gate
+ * renders only Approve and Reject — so a plain gate maps `approve`→Approve and
+ * `reject`→Reject, and nothing else. In particular there is no "send it back"
+ * arm here: a plain gate's Reject ENDS THE RUN, so routing a third choice onto
+ * it would emphasize the destructive button on advice nobody gave. A
+ * recommendation naming a choice this gate does not offer emphasizes nothing,
+ * and the card keeps today's emphasis.
+ */
+function recommendedGateButton(
+  choice: SupervisorRecommendationChoice | undefined,
+  approveDesign: boolean,
+): GateButton | null {
+  if (choice === undefined) return null;
+  if (approveDesign) {
+    if (choice === 'continue') return 'approve';
+    if (choice === 'rerun') return 'revise';
+    if (choice === 'dismiss') return 'no-findings';
+    return null;
+  }
+  if (choice === 'approve') return 'approve';
+  if (choice === 'reject') return 'reject';
+  return null;
+}
+
 export function ReviewItemCard({
   item,
   isFocused = false,
@@ -411,6 +484,12 @@ export function ReviewItemCard({
   // Free-text answer for an OPTION-LESS recovery gate (malformed AskUserQuestion
   // payload → no recovered options). Still delivered via answerRecoveryGate.
   const [recoveryText, setRecoveryText] = React.useState('');
+  // The human's own words on an approve-design REVISE ("only AR-2 matters, drop
+  // AR-11"). Sent as the resolve's `resolution` next to outcome 'revise', which
+  // the server composes into 'revise: <note>' — the re-run reads it back through
+  // readGateResolutionNote and it outranks the review itself. Empty => no note,
+  // so the stored resolution stays the bare verdict word it is today.
+  const [reviseNote, setReviseNote] = React.useState('');
   // TASK-277: in-flight state for the "Address review findings" rewind (a
   // separate busy flag — this mutation never resolves the item, so it must
   // not disable Log/Dismiss the way the shared `pendingItemId` would).
@@ -421,6 +500,10 @@ export function ReviewItemCard({
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
   const proposedTarget = findingProposedTarget(item);
+  // The supervisor's recommendation, parsed out of the body's annotated section;
+  // null = no chip. Rendered on BOTH surfaces (the header block below is shared),
+  // because the advice is just as useful in the queue as it is in the session.
+  const recommendation = parseSupervisorRecommendation(item.body);
   // TASK-277: eval-sourced findings (source LIKE 'agent:eval%') get a
   // dedicated triage set (Address review findings / Log as findings /
   // Dismiss) instead of the legacy Dismiss / Promote-to-task pair — see the
@@ -455,10 +538,35 @@ export function ReviewItemCard({
   // findings"): the controller loops back to the design steps with the
   // adversarial review threaded in. It is never 'reject' — that verdict ends the
   // run, which the 2026-09-15 launch smoke hit from this very button.
-  const handleGateDecision = (outcome: 'approve' | 'reject' | 'revise'): void => {
-    void resolve(item.project_id, item.id, { outcome, surface }).then((r) => {
+  // A REVISE on the approve-design gate may carry the human's note (the textarea
+  // rendered above the buttons). Every other decision sends the bare outcome, so
+  // its stored resolution is byte-identical to today's; an empty textarea is the
+  // same, since `undefined` is dropped before the mutation.
+  // The MODIFIER qualifies an approve: `no-findings` is the approve-design
+  // gate's third choice ("Continue without logging"), which approves the design
+  // while telling gateSideEffects NOT to log the surviving adversarial-review
+  // entries as accepted-risk findings. It rides the stored resolution as
+  // `approve[no-findings]`; the server refuses it on any other outcome or gate.
+  const handleGateDecision = (
+    outcome: 'approve' | 'reject' | 'revise',
+    modifier?: 'no-findings',
+  ): void => {
+    const note =
+      outcome === 'revise' && isApproveDesignGateItem(item) ? reviseNote.trim() || undefined : undefined;
+    void resolve(item.project_id, item.id, {
+      outcome,
+      surface,
+      ...(modifier !== undefined ? { modifier } : {}),
+      ...(note !== undefined ? { resolution: note } : {}),
+    }).then((r) => {
       if (r !== null) {
-        trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
+        trackEvent('review_item_resolved', {
+          kind: item.kind,
+          // `approve[no-findings]` is counted apart from a plain approve: the
+          // interesting number is how often a critique is dropped, not approved.
+          action: modifier === 'no-findings' ? 'approve[no-findings]' : outcome,
+          blocking: item.blocking,
+        });
         onResolved?.();
       }
     });
@@ -658,6 +766,25 @@ export function ReviewItemCard({
   const usesDefaultActions = surface === 'queue' && item.run_id !== null;
 
   /**
+   * The emphasis for one in-session gate button.
+   *
+   * With a supervisor recommendation, the button it points at is `primary` and
+   * every other one `secondary` — the chip in the header says whose advice it
+   * is, and the emphasis is what makes it actionable at a glance. Without one,
+   * this collapses to today's fixed emphasis (approve primary, the rest
+   * secondary), so an un-annotated card is byte-identical to before this seam.
+   */
+  const recommendedButton = recommendedGateButton(recommendation?.choice, isApproveDesignGateItem(item));
+  const gateVariant = (button: GateButton): 'primary' | 'secondary' =>
+    recommendedButton === null
+      ? button === 'approve'
+        ? 'primary'
+        : 'secondary'
+      : button === recommendedButton
+        ? 'primary'
+        : 'secondary';
+
+  /**
    * The DEFAULT actions for an escalation that provided no options of its own:
    * route to the run, or drop the item. Never a resolve — settling a gate nobody
    * opened is exactly what these branches used to get wrong.
@@ -672,21 +799,32 @@ export function ReviewItemCard({
    * not a gate, so it keeps the plain dismiss (aggregate-unblock resume).
    */
   function defaultEscalationActions(): React.ReactElement {
-    // TASK-222: route a DECISION's discard through the centralized
+    // APPROVE-DESIGN is carved out of the decision arm. "Dismiss" there used to
+    // resolve `reject`, which ENDS THE RUN — a human tidying a card they had
+    // already dealt with in the session would kill the walk. The design gate has
+    // a real "drop the entries and carry on" verdict (`approve[no-findings]`),
+    // so the queue's discard points at THAT instead, and the label says what it
+    // does. Keyed on the PROGRAMMATIC gate only: the server admits the modifier
+    // for no other source. Defence in depth: the explicit approve-design pair
+    // above is checked BEFORE `usesDefaultActions`, so this branch is not reached
+    // for that gate today — but if that ordering ever changes, the queue's
+    // discard must still never send a run-ending reject.
+    // TASK-222: every OTHER decision's discard routes through the centralized
     // gate-decline mapping, never a bare 'reject' literal — see
-    // gateDeclineOutcome. A loopback-capable gate (approve-design) never
-    // reaches this branch today (its explicit pair is checked BEFORE
-    // usesDefaultActions below), but the mapping is applied here too so this
-    // fallback cannot regress into a silent reject if that ordering ever
-    // changes.
-    const discard = item.kind === 'decision' ? () => handleGateDecision(gateDeclineOutcome(item)) : handleDismiss;
+    // gateDeclineOutcome. Findings keep the plain dismiss.
+    const approveDesign = isProgrammaticApproveDesignGate(item);
+    const discard = approveDesign
+      ? () => handleGateDecision('approve', 'no-findings')
+      : item.kind === 'decision'
+        ? () => handleGateDecision(gateDeclineOutcome(item))
+        : handleDismiss;
     return (
       <>
         <Button variant="primary" size="sm" onClick={openInSession} data-testid="open-in-session">
           Open in session →
         </Button>
         <Button variant="secondary" size="sm" disabled={busy} onClick={discard} data-testid="default-dismiss">
-          Dismiss
+          {approveDesign ? 'Continue without logging' : 'Dismiss'}
         </Button>
       </>
     );
@@ -889,11 +1027,24 @@ export function ReviewItemCard({
         if (isApproveDesignGateItem(item)) {
           return (
             <>
-              <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
+              {/* The revise note. Rendered wherever this pair is (the pair is
+                  checked before usesDefaultActions, so that includes the queue).
+                  `w-full` makes the flex-wrap row break, which puts the buttons
+                  underneath. */}
+              <textarea
+                value={reviseNote}
+                onChange={(e) => setReviseNote(e.target.value)}
+                placeholder="Optional: what to change — e.g. only AR-2 matters, drop AR-11"
+                rows={2}
+                disabled={busy}
+                data-testid="design-gate-note"
+                className="w-full rounded border border-border-primary bg-bg-secondary px-2 py-1 text-xs text-text-primary"
+              />
+              <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
                 Continue, log as findings
               </Button>
               <Button
-                variant="secondary"
+                variant={gateVariant('revise')}
                 size="sm"
                 disabled={busy}
                 onClick={() => handleGateDecision(gateDeclineOutcome(item))}
@@ -901,6 +1052,21 @@ export function ReviewItemCard({
               >
                 Rerun planning with findings
               </Button>
+              {/* The gate's THIRD choice: approve the design and drop the surviving
+                  review entries instead of logging them. Only for the PROGRAMMATIC
+                  gate, the one source the server accepts the `no-findings`
+                  modifier on. */}
+              {isProgrammaticApproveDesignGate(item) && (
+                <Button
+                  variant={gateVariant('no-findings')}
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => handleGateDecision('approve', 'no-findings')}
+                  data-testid="decision-continue-no-findings"
+                >
+                  Continue without logging
+                </Button>
+              )}
             </>
           );
         }
@@ -916,11 +1082,11 @@ export function ReviewItemCard({
         // drafts and ends the run 'rejected' (no resume).
         return (
           <>
-            <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
+            <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
               Approve &amp; resume
             </Button>
             <Button
-              variant="secondary"
+              variant={gateVariant('reject')}
               size="sm"
               disabled={busy}
               onClick={() => handleGateDecision(gateDeclineOutcome(item))}
@@ -1086,6 +1252,16 @@ export function ReviewItemCard({
             data-testid="blocking-badge"
           >
             Blocking
+          </span>
+        )}
+        {recommendation && (
+          <span
+            className="rounded-full border border-interactive/40 bg-interactive/10 px-1.5 py-px text-[10px] font-medium text-interactive"
+            data-testid="supervisor-recommendation"
+            data-choice={recommendation.choice}
+            title={recommendation.sentence}
+          >
+            Supervisor recommends: {RECOMMENDATION_CHIP_LABEL[recommendation.choice]}
           </span>
         )}
         <span className="ml-auto text-xs text-text-muted">{formatAge(item.created_at)}</span>
