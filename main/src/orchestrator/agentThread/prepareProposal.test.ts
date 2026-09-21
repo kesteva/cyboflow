@@ -779,6 +779,17 @@ describe('normalizeQuickSessionName', () => {
     expect(normalizeQuickSessionName('a'.repeat(80) + '-tail')).toBe('a'.repeat(64));
     expect(normalizeQuickSessionName('!!!')).toBe('');
   });
+
+  it('removes the ref forms git check-ref-format rejects: `..` runs and a trailing `.lock`', () => {
+    expect(normalizeQuickSessionName('foo..bar')).toBe('foo.bar');
+    expect(normalizeQuickSessionName('foo...bar')).toBe('foo.bar');
+    expect(normalizeQuickSessionName('foo.lock')).toBe('foo');
+    expect(normalizeQuickSessionName('foo.lock.lock')).toBe('foo.lock');
+    expect(normalizeQuickSessionName('.lock')).toBe('lock');
+    // The cap applies first: a `.lock` that survives it whole is stripped, a truncated one is just a suffix.
+    expect(normalizeQuickSessionName('a'.repeat(59) + '.lock')).toBe('a'.repeat(59));
+    expect(normalizeQuickSessionName('a'.repeat(60) + '.lock')).toBe('a'.repeat(60) + '.loc');
+  });
 });
 
 describe('prepareProposal — start-quick-session validation', () => {

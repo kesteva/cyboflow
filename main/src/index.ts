@@ -235,6 +235,7 @@ import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/prop
 import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
 import { buildProposalExecutorQuickSessionDeps } from './orchestrator/agentThread/proposalExecutorQuickSessionDeps';
 import { generateQuickWorktreeBranchName } from './ipc/session';
+import { reportEagerSpawnFailure } from './ipc/eagerSpawnFailure';
 import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
@@ -5514,14 +5515,11 @@ app.whenReady().then(async () => {
       newIdempotencyKey: () => randomUUID(),
       // launch-run host sessions + start-quick-session mint/brief delivery: proposalExecutorQuickSessionDeps.ts.
       ...buildProposalExecutorQuickSessionDeps({
-        createQuickSessionCore, stampQuickSessionRuntimeConfig,
+        createQuickSessionCore, stampQuickSessionRuntimeConfig, reportEagerSpawnFailure,
         quickSessionCore: { taskQueue: taskQueue!, sessionManager, workflowRegistry, getDb: () => databaseService.getDb(), dismissHalfCreatedSession: dismissSessionFully },
         newSessionName: generateQuickWorktreeBranchName,
-        sessionManager,
-        panelManager,
+        sessionManager, panelManager, substrateFacade, interactiveReplManager,
         getClaudePanelManager: () => (require('./ipc/claudePanel') as typeof import('./ipc/claudePanel')).claudePanelManager,
-        substrateFacade,
-        interactiveReplManager,
         ptyBriefing: QUICK_PTY_BRIEFING, logger: loggerLike,
       }),
       // launch-run: workflow resolution (by id or name, custom flows included)

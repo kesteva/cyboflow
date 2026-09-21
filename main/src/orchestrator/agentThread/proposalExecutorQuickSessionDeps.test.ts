@@ -72,14 +72,21 @@ interface Recorder {
   facadeSeeds: Array<{ runId: string; panelId: string }>;
   ptyStarts: unknown[][];
   errors: string[];
+  sessionErrors: Array<{ sessionId: string; error: string; details?: string }>;
+  seamReports: Array<{ substrate: string; cliTool: string; sessionId: string; message: string }>;
+  dismissed: string[];
 }
 
 interface HarnessOptions {
   /** What the fake sentinel createRun resolves the substrate to (the wizard default). */
   resolvedSubstrate?: CliSubstrate;
   claudePanelManagerAbsent?: boolean;
+  /** The spawn rejects on the next microtask (a cached "not available" probe). */
   ptySpawnRejects?: boolean;
+  /** The spawn rejects only once the test resolves `latePtyFailure` (spawn-prep failure). */
+  latePtyFailure?: { reject: (err: Error) => void };
   sdkStartThrows?: boolean;
+  stampThrows?: boolean;
   permissionMode?: 'approve' | 'ignore';
 }
 
@@ -98,10 +105,20 @@ function makeHarness(db: Database.Database, opts: HarnessOptions = {}): { c: Pro
     facadeSeeds: [],
     ptyStarts: [],
     errors: [],
+    sessionErrors: [],
+    seamReports: [],
+    dismissed: [],
   };
   const c: ProposalExecutorQuickSessionCollaborators = {
     createQuickSessionCore,
-    stampQuickSessionRuntimeConfig,
+    stampQuickSessionRuntimeConfig: (db_, sessionId, stamps) => {
+      if (opts.stampThrows) throw new Error('stamp boom');
+      stampQuickSessionRuntimeConfig(db_, sessionId, stamps);
+    },
+    reportEagerSpawnFailure: (err, substrate, cliTool, surface) => {
+      rec.seamReports.push({ substrate, cliTool, sessionId: surface.sessionId, message: err instanceof Error ? err.message : String(err) });
+      surface.sessionManager.addSessionError(surface.sessionId, `${cliTool} failed to start`, String(err));
+    },
     quickSessionCore: {
       taskQueue: {
         onSessionJobFailed: () => () => {},
@@ -143,7 +160,9 @@ function makeHarness(db: Database.Database, opts: HarnessOptions = {}): { c: Pro
         },
       },
       getDb: () => db,
-      dismissHalfCreatedSession: async () => {},
+      dismissHalfCreatedSession: async (sessionId) => {
+        rec.dismissed.push(sessionId);
+      },
     },
     newSessionName: () => 'sunny-lake-20260921',
     sessionManager: {
@@ -164,6 +183,9 @@ function makeHarness(db: Database.Database, opts: HarnessOptions = {}): { c: Pro
       },
       addPanelConversationMessage: (panelId, _type, content) => {
         rec.panelMessages.push({ panelId, content });
+      },
+      addSessionError: (sessionId, error, details) => {
+        rec.sessionErrors.push({ sessionId, error, details });
       },
     },
     panelManager: {
@@ -193,6 +215,12 @@ function makeHarness(db: Database.Database, opts: HarnessOptions = {}): { c: Pro
       startPanel: (...args) => {
         rec.ptyStarts.push(args);
         if (opts.ptySpawnRejects) return Promise.reject(new Error('pty boom'));
+        if (opts.latePtyFailure) {
+          const late = opts.latePtyFailure;
+          return new Promise<void>((_resolve, reject) => {
+            late.reject = reject;
+          });
+        }
         // Persistent-REPL contract: resolves only when the REPL exits — never here.
         return new Promise<void>(() => {});
       },
@@ -330,13 +358,47 @@ describe('buildProposalExecutorQuickSessionDeps', () => {
     expect(rec.panelMessages).toEqual([]);
   });
 
-  it('PTY brief delivery is fail-soft on a spawn rejection: the rejection is logged, not thrown', async () => {
+  it('an EARLY PTY spawn rejection (next-tick "not available") throws so the executor compensates', async () => {
     const { c, rec } = makeHarness(db, { ptySpawnRejects: true });
     const deps = buildProposalExecutorQuickSessionDeps(c);
     const created = await deps.startQuickSession({ projectId: PROJECT_ID, substrate: 'interactive', inPlace: false });
 
+    await expect(deps.deliverQuickSessionBrief({ ...created, brief: 'x' })).rejects.toThrow(/interactive REPL spawn rejected: pty boom/);
+    // Nothing was stamped 'running' over a dead terminal, and the session was
+    // not error-surfaced either — the executor's saga dismisses it outright.
+    expect(rec.statusUpdates).toEqual([]);
+    expect(rec.sessionErrors).toEqual([]);
+    expect(rec.seamReports).toEqual([]);
+    expect(rec.errors).toEqual([]);
+  });
+
+  it('a LATE PTY spawn failure is fail-soft but VISIBLE: seam report + session error + status error', async () => {
+    const late = { reject: (_err: Error) => {} };
+    const { c, rec } = makeHarness(db, { latePtyFailure: late });
+    const deps = buildProposalExecutorQuickSessionDeps(c);
+    const created = await deps.startQuickSession({ projectId: PROJECT_ID, substrate: 'interactive', inPlace: false });
+
     await expect(deps.deliverQuickSessionBrief({ ...created, brief: 'x' })).resolves.toEqual({ claudePanelId: 'panel-1' });
+    expect(rec.statusUpdates).toEqual([{ sessionId: 'sess-1', status: 'running' }]);
+
+    late.reject(new Error('worktree prep boom'));
     await vi.waitFor(() => expect(rec.errors).toHaveLength(1));
-    expect(rec.errors[0]).toMatch(/interactive REPL spawn failed.*pty boom/);
+    expect(rec.errors[0]).toMatch(/interactive REPL spawn failed.*worktree prep boom/);
+    expect(rec.seamReports).toEqual([{ substrate: 'interactive', cliTool: 'claude', sessionId: 'sess-1', message: 'worktree prep boom' }]);
+    expect(rec.sessionErrors).toEqual([{ sessionId: 'sess-1', error: 'claude failed to start', details: 'Error: worktree prep boom' }]);
+    // 'running' was written BEFORE the late catch, so 'error' is the final word.
+    expect(rec.statusUpdates).toEqual([
+      { sessionId: 'sess-1', status: 'running' },
+      { sessionId: 'sess-1', status: 'error' },
+    ]);
+  });
+
+  it('a throw after the core persisted the session dismisses it before rejecting (no orphan outside the saga)', async () => {
+    const { c, rec } = makeHarness(db, { stampThrows: true });
+    const deps = buildProposalExecutorQuickSessionDeps(c);
+
+    await expect(deps.startQuickSession({ projectId: PROJECT_ID, inPlace: false })).rejects.toThrow('stamp boom');
+    expect(rec.dismissed).toEqual(['sess-1']);
+    expect(rec.refreshed).toEqual([]);
   });
 });

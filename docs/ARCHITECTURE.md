@@ -532,7 +532,11 @@ toggle — never the SDK pin a `launch-run` host session gets) and delivers the 
 `brief` as its first prompt the way a typed first message lands on each substrate (SDK: a
 registered Chat panel + `startPanel`; PTY: the REPL's positional spawn prompt), via
 `agentThread/proposalExecutorQuickSessionDeps.ts`; a delivery failure dismisses the
-half-created session. The
+half-created session, and a PTY spawn that rejects after delivery returned takes the wizard's
+fail-soft-but-visible path (seam report + session error). Known limit: the kind is
+non-verifiable at crash reconcile (like `create-backlog-items`) — a proposal stranded between
+session creation and finalization is failed without dismissing the session, which stays
+discoverable in the sidebar but gets no "Open" on the card. The
 custom-widget authoring tools (`cyboflow_db_schema`, `cyboflow_widget_preview`,
 `cyboflow_widget_save`) route through `CustomViewsService` so a preview runs the exact query path
 the page will (see "Custom views" under Data Model and `docs/proposals/CUSTOM-VIEWS.md`).

@@ -688,17 +688,24 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
 
 /**
  * Normalize a proposed quick-session name to a branch-safe slug: lower-case,
- * runs of anything outside `[a-z0-9._-]` collapsed to one `-`, leading /
- * trailing separators trimmed, capped at {@link START_QUICK_SESSION_NAME_MAX_CHARS}.
- * Returns '' when nothing survives (the caller rejects that as invalid_name).
+ * runs of anything outside `[a-z0-9._-]` collapsed to one `-`, runs of dots
+ * collapsed to one (`..` is a forbidden ref sequence), leading / trailing
+ * separators trimmed, capped at {@link START_QUICK_SESSION_NAME_MAX_CHARS}, and
+ * a trailing `.lock` dropped (git refuses a component ending in it). The slug
+ * becomes the worktree branch (`git worktree add -b`), so every form
+ * `git check-ref-format --branch` rejects must be gone here, at propose time,
+ * not at execution. Returns '' when nothing survives (the caller rejects that
+ * as invalid_name).
  */
 export function normalizeQuickSessionName(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/-{2,}/g, '-')
+    .replace(/\.{2,}/g, '.')
     .replace(/^[-._]+|[-._]+$/g, '')
     .slice(0, START_QUICK_SESSION_NAME_MAX_CHARS)
+    .replace(/\.lock$/, '')
     .replace(/[-._]+$/g, '');
 }
 

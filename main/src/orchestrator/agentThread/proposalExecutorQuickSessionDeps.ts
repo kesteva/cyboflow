@@ -33,6 +33,7 @@
  */
 import type { CreatePanelRequest, ToolPanel } from '../../../../shared/types/panels';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import type { reportEagerSpawnFailure } from '../../ipc/eagerSpawnFailure';
 import type {
   createQuickSessionCore,
   stampQuickSessionRuntimeConfig,
@@ -47,11 +48,13 @@ export interface QuickSessionSessionManagerLike {
   getDbSession(sessionId: string): { permission_mode?: 'approve' | 'ignore' } | undefined;
   /** Re-map the row + emit session-updated after the runtime stamps land. */
   refreshSessionFromDatabase(sessionId: string): unknown;
-  updateSession(sessionId: string, update: { status: 'running' }): unknown;
+  updateSession(sessionId: string, update: { status: 'running' | 'error' }): unknown;
   /** The legacy session-output stream (what sessions:input writes the user turn to). */
   addSessionOutput(sessionId: string, output: { type: 'stdout'; data: string; timestamp: Date }): unknown;
   /** Panel conversation history — what the SDK chat surface renders. */
   addPanelConversationMessage(panelId: string, messageType: 'user', content: string): void;
+  /** Writes an error output AND flips the session to 'error' (reportEagerSpawnFailure's surface). */
+  addSessionError(sessionId: string, error: string, details?: string): void;
 }
 
 /** The Claude panel manager slice an SDK first turn needs (ipc/claudePanel's export). */
@@ -84,6 +87,8 @@ export interface ProposalExecutorQuickSessionCollaborators {
   /** The two createQuickSessionCore.ts functions, injected (orchestrator/** never imports a service value). */
   createQuickSessionCore: typeof createQuickSessionCore;
   stampQuickSessionRuntimeConfig: typeof stampQuickSessionRuntimeConfig;
+  /** ipc/eagerSpawnFailure — Sentry seam + the user-facing session error for a late PTY spawn failure. */
+  reportEagerSpawnFailure: typeof reportEagerSpawnFailure;
   /** createQuickSessionCore's own bag (taskQueue / sessionManager / workflowRegistry / getDb / dismiss). */
   quickSessionCore: CreateQuickSessionCoreDeps;
   /** The wizard's adjective-noun-date name minter (ipc/session generateQuickWorktreeBranchName). */
@@ -140,8 +145,16 @@ export function buildProposalExecutorQuickSessionDeps(
       // the session row (the sessions:input relay branch and the renderer's
       // substrate gates read it), then the active cache is refreshed so the
       // renderer never sees the INSERT defaults.
-      c.stampQuickSessionRuntimeConfig(c.quickSessionCore.getDb(), session.id, { resolvedSubstrate });
-      c.sessionManager.refreshSessionFromDatabase(session.id);
+      try {
+        c.stampQuickSessionRuntimeConfig(c.quickSessionCore.getDb(), session.id, { resolvedSubstrate });
+        c.sessionManager.refreshSessionFromDatabase(session.id);
+      } catch (err) {
+        // The core has already persisted the session + worktree + sentinel. A
+        // throw here would reject before the executor learns the session id, so
+        // its saga could never compensate — dismiss what the core built first.
+        await c.quickSessionCore.dismissHalfCreatedSession?.(session.id).catch(() => {});
+        throw err;
+      }
       return {
         sessionId: session.id,
         runId,
@@ -159,8 +172,17 @@ export function buildProposalExecutorQuickSessionDeps(
       if (substrate === 'interactive') {
         c.substrateFacade.registerInteractivePanel(runId, panel.id);
         // ⚠️ NEVER await: the interactive spawn promise resolves only when the
-        // REPL EXITS. Fail-soft like the wizard's eager spawn — the session stays
-        // usable and the next sessions:input re-spawns the REPL.
+        // REPL EXITS. Two failure windows, handled differently:
+        //   - EARLY (before `settled`): a cached "not available" probe rejects on
+        //     the next tick. One macrotask of settling catches it, and the throw
+        //     below lets the executor compensate (dismiss the session) instead of
+        //     finalizing "Session started" over a terminal that never emits a byte.
+        //   - LATE: the wizard's fail-soft-but-VISIBLE contract (ipc/session.ts
+        //     eager spawn): report the seam error, write the session error, flip
+        //     the status to 'error'. The 'running' write below always precedes a
+        //     late catch, so the catch's 'error' is never clobbered.
+        let settled = false;
+        let earlyFailure: { err: unknown } | undefined;
         void c.interactiveReplManager
           .startPanel(
             panel.id,
@@ -177,11 +199,23 @@ export function buildProposalExecutorQuickSessionDeps(
             c.ptyBriefing, // session context, NOT a user turn
           )
           .catch((err: unknown) => {
+            if (!settled) {
+              earlyFailure = { err };
+              return;
+            }
             c.logger.error('[proposalExecutor] interactive REPL spawn failed for a proposed quick session', {
               sessionId,
               error: err instanceof Error ? err.message : String(err),
             });
+            c.reportEagerSpawnFailure(err, 'interactive', 'claude', { sessionManager: c.sessionManager, sessionId });
+            void c.sessionManager.updateSession(sessionId, { status: 'error' });
           });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        settled = true;
+        if (earlyFailure !== undefined) {
+          const { err } = earlyFailure;
+          throw new Error(`interactive REPL spawn rejected: ${err instanceof Error ? err.message : String(err)}`);
+        }
         c.sessionManager.updateSession(sessionId, { status: 'running' });
         return { claudePanelId: panel.id };
       }
