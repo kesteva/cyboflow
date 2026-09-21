@@ -92,8 +92,10 @@ done
 # Edit CHANGELOG.md per §2 (the "## [$OLD]" heading must survive the edit).
 git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
 git commit -m "chore: release $NEW"
-git tag "v$NEW"                      # annotate/sign if you prefer; the name is what matters
-git push origin main --follow-tags   # main + the tag in one push
+git tag -a "v$NEW" -m "v$NEW"
+git push origin main
+git push origin "v$NEW"              # NOT --follow-tags: it skips lightweight tags silently
+git ls-remote --tags origin "refs/tags/v$NEW" | grep -q . || echo "TAG DID NOT ARRIVE"
 gh run watch "$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
@@ -103,9 +105,16 @@ What the workflow enforces, so you do not have to:
 - **all four** `package.json` files already say that version, and `CHANGELOG.md`
   has its `## [X.Y.Z]` section — a forgotten bump fails before anything builds;
 - the commit is an ancestor of `origin/main`;
-- **this SHA's Code Quality run went green.** `--follow-tags` pushes both refs at
-  once, so the gate is usually still running when the tag lands — the workflow
-  waits up to 45 min for it. A red or cancelled gate stops the release.
+- **this SHA's Code Quality run went green.** The main push starts it seconds
+  before the tag push, so the gate is usually still running when the tag lands —
+  the workflow waits up to 45 min for it. A red or cancelled gate stops the release.
+
+Push the tag as its own command. `git push --follow-tags` pushes only
+**annotated** tags; with a lightweight `git tag v0.4.3` it pushes main alone and
+says so only by omission (`main -> main`, no tag line). Nothing fails, no
+release run starts, and it reads as "the workflow did not trigger". The 0.4.3
+release hit exactly this. `-a` makes the tag annotated, but the explicit push
+plus `ls-remote` is what proves the tag arrived.
 
 Then it rebuilds the **stable** variant at the tagged commit on the three native
 runners (arm64 `macos-latest`, x64 `macos-15-intel`, `windows-latest`), runs §4's

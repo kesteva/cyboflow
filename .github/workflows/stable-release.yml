@@ -17,8 +17,9 @@ name: Stable release
 # git tag all naming the same thing.
 #
 # GATE: a stable release must not ship from an ungated commit, so the version
-# job waits for THIS SHA's Code Quality run to conclude. `git push origin main
-# --follow-tags` pushes both refs at once, so that run is usually still in
+# job waits for THIS SHA's Code Quality run to conclude. The runbook pushes
+# main and then the tag as separate commands seconds apart (NOT --follow-tags,
+# which skips lightweight tags silently), so that run is usually still in
 # flight when the tag arrives — waiting is the normal path, not an error.
 #
 # ORDER OF OPERATIONS: a tag push runs the workflow file AS IT EXISTS AT THE
@@ -111,7 +112,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Stable release $version from ${sha:0:9} (tag $tag)"
 
-      # `--follow-tags` lands main and the tag together, so this SHA's Code
+      # The tag push follows the main push by seconds, so this SHA's Code
       # Quality run is usually seconds old and still running. Wait for it.
       - name: Wait for the Code Quality gate
         if: ${{ !inputs.allow_unverified_gate }}
