@@ -31,6 +31,7 @@ import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
 import { pathBasename } from '../../utils/pathBasename';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { trpc } from '../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
@@ -113,6 +114,33 @@ export function RunCenterPane({
   // useArtifactTabsSync for the focus-steal / loading-vs-deleted-flicker fixes.
   useArtifactTabsSync(sessionKey, visibleArtifacts, loaded);
 
+  // Per-step resolved model info (IDEA-061 per-step model rail) — fetched ONCE
+  // per run id (mirrors the `runs.contextUsage` fetch-once pattern in
+  // RunChatView): a run's effective step→model resolution is fixed for its
+  // lifetime, so there is no polling/subscription here, just a single query
+  // keyed on activeRunId. `null` while loading/errored — WorkflowCanvas treats
+  // that identically to "no data yet" and renders every card's pre-existing row.
+  const [stepModels, setStepModels] = useState<Map<
+    string,
+    { label: string; family: string }
+  > | null>(null);
+  useEffect(() => {
+    setStepModels(null);
+    let alive = true;
+    trpc.cyboflow.runs.getStepModels
+      .query({ runId: activeRunId })
+      .then((rows) => {
+        if (!alive) return;
+        setStepModels(new Map(rows.map((r) => [r.stepId, { label: r.label, family: r.family }])));
+      })
+      .catch(() => {
+        // Fail-soft: cards simply render without the model segment.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeRunId]);
+
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
   // Active bottom-dock surface (RunBottomPane opens on Chat). The question strip
@@ -169,6 +197,7 @@ export function RunCenterPane({
         paused={activeRun?.status === 'paused'}
         status={activeRun?.status}
         sessionKey={sessionKey}
+        stepModels={stepModels}
       />
     );
   };

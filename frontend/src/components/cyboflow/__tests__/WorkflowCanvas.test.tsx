@@ -450,6 +450,53 @@ describe('WorkflowCanvas', () => {
     expect(allStepWrappers).toHaveLength(totalSteps);
   });
 
+  // -------------------------------------------------------------------------
+  // TASK-274: stepModels threading into WorkflowStepCard
+  // -------------------------------------------------------------------------
+
+  it('threads a stepModels entry into the matching step card as modelLabel/modelFamilyColor', () => {
+    const stepModels = new Map([
+      ['step-a', { label: 'Opus 5', family: 'opus' }],
+      ['step-b', { label: 'Auto', family: 'auto' }],
+    ]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    const modelA = screen.getByTestId('step-card-model-step-a');
+    expect(modelA).toHaveTextContent('Opus 5');
+    expect(screen.getByTestId('step-card-model-dot-step-a')).toHaveStyle({
+      backgroundColor: '#c98a2d',
+    });
+
+    const modelB = screen.getByTestId('step-card-model-step-b');
+    expect(modelB).toHaveTextContent('Auto');
+    expect(screen.getByTestId('step-card-model-dot-step-b')).toHaveStyle({
+      backgroundColor: '#b3a685',
+    });
+
+    // step-c has no entry in the map — no model segment rendered.
+    expect(screen.queryByTestId('step-card-model-step-c')).not.toBeInTheDocument();
+  });
+
+  it('omitting stepModels (undefined/null) renders every card without a model segment, unbroken', () => {
+    const { rerender } = render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" />,
+    );
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+    expect(screen.getByTestId('step-card-step-a')).toBeInTheDocument();
+
+    rerender(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" stepModels={null} />,
+    );
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+    expect(screen.getByTestId('step-card-step-a')).toBeInTheDocument();
+  });
+
   it('measures edge/token overlay coordinates relative to the inner content, not the outer scroll viewport', () => {
     // Deliberately give workflow-canvas-viewport a DIFFERENT rect than
     // workflow-canvas-inner — if the measurement effect ever regressed to use

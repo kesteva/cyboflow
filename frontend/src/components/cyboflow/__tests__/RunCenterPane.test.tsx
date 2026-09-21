@@ -79,6 +79,21 @@ vi.mock('../../../hooks/useArtifactsList', () => ({
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,
 }));
+// TASK-274: RunCenterPane fetches `runs.getStepModels` once per run id to feed
+// WorkflowCanvas's per-step model rail — stubbed here (mocked WorkflowCanvas
+// above doesn't render it anyway) so this suite's tests don't drag in the real
+// tRPC/electron client. Resolves an empty array by default; individual tests
+// may override via `getStepModelsQuery.mockResolvedValueOnce(...)`.
+const getStepModelsQuery = vi.fn().mockResolvedValue([]);
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        getStepModels: { query: (...a: unknown[]) => getStepModelsQuery(...a) },
+      },
+    },
+  },
+}));
 
 const DEFINITION: WorkflowDefinition = { id: 'planner', phases: [] };
 
@@ -135,6 +150,8 @@ describe('RunCenterPane', () => {
     mockLoaded = true;
     reportBottomTabKind = undefined;
     pendingStripProps = undefined;
+    getStepModelsQuery.mockClear();
+    getStepModelsQuery.mockResolvedValue([]);
   });
 
   it('renders the tab strip with the pinned Flow tab and the terminal dock', () => {

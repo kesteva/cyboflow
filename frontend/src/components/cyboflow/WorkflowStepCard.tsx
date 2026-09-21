@@ -21,13 +21,29 @@ export interface WorkflowStepCardProps {
   /** 1-based global step index across all phases. */
   stepIndex: number;
   status: StepStatus;
+  /**
+   * Resolved model label for this step (IDEA-061 per-step model rail), e.g.
+   * "Opus 5" or "Auto". Absent for human/gate steps (never fabricated) and
+   * while the backing `runs.getStepModels` query hasn't resolved yet — in
+   * both cases the row renders exactly as it did before this prop existed.
+   */
+  modelLabel?: string | null;
+  /** Swatch hex for `modelLabel`'s {@link ModelFamily} bucket — see MODEL_FAMILY_COLORS. */
+  modelFamilyColor?: string;
 }
 
 // ---------------------------------------------------------------------------
 // WorkflowStepCard
 // ---------------------------------------------------------------------------
 
-export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowStepCardProps) {
+export function WorkflowStepCard({
+  step,
+  phase,
+  stepIndex,
+  status,
+  modelLabel,
+  modelFamilyColor,
+}: WorkflowStepCardProps) {
   const isPending = status === 'pending';
   const isRunning = status === 'running';
   const isDone = status === 'done';
@@ -166,6 +182,14 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
             display: 'flex',
             justifyContent: 'space-between',
           }}
+          title={
+            modelLabel
+              ? isPending
+                ? `${agentShortName} · will run ${modelLabel}`
+                : `${agentShortName} · ${modelLabel}`
+              : undefined
+          }
+          data-testid={`step-card-agent-row-${step.id}`}
         >
           <span
             style={{
@@ -177,7 +201,40 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
           >
             {agentShortName}
           </span>
-          <span style={{ flexShrink: 0 }}>×{step.retries}</span>
+          {modelLabel && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                marginLeft: 4,
+              }}
+              data-testid={`step-card-model-${step.id}`}
+            >
+              <span aria-hidden style={{ letterSpacing: '0.02em' }}>
+                ·
+              </span>
+              <span
+                aria-hidden
+                style={{
+                  width: 4,
+                  height: 4,
+                  borderRadius: '50%',
+                  backgroundColor: modelFamilyColor,
+                  display: 'inline-block',
+                  opacity: isPending ? 0.45 : 1,
+                  flexShrink: 0,
+                }}
+                data-testid={`step-card-model-dot-${step.id}`}
+              />
+              <span style={{ fontStyle: isPending ? 'italic' : 'normal' }}>{modelLabel}</span>
+            </span>
+          )}
+          <span style={modelLabel ? { flexShrink: 0, marginLeft: 4 } : { flexShrink: 0 }}>
+            ×{step.retries}
+          </span>
         </div>
       </div>
 

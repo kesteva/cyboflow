@@ -37,6 +37,7 @@ import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
+import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +79,15 @@ export interface WorkflowCanvasProps {
    * contexts without a center-pane session (tests / previews).
    */
   sessionKey?: string | null;
+  /**
+   * Per-step resolved model info (IDEA-061 per-step model rail), keyed by
+   * step id — from `runs.getStepModels` via RunCenterPane. A step with no
+   * entry (a human/gate step the backend omits, or the query hasn't
+   * resolved yet) renders its card's agent row exactly as before this prop
+   * existed. `null`/`undefined` (loading/errored/no-query-yet) is equivalent
+   * to an empty map — every card falls back to its pre-existing row.
+   */
+  stepModels?: ReadonlyMap<string, { label: string; family: string }> | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +175,11 @@ export const GRAPH_PAPER_BACKGROUND =
   'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
   'var(--color-bg-primary)';
 
+/** Resolves a step's model-family swatch hex from its (string) family bucket. */
+function modelFamilyColorFor(family: string): string {
+  return MODEL_FAMILY_COLORS[family as ModelFamily] ?? MODEL_FAMILY_COLORS.other;
+}
+
 /** Last path segment of a worktree path, for a compact "folder" chip. */
 function basename(p: string): string {
   const trimmed = p.replace(/[/\\]+$/, '');
@@ -189,6 +204,7 @@ export function WorkflowCanvas({
   paused = false,
   status,
   sessionKey,
+  stepModels,
 }: WorkflowCanvasProps) {
   // A paused run is, by definition, not actively running — suppress the running
   // pill and the token animation regardless of the isRunning prop so the canvas
@@ -542,6 +558,7 @@ export function WorkflowCanvas({
                   const flatIdx = phaseFlatStart + stepInPhase;
                   const derivedStatus = statusFor(flatIdx);
                   const globalStepIndex = flatIdx + 1; // 1-based
+                  const modelEntry = stepModels?.get(step.id);
 
                   return (
                     <div
@@ -555,6 +572,10 @@ export function WorkflowCanvas({
                         phase={phase}
                         stepIndex={globalStepIndex}
                         status={derivedStatus}
+                        modelLabel={modelEntry?.label}
+                        modelFamilyColor={
+                          modelEntry ? modelFamilyColorFor(modelEntry.family) : undefined
+                        }
                       />
                       {/* "creates ⟨artifact⟩" footer chip — absolutely positioned
                           below the card so it never alters the measured card rect

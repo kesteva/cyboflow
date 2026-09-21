@@ -178,6 +178,81 @@ describe('WorkflowStepCard', () => {
     expect(chip).toHaveTextContent('OPTIONAL');
   });
 
+  // -------------------------------------------------------------------------
+  // TASK-274: per-step model segment folded into the existing agent/retries row
+  // -------------------------------------------------------------------------
+
+  it('resolved (running) status: shows dot + label in the resolved color, with a "agent · model" title', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP}
+        phase={MOCK_PHASE}
+        stepIndex={3}
+        status="running"
+        modelLabel="Opus 5"
+        modelFamilyColor="#c98a2d"
+      />,
+    );
+
+    const dot = screen.getByTestId('step-card-model-dot-implement');
+    expect(dot).toHaveStyle({ backgroundColor: '#c98a2d', opacity: '1' });
+
+    const model = screen.getByTestId('step-card-model-implement');
+    expect(model).toHaveTextContent('Opus 5');
+    // Not italic when resolved.
+    const label = model.querySelector('span:last-child') as HTMLElement;
+    expect(label).toHaveStyle({ fontStyle: 'normal' });
+
+    const row = screen.getByTestId('step-card-agent-row-implement');
+    expect(row).toHaveAttribute('title', 'executor-agent · Opus 5');
+    // Uses the existing non-pending row text color, not a new hardcoded one.
+    expect(row).toHaveStyle({ color: '#6a5e44' });
+  });
+
+  it('pending status: model label is italic, dot is 45% opacity, and title reads "will run"', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP}
+        phase={MOCK_PHASE}
+        stepIndex={3}
+        status="pending"
+        modelLabel="Sonnet 5"
+        modelFamilyColor="#4a7ea8"
+      />,
+    );
+
+    const dot = screen.getByTestId('step-card-model-dot-implement');
+    expect(dot).toHaveStyle({ backgroundColor: '#4a7ea8', opacity: '0.45' });
+
+    const model = screen.getByTestId('step-card-model-implement');
+    const label = model.querySelector('span:last-child') as HTMLElement;
+    expect(label).toHaveStyle({ fontStyle: 'italic' });
+
+    const row = screen.getByTestId('step-card-agent-row-implement');
+    expect(row).toHaveAttribute('title', 'executor-agent · will run Sonnet 5');
+    // Uses the existing pending row text color.
+    expect(row).toHaveStyle({ color: '#b3a685' });
+  });
+
+  it('no modelLabel: renders exactly today\'s row — no dot, no separator, no title', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP}
+        phase={MOCK_PHASE}
+        stepIndex={3}
+        status="running"
+      />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-implement')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('step-card-model-dot-implement')).not.toBeInTheDocument();
+
+    const row = screen.getByTestId('step-card-agent-row-implement');
+    expect(row).not.toHaveAttribute('title');
+    expect(row).toHaveTextContent('executor-agent');
+    expect(row).toHaveTextContent('×3');
+  });
+
   it('head bar: shows uppercase phase abbreviation and 2-digit step index', () => {
     render(
       <WorkflowStepCard
