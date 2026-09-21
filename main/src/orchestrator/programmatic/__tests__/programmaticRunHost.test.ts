@@ -1117,7 +1117,9 @@ describe('ProgrammaticRunHost', () => {
       });
     });
 
-    it('a THROWING sink does not cost the decision', async () => {
+    it('a THROWING sink does not cost the decision, but prunes what it could not file', async () => {
+      // The verdict survives a dead queue; the set-aside does NOT — "set aside"
+      // is only safe because the finding exists.
       const monitor = makeLoopMonitor(LOOP);
       const host = new ProgrammaticRunHost({
         runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
@@ -1125,7 +1127,89 @@ describe('ProgrammaticRunHost', () => {
         fileSetAsideFinding: vi.fn().mockRejectedValue(new Error('queue down')),
       });
 
-      expect(await host.adviseReviewLoop(req, ctx)).toEqual(LOOP);
+      expect(await host.adviseReviewLoop(req, ctx)).toEqual({
+        verdict: 'loop',
+        rationale: LOOP.rationale,
+        steering: { address: ['AR-1'], setAside: [], guidance: 'add a Home affordance' },
+      });
+    });
+
+    it('a BLOCKING entry whose set-aside finding fails is put back into the lap', async () => {
+      // Nothing else would carry it: the re-run is told set-asides are already
+      // filed, and the human gate files only the CURRENT round's entries.
+      const twoBlocking: ReviewLoopRequest = {
+        ...req,
+        parsed: {
+          blocking: [arEntry('AR-1', 'Spend screen has no way back'), arEntry('AR-2', 'No empty state')],
+          findings: [arEntry('AR-3', 'Copy nit', 'advisory')],
+          prior: [],
+        },
+      };
+      const monitor = makeLoopMonitor({
+        verdict: 'loop',
+        rationale: 'AR-1 is a one-line fix',
+        steering: { address: ['AR-1'], setAside: [{ id: 'AR-2', reason: 'bigger than a lap' }] },
+      });
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding,
+        fileSetAsideFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+      });
+
+      expect(await host.adviseReviewLoop(twoBlocking, ctx)).toEqual({
+        verdict: 'loop',
+        rationale: 'AR-1 is a one-line fix',
+        steering: { address: ['AR-1', 'AR-2'], setAside: [] },
+      });
+      // The audit names only entries that really do have a finding.
+      const audit = fileMonitorFinding.mock.calls[0][0] as { body: string };
+      expect(audit.body).toContain('addressing: AR-1, AR-2');
+      expect(audit.body).not.toContain('Set aside for this round');
+    });
+
+    it('an ADVISORY entry whose set-aside finding fails is pruned but NOT added to the lap', async () => {
+      // It is still in the review the re-run reads, still advisory — no rescue
+      // into the must-fix set is warranted.
+      const monitor = makeLoopMonitor(LOOP);
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding,
+        fileSetAsideFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+      });
+
+      const decision = await host.adviseReviewLoop(req, ctx);
+      expect(decision).toEqual({
+        verdict: 'loop',
+        rationale: LOOP.rationale,
+        steering: { address: ['AR-1'], setAside: [], guidance: 'add a Home affordance' },
+      });
+      const audit = fileMonitorFinding.mock.calls[0][0] as { body: string };
+      expect(audit.body).toContain('addressing: AR-1');
+      expect(audit.body).not.toContain('AR-3');
+    });
+
+    it('a STOP whose set-aside finding fails returns an EMPTY set-aside list', async () => {
+      const monitor = makeLoopMonitor({
+        verdict: 'stop',
+        rationale: 'a product call',
+        setAside: [{ id: 'AR-1', reason: 'out of scope' }],
+      });
+      const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        fileMonitorFinding,
+        fileSetAsideFinding: vi.fn().mockRejectedValue(new Error('queue down')),
+      });
+
+      expect(await host.adviseReviewLoop(req, ctx)).toEqual({
+        verdict: 'stop',
+        rationale: 'a product call',
+        setAside: [],
+      });
+      const audit = fileMonitorFinding.mock.calls[0][0] as { body: string };
+      expect(audit.body).not.toContain('Set aside for this round');
     });
 
     it('a THROWING consult resolves undefined (the mechanical budget)', async () => {

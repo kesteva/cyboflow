@@ -230,6 +230,48 @@ function excerptBody(body: string | undefined): string {
 }
 
 /**
+ * Re-derive the decision the host can actually HONOUR after one or more
+ * set-aside findings failed to file.
+ *
+ * "Set aside" is only defensible because the finding exists. An id whose
+ * finding never landed would otherwise vanish from the run entirely: the
+ * re-run is told it is "already filed as findings", the next reviewer lists it
+ * under `### Prior entries` as set-aside, `ControllerEscalation.setAsideIds`
+ * tells the gate it was filed — and the human gate itself files only the
+ * CURRENT round's `## Blocking` / `## Findings` entries. So a failed id leaves
+ * the set-aside list, and — if it was BLOCKING this round — is appended to the
+ * lap's must-fix set instead, so the lap still has to close it. A failed
+ * ADVISORY id needs no such rescue: it is still in the review the re-run reads,
+ * still advisory.
+ *
+ * Returns the decision UNCHANGED (same reference) when nothing failed.
+ */
+function withoutFailedSetAsides(
+  req: ReviewLoopRequest,
+  decision: ReviewLoopDecision,
+  failed: ReadonlySet<string>,
+): ReviewLoopDecision {
+  if (failed.size === 0) return decision;
+  if (decision.verdict === 'stop') {
+    return { ...decision, setAside: decision.setAside.filter((entry) => !failed.has(entry.id)) };
+  }
+  const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
+  // Existing order preserved; rescued ids append at the end.
+  const address = [...decision.steering.address];
+  for (const { id } of decision.steering.setAside) {
+    if (failed.has(id) && blockingIds.has(id) && !address.includes(id)) address.push(id);
+  }
+  return {
+    ...decision,
+    steering: {
+      ...decision.steering,
+      address,
+      setAside: decision.steering.setAside.filter((entry) => !failed.has(entry.id)),
+    },
+  };
+}
+
+/**
  * Drives a step boundary onto the live timeline (current_step_id + emit). In
  * production a thin adapter over `buildStepTransitionEvent`; in tests a spy.
  */
@@ -1485,11 +1527,14 @@ export class ProgrammaticRunHost implements ControllerHost {
    *   3. Consult `monitor.adviseReviewLoop`. It OWNS its chat rendering (the
    *      blocking announcement + the verdict turn), so this method injects NO
    *      turn of its own — a host turn here would double-render.
-   *   4. RECORD, before returning: one audit finding for the consult, and one
-   *      finding per SET-ASIDE entry. The set-asides are what make the verdict
+   *   4. RECORD, before returning: one finding per SET-ASIDE entry, and one
+   *      audit finding for the consult. The set-asides are what make the verdict
    *      safe to execute unattended — an entry the supervisor drops from the lap
    *      must still reach the human — so they are filed on BOTH arms (a `stop`
-   *      can set entries aside too), each fail-soft and awaited.
+   *      can set entries aside too), each fail-soft and awaited, and they go
+   *      FIRST: an id whose finding did not land cannot travel as set-aside, so
+   *      the decision is re-derived (`withoutFailedSetAsides`) and it is the
+   *      ADJUSTED one that is audited and returned.
    *
    * Fail-soft overall: `DefaultMonitorSession.adviseReviewLoop` already never
    * rejects, so the try/catch is belt-and-braces. An ABORTED run also resolves
@@ -1531,10 +1576,13 @@ export class ProgrammaticRunHost implements ControllerHost {
         });
         return undefined;
       }
-      await this.fileReviewLoopAudit(req, decision);
       const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
-      await this.fileSetAsideFindings(req, setAside);
-      return decision;
+      const failed = await this.fileSetAsideFindings(req, setAside, decision.verdict);
+      // The audit must describe what the host HONOURED, not what the supervisor
+      // asked for: an entry whose finding never landed is not set aside.
+      const honoured = withoutFailedSetAsides(req, decision, failed);
+      await this.fileReviewLoopAudit(req, honoured);
+      return honoured;
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] review-loop consult failed; using the mechanical budget', {
         runId: this.args.runId,
@@ -1609,32 +1657,44 @@ export class ProgrammaticRunHost implements ControllerHost {
    * queue refuses must not cost the others their record — and the whole thing is
    * fail-soft, because the verdict is already decided.
    *
+   * Returns the ids whose sink call THREW — the entries that therefore have no
+   * finding and must not travel as set-aside (see `withoutFailedSetAsides`).
    * An id the supervisor named but the round's review does not carry is dropped
-   * silently: `parseReviewLoopOutput` already validated against the round's
-   * ids, so reaching here means the entry genuinely does not exist.
+   * silently and is NOT a failure: `parseReviewLoopOutput` already validated
+   * against the round's ids, so reaching here means the entry genuinely does
+   * not exist.
    */
   private async fileSetAsideFindings(
     req: ReviewLoopRequest,
     setAside: readonly { id: string; reason: string }[],
-  ): Promise<void> {
+    verdict: ReviewLoopDecision['verdict'],
+  ): Promise<Set<string>> {
+    const failed = new Set<string>();
     const sink = this.args.fileSetAsideFinding;
-    if (!sink || setAside.length === 0) return;
+    if (!sink || setAside.length === 0) return failed;
     const byId = new Map<string, AdversarialFinding>();
     for (const entry of [...req.parsed.blocking, ...req.parsed.findings]) byId.set(entry.id, entry);
+    const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
     for (const { id, reason } of setAside) {
       const entry = byId.get(id);
       if (entry === undefined) continue;
       try {
         await sink({ entry, reason, round: req.round });
       } catch (err) {
+        failed.add(id);
         this.args.logger?.warn('[ProgrammaticRunHost] set-aside finding not filed (fail-soft)', {
           runId: this.args.runId,
           stepId: req.stepId,
           arId: id,
+          adjustment:
+            verdict === 'loop' && blockingIds.has(id)
+              ? 'kept in the lap'
+              : 'dropped from the set-aside list',
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
+    return failed;
   }
 
   /**
