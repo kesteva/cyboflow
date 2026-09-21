@@ -95,6 +95,13 @@ function createInsightsDb(): Database.Database {
       -- migration 048: non-NULL when this run pinned a specific A/B variant
       -- (excluded from tuning-level attribution — see selectTuningLevelUsage).
       variant_id TEXT,
+      -- migration 037: per-run model pin (Claude alias, or a Codex/OMP model id
+      -- when the launch pinned one); NULL = no pin. migrations 062/063: the
+      -- provider/runtime this run spawned with — TASK-290's result-usage fallback
+      -- in selectDailyModelUsage reads all three to label a Codex/OMP bucket.
+      model TEXT,
+      agent_provider TEXT NOT NULL DEFAULT 'claude',
+      agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
       ended_at DATETIME
@@ -224,13 +231,19 @@ interface SeedRunOpts {
   tuningLevel?: string | null;
   /** workflow_runs.variant_id (migration 048); non-null = a pinned A/B variant run. */
   variantId?: string | null;
+  /** workflow_runs.model (migration 037); null/omitted = no pin. */
+  model?: string | null;
+  /** workflow_runs.agent_provider (migration 062); defaults to 'claude'. */
+  agentProvider?: string;
+  /** workflow_runs.agent_runtime (migration 063); defaults to 'claude-sdk'. */
+  agentRuntime?: string;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, model, agent_provider, agent_runtime, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
@@ -242,6 +255,9 @@ function seedRun(db: Database.Database, opts: SeedRunOpts): void {
     opts.specHash ?? null,
     opts.tuningLevel ?? null,
     opts.variantId ?? null,
+    opts.model ?? null,
+    opts.agentProvider ?? 'claude',
+    opts.agentRuntime ?? 'claude-sdk',
     opts.createdAt ?? null,
     opts.startedAt ?? null,
     opts.endedAt ?? null,
@@ -503,6 +519,7 @@ function resultPayload(
   turns: number | null,
   opts: {
     sessionId?: string;
+    inputTokens?: number;
     outputTokens?: number;
     modelUsage?: Record<string, { outputTokens?: number }>;
   } = {},
@@ -510,8 +527,14 @@ function resultPayload(
   const payload: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false };
   if (cost !== null) payload.total_cost_usd = cost;
   if (turns !== null) payload.num_turns = turns;
-  // A usage block on the result MUST be ignored by the token sums.
-  payload.usage = { input_tokens: 99999, output_tokens: opts.outputTokens ?? 88888 };
+  // A usage block on the result is ignored by selectRunUsageRollups' primary
+  // (assistant-side) token sums UNLESS the run reported no assistant usage at
+  // all, in which case it is the ONLY source (the result-usage fallback) — see
+  // scanRawEventRollups / selectDailyModelUsage's TASK-290 fallback pass.
+  payload.usage = {
+    input_tokens: opts.inputTokens ?? 99999,
+    output_tokens: opts.outputTokens ?? 88888,
+  };
   if (opts.sessionId !== undefined) payload.session_id = opts.sessionId;
   if (opts.modelUsage !== undefined) payload.modelUsage = opts.modelUsage;
   return payload;
@@ -2354,6 +2377,134 @@ describe('selectDailyModelUsage', () => {
     expect(points).toHaveLength(1);
     expect(points[0].totalTokens).toBe(6);
     expect(points[0].assistantMessageCount).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-290: result/agent_result usage fallback for providers that never
+  // report tokens on an assistant message (Codex, OMP).
+  // -------------------------------------------------------------------------
+
+  it("buckets a Codex-only run's terminal result.usage under 'codex:<model>', not 'unknown'", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    // Codex reports usage ONLY on the terminal result — no assistant-type rows at all.
+    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'codex:gpt-5-codex',
+        inputTokens: 400,
+        outputTokens: 100,
+        totalTokens: 500,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it("falls back to agent_runtime for the codex bucket label when the run pinned no model", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: null,
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 2 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toHaveLength(1);
+    expect(points[0].model).toBe('codex:codex-sdk');
+  });
+
+  it("buckets an OMP-only run's terminal agent_result.usage under 'omp:<model>'", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    // OMP reports its per-turn usage on 'agent_result', not 'result'.
+    seedEvent(
+      db,
+      'r1',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'omp:gpt-5-mini',
+        inputTokens: 60,
+        outputTokens: 15,
+        totalTokens: 75,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it('does NOT double-count a Claude run that carries both assistant usage and a result.usage (regression)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    // The SAME run's terminal result restates a usage block — MUST be ignored
+    // entirely (the run already reported assistant-side usage in this window).
+    seedEvent(db, 'r1', 'result', resultPayload(0.02, 1, { inputTokens: 9999, outputTokens: 8888 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'claude-opus-4-5',
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it('keeps a Codex fallback run scoped to its own project', () => {
+    seedWorkflow(db, { id: 'wf-a', projectId: 1 });
+    seedWorkflow(db, { id: 'wf-b', projectId: 2 });
+    seedRun(db, {
+      id: 'ra',
+      workflowId: 'wf-a',
+      projectId: 1,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'ra', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 5 }), t0.ts);
+
+    expect(selectDailyModelUsage(dbAdapter(db), 2, 30)).toEqual([]);
+    const scoped = selectDailyModelUsage(dbAdapter(db), 1, 30);
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0].model).toBe('codex:gpt-5-codex');
   });
 });
 
