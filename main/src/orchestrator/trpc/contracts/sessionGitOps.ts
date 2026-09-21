@@ -275,12 +275,21 @@ export interface SessionGitOpsLike {
   /**
    * Mirrors legacy `sessions:get-delivery-state`. `delivered` = a run this
    * session hosted carries a delivery stamp; `landed` = git says the branch has
-   * nothing left to give main. Read by the dismiss dialog.
+   * nothing left to give main; `completedNoCode` = the session hosted a
+   * COMPLETED run of a workflow that never touches the repo (Planner / Launch)
+   * and the worktree has zero own commits — the DB-only sibling of
+   * `delivered`/`landed` for a run whose "delivery" is backlog rows, not code.
+   * Read by the dismiss dialog, which offers Mark complete when ANY of the
+   * three is true.
    */
   getDeliveryState(request: {
     sessionId: string;
   }): Promise<
-    { success: true; data: { delivered: boolean; landed: boolean; ownCommits: number } } | SessionGitError
+    | {
+        success: true;
+        data: { delivered: boolean; landed: boolean; ownCommits: number; completedNoCode: boolean };
+      }
+    | SessionGitError
   >;
 
   /**

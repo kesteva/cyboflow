@@ -56,9 +56,20 @@ function buildDb(): Database.Database {
       payload_json TEXT,
       resolution TEXT
     );
+    -- workflow_id/spec_hash are joined by resolveRunFrozenSpec (TASK-222's
+    -- stepDeclaresOptionalLoopback guard). Every existing test leaves them NULL,
+    -- so the reader degrades via its own schema-absence/fallback paths; the new
+    -- TASK-222 describe block below is the only one that populates them.
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY,
-      status TEXT NOT NULL
+      status TEXT NOT NULL,
+      workflow_id TEXT,
+      spec_hash TEXT
+    );
+    CREATE TABLE workflows (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      spec_json TEXT
     );
   `);
   return db;
@@ -187,10 +198,13 @@ describe('resolveReviewItem — approve-plan Q1 reveal', () => {
       deps.applyReviewItemResolve.mock.invocationCallOrder[0],
     );
     // outcome wins over free text → resolution 'approve' (deterministic verdict).
+    // TASK-222: an explicit outcome also stamps resolutionMeta (gate-resolution
+    // provenance) — surface is null here (baseInput supplies no surface).
     expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
       reviewItemId: 'rvw_ap',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toEqual({
       ok: true,
@@ -247,6 +261,7 @@ describe('resolveReviewItem — non-approve-plan gate', () => {
       reviewItemId: 'rvw_ai',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: 'approve-idea', outcome: 'approve' });
     expect(runStatus(db, 'run-ai')).toBe('running');
@@ -285,6 +300,68 @@ describe('resolveReviewItem — non-gate items', () => {
 
     expect(deps.maybeResumeRun).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true, reviewItemId: 'rvw_nb', resumed: false, gateStepId: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-277 — "Log as findings" on an eval-sourced finding (resolution
+// 'triaged:logged'): the SAME aggregate-unblock mechanism as any other
+// blocking finding (keyed on `blocking`, never on the resolution text or
+// source), so a blocking catastrophic-cap eval item stops gating the run
+// exactly like the generic case above — and no task is ever minted, because
+// this chokepoint's dep bag carries no task-creation collaborator at all
+// (only reviewItems.promoteToTask does that, via a wholly separate handler).
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — TASK-277 eval finding "Log as findings"', () => {
+  it('a blocking eval-sourced (catastrophic-cap) finding resolved triaged:logged stops gating the run', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_cap',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: true,
+      runId: 'run-eval',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_cap', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    // No task-minting collaborator exists on this path — resolve never mints one.
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
+      reviewItemId: 'rvw_eval_cap',
+      actor: 'user',
+      resolution: 'triaged:logged',
+    });
+    expect(deps.promotePendingDraftsForRun).not.toHaveBeenCalled();
+    expect(deps.deleteRunCreatedEntities).not.toHaveBeenCalled();
+    // The blocking cap item no longer gates the run — aggregate-unblock resumes it.
+    expect(deps.maybeResumeRun).toHaveBeenCalledWith('run-eval');
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_cap', resumed: true, gateStepId: null });
+    expect(runStatus(db, 'run-eval')).toBe('running');
+  });
+
+  it('a non-blocking eval finding resolved triaged:logged just resolves — no resume attempted, no task minted', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_nb',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: false,
+      runId: 'run-eval-nb',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_nb', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_nb', resumed: false, gateStepId: null });
   });
 });
 
@@ -1079,5 +1156,114 @@ describe('resolveReviewItem — approve-plan reject unwinds the plan ledger', ()
       makeDeps(db),
     );
     expect(result).toMatchObject({ ok: true, outcome: 'reject' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-222 — attributable-reject guard (stepDeclaresOptionalLoopback)
+//
+// The swift-bison-20260917 incident: a plain 'reject' on the approve-design gate
+// (which the frozen spec declares optional with an intra-phase `loopback` target)
+// ENDS the run instead of looping back to expand-spec. This handler does not itself
+// own the loopback (the WorkflowController does — untouched by this task), but it
+// MUST warn-log so the occurrence is attributable to a surface/actor, and it MUST
+// still honor the caller's explicit choice (no refusal, no behavior change).
+// ---------------------------------------------------------------------------
+
+/** Seed a `workflows` row + point the run at it, so resolveRunFrozenSpec resolves a spec. */
+function seedWorkflowSpec(
+  db: Database.Database,
+  opts: { runId: string; workflowId: string; steps: Array<{ id: string; optional?: boolean; loopback?: string }> },
+): void {
+  db.prepare('INSERT INTO workflows (id, name, spec_json) VALUES (?, ?, ?)').run(
+    opts.workflowId,
+    'test-workflow',
+    JSON.stringify({ phases: [{ steps: opts.steps }] }),
+  );
+  db.prepare('UPDATE workflow_runs SET workflow_id = ? WHERE id = ?').run(opts.workflowId, opts.runId);
+}
+
+describe('resolveReviewItem — TASK-222 attributable-reject guard', () => {
+  it('warns when a reject arrives for a programmatic approve-design gate whose frozen spec declares an optional loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design',
+      workflowId: 'wf-1',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("gate 'approve-design' on run run-design resolved with outcome 'reject'"),
+    );
+    expect(warnSpy.mock.calls[0][0]).toContain('surface=queue');
+    // The reject itself is still honored exactly as requested — no refusal, no
+    // forced remap to 'revise' (that behavior lives in the surfaces, not here).
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'reject' });
+  });
+
+  it('does NOT warn when the same gate is resolved with outcome revise (the intended loopback)', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_revise',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design-2',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design-2',
+      workflowId: 'wf-2',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_revise', outcome: 'revise', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'revise' });
+  });
+
+  it('does NOT warn on reject for a gate whose frozen spec declares NO loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_plain_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-idea',
+      blocking: true,
+      runId: 'run-plain',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-plain',
+      workflowId: 'wf-3',
+      steps: [{ id: 'approve-idea' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_plain_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("declares an optional loopback"));
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-idea', outcome: 'reject' });
   });
 });

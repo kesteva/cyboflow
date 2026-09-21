@@ -1383,6 +1383,12 @@ function EpicCard({
 // planner asks a live AskUserQuestion whose first sub-question offers an
 // Approve/Reject option set. This template resolves whichever is pending.
 const GATE_SOURCE_APPROVE_PLAN = 'gate:human-step:approve-plan';
+/**
+ * TASK-222 provenance id for gate verdicts recorded from THIS artifact tab's
+ * Approve/Reject pair — persisted as `resolvedSurface` in the item's
+ * payload_json, alongside the queue/session `ReviewItemCardSurface` ids.
+ */
+const ARTIFACT_GATE_SURFACE = 'artifact:decomposed-stories';
 
 /** True when any rendered epic/task is a hidden draft (approved_at === null). */
 function hasDraftDescendant(ideas: BacklogTaskItem[]): boolean {
@@ -1545,9 +1551,12 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
     }
     if (variant === 'gate' && gateItem) {
       // Resolve the programmatic gate; the server reveals drafts + resumes on
-      // 'approve', tears the drafts down + ends the run on 'reject'.
+      // 'approve', tears the drafts down + ends the run on 'reject'. `surface`
+      // (TASK-222) stamps WHICH control answered the gate into payload_json
+      // (`resolvedSurface`) so a post-mortem can tell this artifact-tab pair
+      // apart from the queue/session cards.
       setSubmitting(true);
-      resolve(projectId, gateItem.id, { outcome: kind }).then((result) => {
+      resolve(projectId, gateItem.id, { outcome: kind, surface: ARTIFACT_GATE_SURFACE }).then((result) => {
         setSubmitting(false);
         if (result === null) setSubmitError('Failed to submit.');
       });

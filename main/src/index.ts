@@ -157,7 +157,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -186,12 +186,11 @@ import { pollClaudeUsage, pollCodexRateLimits } from './services/providerUsage/p
 import {
   setReviewItemsRunProbe,
   setResolveVerdictNudgeDeps,
-  resumeWouldStrandEndedWalk,
 } from './orchestrator/trpc/routers/reviewItems';
 import { setMonitorRehydrator, setFinalGateHandover } from './orchestrator/trpc/routers/monitor';
 import { createFinalGateHandover } from './orchestrator/finalGateHandover';
 import { createMonitorRehydrator } from './orchestrator/programmatic/monitorRehydration';
-import { resolveReviewItem as resolveReviewItemCore } from './orchestrator/resolveReviewItemHandler';
+import { composeMonitorReviewQueueActions } from './monitorReviewQueueComposition';
 import {
   addTaskToRun,
   removeTaskFromRun,
@@ -540,7 +539,7 @@ interface MonitorSteeringActions {
   ): Promise<MonitorActionResult>;
   resolveReviewItem(
     runId: string,
-    input: { reviewItemId: string; outcome?: 'approve' | 'reject'; resolution?: string },
+    input: { reviewItemId: string; outcome?: 'approve' | 'reject' | 'revise'; resolution?: string },
   ): Promise<MonitorActionResult>;
   fileNote(runId: string, input: { title: string; body?: string }): Promise<MonitorActionResult>;
 }
@@ -4863,6 +4862,11 @@ app.whenReady().then(async () => {
       },
       logger: loggerLike,
     };
+    // The review queue's "Address review findings" CTA (TASK-277) is a SECOND
+    // entry point onto this SAME dep bag — rewindRunHandler(runId,
+    // 'address-review', ...), wired here rather than duplicating the bag.
+    setRewindRunDeps(rewindRunDepsBag);
+    console.log('[Main] runs.addressReviewFindings deps wired');
 
     // Lane-rewind deps bag (monitor rewind_lane_to_step). Deliberately tiny next to
     // the rewind bag above: a lane rewind mutates nothing durable — it records an
@@ -5014,71 +5018,10 @@ app.whenReady().then(async () => {
         };
         return { ok: false, message: messages[result.reason] ?? `Lane rewind refused (${result.reason}).` };
       },
-      resolveReviewItem: async (runId, input) => {
-        const projectId = runProjectId(runId);
-        if (projectId === undefined) return { ok: false, message: 'Run not found.' };
-        const result = await resolveReviewItemCore(
-          {
-            projectId,
-            reviewItemId: input.reviewItemId,
-            ...(input.outcome !== undefined ? { outcome: input.outcome } : {}),
-            ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
-          },
-          {
-            db,
-            applyReviewItemResolve: (pid, resolveArgs) =>
-              ReviewItemRouter.getInstance().applyReviewItem(pid, {
-                op: 'resolve',
-                actor: resolveArgs.actor,
-                reviewItemId: resolveArgs.reviewItemId,
-                ...(resolveArgs.resolution != null ? { resolution: resolveArgs.resolution } : {}),
-              }),
-            promotePendingDraftsForRun: (rid) =>
-              QuestionRouter.getInstance().promotePendingDraftsForRun(rid),
-            deleteRunCreatedEntities: (pid, rid) =>
-              TaskChangeRouter.getInstance().deleteRunCreatedEntities(pid, rid),
-            maybeResumeRun: (rid) => HumanStepManager.getInstance().maybeResumeRun(rid),
-            wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
-            logger: loggerLike,
-          },
-        );
-        if (result.ok) {
-          const verb =
-            result.outcome === 'reject'
-              ? 'Rejected'
-              : result.outcome === 'approve'
-                ? 'Approved'
-                : 'Resolved';
-          return {
-            ok: true,
-            message: `${verb} the review item${result.resumed ? ' — the run is resuming.' : '.'}`,
-          };
-        }
-        return { ok: false, message: result.message };
-      },
-      fileNote: async (runId, input) => {
-        const projectId = runProjectId(runId);
-        if (projectId === undefined) return { ok: false, message: 'Run not found.' };
-        try {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'create',
-            actor: 'orchestrator',
-            kind: 'human_task',
-            title: input.title,
-            ...(input.body !== undefined ? { body: input.body } : {}),
-            blocking: false,
-            source: 'monitor',
-            runId,
-          });
-          return { ok: true, message: `Filed a note in the review queue: '${input.title}'.` };
-        } catch (err) {
-          loggerLike.warn('[Main] monitor fileNote failed', {
-            runId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return { ok: false, message: 'Could not file the note.' };
-        }
-      },
+      // The two review-queue actions (resolve_review_item / file_note) live in
+      // ./monitorReviewQueueComposition.ts (issue #19 size ratchet) and reuse
+      // this block's db / run→project lookup / logger.
+      ...composeMonitorReviewQueueActions({ db, runProjectId, loggerLike }),
     };
     console.log('[Main] monitor steering actions wired');
 

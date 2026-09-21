@@ -139,6 +139,323 @@ describe('session_summaries state/waiting_on (migration 121)', () => {
   });
 });
 
+describe('dismissSessionAsk (migration 140, TASK-225)', () => {
+  it('clears state/waiting_on and stamps ask_dismissed_at + a hash of the cleared waiting_on', () => {
+    createSession('s1');
+    db.persistSessionSummaryResult({
+      sessionId: 's1',
+      summary: 'Waiting on a decision.',
+      lastTurnId: 3,
+      costUsdDelta: 0.001,
+      entries: ['Waiting on a decision.'],
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    const ok = db.dismissSessionAsk('s1');
+    expect(ok).toBe(true);
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBeNull();
+    expect(row?.waiting_on).toBeNull();
+    expect(row?.ask_dismissed_at).not.toBeNull();
+    expect(row?.ask_dismissed_hash).not.toBeNull();
+    expect(typeof row?.ask_dismissed_hash).toBe('string');
+  });
+
+  it('dismissing twice with the same waiting_on text produces the same hash', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+    db.dismissSessionAsk('s1');
+    const firstHash = db.getSessionSummary('s1')?.ask_dismissed_hash;
+
+    // The summarizer writes the SAME question back, then it is dismissed again.
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 2,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+    db.dismissSessionAsk('s1');
+    const secondHash = db.getSessionSummary('s1')?.ask_dismissed_hash;
+
+    expect(firstHash).not.toBeNull();
+    expect(secondHash).toBe(firstHash);
+  });
+
+  it('a repeat dismiss with nothing left to hash preserves the existing suppression hash (double-click)', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+    db.dismissSessionAsk('s1');
+    const firstHash = db.getSessionSummary('s1')?.ask_dismissed_hash;
+    expect(firstHash).not.toBeNull();
+
+    // Second request lands after waiting_on is already null — it must not
+    // wipe the hash the first one stamped.
+    expect(db.dismissSessionAsk('s1')).toBe(true);
+    const row = db.getSessionSummary('s1');
+    expect(row?.ask_dismissed_hash).toBe(firstHash);
+    expect(row?.state).toBeNull();
+    expect(row?.waiting_on).toBeNull();
+  });
+
+  it('a different waiting_on text hashes differently', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+    db.dismissSessionAsk('s1');
+    const firstHash = db.getSessionSummary('s1')?.ask_dismissed_hash;
+
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 2,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Postgres or SQLite for the cache?',
+    });
+    db.dismissSessionAsk('s1');
+    const secondHash = db.getSessionSummary('s1')?.ask_dismissed_hash;
+
+    expect(secondHash).not.toBe(firstHash);
+  });
+
+  it('dismissing a session with no session_summaries row yet still stamps a dismissal (null hash)', () => {
+    createSession('s1');
+    expect(db.getSessionSummary('s1')).toBeUndefined();
+
+    const ok = db.dismissSessionAsk('s1');
+    expect(ok).toBe(true);
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.ask_dismissed_at).not.toBeNull();
+    expect(row?.ask_dismissed_hash).toBeNull();
+  });
+
+  it('returns false and writes nothing when the session does not exist', () => {
+    const ok = db.dismissSessionAsk('does-not-exist');
+    expect(ok).toBe(false);
+    expect(db.getSessionSummary('does-not-exist')).toBeUndefined();
+  });
+});
+
+describe('clearSessionAsk (TASK-225 auto-clear)', () => {
+  it('clears state/waiting_on without touching ask_dismissed_at/hash', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    db.clearSessionAsk('s1');
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBeNull();
+    expect(row?.waiting_on).toBeNull();
+    expect(row?.ask_dismissed_at).toBeNull();
+    expect(row?.ask_dismissed_hash).toBeNull();
+  });
+
+  it('is a no-op when there is no session_summaries row', () => {
+    createSession('s1');
+    expect(() => db.clearSessionAsk('s1')).not.toThrow();
+    expect(db.getSessionSummary('s1')).toBeUndefined();
+  });
+});
+
+describe('addConversationMessage auto-clears a stale ask on a USER message (TASK-225)', () => {
+  it('a user message clears state/waiting_on', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    db.addConversationMessage('s1', 'user', 'Ship it as a boot check.');
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBeNull();
+    expect(row?.waiting_on).toBeNull();
+  });
+
+  it('an assistant message does NOT clear the ask', () => {
+    createSession('s1');
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    db.addConversationMessage('s1', 'assistant', 'Still waiting on you.');
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBe('needs_input');
+    expect(row?.waiting_on).toBe('Ship as boot check or dialog?');
+  });
+
+  it('a PANEL-backed user message (addPanelConversationMessage — the chat send path) clears the ask too', () => {
+    createSession('s1');
+    db.createPanel({ id: 'panel-1', sessionId: 's1', type: 'claude', title: 'Claude' });
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    db.addPanelConversationMessage('panel-1', 'user', 'Boot check, please.');
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBeNull();
+    expect(row?.waiting_on).toBeNull();
+    // Auto-clear is activity, not a suppression decision: no dismissal stamp.
+    expect(row?.ask_dismissed_at).toBeNull();
+    expect(row?.ask_dismissed_hash).toBeNull();
+  });
+
+  it('a PANEL-backed assistant message does NOT clear the ask', () => {
+    createSession('s1');
+    db.createPanel({ id: 'panel-1', sessionId: 's1', type: 'claude', title: 'Claude' });
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+
+    db.addPanelConversationMessage('panel-1', 'assistant', 'Still waiting on you.');
+
+    const row = db.getSessionSummary('s1');
+    expect(row?.state).toBe('needs_input');
+  });
+});
+
+describe('resting status transitions auto-clear a stale ask (TASK-225)', () => {
+  function seedAsk(id: string): void {
+    createSession(id);
+    db.upsertSessionSummary({
+      sessionId: id,
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Ship as boot check or dialog?',
+    });
+    // The ask stands while the session is mid-turn (the summarizer wrote it
+    // before this turn started; nothing inserted a user message).
+    db.updateSession(id, { status: 'running' });
+    expect(db.getSessionSummary(id)?.state).toBe('needs_input');
+  }
+
+  it.each(['stopped', 'completed', 'failed'] as const)(
+    "updateSession to '%s' clears state/waiting_on without stamping a dismissal",
+    (status) => {
+      seedAsk('s1');
+
+      db.updateSession('s1', { status });
+
+      const row = db.getSessionSummary('s1');
+      expect(row?.state).toBeNull();
+      expect(row?.waiting_on).toBeNull();
+      // Activity, not a suppression decision — the identical question may
+      // resurface from the next summarizer pass.
+      expect(row?.ask_dismissed_at).toBeNull();
+      expect(row?.ask_dismissed_hash).toBeNull();
+    },
+  );
+
+  it("updateSession to 'running' / 'pending' leaves the ask standing", () => {
+    seedAsk('s1');
+    db.updateSession('s1', { status: 'pending' });
+    expect(db.getSessionSummary('s1')?.state).toBe('needs_input');
+    db.updateSession('s1', { status: 'running' });
+    expect(db.getSessionSummary('s1')?.state).toBe('needs_input');
+  });
+
+  it('a non-status update (rename) never touches the ask', () => {
+    seedAsk('s1');
+    db.updateSession('s1', { name: 'renamed' });
+    expect(db.getSessionSummary('s1')?.state).toBe('needs_input');
+    expect(db.getSessionSummary('s1')?.waiting_on).toBe('Ship as boot check or dialog?');
+  });
+
+  it('a fresh ask written AFTER the session rested survives (the summarizer runs post-rest)', () => {
+    createSession('s1');
+    db.updateSession('s1', { status: 'running' });
+    db.updateSession('s1', { status: 'completed' });
+    // The idle-window summarizer pass lands on the already-resting session.
+    db.upsertSessionSummary({
+      sessionId: 's1',
+      summary: 'x',
+      lastTurnId: 2,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Which option?',
+    });
+    expect(db.getSessionSummary('s1')?.state).toBe('needs_input');
+    expect(db.getSessionSummary('s1')?.waiting_on).toBe('Which option?');
+  });
+
+  it('the boot sweep (markSessionsAsStopped) clears the asks of the sessions it rests', () => {
+    seedAsk('s1');
+    seedAsk('s2');
+    createSession('s3');
+    db.upsertSessionSummary({
+      sessionId: 's3',
+      summary: 'x',
+      lastTurnId: 1,
+      costUsdDelta: 0,
+      state: 'needs_input',
+      waitingOn: 'Untouched — not part of the sweep',
+    });
+
+    db.markSessionsAsStopped(['s1', 's2']);
+
+    expect(db.getSessionSummary('s1')?.state).toBeNull();
+    expect(db.getSessionSummary('s1')?.waiting_on).toBeNull();
+    expect(db.getSessionSummary('s2')?.state).toBeNull();
+    expect(db.getSessionSummary('s3')?.state).toBe('needs_input');
+    expect(db.getSessionSummary('s3')?.waiting_on).toBe('Untouched — not part of the sweep');
+  });
+});
+
 describe('upsertSessionSummary accumulation', () => {
   it('replaces summary/last_turn_id but accumulates calls_count and cost_usd_total', () => {
     createSession('s1');

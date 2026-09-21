@@ -18,6 +18,15 @@
  * Every row is one card: an "ASKED YOU" kicker + quiet clock, the ask itself as
  * the bold headline, then a metadata line (project · session · branch · summary)
  * with the actions right-aligned.
+ *
+ * Only quick-session rows carry a Dismiss action (a ✕ in the card's top-right
+ * plus a "Dismiss" button) — TASK-225. It clears the session's stale
+ * summarizer ask (`session_summaries.state`/`waiting_on`) via
+ * `cyboflow.sessions.dismissAsk` and stamps a dismissal hash so the SAME
+ * question doesn't resurface on the next summary; a genuinely different
+ * question still does. Decision review items and permission approvals already
+ * have their own resolve paths (Answer → / Approve·Reject) and are
+ * deliberately left untouched.
  */
 import React from 'react';
 import { trpc } from '../../trpc/client';
@@ -40,12 +49,35 @@ function AskCard({ children }: { children: React.ReactNode }): React.JSX.Element
   );
 }
 
-function CardTop({ quiet }: { quiet: string | null }): React.JSX.Element {
+function CardTop({
+  quiet,
+  onDismiss,
+  dismissDisabled = false,
+}: {
+  quiet: string | null;
+  /** Small ✕ in the top-right corner — quick-session rows only (TASK-225). */
+  onDismiss?: () => void;
+  /** Disabled while a dismiss is in flight, so a double-click can't fire a second mutation. */
+  dismissDisabled?: boolean;
+}): React.JSX.Element {
   return (
     <div className="flex items-center gap-2">
       <span className="eyebrow text-status-error">Asked you</span>
       {quiet !== null && (
         <span className="ml-auto shrink-0 text-[10px] text-text-tertiary">quiet {quiet}</span>
+      )}
+      {onDismiss !== undefined && (
+        <button
+          type="button"
+          aria-label="Dismiss ask"
+          title="Dismiss"
+          data-testid="rq-needs-input-dismiss-x"
+          onClick={onDismiss}
+          disabled={dismissDisabled}
+          className={`shrink-0 text-[12px] leading-none text-text-tertiary transition-colors hover:text-text-primary disabled:opacity-50 ${quiet === null ? 'ml-auto' : ''}`}
+        >
+          ✕
+        </button>
       )}
     </div>
   );
@@ -114,22 +146,66 @@ function QuickSessionAsk({
   projectName,
   nowMs,
   onOpen,
+  onDismissed,
 }: {
   row: QuickSessionRow;
   projectName: string | null;
   nowMs: number;
   onOpen: (row: QuickSessionRow) => void;
+  /** Called once the dismiss mutation settles (success or failure — see `dismiss` below). */
+  onDismissed: () => void;
 }): React.JSX.Element {
+  const [busy, setBusy] = React.useState(false);
+
+  // Dismiss only clears the SUMMARIZER's ask (session_summaries.state /
+  // waiting_on). A live `blocked` row is a real in-flight AskUserQuestion /
+  // permission gate the mutation cannot clear — the card would survive the
+  // click — so the affordance is offered only for the idle + needs_input
+  // (summary-derived) ask it can actually remove.
+  const canDismiss = row.state !== 'blocked';
+
+  // TASK-225: clears session_summaries.state/waiting_on server-side and stamps
+  // a dismissal hash so a future summarizer run repeating the SAME question
+  // stays suppressed (quickSessionListing.ts's read-time filter) — a
+  // genuinely different question still resurfaces. `onDismissed` kicks an
+  // immediate board refresh so the card drops out right away rather than
+  // waiting for the next 3s poll tick. Guarded on `busy` (and both controls
+  // disable while in flight) so a double-click never issues a second dismiss
+  // that would re-stamp over the first one's suppression hash.
+  const dismiss = (): void => {
+    if (busy) return;
+    setBusy(true);
+    void trpc.cyboflow.sessions.dismissAsk
+      .mutate({ sessionId: row.sessionId })
+      .then(() => onDismissed())
+      .catch(() => {
+        // Best-effort — leave the card in place on error, matching ApprovalAsk.
+      })
+      .finally(() => setBusy(false));
+  };
+
   return (
     <AskCard>
-      <CardTop quiet={formatElapsedMinutes(row.restedAtIso, nowMs)} />
+      <CardTop
+        quiet={formatElapsedMinutes(row.restedAtIso, nowMs)}
+        {...(canDismiss ? { onDismiss: dismiss, dismissDisabled: busy } : {})}
+      />
       <Headline>{row.waitingOn ?? row.summary ?? 'Waiting for your answer'}</Headline>
       <MetaRow
         projectName={projectName}
         sessionName={row.name}
         branchName={row.worktreeName}
         context={row.waitingOn !== null ? row.summary : null}
-        actions={<PrimaryButton onClick={() => onOpen(row)}>Answer →</PrimaryButton>}
+        actions={
+          <>
+            {canDismiss && (
+              <GhostButton onClick={dismiss} disabled={busy}>
+                Dismiss
+              </GhostButton>
+            )}
+            <PrimaryButton onClick={() => onOpen(row)}>Answer →</PrimaryButton>
+          </>
+        }
       />
     </AskCard>
   );
@@ -309,6 +385,8 @@ export interface NeedsInputSectionProps {
   onOpenQuickSession: (row: QuickSessionRow) => void;
   onOpenReviewItem: (item: ReviewItem) => void;
   onApprovalDecided: () => void;
+  /** Fired after a quick-session ask is dismissed (TASK-225) — refresh the board. */
+  onQuickSessionAskDismissed: () => void;
 }
 
 /** NeedsInputSection — see {@link NeedsInputSectionProps}. */
@@ -327,6 +405,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
       onOpenQuickSession,
       onOpenReviewItem,
       onApprovalDecided,
+      onQuickSessionAskDismissed,
     } = props;
 
     const total = quickRows.length + reviewItems.length + approvals.length;
@@ -360,6 +439,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
                 projectName={nameOf(row.projectId)}
                 nowMs={nowMs}
                 onOpen={onOpenQuickSession}
+                onDismissed={onQuickSessionAskDismissed}
               />
             ))}
             {reviewItems.map((item) => (

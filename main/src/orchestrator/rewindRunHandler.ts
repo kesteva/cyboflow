@@ -334,8 +334,13 @@ type GuardOutcome =
   | { ok: true; fanOutKeptSettled: boolean; keptFanOutIds: readonly string[] }
   | { ok: false; reason: RewindRunNoOpReason };
 
-/** Statuses a programmatic run can be rewound from (see header for the rationale). */
-const REWINDABLE_STATUSES = new Set<string>(['running', 'awaiting_review', 'failed', 'paused']);
+/**
+ * Statuses a programmatic run can be rewound from (see header for the
+ * rationale). Exported so the `runs.canAddressReviewFindings` eligibility
+ * query (TASK-277) can pre-flight-check a run WITHOUT duplicating this list —
+ * it must stay in sync with the pre-flight/Phase-1 guards below.
+ */
+export const REWINDABLE_STATUSES = new Set<string>(['running', 'awaiting_review', 'failed', 'paused']);
 
 const RUN_SELECT_SQL = `SELECT status, execution_model, current_step_id, batch_id
          FROM workflow_runs

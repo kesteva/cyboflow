@@ -247,6 +247,36 @@ describe('describeReadyState', () => {
     expect(state).toEqual({ label: 'stopped by you', tone: 'neutral' });
   });
 
+  describe('with a finished flow run (TASK-226)', () => {
+    it('a COMPLETED flow run is not "stopped by you" even though the parked quick chat reads stopped', () => {
+      const state = describeReadyState(
+        row({ rawStatus: 'stopped', git: gitSnapshot({ isReadyToMerge: true, ahead: 2 }) }),
+        { status: 'completed' },
+      );
+      expect(state).toEqual({ label: 'ready to merge ↑2 · clean', tone: 'success' });
+    });
+
+    it('a CANCELED flow run reads "stopped by you"', () => {
+      const state = describeReadyState(row({ rawStatus: 'completed' }), { status: 'canceled' });
+      expect(state).toEqual({ label: 'stopped by you', tone: 'neutral' });
+    });
+
+    it('a FAILED flow run reads "stopped early"', () => {
+      const state = describeReadyState(
+        row({ rawStatus: 'completed', git: gitSnapshot({ isReadyToMerge: true }) }),
+        { status: 'failed' },
+      );
+      expect(state).toEqual({ label: 'stopped early', tone: 'error' });
+    });
+
+    it('null/undefined flow run falls back to the quick row itself', () => {
+      expect(describeReadyState(row({ rawStatus: 'stopped' }), null)).toEqual({
+        label: 'stopped by you',
+        tone: 'neutral',
+      });
+    });
+  });
+
   it('shows ready-to-merge for a clean ahead branch', () => {
     const state = describeReadyState(
       row({ rawStatus: 'completed', git: gitSnapshot({ isReadyToMerge: true, ahead: 3 }) }),

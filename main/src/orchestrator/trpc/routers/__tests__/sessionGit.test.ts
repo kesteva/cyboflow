@@ -71,7 +71,10 @@ function makeFakeOps(): FakeOps {
     push: vi.fn().mockResolvedValue({ success: true, data: { output: '' } }),
     getDeliveryState: vi
       .fn()
-      .mockResolvedValue({ success: true, data: { delivered: false, landed: false, ownCommits: 0 } }),
+      .mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: false },
+      }),
     markComplete: vi.fn().mockResolvedValue({ success: true, data: { stamped: 1 } }),
     getBranchCommitSubjects: vi.fn().mockResolvedValue({ success: true, data: { subjects: [] } }),
     getLastCommits: vi.fn().mockResolvedValue({ success: true, data: [] }),

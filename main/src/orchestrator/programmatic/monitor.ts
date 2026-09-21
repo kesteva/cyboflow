@@ -731,7 +731,7 @@ Capabilities:
   - Action "rewind_to_step": rewind the WHOLE run to an earlier step and re-run everything from that step onward. Set \`stepId\` (required) to a step at or before the run's current step (from the timeline above). Works even while the run is actively executing — the host safely stops current work first. Use when earlier output was wrong and later steps built on it; prefer "retry_step" for simply re-running a failed step.
   - Action "rewind_lane_to_step": rewind ONE sprint task's lane to an earlier step of ITS chain (e.g. back to 'implement'), leaving the run and every other lane running. Set \`taskRef\` (the task's ref or id) and \`stepId\` (an INNER lane step such as 'implement', 'code-review', 'task-verify' — NOT a phase step from the timeline), both required, with \`stepId\` at or before that lane's current step (see the sprint task lanes section above). The lane must be RUNNING right now; a queued lane hasn't started, and an integrated or failed lane has already settled — neither can be rewound this way. This is THE action for one stuck or misbehaving task: the host safely stops just that lane's agent and re-drives it from the step you name. Prefer it over "rewind_to_step" whenever the problem is confined to one task — the whole-run rewind throws away every other lane's work too.
 - Review queue:
-  - Action "resolve_review_item": resolve a pending gate, finding, or permission request by id. Set \`reviewItemId\` (required), and optionally \`outcome\` ("approve" or "reject") and \`resolution\` (a short note).
+  - Action "resolve_review_item": resolve a pending gate, finding, or permission request by id. Set \`reviewItemId\` (required), and optionally \`outcome\` ("approve", "revise" or "reject") and \`resolution\` (a short note). For a human gate that declares a revise target (e.g. the planner's approve-design gate), "revise" is the normal non-approve verdict — it reruns the preceding steps with the user's notes threaded in. "reject" ENDS the run; use it only when the user explicitly asks to end/abandon the run, never as a stand-in for "rerun with findings".
   - Action "file_note": file a non-blocking informational note into the run's review queue. Set \`title\` (required) and optionally \`body\`.
 - For a pure question (no explicit action request), return no action.
 
@@ -837,8 +837,9 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
         },
         outcome: {
           type: 'string',
-          enum: ['approve', 'reject'],
-          description: 'resolve_review_item only: the resolution outcome.',
+          enum: ['approve', 'revise', 'reject'],
+          description:
+            'resolve_review_item only: the resolution outcome. "revise" reruns a gate\'s preceding steps with the user\'s notes (the normal non-approve verdict for a gate with a revise target, e.g. approve-design); "reject" ENDS the run.',
         },
         resolution: {
           type: 'string',
@@ -953,7 +954,12 @@ export interface ConverseRewindLaneToStepAction {
 export interface ConverseResolveReviewItemAction {
   kind: 'resolve_review_item';
   reviewItemId: string;
-  outcome?: 'approve' | 'reject';
+  /**
+   * `revise` (TASK-222) is the loopback verdict — for a gate that declares a
+   * revise target (approve-design) it reruns the preceding steps instead of
+   * ending the run the way a plain `reject` does.
+   */
+  outcome?: 'approve' | 'reject' | 'revise';
   resolution?: string;
 }
 
@@ -1012,7 +1018,7 @@ function isNonEmptyString(v: unknown): v is string {
  *   `steer_step`'s optional lane narrowing, a lane rewind without a lane is
  *   meaningless, so a missing/blank `taskRef` drops the whole action.
  * - `resolve_review_item` requires `reviewItemId`; `outcome`, if present, must be
- *   `'approve'` or `'reject'` — an invalid `outcome` is dropped to `undefined`
+ *   `'approve'`, `'revise'` or `'reject'` — an invalid `outcome` is dropped to `undefined`
  *   while the rest of the action is KEPT (not the same failure mode as a missing
  *   required field).
  *
@@ -1091,7 +1097,8 @@ function parseConverseAction(v: unknown): ConverseAction | undefined {
     case 'resolve_review_item': {
       if (!isNonEmptyString(o.reviewItemId)) return undefined;
       if (o.resolution !== undefined && typeof o.resolution !== 'string') return undefined;
-      const outcome = o.outcome === 'approve' || o.outcome === 'reject' ? o.outcome : undefined;
+      const outcome =
+        o.outcome === 'approve' || o.outcome === 'reject' || o.outcome === 'revise' ? o.outcome : undefined;
       return {
         kind: 'resolve_review_item',
         reviewItemId: o.reviewItemId,
@@ -1405,7 +1412,7 @@ export interface MonitorActions {
    */
   resolveReviewItem(input: {
     reviewItemId: string;
-    outcome?: 'approve' | 'reject';
+    outcome?: 'approve' | 'reject' | 'revise';
     resolution?: string;
   }): Promise<MonitorActionResult>;
 
