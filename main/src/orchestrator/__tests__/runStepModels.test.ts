@@ -56,6 +56,11 @@ const TEST_SPEC = {
         { id: 'opus-step', name: 'Opus step', agent: 'opus-agent' },
         // Pinned non-Claude runtime with a verbatim provider model id.
         { id: 'codex-step', name: 'Codex step', agent: 'codex-agent' },
+        // Pinned Claude runtime AND a pinned Claude model together (distinct
+        // from opus-step's runtime===null pin and claude-runtime-only-step's
+        // model===null inherit — this is the fourth combination of the
+        // {runtime, model} pair the precedence chain must handle).
+        { id: 'claude-runtime-and-model-step', name: 'Claude runtime + model', agent: 'claude-interactive-sonnet-agent' },
       ],
     },
   ],
@@ -105,6 +110,11 @@ const FAKE_EFFECTIVE_AGENTS: EffectiveAgent[] = [
   effectiveAgent({ agentKey: 'opus-agent', model: 'opus' }),
   effectiveAgent({ agentKey: 'codex-agent', model: null, runtime: 'codex-sdk', providerModel: 'gpt-5.6-sol' }),
   effectiveAgent({ agentKey: 'claude-interactive-agent', model: null, runtime: 'claude-interactive' }),
+  effectiveAgent({
+    agentKey: 'claude-interactive-sonnet-agent',
+    model: 'sonnet',
+    runtime: 'claude-interactive',
+  }),
   // 'inherit-agent' deliberately absent — a step whose agentKey has no
   // effective-agent row at all must still resolve (fully inherits).
 ];
@@ -162,6 +172,18 @@ describe('resolveRunStepModels', () => {
     expect(step?.family).toBe('opus');
   });
 
+  it('pinned Claude runtime WITH a pinned Claude model resolves via agentRunTargetLabel, not the runtime label', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-pinned-runtime-and-model', { model: 'haiku', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-pinned-runtime-and-model', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'claude-runtime-and-model-step');
+
+    expect(step).toBeDefined();
+    expect(step?.label).toBe('Sonnet 5');
+    expect(step?.family).toBe('sonnet');
+  });
+
   it('non-Claude runtime (Codex with a providerModel) resolves verbatim with family "other"', () => {
     const db = makeDb();
     seedStepModelsRun(db, 'run-codex', { model: 'sonnet', agentProvider: 'claude' });
@@ -181,7 +203,13 @@ describe('resolveRunStepModels', () => {
 
     expect(result.some((s) => s.stepId === 'human-gate')).toBe(false);
     expect(result.map((s) => s.stepId).sort()).toEqual(
-      ['inherit-step', 'claude-runtime-only-step', 'opus-step', 'codex-step'].sort(),
+      [
+        'inherit-step',
+        'claude-runtime-only-step',
+        'opus-step',
+        'codex-step',
+        'claude-runtime-and-model-step',
+      ].sort(),
     );
   });
 
