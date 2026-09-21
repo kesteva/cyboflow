@@ -40,12 +40,14 @@ const ROWS: WorkflowRow[] = [
   row('wf-p1-dash', 'dash', 1, DASH_SPEC),
   row('wf-p1-my-planner', 'my-planner', 1, MY_PLANNER_SPEC),
   row('wf-p2-secret', 'secret', 2, DASH_SPEC),
+  { ...row('wf-p1-retired', 'retired', 1, DASH_SPEC), archived_at: '2026-09-21T00:00:00Z' },
 ];
 
 function registry(): ProposalExecutorLaunchCollaborators['workflowRegistry'] {
   return {
     getById: (id) => ROWS.find((r) => r.id === id) ?? null,
-    listByProject: (projectId) => ROWS.filter((r) => r.project_id === null || r.project_id === projectId),
+    listByProject: (projectId) =>
+      ROWS.filter((r) => r.archived_at === null && (r.project_id === null || r.project_id === projectId)),
     getEffectiveDefinition: (id) => {
       const r = ROWS.find((w) => w.id === id);
       if (!r) return null;
@@ -62,6 +64,14 @@ describe('resolveLaunchWorkflowRow', () => {
     expect(resolveLaunchWorkflowRow(reg, { projectId: 2, workflowId: 'wf-p2-secret', workflowName: 'x' })?.id).toBe('wf-p2-secret');
     expect(resolveLaunchWorkflowRow(reg, { projectId: 1, workflowId: 'wf-p2-secret', workflowName: 'x' })).toBeNull();
     expect(resolveLaunchWorkflowRow(reg, { projectId: 1, workflowId: 'wf-missing', workflowName: 'x' })).toBeNull();
+  });
+
+  it('refuses a stamped workflowId whose row was archived after the proposal was drafted', () => {
+    const reg = registry();
+    // The by-id branch is the only path that can see an archived row: listByProject
+    // (the by-name branch) already filters archived_at, so the stale card must too.
+    expect(resolveLaunchWorkflowRow(reg, { projectId: 1, workflowId: 'wf-p1-retired', workflowName: 'retired' })).toBeNull();
+    expect(resolveLaunchWorkflowRow(reg, { projectId: 1, workflowName: 'retired' })).toBeNull();
   });
 
   it('resolves by name among the visible rows, preferring the project-scoped one', () => {

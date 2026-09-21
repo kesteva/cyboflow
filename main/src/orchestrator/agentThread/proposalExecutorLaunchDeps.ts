@@ -48,6 +48,9 @@ export function resolveLaunchWorkflowRow(
   if (args.workflowId !== undefined) {
     const row = registry.getById(args.workflowId);
     if (!row || (row.project_id !== null && row.project_id !== args.projectId)) return null;
+    // getById returns archived rows too (listByProject filters them). A flow
+    // archived between propose and confirm must not launch off a stale card.
+    if (row.archived_at !== null) return null;
     return row;
   }
   const visible = registry.listByProject(args.projectId).filter((w) => w.name === args.workflowName);
