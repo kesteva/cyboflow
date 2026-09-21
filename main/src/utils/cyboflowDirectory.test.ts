@@ -86,6 +86,28 @@ describe('cyboflowDirectory', () => {
     expect(dir).toBe(join(homedir(), '.cyboflow_dev'));
   });
 
+  it('appIconBasename() picks the blue dev icon for the packaged DEV variant', async () => {
+    setPackaged(true);
+    stubBuildInfoVariant('dev');
+    const { appIconBasename } = await import('./cyboflowDirectory');
+    expect(appIconBasename()).toBe('icon-dev.png');
+  });
+
+  it('appIconBasename() keeps the stable icon for the packaged STABLE variant', async () => {
+    setPackaged(true);
+    stubBuildInfoVariant('stable');
+    const { appIconBasename } = await import('./cyboflowDirectory');
+    expect(appIconBasename()).toBe('icon.png');
+  });
+
+  it('appIconBasename() keeps the stable icon for the dev SERVER (not packaged) — the variant probe is meaningless there', async () => {
+    setPackaged(false);
+    // Even a stray dev buildInfo must not flip an unpackaged app's icon.
+    stubBuildInfoVariant('dev');
+    const { appIconBasename } = await import('./cyboflowDirectory');
+    expect(appIconBasename()).toBe('icon.png');
+  });
+
   it('getCyboflowDirectory() respects CYBOFLOW_DIR environment variable', async () => {
     process.env.CYBOFLOW_DIR = '/custom/cyboflow/path';
     const { getCyboflowDirectory } = await import('./cyboflowDirectory');
