@@ -792,6 +792,40 @@ export function readMarkdownSection(body: string | null | undefined, heading: st
 }
 
 /**
+ * Remove EVERY `## <heading>` section from a markdown body.
+ *
+ * Exists because `## Supervisor recommendation` is RESERVED to the router's
+ * `annotate` op, while `create` stores whatever body its caller handed over: a
+ * step agent filing a finding, or an orchestrated gate writing its own decision
+ * body, could otherwise plant the section and the card would emphasize a button
+ * on advice no supervisor gave — and the gate consult, which skips an item whose
+ * snapshot body already carries the section, would never run. Stripping on the
+ * way in keeps `annotate` the only writer.
+ *
+ * Same boundary rules as {@link upsertMarkdownSection} (fence-aware; a section
+ * ends at the next H1/H2 outside a fence), so a quoted example inside a ```
+ * block survives. The rest of the body is byte-identical apart from the trailing
+ * whitespace, normalized to exactly one newline the way `upsertMarkdownSection`
+ * normalizes it. A body with no such section is returned UNCHANGED — the same
+ * string, not a re-normalized copy — so the overwhelmingly common create path
+ * cannot be perturbed by this guard. Pure.
+ */
+export function stripMarkdownSection(body: string, heading: string): string {
+  const source = body ?? '';
+  const lines = source.split('\n');
+  const ranges = findSections(lines, heading);
+  if (ranges.length === 0) return body;
+
+  // Splice from the tail so the earlier ranges' indices stay valid.
+  const out = lines.slice();
+  for (let i = ranges.length - 1; i >= 0; i--) {
+    out.splice(ranges[i].start, ranges[i].end - ranges[i].start);
+  }
+  const rebuilt = out.join('\n').replace(/\s+$/, '');
+  return rebuilt === '' ? '' : `${rebuilt}\n`;
+}
+
+/**
  * The machine-readable first line of a supervisor recommendation:
  * `Recommended: <choice> — <one sentence>`. Case-insensitive on the choice; the
  * separator may be an em dash, a hyphen, or a colon.

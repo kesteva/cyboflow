@@ -39,7 +39,12 @@ import type {
   ReviewItemSeverity,
   ReviewItemStatus,
 } from '../../../shared/types/reviews';
-import { SUPERVISOR_RECOMMENDATION_HEADING, upsertMarkdownSection } from '../../../shared/types/reviews';
+import {
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  readMarkdownSection,
+  stripMarkdownSection,
+  upsertMarkdownSection,
+} from '../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts), mirroring
@@ -532,7 +537,27 @@ export class ReviewItemRouter {
     const audience: ReviewItemAudience = change.audience ?? 'human';
     const severity = change.severity ?? null;
     const source = change.source ?? null;
-    const body = change.body ?? null;
+
+    // ----- `## Supervisor recommendation` is reserved to the `annotate` op -----
+    // `create` stores the caller's body verbatim, and its callers are not the
+    // supervisor: a step agent filing a finding through cyboflow_report_finding,
+    // or the orchestrated planner writing its own approve-design body, could
+    // plant the section. The card would then render the "Supervisor recommends"
+    // chip and emphasize a button on advice no supervisor gave, and the gate
+    // consult — which skips an item whose snapshot body already carries the
+    // section — would never ask the real one. Strip it here so `annotate`
+    // remains the single writer. `mutate` never touches bodies, so there is
+    // nothing to guard there.
+    let body = change.body ?? null;
+    if (body !== null && readMarkdownSection(body, SUPERVISOR_RECOMMENDATION_HEADING) !== null) {
+      console.warn(
+        `[ReviewItemRouter] reserved section stripped from a created review item: ` +
+          `heading='${SUPERVISOR_RECOMMENDATION_HEADING}' title='${change.title}' ` +
+          `source='${source ?? 'none'}'`,
+      );
+      body = stripMarkdownSection(body, SUPERVISOR_RECOMMENDATION_HEADING);
+    }
+
     const runId = change.runId ?? null;
     const payloadJson = payload === null ? null : JSON.stringify(payload);
 

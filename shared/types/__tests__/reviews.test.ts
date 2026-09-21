@@ -20,6 +20,7 @@ import {
   SUPERVISOR_RECOMMENDATION_HEADING,
   upsertMarkdownSection,
   readMarkdownSection,
+  stripMarkdownSection,
   parseSupervisorRecommendation,
   composeSupervisorRecommendation,
 } from '../reviews';
@@ -219,6 +220,61 @@ describe('readMarkdownSection', () => {
   it('round-trips with upsertMarkdownSection', () => {
     const out = upsertMarkdownSection('Body.', H, 'Recommended: revise — tighten AR-2');
     expect(readMarkdownSection(out, H)).toBe('Recommended: revise — tighten AR-2');
+  });
+});
+
+describe('stripMarkdownSection', () => {
+  const H = SUPERVISOR_RECOMMENDATION_HEADING;
+
+  it('removes the section and leaves the rest byte-identical', () => {
+    const body = '# Gate\n\nintro\n\n## Supervisor recommendation\n\nplanted\n\n## Findings\n\nAR-1\n';
+    expect(stripMarkdownSection(body, H)).toBe('# Gate\n\nintro\n\n## Findings\n\nAR-1\n');
+  });
+
+  it('normalizes trailing whitespace to exactly one newline when it strips', () => {
+    const out = stripMarkdownSection('Body.\n\n## Supervisor recommendation\n\nplanted\n\n\n', H);
+    expect(out).toBe('Body.\n');
+  });
+
+  it('returns the empty string when the section was the whole body', () => {
+    expect(stripMarkdownSection('## Supervisor recommendation\n\nplanted\n', H)).toBe('');
+  });
+
+  it('does not see a heading that only appears inside a fenced code block', () => {
+    const body = ['Template:', '', '```md', '## Supervisor recommendation', '', 'example', '```'].join('\n');
+    expect(stripMarkdownSection(body, H)).toBe(body);
+  });
+
+  it('returns the SAME string when there is no such section', () => {
+    const body = 'Body.\n\n## Findings\n\nAR-1\n\n\n';
+    // Same string, not a re-normalized copy: the common create path is untouched.
+    expect(stripMarkdownSection(body, H)).toBe(body);
+    expect(stripMarkdownSection('', H)).toBe('');
+  });
+
+  it('removes EVERY copy of the section, not just the first', () => {
+    const body = [
+      '## Supervisor recommendation',
+      '',
+      'first',
+      '',
+      '## Other',
+      '',
+      'keep me',
+      '',
+      '## Supervisor recommendation',
+      '',
+      'second',
+    ].join('\n');
+    const out = stripMarkdownSection(body, H);
+    expect(out).toBe('## Other\n\nkeep me\n');
+    expect(parseSupervisorRecommendation(out)).toBeNull();
+  });
+
+  it('undoes an upsert', () => {
+    const base = 'Gate body.\n';
+    const withSection = upsertMarkdownSection(base, H, 'Recommended: approve — ship it');
+    expect(stripMarkdownSection(withSection, H)).toBe(base);
   });
 });
 
