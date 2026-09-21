@@ -248,6 +248,22 @@ describe('CodeQualitySection drill-down', () => {
     expect(row.querySelector('.text-\\[10px\\]')?.textContent).toContain('2d after merge');
   });
 
+  it('falls back to the category label as post-merge meta when there is no run linkage to compute a lag', () => {
+    mockQualityFindings = [
+      finding({
+        id: 'qf-pm-cat',
+        category: 'post-merge-bug',
+        sourceStep: 'executor',
+        runOutcome: null,
+        runEndedAt: null,
+      }),
+    ];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-post_merge-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    expect(row.querySelector('.text-\\[10px\\]')?.textContent).toContain('post-merge-bug');
+  });
+
   it('drills into a category tally and back out to the overview', () => {
     mockQualityFindings = [
       finding({ id: 'a', category: 'security', sourceStep: 'executor' }),
