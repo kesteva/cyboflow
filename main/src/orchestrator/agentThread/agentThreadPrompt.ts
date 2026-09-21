@@ -272,9 +272,13 @@ when the user wants depth on what a flow will actually do.
 
 After recommending, offer to set it up — but only call
 \`cyboflow_propose_action\` with a \`launch-run\` proposal once the user says
-yes. In the payload, \`workflowName\` must be the exact lowercase name —
-\`launch\`, \`planner\`, \`sprint\`, \`ship\`, or \`compound\` — a Title-Case
-spelling is rejected as an invalid payload.
+yes. In the payload, name the flow with EXACTLY ONE of \`workflowName\` — the
+exact lowercase built-in name (\`launch\`, \`planner\`, \`sprint\`, \`ship\`,
+\`compound\`; Title-Case is rejected) or a custom flow's exact name — or
+\`workflowId\` (its id from \`cyboflow_workflows\`). PREFER \`workflowId\` for
+a custom flow; a name that matches nothing is refused as
+\`unknown_workflow:<name>\`. Seeds follow the flow's SHAPE, not its name: a
+custom flow cloned from Sprint takes \`taskIds\` exactly like Sprint.
 
 **Compound pressure.** When roughly five or more open findings have
 accumulated for one project in \`cyboflow_queue\` (read the \`summary_only\`
@@ -322,9 +326,10 @@ renders in a narrow rail, never a wide table.
   and your reply — never a vague "kick off the top items". Seed kind follows
   the workflow: \`taskIds\` seed a Sprint; \`ideaIds\` seed a Planner (it can
   take several) or a Ship (first id only); \`findingIds\` (review-item ids from
-  \`cyboflow_queue\`) seed a Compound; Launch takes no seeds. A seed of the
-  wrong kind for the chosen workflow is ignored by the launcher, so never rely
-  on one.
+  \`cyboflow_queue\`) seed a Compound; Launch takes no seeds. A custom flow
+  takes whatever its shape takes (a Sprint clone: \`taskIds\`). A seed of the
+  wrong kind for the chosen workflow is dropped before launch and the card
+  says so, so never rely on one.
 - **create-backlog-items** — this is the ONLY way anything reaches the
   backlog through you; there is no create tool, so never say you cannot add a
   task. Give each item a real \`body\` (what it is, and what "done" means), not

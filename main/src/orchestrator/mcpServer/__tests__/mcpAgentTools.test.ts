@@ -958,6 +958,52 @@ describe('McpQueryHandler global-agent tool family', () => {
       expect(JSON.parse(events[0].payloadJson)).toEqual({ proposalId, kind: 'launch-run' });
     });
 
+    it('launch-run: resolves a CUSTOM flow by name or id, stamping id/name/scope; rejects an unknown one by name (TASK-294)', async () => {
+      // A custom sprint clone (definition.id stays 'sprint') + another custom flow, both
+      // project-scoped (this fixture's workflows table predates nullable project_id;
+      // the global-scope stamp is pinned in prepareProposal.test.ts).
+      seedWorkflowRow(db, 'wf-global-custom-e253eb7b', 1, 'dash', { ...CUSTOM_DEFINITION, id: 'sprint' });
+      seedWorkflowRow(db, 'wf-p1-docs', 1, 'docs-review', CUSTOM_DEFINITION);
+
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+
+      const byName = await propose({ kind: 'launch-run', projectId: 1, workflowName: 'dash', taskIds: ['tsk_1'] });
+      expect(byName.ok).toBe(true);
+      expect(store.getProposal((byName.data as { proposalId: string }).proposalId)?.payload).toEqual({
+        kind: 'launch-run',
+        projectId: 1,
+        workflowName: 'dash',
+        workflowId: 'wf-global-custom-e253eb7b',
+        workflowScope: 'project',
+        taskIds: ['tsk_1'],
+      });
+
+      const byId = await propose({ kind: 'launch-run', projectId: 1, workflowId: 'wf-p1-docs' });
+      expect(byId.ok).toBe(true);
+      expect(store.getProposal((byId.data as { proposalId: string }).proposalId)?.payload).toMatchObject({
+        workflowName: 'docs-review',
+        workflowId: 'wf-p1-docs',
+        workflowScope: 'project',
+      });
+
+      expect(await propose({ kind: 'launch-run', projectId: 1, workflowName: 'nope' })).toMatchObject({
+        ok: false,
+        error: 'unknown_workflow:nope',
+      });
+      // Another project's scoped flow is invisible here.
+      expect(await propose({ kind: 'launch-run', projectId: 2, workflowId: 'wf-p1-docs' })).toMatchObject({
+        ok: false,
+        error: 'unknown_workflow:wf-p1-docs',
+      });
+    });
+
     it('open-session: accepts a discriminated navigation payload with null preconditions', async () => {
       seedRunFor(db, 'run-xyz', 1);
       const payload = { kind: 'open-session', navigation: { target: 'run', runId: 'run-xyz' } };

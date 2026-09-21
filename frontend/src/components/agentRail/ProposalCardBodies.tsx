@@ -24,13 +24,14 @@ import type {
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
 } from '../../../../shared/types/agentThread';
-import type { CyboflowWorkflowName } from '../../../../shared/types/workflows';
+import { isCyboflowWorkflowName, type CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { Priority } from '../../../../shared/types/tasks';
 import { useLandingStore } from '../../stores/landingStore';
 import {
   parseWorkflowDefinitionSummary,
   type CreateBacklogResultJson,
   type CreateWorkflowResultJson,
+  type LaunchSeedField,
   type ReprioritizeResultJson,
 } from './proposalResultTypes';
 import { useProposalEntityLabels, type ResolvedProposalEntity, type ResolvedStage } from './useProposalEntityLabels';
@@ -75,6 +76,33 @@ export function workflowNameLabel(name: string): string {
   return Object.prototype.hasOwnProperty.call(WORKFLOW_LABEL, name)
     ? WORKFLOW_LABEL[name as CyboflowWorkflowName]
     : name;
+}
+
+/** Human label for a launch seed field the flow's shape did not take (TASK-294). */
+export const LAUNCH_SEED_FIELD_LABEL: Record<LaunchSeedField, string> = {
+  taskIds: 'tasks',
+  ideaIds: 'ideas',
+  findingIds: 'findings',
+};
+
+/**
+ * The muted "custom · global|project" tag beside a CUSTOM workflow's name, so
+ * a sprint-shaped custom flow named `dash` never passes for the built-in
+ * Sprint (TASK-294). A built-in name renders no tag; a custom name whose scope
+ * the propose handler did not stamp (an older row) still says "custom".
+ */
+export function CustomWorkflowTag({ payload }: { payload: LaunchRunProposalPayload }): React.ReactElement | null {
+  if (isCyboflowWorkflowName(payload.workflowName)) return null;
+  return (
+    <span
+      className="ml-1.5 align-middle text-[9px] font-normal uppercase tracking-[0.12em] text-text-tertiary"
+      data-testid="launch-run-custom-tag"
+      data-scope={payload.workflowScope ?? ''}
+      title={payload.workflowId}
+    >
+      custom{payload.workflowScope != null ? ` · ${payload.workflowScope}` : ''}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +208,7 @@ export function LaunchRunBody({ payload }: { payload: LaunchRunProposalPayload }
     <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-launch-run">
       <div className="text-[13px] font-bold text-text-primary">
         Launch {workflowNameLabel(payload.workflowName)}
+        <CustomWorkflowTag payload={payload} />
       </div>
       <div className="flex flex-col gap-1.5">
         <Row label="project" value={projectName} />

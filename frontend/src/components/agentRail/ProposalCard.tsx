@@ -53,6 +53,7 @@ import {
   CreateBacklogRows,
   CreateWorkflowBody,
   CreateWorkflowAgentRows,
+  LAUNCH_SEED_FIELD_LABEL,
   workflowNameLabel,
 } from './ProposalCardBodies';
 import {
@@ -169,24 +170,40 @@ function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.Rea
       sessionNameById ?? (r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null);
     const workflowLabel = payload != null ? workflowNameLabel(payload.workflowName) : null;
     const detail = launchRunResolvedDetail({ sessionName, workflowLabel });
+    // Seeds the flow's shape did not take were dropped before launch — say so,
+    // since "Run launched." alone would read as if every seed went in.
+    const ignored =
+      r.ignoredSeeds != null && r.ignoredSeeds.length > 0 ? (
+        <p className="ml-7 text-[10.5px] italic text-text-tertiary" data-testid="launch-run-ignored-seeds">
+          Ignored {r.ignoredSeeds.map((f) => LAUNCH_SEED_FIELD_LABEL[f]).join(' · ')} — this flow takes no such seed.
+        </p>
+      ) : null;
     if (r.runId != null) {
       const runId = r.runId;
       return (
-        <button
-          type="button"
-          onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
-          data-testid="proposal-card-resolved-row"
-          className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
-        >
-          <StatusCircle tone="success" glyph="✓" />
-          <div className="text-[11px] leading-snug">
-            <span className="font-bold text-text-primary">Run launched.</span>
-            {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
-          </div>
-        </button>
+        <div className="flex flex-col">
+          <button
+            type="button"
+            onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
+            data-testid="proposal-card-resolved-row"
+            className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+          >
+            <StatusCircle tone="success" glyph="✓" />
+            <div className="text-[11px] leading-snug">
+              <span className="font-bold text-text-primary">Run launched.</span>
+              {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
+            </div>
+          </button>
+          {ignored != null && <div className="pb-2.5">{ignored}</div>}
+        </div>
       );
     }
-    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />;
+    return (
+      <div className="flex flex-col">
+        <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />
+        {ignored != null && <div className="pb-2.5">{ignored}</div>}
+      </div>
+    );
   }
   return <ResolvedLine tone="error" glyph="✕" verb="Launch failed." detail={r.error} />;
 }

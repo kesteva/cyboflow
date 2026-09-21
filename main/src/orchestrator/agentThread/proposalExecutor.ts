@@ -78,16 +78,24 @@ export interface AgentProposalStoreLike {
 }
 
 /**
- * The launch-run side effect, high-level. The wiring closure (index.ts) resolves the
- * workflow id + project path from (projectId, workflowName) and maps the seeds to
- * RunLauncher.launch's per-workflow positional params (taskIds→sprint,
- * ideaIds→planner/ship, findingIds→compound), respecting the launcher's own seed
- * guards. The executor stays free of workflow-resolution concerns and owns only the
- * session→run sequencing + compensation saga.
+ * The launch-run side effect, high-level. The wiring closure
+ * (proposalExecutorLaunchDeps.ts) resolves the workflow row — by `workflowId`
+ * when the proposal carries one, else by `workflowName` — plus the project
+ * path, and maps the seeds to RunLauncher.launch's positional params by the
+ * flow's SHAPE (`seedKindForWorkflow`: taskIds→a task fan-out flow,
+ * ideaIds→a plan-phase flow, findingIds→a compound-shaped flow), never by the
+ * row's display name, so a custom sprint-shaped flow seeds like the built-in.
+ * Seeds the resolved shape does not take are dropped and reported back as
+ * `ignoredSeeds` so the result card can say so. The executor stays free of
+ * workflow-resolution concerns and owns only the session→run sequencing +
+ * compensation saga.
  */
 export interface LaunchRunSideEffectArgs {
   projectId: number;
-  workflowName: CyboflowWorkflowName;
+  /** Display name — a built-in name or a custom flow's; used for the session-name template. */
+  workflowName: CyboflowWorkflowName | string;
+  /** The resolved workflows.id, when the proposal was stamped with one (custom flows always are). */
+  workflowId?: string;
   sessionId: string;
   substrate?: CliSubstrate;
   taskIds?: string[];
@@ -122,10 +130,14 @@ export interface ProposalExecutorDeps {
     projectId: number;
     nameHint: string;
   }) => Promise<{ sessionId: string; worktreePath: string }>;
-  /** Launch the seeded workflow run into the host session (RunLauncher.launch). */
+  /**
+   * Launch the seeded workflow run into the host session (RunLauncher.launch).
+   * `ignoredSeeds` names the seed fields the flow's shape does not consume and
+   * that were therefore dropped before the launch (never an error).
+   */
   launchRun: (
     args: LaunchRunSideEffectArgs,
-  ) => Promise<{ runId: string; worktreePath: string; branchName: string }>;
+  ) => Promise<{ runId: string; worktreePath: string; branchName: string; ignoredSeeds?: LaunchSeedField[] }>;
   /** Compensation: cancel a run created before a later boundary failed (git-neutral). */
   cancelRun: (runId: string) => Promise<void>;
   /** Compensation: the FULL safe session-dismiss path (cancels hosted runs, then removes the worktree). */
@@ -195,6 +207,9 @@ interface CompensationStep {
   error?: string;
 }
 
+/** The three launch seed fields a proposal may carry. */
+export type LaunchSeedField = 'taskIds' | 'ideaIds' | 'findingIds';
+
 export interface LaunchRunResultJson {
   kind: 'launch-run';
   status: 'executed' | 'failed';
@@ -202,6 +217,8 @@ export interface LaunchRunResultJson {
   worktreePath?: string;
   runId?: string;
   branchName?: string;
+  /** Seed fields the launched flow's shape does not take, dropped before launch. */
+  ignoredSeeds?: LaunchSeedField[];
   error?: string;
   compensations?: CompensationStep[];
   /** Set by boot reconciliation (not the live confirm path). */
@@ -433,6 +450,7 @@ async function runLaunch(
     const run = await deps.launchRun({
       projectId: payload.projectId,
       workflowName: payload.workflowName,
+      ...(payload.workflowId !== undefined ? { workflowId: payload.workflowId } : {}),
       sessionId: session.sessionId,
       substrate: payload.substrate,
       taskIds: payload.taskIds,
@@ -448,6 +466,7 @@ async function runLaunch(
       worktreePath: run.worktreePath,
       runId: run.runId,
       branchName: run.branchName,
+      ...(run.ignoredSeeds !== undefined && run.ignoredSeeds.length > 0 ? { ignoredSeeds: run.ignoredSeeds } : {}),
     };
     deps.store.finalizeProposal(proposalId, 'executed', JSON.stringify(result));
     return { ok: true, proposalId, kind: proposal.kind, status: 'executed', result };

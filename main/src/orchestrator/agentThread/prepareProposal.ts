@@ -236,9 +236,21 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
     case 'launch-run': {
       const projectId = raw.projectId;
       const workflowName = raw.workflowName;
+      const workflowId = raw.workflowId;
       if (typeof projectId !== 'number') return null;
-      if (typeof workflowName !== 'string' || !isCyboflowWorkflowName(workflowName)) return null;
-      const payload: LaunchRunProposalPayload = { kind: 'launch-run', projectId, workflowName };
+      // Exactly one of workflowId / workflowName is required; either may be a
+      // custom flow (resolved in prepareProposal — the parser only shapes).
+      if (workflowName !== undefined && (typeof workflowName !== 'string' || workflowName.trim().length === 0)) return null;
+      if (workflowId !== undefined && (typeof workflowId !== 'string' || workflowId.length === 0)) return null;
+      if (workflowName === undefined && workflowId === undefined) return null;
+      const payload: LaunchRunProposalPayload = {
+        kind: 'launch-run',
+        projectId,
+        // A missing name is filled in by prepareProposal once the id resolves;
+        // the placeholder never survives to a persisted row.
+        workflowName: typeof workflowName === 'string' ? workflowName.trim() : '',
+      };
+      if (typeof workflowId === 'string') payload.workflowId = workflowId;
 
       const substrate = raw.substrate;
       if (substrate !== undefined) {
@@ -393,6 +405,17 @@ export interface PrepareProposalDeps {
   workflowNameTaken(projectId: number | null, name: string): boolean;
   /** Does `projectId` already carry a custom agent (an agent_overrides row) under `agentKey`? */
   customAgentExists(projectId: number, agentKey: string): boolean;
+  /**
+   * The workflow a launch-run proposal names, among the flows VISIBLE to
+   * `projectId` (global rows + the project's own; an archived row is not
+   * launchable). By id when given, else by exact name — a project-scoped row
+   * shadows a same-named global one, matching the launch wizard. Null when
+   * nothing matches.
+   */
+  resolveLaunchWorkflow(
+    projectId: number,
+    ref: { workflowId?: string; workflowName?: string },
+  ): { id: string; name: string; projectId: number | null } | null;
 }
 
 /**
@@ -409,6 +432,35 @@ export interface PrepareProposalDeps {
 export type PrepareProposalResult =
   | { ok: true; payload: AgentProposalPayload; preconditions: AgentProposalPreconditions | null }
   | { ok: false; error: string };
+
+/**
+ * The launch-run branch of prepareProposal: resolve the named workflow among
+ * the flows visible to the project and stamp `workflowId` / `workflowName` /
+ * `workflowScope` back onto the payload. Returns the error string or null.
+ *
+ * A BUILT-IN name that resolves to no row is let through unstamped: the
+ * built-in rows are minted by WorkflowRegistry's boot reconcile, so their
+ * absence only ever means a fixture/fresh DB, and the launch closure resolves
+ * a built-in by name at confirm time exactly as it did before workflowId
+ * existed. A custom name/id that resolves to nothing is an assistant mistake
+ * and is refused with a NAMED error, never a bare invalid_payload.
+ */
+function resolveLaunchRunWorkflow(deps: PrepareProposalDeps, payload: LaunchRunProposalPayload): string | null {
+  const ref = payload.workflowId !== undefined ? { workflowId: payload.workflowId } : { workflowName: payload.workflowName };
+  const row = deps.resolveLaunchWorkflow(payload.projectId, ref);
+  if (row === null) {
+    if (payload.workflowId === undefined && isCyboflowWorkflowName(payload.workflowName)) return null;
+    return `unknown_workflow:${payload.workflowId ?? payload.workflowName}`;
+  }
+  payload.workflowId = row.id;
+  payload.workflowName = row.name;
+  if (isCyboflowWorkflowName(row.name)) {
+    delete payload.workflowScope;
+  } else {
+    payload.workflowScope = row.projectId === null ? 'global' : 'project';
+  }
+  return null;
+}
 
 /**
  * Validate a raw proposal payload and capture its preconditions.
@@ -508,8 +560,13 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
     // fix in the same turn instead of the human confirming a card that fails.
     const error = validateCreateWorkflow(deps, payload);
     if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'launch-run') {
+    // No preconditions (shared type contract), but the workflow is resolved
+    // NOW — by id or by name, custom flows included — so a confirmed card
+    // never dies on a flow the assistant misremembered (TASK-294).
+    const error = resolveLaunchRunWorkflow(deps, payload);
+    if (error !== null) return { ok: false, error };
   }
-  // launch-run carries no preconditions (shared type contract).
 
   return { ok: true, payload, preconditions };
 }
@@ -654,6 +711,30 @@ export function createPrepareProposalDeps(db: DatabaseLike): PrepareProposalDeps
     },
     customAgentExists(projectId: number, agentKey: string): boolean {
       return db.prepare('SELECT 1 FROM agent_overrides WHERE project_id = ? AND agent_key = ? LIMIT 1').get(projectId, agentKey) !== undefined;
+    },
+    resolveLaunchWorkflow(projectId, ref) {
+      // Visibility mirrors WorkflowRegistry.listByProject (global rows + the
+      // project's own, minus the quick sentinel); archived rows are not
+      // launchable. By name, a project-scoped row wins over a global one —
+      // `ORDER BY project_id IS NULL` sorts the project row (0) first.
+      const row =
+        ref.workflowId !== undefined
+          ? (db
+              .prepare(
+                `SELECT id, name, project_id FROM workflows
+                  WHERE id = ? AND (project_id = ? OR project_id IS NULL) AND archived_at IS NULL AND name != ?`,
+              )
+              .get(ref.workflowId, projectId, QUICK_WORKFLOW_NAME) as { id: string; name: string; project_id: number | null } | undefined)
+          : ref.workflowName !== undefined
+            ? (db
+                .prepare(
+                  `SELECT id, name, project_id FROM workflows
+                    WHERE name = ? AND (project_id = ? OR project_id IS NULL) AND archived_at IS NULL AND name != ?
+                    ORDER BY project_id IS NULL ASC LIMIT 1`,
+                )
+                .get(ref.workflowName, projectId, QUICK_WORKFLOW_NAME) as { id: string; name: string; project_id: number | null } | undefined)
+            : undefined;
+      return row === undefined ? null : { id: row.id, name: row.name, projectId: row.project_id };
     },
   };
 }

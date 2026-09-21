@@ -33,6 +33,7 @@ import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import type { SessionAgentPermissionModeDeps } from '../sessionPermissionMode';
 
 // Shared stubs for the 4 required MCP collaborators.
@@ -1611,7 +1612,12 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
    * the RESOLVED substrate, mirroring the real registry) plus a sprint-lane spy.
    * `workflowName` controls the sprint-only guard.
    */
-  function makeSprintFixture(db: Database.Database, tmpDir: string, workflowName: string, opts?: { omitSprintLanes?: boolean }) {
+  function makeSprintFixture(
+    db: Database.Database,
+    tmpDir: string,
+    workflowName: string,
+    opts?: { omitSprintLanes?: boolean; specJson?: string },
+  ) {
     // batch_id (sprint lanes, migration 022) now comes from the shared fixture's
     // includeWorkflowRunTaskColumns block — no manual ALTER here.
     const adapter = dbAdapter(db);
@@ -1619,8 +1625,8 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
     const seedWorkflowId = randomUUID();
     db.prepare(
-      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/sprint.md', 'default')",
-    ).run(seedWorkflowId, workflowName);
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode, spec_json) VALUES (?, 1, ?, '/fake/sprint.md', 'default', ?)",
+    ).run(seedWorkflowId, workflowName, opts?.specJson ?? '{}');
 
     const cannedRunId = randomUUID().replace(/-/g, '');
     const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
@@ -1639,7 +1645,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
     const fakeRegistry = {
       getById: (id: string) =>
-        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at FROM workflows WHERE id = ?').get(id) ?? null,
       createRun: createRunSpy,
       resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
@@ -1710,6 +1716,43 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
       // The guard fires before createRun — no half-created run row.
       expect(createRunSpy).not.toHaveBeenCalled();
       expect(createForRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('accepts seedTaskIds for a CUSTOM sprint-shaped flow — the guard keys on the definition, not the name (TASK-294)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      // `dash`: a custom flow cloned from sprint (its definition keeps sprint's shape).
+      const { launcher, workflowId, sessionId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'dash', {
+        specJson: JSON.stringify({ ...WORKFLOW_DEFINITIONS.sprint, id: 'dash' }),
+      });
+
+      await launcher.launch(workflowId, tmpDir, 'sdk', undefined, undefined, sessionId, undefined, undefined, ['TASK-1']);
+
+      expect(createForRunSpy).toHaveBeenCalledWith(1, 'sdk', ['TASK-1']);
+      const row = db.prepare('SELECT batch_id FROM workflow_runs WHERE id = ?').get(cannedRunId) as { batch_id: string | null };
+      expect(row.batch_id).toBe('batch-test-1');
+    });
+  });
+
+  it('rejects seedTaskIds for a custom flow with no task fan-out, and for one whose spec does not resolve', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const shapeless = makeSprintFixture(db, tmpDir, 'docs-review', {
+        specJson: JSON.stringify({
+          id: 'docs-review',
+          phases: [{ id: 'p', label: 'P', color: '#112233', steps: [{ id: 'read', name: 'Read', agent: 'docs-writer', mcps: [], retries: 0 }] }],
+        }),
+      });
+      await expect(
+        shapeless.launcher.launch(shapeless.workflowId, tmpDir, undefined, undefined, undefined, undefined, undefined, undefined, ['TASK-1']),
+      ).rejects.toThrow(/seedTaskIds is only valid for the 'sprint' workflow/);
+      expect(shapeless.createRunSpy).not.toHaveBeenCalled();
+
+      const broken = makeSprintFixture(sessionHostedDb(), tmpDir, 'broken-custom');
+      await expect(
+        broken.launcher.launch(broken.workflowId, tmpDir, undefined, undefined, undefined, undefined, undefined, undefined, ['TASK-1']),
+      ).rejects.toThrow(/seedTaskIds is only valid for the 'sprint' workflow/);
     });
   });
 

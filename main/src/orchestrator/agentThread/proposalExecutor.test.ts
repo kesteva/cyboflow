@@ -200,6 +200,51 @@ describe('executeProposal — launch-run', () => {
     expect(rj).toMatchObject({ kind: 'launch-run', status: 'executed', sessionId: 'sess-9', runId: 'run-9', branchName: 'br-9' });
   });
 
+  it('carries a stamped workflowId into the launch, keeps the display name for the session hint, and records ignored seeds (TASK-294)', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal(
+        {
+          kind: 'launch-run',
+          projectId: 7,
+          workflowName: 'dash',
+          workflowId: 'wf-global-custom-e253eb7b',
+          workflowScope: 'global',
+          taskIds: ['T1'],
+          findingIds: ['F1'],
+        },
+        { id: 'prop-dash0001' },
+      ),
+    );
+    const createQuickSession = vi.fn(async () => ({ sessionId: 'sess-d', worktreePath: '/wt/sess-d' }));
+    const launchRun = vi.fn(async () => ({ runId: 'run-d', worktreePath: '/wt/sess-d', branchName: 'br-d', ignoredSeeds: ['findingIds' as const] }));
+    const deps = baseDeps(store, { createQuickSession, launchRun });
+
+    const result = await executeProposal(deps, 'prop-dash0001');
+    expect(result.ok && result.status).toBe('executed');
+    expect(createQuickSession).toHaveBeenCalledWith({ projectId: 7, nameHint: 'agent-dash-prop-das' });
+    expect(launchRun).toHaveBeenCalledWith({
+      projectId: 7,
+      workflowName: 'dash',
+      workflowId: 'wf-global-custom-e253eb7b',
+      sessionId: 'sess-d',
+      substrate: undefined,
+      taskIds: ['T1'],
+      ideaIds: undefined,
+      findingIds: ['F1'],
+    });
+    const rj = store.proposals.get('prop-dash0001')?.result as LaunchRunResultJson;
+    expect(rj).toMatchObject({ kind: 'launch-run', status: 'executed', runId: 'run-d', ignoredSeeds: ['findingIds'] });
+  });
+
+  it('omits ignoredSeeds from the result when the launch dropped nothing', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'launch-run', projectId: 7, workflowName: 'sprint', taskIds: ['T1'] }));
+    const deps = baseDeps(store, { launchRun: async () => ({ runId: 'r', worktreePath: '/w', branchName: 'b', ignoredSeeds: [] }) });
+    await executeProposal(deps, 'p1');
+    expect(store.proposals.get('p1')?.result).not.toHaveProperty('ignoredSeeds');
+  });
+
   it('saga: session-create fails → no compensation, finalized failed', async () => {
     const store = new FakeStore();
     store.add(makeProposal({ kind: 'launch-run', projectId: 7, workflowName: 'planner', ideaIds: ['IDEA-1'] }));

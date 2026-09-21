@@ -122,6 +122,19 @@ describe('agentThreadPrompt', () => {
     expect(getAgentSystemPrompt()).toMatch(/recommending the right flow/i);
   });
 
+  it('tells the assistant a launch-run may name a custom flow by exact name or by workflowId (TASK-294)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/`workflowId`/);
+    expect(prompt).toMatch(/unknown_workflow:<name>/);
+    expect(prompt).toMatch(/PREFER `workflowId` for\s+a custom flow/);
+  });
+
+  it('tells the assistant to size an inbox with cyboflow_queue summary_only before paging it (TASK-293)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/`summary_only:true` FIRST/);
+    expect(prompt).toMatch(/`nextOffset`/);
+  });
+
   it('documents the create-workflow proposal kind and the agents read that precedes it', () => {
     const prompt = getAgentSystemPrompt();
     expect(prompt).toMatch(/create-workflow/);

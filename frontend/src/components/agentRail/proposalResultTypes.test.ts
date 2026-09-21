@@ -25,11 +25,20 @@ describe('parseLaunchRunResult', () => {
       worktreePath: '/tmp/wt',
       runId: 'run-1',
       branchName: 'agent/foo',
+      ignoredSeeds: undefined,
       error: undefined,
       compensations: undefined,
       reconciled: undefined,
       verified: undefined,
     });
+  });
+
+  it('keeps the known ignoredSeeds entries and drops unknown ones; an empty list reads as absent', () => {
+    expect(
+      parseLaunchRunResult({ kind: 'launch-run', status: 'executed', runId: 'r', ignoredSeeds: ['findingIds', 'bogus', 'taskIds'] })
+        ?.ignoredSeeds,
+    ).toEqual(['findingIds', 'taskIds']);
+    expect(parseLaunchRunResult({ kind: 'launch-run', status: 'executed', runId: 'r', ignoredSeeds: ['bogus'] })?.ignoredSeeds).toBeUndefined();
   });
 
   it('parses a failed result with compensations', () => {

@@ -249,10 +249,37 @@ export type AgentNavigationTarget =
 // Per-kind proposal payloads
 // ---------------------------------------------------------------------------
 
+/**
+ * Where a launched workflow row lives — stamped at propose time for a CUSTOM
+ * flow so the card can say "custom · global" / "custom · project" instead of
+ * letting a custom `sprint`-shaped flow named `dash` pass for the built-in.
+ */
+export type LaunchRunWorkflowScope = 'global' | 'project';
+
+/**
+ * Launch a workflow run. The workflow is named by EXACTLY ONE of
+ * `workflowId` (a `workflows.id` from cyboflow_workflows — the preferred form
+ * for a custom flow) or `workflowName` (a built-in name, the documented fast
+ * path, OR a custom flow's exact display name); `workflowId` wins when both
+ * are present. The propose handler resolves either against the flows visible
+ * to `projectId` (global rows plus the project's own, project-scoped rows
+ * shadowing a same-named global one) and rejects an unresolvable one with
+ * `unknown_workflow:<idOrName>`; a resolved flow is stamped back onto the
+ * payload as BOTH `workflowId` and `workflowName` (plus `workflowScope` for a
+ * custom flow), so the executor and the card never re-derive it. A built-in
+ * name that has no row yet (a fresh install before the registry reconciled)
+ * passes through unresolved — the launch closure resolves it by name at
+ * confirm time, as it always has.
+ */
 export interface LaunchRunProposalPayload {
   kind: 'launch-run';
   projectId: number;
-  workflowName: CyboflowWorkflowName;
+  /** A built-in `CyboflowWorkflowName`, or a custom flow's exact name. */
+  workflowName: CyboflowWorkflowName | string;
+  /** The resolved `workflows.id` — required for a custom flow when no name is given. */
+  workflowId?: string;
+  /** Stamped at propose time for a custom flow only; absent for a built-in. */
+  workflowScope?: LaunchRunWorkflowScope;
   substrate?: CliSubstrate;
   taskIds?: string[];
   ideaIds?: string[];

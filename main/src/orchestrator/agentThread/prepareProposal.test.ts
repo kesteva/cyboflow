@@ -37,6 +37,8 @@ let identities: Map<string, { ref: string; stage_id: string; version: number; ty
 let existing: Map<string, string>;
 let takenWorkflowNames: Set<string>;
 let customAgents: Set<string>;
+/** Launchable flows keyed by id — `projectId` null = global. */
+let launchable: Map<string, { id: string; name: string; projectId: number | null }>;
 
 beforeEach(() => {
   rawDb = new Database(':memory:');
@@ -54,6 +56,7 @@ beforeEach(() => {
   existing = new Map();
   takenWorkflowNames = new Set();
   customAgents = new Set();
+  launchable = new Map();
 
   deps = {
     db: dbAdapter(rawDb),
@@ -62,6 +65,12 @@ beforeEach(() => {
     resolveExistingEntity: (projectId, refOrId, type) => existing.get(`${projectId}:${refOrId}:${type}`) ?? null,
     workflowNameTaken: (projectId, name) => takenWorkflowNames.has(`${projectId ?? 'global'}:${name}`),
     customAgentExists: (projectId, agentKey) => customAgents.has(`${projectId}:${agentKey}`),
+    resolveLaunchWorkflow: (projectId, ref) => {
+      const visible = [...launchable.values()].filter((w) => w.projectId === null || w.projectId === projectId);
+      if (ref.workflowId !== undefined) return visible.find((w) => w.id === ref.workflowId) ?? null;
+      const byName = visible.filter((w) => w.name === ref.workflowName);
+      return byName.find((w) => w.projectId !== null) ?? byName[0] ?? null;
+    },
   };
 });
 
@@ -80,6 +89,23 @@ describe('parseAgentProposalPayload', () => {
     expect(
       parseAgentProposalPayload({ kind: 'launch-run', projectId: 1, workflowName: 'sprint', taskIds: ['t1'] }),
     ).toEqual({ kind: 'launch-run', projectId: 1, workflowName: 'sprint', taskIds: ['t1'] });
+  });
+
+  it('launch-run accepts a custom workflowName or a workflowId, but not neither (TASK-294)', () => {
+    expect(parseAgentProposalPayload({ kind: 'launch-run', projectId: 1, workflowName: 'dash' })).toEqual({
+      kind: 'launch-run',
+      projectId: 1,
+      workflowName: 'dash',
+    });
+    expect(parseAgentProposalPayload({ kind: 'launch-run', projectId: 1, workflowId: 'wf-global-custom-e253eb7b' })).toEqual({
+      kind: 'launch-run',
+      projectId: 1,
+      workflowName: '',
+      workflowId: 'wf-global-custom-e253eb7b',
+    });
+    expect(parseAgentProposalPayload({ kind: 'launch-run', projectId: 1 })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'launch-run', projectId: 1, workflowName: '  ' })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'launch-run', projectId: 1, workflowId: '' })).toBeNull();
   });
 });
 
@@ -163,7 +189,7 @@ describe('prepareProposal — error strings', () => {
 // ---------------------------------------------------------------------------
 
 describe('prepareProposal — preconditions captured server-side', () => {
-  it('launch-run carries no preconditions', () => {
+  it('launch-run carries no preconditions (a built-in name with no row yet passes through unstamped)', () => {
     const result = prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'sprint' });
     expect(result).toEqual({
       ok: true,
@@ -434,5 +460,124 @@ describe('prepareProposal — create-workflow validation', () => {
       ok: false,
       error: 'unknown_step_agent:ghost-reviewer',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// launch-run — custom workflow resolution (TASK-294)
+// ---------------------------------------------------------------------------
+
+describe('prepareProposal — launch-run workflow resolution', () => {
+  beforeEach(() => {
+    launchable.set('wf-sprint', { id: 'wf-sprint', name: 'sprint', projectId: null });
+    launchable.set('wf-global-custom-e253eb7b', { id: 'wf-global-custom-e253eb7b', name: 'dash', projectId: null });
+    launchable.set('wf-p1-docs', { id: 'wf-p1-docs', name: 'docs-review', projectId: 1 });
+    launchable.set('wf-p2-secret', { id: 'wf-p2-secret', name: 'secret', projectId: 2 });
+  });
+
+  it('accepts a custom flow by workflowId and stamps its name + scope', () => {
+    const result = prepareProposal(deps, {
+      kind: 'launch-run',
+      projectId: 1,
+      workflowId: 'wf-global-custom-e253eb7b',
+      taskIds: ['tsk_1'],
+    });
+    expect(result).toEqual({
+      ok: true,
+      payload: {
+        kind: 'launch-run',
+        projectId: 1,
+        workflowName: 'dash',
+        workflowId: 'wf-global-custom-e253eb7b',
+        workflowScope: 'global',
+        taskIds: ['tsk_1'],
+      },
+      preconditions: null,
+    });
+  });
+
+  it('accepts a custom flow by exact name and stamps its id + scope', () => {
+    const result = prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'docs-review' });
+    expect(result.ok === true && result.payload).toMatchObject({
+      workflowName: 'docs-review',
+      workflowId: 'wf-p1-docs',
+      workflowScope: 'project',
+    });
+  });
+
+  it('stamps a built-in that HAS a row with its id, but never a scope', () => {
+    const result = prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'sprint' });
+    expect(result.ok === true && result.payload).toEqual({
+      kind: 'launch-run',
+      projectId: 1,
+      workflowName: 'sprint',
+      workflowId: 'wf-sprint',
+    });
+  });
+
+  it('rejects an unknown custom name or id with a NAMED error, not invalid_payload', () => {
+    expect(prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'nope' })).toEqual({
+      ok: false,
+      error: 'unknown_workflow:nope',
+    });
+    expect(prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowId: 'wf-missing' })).toEqual({
+      ok: false,
+      error: 'unknown_workflow:wf-missing',
+    });
+  });
+
+  it("rejects another project's scoped flow (invisible to this project)", () => {
+    expect(prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowId: 'wf-p2-secret' })).toEqual({
+      ok: false,
+      error: 'unknown_workflow:wf-p2-secret',
+    });
+    expect(prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'secret' })).toEqual({
+      ok: false,
+      error: 'unknown_workflow:secret',
+    });
+  });
+
+  it('workflowId wins over a conflicting workflowName', () => {
+    const result = prepareProposal(deps, {
+      kind: 'launch-run',
+      projectId: 1,
+      workflowId: 'wf-global-custom-e253eb7b',
+      workflowName: 'docs-review',
+    });
+    expect(result.ok === true && result.payload).toMatchObject({ workflowId: 'wf-global-custom-e253eb7b', workflowName: 'dash' });
+  });
+
+  it('prefers the project-scoped row when a project name shadows a global one', () => {
+    launchable.set('wf-global-dash2', { id: 'wf-global-dash2', name: 'shadow', projectId: null });
+    launchable.set('wf-p1-dash2', { id: 'wf-p1-dash2', name: 'shadow', projectId: 1 });
+    const result = prepareProposal(deps, { kind: 'launch-run', projectId: 1, workflowName: 'shadow' });
+    expect(result.ok === true && result.payload).toMatchObject({ workflowId: 'wf-p1-dash2', workflowScope: 'project' });
+  });
+});
+
+describe('createPrepareProposalDeps.resolveLaunchWorkflow', () => {
+  it('reads visibility, archival, the quick sentinel and project-over-global shadowing off the workflows table', async () => {
+    const { createPrepareProposalDeps } = await import('./prepareProposal');
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE workflows (id TEXT PRIMARY KEY, project_id INTEGER, name TEXT NOT NULL, archived_at TEXT)`);
+    const ins = db.prepare('INSERT INTO workflows (id, project_id, name, archived_at) VALUES (?, ?, ?, ?)');
+    ins.run('wf-sprint', null, 'sprint', null);
+    ins.run('wf-dash', null, 'dash', null);
+    ins.run('wf-p1-dash', 1, 'dash', null);
+    ins.run('wf-p2-only', 2, 'p2-only', null);
+    ins.run('wf-archived', null, 'old', '2026-01-01T00:00:00.000Z');
+    ins.run('wf-1-__quick__', 1, '__quick__', null);
+    const real = createPrepareProposalDeps(dbAdapter(db));
+
+    expect(real.resolveLaunchWorkflow(1, { workflowName: 'sprint' })).toEqual({ id: 'wf-sprint', name: 'sprint', projectId: null });
+    expect(real.resolveLaunchWorkflow(1, { workflowName: 'dash' })).toEqual({ id: 'wf-p1-dash', name: 'dash', projectId: 1 });
+    expect(real.resolveLaunchWorkflow(2, { workflowName: 'dash' })).toEqual({ id: 'wf-dash', name: 'dash', projectId: null });
+    expect(real.resolveLaunchWorkflow(1, { workflowId: 'wf-p2-only' })).toBeNull();
+    expect(real.resolveLaunchWorkflow(2, { workflowId: 'wf-p2-only' })).toMatchObject({ id: 'wf-p2-only' });
+    expect(real.resolveLaunchWorkflow(1, { workflowName: 'old' })).toBeNull();
+    expect(real.resolveLaunchWorkflow(1, { workflowId: 'wf-archived' })).toBeNull();
+    expect(real.resolveLaunchWorkflow(1, { workflowName: '__quick__' })).toBeNull();
+    expect(real.resolveLaunchWorkflow(1, {})).toBeNull();
+    db.close();
   });
 });

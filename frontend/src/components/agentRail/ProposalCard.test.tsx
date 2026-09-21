@@ -344,6 +344,11 @@ describe('ProposalCard — open state, per-kind body', () => {
     render(<ProposalCard proposal={proposal} />);
 
     expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch speedboat');
+    // A custom name carries the muted "custom" tag; with no stamped scope it
+    // says just that (an older row the propose handler never stamped).
+    const tag = screen.getByTestId('launch-run-custom-tag');
+    expect(tag).toHaveTextContent(/^custom$/);
+    expect(tag).toHaveAttribute('data-scope', '');
     const labels = screen.getAllByTestId('proposal-entity-label');
     expect(labels[0]).toHaveTextContent('TASK-041');
     expect(labels[0]).toHaveTextContent('Fix the flaky retry test');
@@ -351,6 +356,28 @@ describe('ProposalCard — open state, per-kind body', () => {
     expect(labels[1]).toHaveTextContent('IDEA-008');
     expect(labels[1]).toHaveTextContent('Faster cold start');
     expect(screen.queryByTestId('proposal-entity-unresolved')).not.toBeInTheDocument();
+  });
+
+  it('launch-run: a custom flow with a stamped scope shows "custom · global|project"; a built-in shows no tag (TASK-294)', () => {
+    const { rerender } = render(
+      <ProposalCard
+        proposal={makeLaunchRunProposal({
+          payload: { workflowName: 'dash', workflowId: 'wf-global-custom-e253eb7b', workflowScope: 'global' },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch dash');
+    const tag = screen.getByTestId('launch-run-custom-tag');
+    expect(tag).toHaveTextContent('custom · global');
+    expect(tag).toHaveAttribute('data-scope', 'global');
+    expect(tag).toHaveAttribute('title', 'wf-global-custom-e253eb7b');
+
+    rerender(<ProposalCard proposal={makeLaunchRunProposal({ payload: { workflowName: 'docs-review', workflowScope: 'project' } })} />);
+    expect(screen.getByTestId('launch-run-custom-tag')).toHaveTextContent('custom · project');
+
+    rerender(<ProposalCard proposal={makeLaunchRunProposal()} />);
+    expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch Sprint');
+    expect(screen.queryByTestId('launch-run-custom-tag')).not.toBeInTheDocument();
   });
 
   it('launch-run: a finding seed id resolves its title (no ref) via a batched reviewItems.get fetch', async () => {
@@ -767,6 +794,26 @@ describe('ProposalCard — launch-run resolved', () => {
 
     fireEvent.click(row);
     expect(setActiveRun).toHaveBeenCalledWith('run-new');
+  });
+
+  it('says which seeds the flow ignored, when the executor reports any (TASK-294)', () => {
+    const proposal = makeLaunchRunProposal({
+      payload: { workflowName: 'dash', workflowScope: 'global', taskIds: ['tsk_1'], findingIds: ['rvw_1'] },
+      status: 'executed',
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-d', sessionId: 'sess-d', ignoredSeeds: ['findingIds'] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Run launched.');
+    expect(screen.getByTestId('launch-run-ignored-seeds')).toHaveTextContent('Ignored findings — this flow takes no such seed.');
+  });
+
+  it('shows no ignored-seeds note when nothing was dropped', () => {
+    render(
+      <ProposalCard
+        proposal={makeLaunchRunProposal({ status: 'executed', result: { kind: 'launch-run', status: 'executed', runId: 'run-1' } })}
+      />,
+    );
+    expect(screen.queryByTestId('launch-run-ignored-seeds')).not.toBeInTheDocument();
   });
 
   it('shows a readable workflow + "loading session" label — never the opaque run id — while nothing has hydrated yet', () => {
