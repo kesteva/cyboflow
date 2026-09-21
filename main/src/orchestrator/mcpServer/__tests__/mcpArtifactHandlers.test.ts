@@ -104,6 +104,12 @@ function buildDb(): Database.Database {
   // (rebuild recipe; preserves the revision column added just above). Applied
   // here so the interactive-prototype report tests can insert that atype.
   db.exec(readFileSync(join(migDir, '089_interactive_prototype.sql'), 'utf-8'));
+  // artifacts.reported_at (migration 141) — the LAST report's instant, which
+  // ArtifactRouter's create path now names in both its INSERT and its enrich
+  // UPDATE. Added directly (like the columns above) since this DB hand-picks a
+  // migration subset predating 141; MUST come after every atype-CHECK recreate
+  // above, since a recreate carries only the columns it names.
+  db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   return db;
 }
 

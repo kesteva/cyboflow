@@ -81,6 +81,12 @@ function buildDb(): Database.Database {
   // artifacts.revision (migration 085) — ArtifactRouter bumps it on the verdict
   // enrich-with-deltas; add the additive column onto this pre-085 chain.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  // artifacts.reported_at (migration 141) — the LAST report's instant, which
+  // ArtifactRouter's create path now names in both its INSERT and its enrich
+  // UPDATE. Added directly (like the columns above) since this DB hand-picks a
+  // migration subset predating 141; MUST come after every atype-CHECK recreate
+  // above, since a recreate carries only the columns it names.
+  db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   return db;
 }
 
@@ -715,6 +721,7 @@ function buildSprintDb(): Database.Database {
   // run's plane for the plane-aware audience test.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+  db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT');
   return db;
 }

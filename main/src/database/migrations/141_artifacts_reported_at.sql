@@ -1,0 +1,46 @@
+-- Migration 141: artifacts.reported_at — the instant of the LAST report.
+--
+-- WHY. The `adversarial-review` critique is ONE row per run (one-per-(run,
+-- atype), migration 136), so it outlives the walk that produced it. After a
+-- whole-run rewind (the controller starts a NEW walk; StepResultStore.
+-- deleteForSteps purges the at-and-after step_results slice but nothing touches
+-- `artifacts`) or a human Revise, the PREVIOUS walk's critique is still sitting
+-- there. Readers that treat "the artifact exists and has `## Blocking` entries"
+-- as "this round's reviewer said so" then loop the design phase on a phantom
+-- verdict, or open the optional approve-design gate over a surface that no
+-- longer exists.
+--
+-- WHY A NEW COLUMN. Nothing existing answers "was this row written during THIS
+-- step's turn". `revision` (078/082) advances only when a field actually
+-- changed, and the router appends an `entity_events` row only on a delta — an
+-- IDENTICAL re-report (same critique, same label) is a true no-op in both.
+-- `created_at` is the FIRST report, not the last. `reported_at` is stamped on
+-- EVERY report — the op='create' insert AND its upsert-refresh, including the
+-- no-op refresh — which is precisely the case the column exists for. It is NOT
+-- stamped by the op='update' field patches (a tab focus flipping `is_new` is
+-- not a report) nor by commit.
+--
+-- VALUE. The router's ISO-8601 UTC `now` — the same string it already stamps on
+-- `created_at` and on `entity_events.created_at` — so a reader parses it with
+-- the shared timestamp util and compares epoch ms.
+--
+-- BACKFILL. Existing rows take `created_at` (best effort: that is the only
+-- instant on record). Readers treat NULL/unparseable as "age unknown" and apply
+-- NO freshness constraint, since this bound can only ever make an artifact read
+-- as ABSENT and a pre-141 row must keep today's behaviour.
+--
+-- FUTURE RECREATES. A later `artifacts` rebuild (the 136 recipe) MUST carry
+-- this column and copy it in the INSERT…SELECT, exactly like `revision` —
+-- dropping it silently re-opens the phantom-loop hazard on every migrated DB.
+--
+-- No schema.sql mirror: `artifacts` exists ONLY in the migration chain (it is
+-- absent from schema.sql), and both verify-schema-parity.js paths apply
+-- migrations.
+
+-- Plain ADD COLUMN: `duplicate column name` is tolerated per statement, so a
+-- renumbered re-apply is a no-op here.
+ALTER TABLE artifacts ADD COLUMN reported_at TEXT;
+
+-- NULL-guarded backfill: safe to re-run, and it never overwrites a value a
+-- later report already stamped.
+UPDATE artifacts SET reported_at = created_at WHERE reported_at IS NULL;

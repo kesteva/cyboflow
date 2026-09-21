@@ -123,6 +123,12 @@ function buildDb(): Database.Database {
   // recreate carries only the atypes it names, so this must run last, and the
   // "accepts every atype in the union" loop below now iterates it too.
   db.exec(readFileSync(join(migDir, '136_adversarial_review_atype.sql'), 'utf-8'));
+  // Migration 141 adds artifacts.reported_at — the LAST report's instant, which
+  // the create path stamps on EVERY report. A plain ALTER TABLE ADD COLUMN, so
+  // unlike the CHECK recreates above it is order-independent; listed LAST anyway
+  // so the real file is the thing exercised (a hand-written ALTER here could
+  // drift from it silently).
+  db.exec(readFileSync(join(migDir, '141_artifacts_reported_at.sql'), 'utf-8'));
   return db;
 }
 
@@ -478,6 +484,114 @@ describe('ArtifactRouter', () => {
     });
     expect(countEvents(db, artifactId)).toBe(1); // no no-op audit row
     expect(events).toHaveLength(0); // no no-op emit
+  });
+
+  // ── reported_at (migration 141) ──────────────────────────────────────────
+  // The freshness stamp readers use to tell THIS round's critique from a
+  // previous walk's surviving one. Its whole reason for existing is the case
+  // `revision` and the audit log cannot see: an identical re-report.
+
+  function readReportedAt(db: Database.Database, artifactId: string): string | null {
+    const row = db.prepare('SELECT reported_at AS v FROM artifacts WHERE id = ?').get(artifactId) as {
+      v: string | null;
+    };
+    return row.v;
+  }
+
+  it('a create stamps reported_at with the same ISO-8601 UTC instant as created_at', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'adversarial-review', label: 'Critique', actor: 'agent:adversarial-review',
+    });
+
+    const row = db.prepare('SELECT created_at AS createdAt, reported_at AS reportedAt FROM artifacts WHERE id = ?')
+      .get(artifactId) as { createdAt: string; reportedAt: string };
+    expect(row.reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(row.reportedAt).toBe(row.createdAt);
+  });
+
+  it('an IDENTICAL re-report re-stamps reported_at while revision and the audit log stay put', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create',
+      runId: 'run-1',
+      atype: 'adversarial-review',
+      label: 'Critique',
+      payloadJson: JSON.stringify({ markdown: '## Blocking\n- AR-1 x' }),
+      actor: 'agent:adversarial-review',
+    });
+    expect(countEvents(db, artifactId)).toBe(1);
+
+    // Backdate so "it moved" is observable without depending on clock resolution.
+    db.prepare("UPDATE artifacts SET reported_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(artifactId);
+
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-1',
+      atype: 'adversarial-review',
+      label: 'Critique',
+      payloadJson: JSON.stringify({ markdown: '## Blocking\n- AR-1 x' }),
+      actor: 'agent:adversarial-review',
+    });
+
+    const row = db.prepare('SELECT reported_at AS reportedAt, revision AS revision FROM artifacts WHERE id = ?')
+      .get(artifactId) as { reportedAt: string; revision: number };
+    expect(row.reportedAt).not.toBe('2000-01-01T00:00:00.000Z');
+    expect(Date.parse(row.reportedAt)).toBeGreaterThan(Date.parse('2000-01-01T00:00:00.000Z'));
+    // The no-op semantics this column exists ALONGSIDE are untouched.
+    expect(row.revision).toBe(1);
+    expect(countEvents(db, artifactId)).toBe(1);
+  });
+
+  it('a re-report with a changed payload stamps reported_at AND bumps revision', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create',
+      runId: 'run-1',
+      atype: 'adversarial-review',
+      label: 'Critique',
+      payloadJson: JSON.stringify({ markdown: 'round 1' }),
+      actor: 'agent:adversarial-review',
+    });
+    db.prepare("UPDATE artifacts SET reported_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(artifactId);
+
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-1',
+      atype: 'adversarial-review',
+      label: 'Critique',
+      payloadJson: JSON.stringify({ markdown: 'round 2' }),
+      actor: 'agent:adversarial-review',
+    });
+
+    const row = db.prepare('SELECT reported_at AS reportedAt, revision AS revision FROM artifacts WHERE id = ?')
+      .get(artifactId) as { reportedAt: string; revision: number };
+    expect(Date.parse(row.reportedAt)).toBeGreaterThan(Date.parse('2000-01-01T00:00:00.000Z'));
+    expect(row.revision).toBe(2);
+    expect(countEvents(db, artifactId)).toBe(2);
+  });
+
+  it('an op=update field patch (isNew) does NOT move reported_at — a tab focus is not a report', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'adversarial-review', label: 'Critique', actor: 'agent:adversarial-review',
+    });
+    db.prepare("UPDATE artifacts SET reported_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(artifactId);
+
+    await router.apply(1, { op: 'update', artifactId, isNew: false, actor: 'user' });
+
+    // The patch really landed (so the assertion below is not vacuous).
+    const row = db.prepare('SELECT is_new AS isNew FROM artifacts WHERE id = ?').get(artifactId) as { isNew: number };
+    expect(row.isNew).toBe(0);
+    expect(readReportedAt(db, artifactId)).toBe('2000-01-01T00:00:00.000Z');
   });
 
   it('the payload_json delta reflects the real before/after (null -> present -> cleared)', async () => {
