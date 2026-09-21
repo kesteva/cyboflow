@@ -101,11 +101,20 @@ interface RunRow {
   run_provider: string | null;
 }
 
-/** Derive the {@link ModelFamily} for an INHERITED (run-level) model. */
-function inheritedFamily(model: string | null, provider: string | null): ModelFamily {
-  if (provider !== 'claude') return 'other';
+/**
+ * Derive the {@link ModelFamily} for an INHERITED (run-level) model.
+ *
+ * Provider is NOT consulted first: a recognized Claude-family alias always
+ * wins regardless of `agent_provider`, an unset/empty/`'auto'` model is
+ * always `'auto'` regardless of provider (so an inherited non-Claude run
+ * with no model pinned still reads as "auto", not "other"), and only a
+ * concrete non-Claude model string (e.g. a verbatim Codex model id) falls
+ * through to `'other'`.
+ */
+function inheritedFamily(model: string | null): ModelFamily {
   if (model !== null && isAgentModelAlias(model)) return model;
-  return 'auto';
+  if (model === null || model === '' || model === 'auto') return 'auto';
+  return 'other';
 }
 
 /** Derive the {@link ModelFamily} for a PINNED (per-agent) model. */
@@ -194,7 +203,7 @@ export function resolveRunStepModels(
       const label = isInherit
         ? runModelLabel(runModel, runProvider)
         : agentRunTargetLabel({ runtime, model, providerModel });
-      const family = isInherit ? inheritedFamily(runModel, runProvider) : pinnedFamily(runtime, model);
+      const family = isInherit ? inheritedFamily(runModel) : pinnedFamily(runtime, model);
 
       out.push({
         stepId: step.id,

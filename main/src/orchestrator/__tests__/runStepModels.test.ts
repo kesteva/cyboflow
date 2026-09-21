@@ -161,6 +161,50 @@ describe('resolveRunStepModels', () => {
     expect(step?.family).toBe('auto');
   });
 
+  it('inherit case: a Codex run with no run-level model (null) resolves to Auto/default with family "auto"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-inherit-codex-null', { model: null, agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-inherit-codex-null', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('Auto/default');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('inherit case: a Codex run with an empty-string run-level model resolves to Auto/default with family "auto"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-inherit-codex-empty', { model: '', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-inherit-codex-empty', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('Auto/default');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('inherit case: a Codex run with run-level model "auto" resolves to Auto/default with family "auto"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-inherit-codex-auto', { model: 'auto', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-inherit-codex-auto', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('Auto/default');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('inherit case: a Codex run with a concrete non-Claude run-level model resolves verbatim with family "other"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-inherit-codex-concrete', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-inherit-codex-concrete', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('gpt-5.6-sol');
+    expect(step?.family).toBe('other');
+  });
+
   it('pinned Claude alias resolves via agentRunTargetLabel with the alias as its family', () => {
     const db = makeDb();
     seedStepModelsRun(db, 'run-pinned-claude', { model: 'sonnet', agentProvider: 'claude' });
