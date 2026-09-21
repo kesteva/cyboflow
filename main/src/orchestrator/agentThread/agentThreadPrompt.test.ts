@@ -129,6 +129,13 @@ describe('agentThreadPrompt', () => {
     expect(prompt).toMatch(/PREFER `workflowId` for\s+a custom flow/);
   });
 
+  it('documents the triage-findings proposal kind and asks for per-group reasoning in the reply (TASK-292)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/\*\*triage-findings\*\*/);
+    expect(prompt).toMatch(/per-group\s+reasoning in your reply/);
+    expect(prompt).toMatch(/set-selected:true` stages AND selects/);
+  });
+
   it('tells the assistant to size an inbox with cyboflow_queue summary_only before paging it (TASK-293)', () => {
     const prompt = getAgentSystemPrompt();
     expect(prompt).toMatch(/`summary_only:true` FIRST/);

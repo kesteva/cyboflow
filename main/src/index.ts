@@ -232,6 +232,7 @@ import {
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
 import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/proposalExecutorLaunchDeps';
+import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
 import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
@@ -5585,6 +5586,8 @@ app.whenReady().then(async () => {
       runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
       // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
       ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
+      // triage-findings: the ReviewItemRouter chokepoint + a live-state read.
+      ...buildProposalExecutorReviewDeps({ reviewItemRouter: ReviewItemRouter.getInstance(), db: experimentsDb }),
       logger: loggerLike,
     };
     setProposalExecutorDeps(proposalExecutorDeps);

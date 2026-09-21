@@ -29,6 +29,7 @@ import type {
   CreateBacklogItemsProposalPayload,
   CreateWorkflowProposalPayload,
   AgentProposalStatus,
+  TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -1079,5 +1080,110 @@ describe('ProposalCard — open-session Confirm navigation', () => {
     await waitFor(() => expect(mockConfirmProposal).toHaveBeenCalled());
     expect(setActiveRun).not.toHaveBeenCalled();
     expect(setActiveQuickSession).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triage-findings — grouped counts + expandable titles, per-group outcomes
+// (TASK-292)
+// ---------------------------------------------------------------------------
+
+function makeTriageProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  items?: TriageFindingsProposalPayload['items'];
+  summary?: string;
+} = {}): AgentProposal {
+  const payload: TriageFindingsProposalPayload = {
+    kind: 'triage-findings',
+    projectId: 1,
+    items: overrides.items ?? [
+      { reviewItemId: 'rvw_a', op: 'dismiss', resolution: 'eval noise', title: 'Unused import in foo.ts' },
+      { reviewItemId: 'rvw_b', op: 'dismiss', title: 'Trailing whitespace' },
+      { reviewItemId: 'rvw_c', op: 'resolve', title: 'Fixed in #42' },
+      { reviewItemId: 'rvw_d', op: 'set-selected', selected: true, title: 'Worktree lock leaks on crash' },
+      { reviewItemId: 'rvw_e', op: 'approve', title: 'Retry storm on 429' },
+    ],
+    ...(overrides.summary !== undefined ? { summary: overrides.summary } : {}),
+  };
+  return baseProposal({ kind: 'triage-findings', payload, status: overrides.status ?? 'proposed', result: overrides.result ?? null });
+}
+
+describe('ProposalCard — triage-findings', () => {
+  it('open state: a grouped headline with counts, no per-item rows until a group is expanded', () => {
+    render(<ProposalCard proposal={makeTriageProposal()} />);
+
+    expect(screen.getByTestId('proposal-card')).toHaveAttribute('data-kind', 'triage-findings');
+    expect(screen.getByText(/Proposed action · triage findings/i)).toBeInTheDocument();
+    expect(screen.getByTestId('triage-headline')).toHaveTextContent('Dismiss 2 · Resolve 1 · Stage for Compound 1 · Select for Compound 1');
+
+    const groups = screen.getAllByTestId('triage-group');
+    expect(groups.map((g) => g.getAttribute('data-group'))).toEqual(['dismiss', 'resolve', 'approve', 'select']);
+    expect(within(groups[0]).getByTestId('triage-group-count')).toHaveTextContent('2');
+    expect(screen.queryAllByTestId('triage-row')).toHaveLength(0);
+
+    fireEvent.click(within(groups[0]).getByTestId('triage-group-toggle'));
+    const rows = within(groups[0]).getAllByTestId('triage-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Unused import in foo.ts');
+    expect(rows[0]).toHaveTextContent('eval noise');
+    expect(rows[0]).toHaveAttribute('data-review-item-id', 'rvw_a');
+    // Still no outcome markers before confirm.
+    expect(screen.queryAllByTestId('triage-outcome')).toHaveLength(0);
+  });
+
+  it('open state: a summary replaces the headline and the counts move to the caption', () => {
+    render(<ProposalCard proposal={makeTriageProposal({ summary: 'Sweep the eval noise' })} />);
+    expect(screen.getByTestId('triage-headline')).toHaveTextContent('Sweep the eval noise');
+    expect(screen.getByText(/Project #1 · Dismiss 2/)).toBeInTheDocument();
+  });
+
+  it('resolved: applied / skipped counts plus per-group ✓ / skipped / ✕ tallies', () => {
+    const proposal = makeTriageProposal({
+      status: 'failed',
+      result: {
+        kind: 'triage-findings',
+        status: 'failed',
+        applied: 3,
+        skipped: 1,
+        items: [
+          { reviewItemId: 'rvw_a', op: 'dismiss', ok: true },
+          { reviewItemId: 'rvw_b', op: 'dismiss', ok: false, skipped: 'already resolved' },
+          { reviewItemId: 'rvw_c', op: 'resolve', ok: true },
+          { reviewItemId: 'rvw_d', op: 'set-selected', ok: true },
+          { reviewItemId: 'rvw_e', op: 'approve', ok: false, error: 'not untriaged' },
+        ],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByTestId('triage-resolved-summary')).toHaveTextContent('Triaged 3 of 5 findings · 1 skipped (already triaged) · 1 failed.');
+    expect(screen.queryByTestId('proposal-card-confirm')).not.toBeInTheDocument();
+
+    const groups = screen.getAllByTestId('triage-group');
+    expect(within(groups[0]).getByTestId('triage-group-outcome')).toHaveTextContent('✓ 1skipped 1');
+    expect(within(groups[2]).getByTestId('triage-group-outcome')).toHaveTextContent('✕ 1');
+
+    fireEvent.click(within(groups[0]).getByTestId('triage-group-toggle'));
+    const outcomes = within(groups[0]).getAllByTestId('triage-outcome');
+    expect(outcomes[0]).toHaveTextContent('✓');
+    expect(outcomes[1]).toHaveTextContent('skipped');
+    expect(outcomes[1]).toHaveAttribute('title', 'already resolved');
+  });
+
+  it('resolved executed: a clean sweep reads as fully triaged', () => {
+    const proposal = makeTriageProposal({
+      status: 'executed',
+      items: [{ reviewItemId: 'rvw_a', op: 'dismiss', title: 'x' }],
+      result: { kind: 'triage-findings', status: 'executed', applied: 1, skipped: 0, items: [{ reviewItemId: 'rvw_a', op: 'dismiss', ok: true }] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+    expect(screen.getByTestId('triage-resolved-summary')).toHaveTextContent('Triaged 1 of 1 finding.');
+    expect(screen.getByTestId('proposal-status-circle')).toHaveAttribute('data-tone', 'success');
+  });
+
+  it('dismissed collapses to the neutral resolved row', () => {
+    render(<ProposalCard proposal={makeTriageProposal({ status: 'dismissed' })} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
   });
 });

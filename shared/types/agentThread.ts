@@ -104,6 +104,7 @@ export const AGENT_PROPOSAL_KINDS = [
   'open-session',
   'create-backlog-items',
   'create-workflow',
+  'triage-findings',
 ] as const;
 
 export type AgentProposalKind = (typeof AGENT_PROPOSAL_KINDS)[number];
@@ -417,13 +418,76 @@ export interface CreateWorkflowProposalPayload {
   summary?: string;
 }
 
+/**
+ * The four review-item ops a triage-findings proposal may batch — each one an
+ * EXISTING `ReviewItemRouter.applyReviewItem` op (main/src/orchestrator/
+ * reviewItemRouter.ts), so the executor adds no write path:
+ *   - `dismiss` / `resolve` — the two terminal triage transitions (pending →
+ *     dismissed / resolved), with an optional `resolution` note.
+ *   - `approve` — stage an untriaged finding into READY-to-compound
+ *     (`staged_at` set; not yet selected).
+ *   - `set-selected` — tick / untick the "compound this" checkbox
+ *     (`selected` required). Selecting a finding that is not yet staged
+ *     stages it first (approve + select in one op), so "stage for Compound"
+ *     is a single op from the assistant's side; deselecting requires a
+ *     staged finding.
+ */
+export const TRIAGE_FINDING_OPS = ['dismiss', 'resolve', 'approve', 'set-selected'] as const;
+
+export type TriageFindingOp = (typeof TRIAGE_FINDING_OPS)[number];
+
+export function isTriageFindingOp(value: unknown): value is TriageFindingOp {
+  return (TRIAGE_FINDING_OPS as readonly unknown[]).includes(value);
+}
+
+/** One finding the assistant proposes triaging. */
+export interface TriageFindingItem {
+  /** A `review_items.id` (from cyboflow_queue). Must be a PENDING `kind='finding'` row of `projectId`. */
+  reviewItemId: string;
+  op: TriageFindingOp;
+  /** `dismiss` / `resolve` only: the free-form resolution note recorded on the row. */
+  resolution?: string;
+  /** `set-selected` only (required there): the target checkbox state. */
+  selected?: boolean;
+  /**
+   * The finding's title, stamped SERVER-SIDE at propose time from the row (a
+   * caller-supplied value is overwritten) so the card renders titles without a
+   * per-id lookup and a confirmed card describes exactly the rows it touches.
+   */
+  title?: string;
+}
+
+/**
+ * Triage a batch of review-queue findings in one human confirm (TASK-292).
+ * Every id is validated at propose time — exists, belongs to `projectId`, is a
+ * `finding`, is still `pending`, appears once — so a confirmed card never dies
+ * on a stale id; an item resolved by someone else BETWEEN propose and confirm
+ * is skipped and reported, never a batch failure. Capped at
+ * {@link TRIAGE_FINDINGS_MAX_ITEMS} so one card cannot sweep an inbox.
+ *
+ * Findings ONLY: `decision` / `permission` / `human_task` items are folded
+ * run-gate co-writes whose resolve must carry an outcome and un-park the run —
+ * they are not reachable from here by design.
+ */
+export interface TriageFindingsProposalPayload {
+  kind: 'triage-findings';
+  projectId: number;
+  items: TriageFindingItem[];
+  /** One-line human summary rendered on the card. */
+  summary?: string;
+}
+
+/** Ceiling on one triage-findings proposal — one card, one reviewable decision. */
+export const TRIAGE_FINDINGS_MAX_ITEMS = 200;
+
 export type AgentProposalPayload =
   | LaunchRunProposalPayload
   | ReprioritizeBacklogProposalPayload
   | EditWorkflowProposalPayload
   | OpenSessionProposalPayload
   | CreateBacklogItemsProposalPayload
-  | CreateWorkflowProposalPayload;
+  | CreateWorkflowProposalPayload
+  | TriageFindingsProposalPayload;
 
 // ---------------------------------------------------------------------------
 // Per-kind proposal preconditions
@@ -442,11 +506,12 @@ export interface ReprioritizeBacklogPreconditions {
 }
 
 /**
- * launch-run, open-session, create-backlog-items, and create-workflow carry no
- * preconditions — nothing to CAS-check (a create has no prior version to race
- * against; the parent/lineage links and agent bindings it references are
- * validated at propose time instead, and a name that gets taken in between is
- * a plain executor failure).
+ * launch-run, open-session, create-backlog-items, create-workflow, and
+ * triage-findings carry no preconditions — nothing to CAS-check (a create has
+ * no prior version to race against; the parent/lineage links and agent
+ * bindings it references are validated at propose time instead, and a name
+ * that gets taken in between is a plain executor failure; a finding that is
+ * no longer pending at confirm time is skipped per item, not CAS-refused).
  */
 export type AgentProposalPreconditions = EditWorkflowPreconditions | ReprioritizeBacklogPreconditions;
 

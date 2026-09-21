@@ -13,9 +13,10 @@
  *      { ok:false, reason:'claimed' }. A missing row ⇒ { ok:false, reason:'not-found' }.
  *   2. PRECONDITION CHECK (edit-workflow only — spec-hash CAS): a mismatch supersedes
  *      the proposal with a refreshed-diff loopback turn, never a blind overwrite.
- *      (launch-run and create-backlog-items carry no precondition; reprioritize's
- *      per-task expectedVersions are consumed PER ITEM by the chokepoint, not as a
- *      whole-proposal gate.)
+ *      (launch-run, create-backlog-items and triage-findings carry no precondition;
+ *      reprioritize's per-task expectedVersions are consumed PER ITEM by the
+ *      chokepoint, not as a whole-proposal gate; a triage item no longer pending at
+ *      confirm time is skipped per item.)
  *   3. SIDE EFFECTS through the chokepoints, carrying the idempotency key / expected
  *      versions where the target supports them. launch-run runs a COMPENSATION SAGA:
  *      created resources are tracked and unwound in reverse on any post-session
@@ -58,6 +59,9 @@ import type {
   EditWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogProposalPayload,
+  TriageFindingItem,
+  TriageFindingOp,
+  TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
 
 // ---------------------------------------------------------------------------
@@ -116,6 +120,23 @@ export interface ReprioritizeTaskChange {
 export interface TaskFieldsSnapshot {
   priority: Priority | null;
   stageId: string | null;
+}
+
+/**
+ * One triage-findings write, actor pinned 'user' by the executor. Each shape
+ * is a ReviewItemRouter.applyReviewItem op verbatim (the wiring closure
+ * forwards it as-is), so the executor adds no write path of its own.
+ */
+export type TriageReviewItemChange =
+  | { op: 'resolve' | 'dismiss'; actor: 'user'; reviewItemId: string; resolution?: string | null }
+  | { op: 'approve'; actor: 'user'; reviewItemId: string }
+  | { op: 'set-selected'; actor: 'user'; reviewItemIds: string[]; selected: boolean };
+
+/** Live review-item state read before each triage write and during reconciliation. */
+export interface ReviewItemStateSnapshot {
+  status: 'pending' | 'resolved' | 'dismissed';
+  stagedAt: string | null;
+  selected: boolean;
 }
 
 export interface ProposalExecutorDeps {
@@ -193,6 +214,12 @@ export interface ProposalExecutorDeps {
   findWorkflowIdByName: (projectId: number | null, name: string) => string | null;
   /** Reconciliation: does `projectId` carry a custom agent under `agentKey`? */
   customAgentExists: (projectId: number, agentKey: string) => boolean;
+
+  // --- triage-findings: sequential per-item ReviewItemRouter writes, skip-tolerant ---
+  /** One ReviewItemRouter.applyReviewItem (actor 'user'); throws (ReviewItemError) on rejection. */
+  applyReviewItemChange: (projectId: number, change: TriageReviewItemChange) => Promise<void>;
+  /** The item's current status / staged / selected state (null when it is gone or belongs elsewhere). */
+  readReviewItemState: (projectId: number, reviewItemId: string) => ReviewItemStateSnapshot | null;
 
   logger?: LoggerLike;
 }
@@ -296,12 +323,37 @@ export interface CreateWorkflowResultJson {
   verified?: string;
 }
 
+export interface TriageFindingItemResultJson {
+  reviewItemId: string;
+  op: TriageFindingOp;
+  ok: boolean;
+  /**
+   * Present when the item was NOT written because someone else got there
+   * first (it was no longer pending at confirm time, or no longer exists) —
+   * reported, never a batch failure. `ok` is false on a skipped row.
+   */
+  skipped?: string;
+  error?: string;
+}
+
+export interface TriageFindingsResultJson {
+  kind: 'triage-findings';
+  status: 'executed' | 'failed';
+  items: TriageFindingItemResultJson[];
+  /** Rows written through the chokepoint. */
+  applied: number;
+  /** Rows skipped as superseded (not counted as failures). */
+  skipped: number;
+  reconciled?: boolean;
+}
+
 export type ProposalResultJson =
   | LaunchRunResultJson
   | ReprioritizeResultJson
   | EditWorkflowResultJson
   | CreateBacklogResultJson
-  | CreateWorkflowResultJson;
+  | CreateWorkflowResultJson
+  | TriageFindingsResultJson;
 
 // ---------------------------------------------------------------------------
 // Result
@@ -411,6 +463,8 @@ export async function executeProposal(
       );
     case 'create-workflow':
       return runCreateWorkflow(deps, proposal, proposal.payload as CreateWorkflowProposalPayload, proposalId);
+    case 'triage-findings':
+      return runTriageFindings(deps, proposal, proposal.payload as TriageFindingsProposalPayload, proposalId);
     default:
       // Unreachable: open-session is handled above, and the union is closed. Finalize
       // failed defensively so a future kind never strands the claimed row.
@@ -687,6 +741,91 @@ async function runCreateWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// triage-findings — sequential per-item chokepoint writes, superseded-tolerant
+// ---------------------------------------------------------------------------
+
+/** The chokepoint change(s) one triage item maps to, given the row's live state. */
+function triageChanges(item: TriageFindingItem, live: ReviewItemStateSnapshot): TriageReviewItemChange[] {
+  const id = item.reviewItemId;
+  switch (item.op) {
+    case 'dismiss':
+    case 'resolve':
+      return [{ op: item.op, actor: 'user', reviewItemId: id, resolution: item.resolution ?? null }];
+    case 'approve':
+      return [{ op: 'approve', actor: 'user', reviewItemId: id }];
+    case 'set-selected': {
+      const selected = item.selected === true;
+      // Selecting an unstaged finding stages it first: the chokepoint only
+      // toggles READY (staged) rows, and "stage for Compound" is one decision
+      // from the human's side, not two clicks.
+      const stage: TriageReviewItemChange[] = selected && live.stagedAt === null ? [{ op: 'approve', actor: 'user', reviewItemId: id }] : [];
+      return [...stage, { op: 'set-selected', actor: 'user', reviewItemIds: [id], selected }];
+    }
+  }
+}
+
+async function runTriageFindings(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: TriageFindingsProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  const items: TriageFindingItemResultJson[] = [];
+  let applied = 0;
+  let skipped = 0;
+  let anyFailed = false;
+  // Same posture as runReprioritize: ReviewItemRouter.applyReviewItem is one
+  // item per call, so each item is its own call and a rejection does NOT abort
+  // the rest. One extra arm: a row that stopped being pending between propose
+  // and confirm (a human triaged it from the queue meanwhile) is SKIPPED and
+  // reported — the assistant's intent for it is moot, not wrong — rather than
+  // surfacing the chokepoint's invalid_status as a failure of the batch.
+  for (const item of payload.items) {
+    const live = deps.readReviewItemState(payload.projectId, item.reviewItemId);
+    if (live === null) {
+      skipped++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, skipped: 'no longer exists' });
+      continue;
+    }
+    if (live.status !== 'pending') {
+      skipped++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, skipped: `already ${live.status}` });
+      continue;
+    }
+    try {
+      for (const change of triageChanges(item, live)) {
+        await deps.applyReviewItemChange(payload.projectId, change);
+      }
+      applied++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: true });
+    } catch (err) {
+      anyFailed = true;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, error: errMsg(err) });
+    }
+  }
+
+  const status: 'executed' | 'failed' = anyFailed ? 'failed' : 'executed';
+  const result: TriageFindingsResultJson = { kind: 'triage-findings', status, items, applied, skipped };
+  deps.store.finalizeProposal(proposalId, status, JSON.stringify(result));
+  return { ok: true, proposalId, kind: proposal.kind, status, result };
+}
+
+/** Does the row's live state already reflect what `item` asked for? (Reconciliation read.) */
+function triageItemApplied(item: TriageFindingItem, live: ReviewItemStateSnapshot | null): boolean {
+  if (live === null) return false;
+  switch (item.op) {
+    case 'dismiss':
+      return live.status === 'dismissed';
+    case 'resolve':
+      return live.status === 'resolved';
+    case 'approve':
+      return live.stagedAt !== null;
+    case 'set-selected':
+      return live.selected === (item.selected === true) && (item.selected !== true || live.stagedAt !== null);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // edit-workflow — spec-hash CAS + safeParse + updateSpec inside one transaction
 // ---------------------------------------------------------------------------
 
@@ -832,6 +971,11 @@ export interface ReconcileSummary {
  *     time, so its presence is the confirm's own trace); otherwise
  *     'crashed-mid-execution' — with whatever landed listed, since a half-minted
  *     agent set is exactly what the human has to clean up by hand.
+ *   - triage-findings: every item's row already reflects its op (dismissed /
+ *     resolved / staged / selected as asked) ⇒ executed; otherwise
+ *     'crashed-mid-execution' with the per-item verified state. A row someone
+ *     else triaged meanwhile reads as applied for dismiss/resolve only when the
+ *     status matches — reconciliation never re-writes.
  */
 export async function reconcileOrphanedExecutingProposals(deps: ProposalExecutorDeps): Promise<ReconcileSummary> {
   const orphans = deps.store.listProposalsByStatus('executing');
@@ -988,6 +1132,27 @@ async function reconcileOne(deps: ProposalExecutorDeps, proposal: AgentProposal)
         kind: proposal.kind,
         finalizedTo: status,
         note: applied ? verified : `crashed-mid-execution: ${verified}; check the Agents pane for partially created agents`,
+      };
+    }
+
+    case 'triage-findings': {
+      const payload = proposal.payload as TriageFindingsProposalPayload;
+      const items: TriageFindingItemResultJson[] = [];
+      let applied = 0;
+      for (const item of payload.items) {
+        const ok = triageItemApplied(item, deps.readReviewItemState(payload.projectId, item.reviewItemId));
+        if (ok) applied++;
+        items.push({ reviewItemId: item.reviewItemId, op: item.op, ok });
+      }
+      const allApplied = applied === payload.items.length;
+      const status: 'executed' | 'failed' = allApplied ? 'executed' : 'failed';
+      const result: TriageFindingsResultJson = { kind: 'triage-findings', status, items, applied, skipped: 0, reconciled: true };
+      deps.store.finalizeProposal(proposal.id, status, JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: status,
+        note: allApplied ? 'all items already applied' : 'crashed-mid-execution: some items not applied',
       };
     }
 

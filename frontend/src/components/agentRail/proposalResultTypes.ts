@@ -2,7 +2,7 @@
  * proposalResultTypes — local, DEFENSIVE mirrors of the proposal executor's
  * `result_json` shapes (main/src/orchestrator/agentThread/proposalExecutor.ts
  * — `LaunchRunResultJson` / `ReprioritizeResultJson` / `EditWorkflowResultJson` /
- * `CreateBacklogResultJson` / `CreateWorkflowResultJson`).
+ * `CreateBacklogResultJson` / `CreateWorkflowResultJson` / `TriageFindingsResultJson`).
  *
  * `AgentProposal.result` is typed `unknown` (shared/types/agentThread.ts) —
  * deliberately, since the executor's typed result interfaces live main-only
@@ -13,6 +13,7 @@
  * there is no shared source of truth to keep them in lockstep automatically.
  */
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
+import { isTriageFindingOp, type TriageFindingOp } from '../../../../shared/types/agentThread';
 
 // ---------------------------------------------------------------------------
 // launch-run
@@ -297,6 +298,51 @@ export function parseCreateWorkflowResult(result: unknown): CreateWorkflowResult
     agents: result.agents.filter(isCreateWorkflowAgentResult),
     error: typeof result.error === 'string' ? result.error : undefined,
     compensations: compensations && compensations.length > 0 ? compensations : undefined,
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// triage-findings
+// ---------------------------------------------------------------------------
+
+export interface TriageFindingItemResultJson {
+  reviewItemId: string;
+  op: TriageFindingOp;
+  ok: boolean;
+  /** Present when the row was skipped as superseded (someone else triaged it first). */
+  skipped?: string;
+  error?: string;
+}
+
+export interface TriageFindingsResultJson {
+  kind: 'triage-findings';
+  status: 'executed' | 'failed';
+  items: TriageFindingItemResultJson[];
+  applied: number;
+  skipped: number;
+  reconciled?: boolean;
+}
+
+function isTriageFindingItemResult(v: unknown): v is TriageFindingItemResultJson {
+  if (!isRecord(v)) return false;
+  return typeof v.reviewItemId === 'string' && isTriageFindingOp(v.op) && typeof v.ok === 'boolean';
+}
+
+/** Parse a proposal's `result` as a triage-findings result, or null if it doesn't match. */
+export function parseTriageFindingsResult(result: unknown): TriageFindingsResultJson | null {
+  if (!isRecord(result) || result.kind !== 'triage-findings') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  if (!Array.isArray(result.items)) return null;
+  const items = result.items.filter(isTriageFindingItemResult);
+  return {
+    kind: 'triage-findings',
+    status: result.status,
+    items,
+    // Derived from the rows when the counts are missing, so an older/partial
+    // result still renders "applied N · skipped M" truthfully.
+    applied: typeof result.applied === 'number' ? result.applied : items.filter((i) => i.ok).length,
+    skipped: typeof result.skipped === 'number' ? result.skipped : items.filter((i) => i.skipped != null).length,
     reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
   };
 }

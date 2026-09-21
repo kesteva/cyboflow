@@ -7,10 +7,11 @@
  * body (delegated to {@link ProposalCardBodies}) with a rust-primary Confirm
  * + ghost Dismiss footer, while `status === 'proposed'`. On any terminal
  * status the head bar/footer disappear and the card collapses to a compact
- * resolved row — a status circle + a bold verb + muted detail — EXCEPT the two
- * per-item kinds (reprioritize-backlog and create-backlog-items), which keep
- * their rows visible with a per-item ✓/✕ overlay (the brief's explicit ask for
- * partial-failure visibility, not a one-line opaque summary).
+ * resolved row — a status circle + a bold verb + muted detail — EXCEPT the
+ * per-item kinds (reprioritize-backlog, create-backlog-items and the grouped
+ * triage-findings), which keep their rows visible with a per-item ✓/✕ overlay
+ * (the brief's explicit ask for partial-failure visibility, not a one-line
+ * opaque summary).
  *
  * Confirm/dismiss wiring:
  *   - Confirm sets a LOCAL optimistic 'executing' flag immediately (spinner +
@@ -54,6 +55,8 @@ import {
   CreateWorkflowBody,
   CreateWorkflowAgentRows,
   LAUNCH_SEED_FIELD_LABEL,
+  TriageFindingsBody,
+  TriageFindingsGroups,
   workflowNameLabel,
 } from './ProposalCardBodies';
 import {
@@ -62,6 +65,7 @@ import {
   parseEditWorkflowResult,
   parseCreateBacklogResult,
   parseCreateWorkflowResult,
+  parseTriageFindingsResult,
 } from './proposalResultTypes';
 import { navigateToProposalTarget } from './proposalNavigation';
 
@@ -343,6 +347,34 @@ function CreateWorkflowResolved({ proposal }: { proposal: AgentProposal }): Reac
   );
 }
 
+function TriageFindingsResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  const payload = proposal.payload.kind === 'triage-findings' ? proposal.payload : null;
+  const result = parseTriageFindingsResult(proposal.result);
+  if (payload === null) {
+    return <ResolvedLine tone="error" glyph="✕" verb="Resolved." />;
+  }
+  const total = payload.items.length;
+  const applied = result?.applied ?? 0;
+  const skipped = result?.skipped ?? 0;
+  const failed = result === null ? 0 : total - applied - skipped;
+  return (
+    <div className="flex flex-col gap-2 p-2.5">
+      <div className="flex items-center gap-2.5">
+        <StatusCircle tone={result?.status === 'failed' ? 'warning' : 'success'} glyph={result?.status === 'failed' ? '!' : '✓'} />
+        <span className="text-[11px] font-bold text-text-primary" data-testid="triage-resolved-summary">
+          Triaged {applied} of {total} finding{total === 1 ? '' : 's'}
+          {skipped > 0 ? ` · ${skipped} skipped (already triaged)` : ''}
+          {failed > 0 ? ` · ${failed} failed` : ''}.
+        </span>
+      </div>
+      <TriageFindingsGroups items={payload.items} result={result} />
+    </div>
+  );
+}
+
 function OpenSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
@@ -445,6 +477,9 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'create-workflow' && proposal.payload.kind === 'create-workflow' && (
             <CreateWorkflowBody payload={proposal.payload} />
           )}
+          {proposal.kind === 'triage-findings' && proposal.payload.kind === 'triage-findings' && (
+            <TriageFindingsBody payload={proposal.payload} />
+          )}
         </div>
       )}
 
@@ -479,6 +514,7 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'open-session' && <OpenSessionResolved proposal={proposal} />}
           {proposal.kind === 'create-backlog-items' && <CreateBacklogResolved proposal={proposal} />}
           {proposal.kind === 'create-workflow' && <CreateWorkflowResolved proposal={proposal} />}
+          {proposal.kind === 'triage-findings' && <TriageFindingsResolved proposal={proposal} />}
         </>
       )}
 

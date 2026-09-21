@@ -23,9 +23,12 @@ import type {
   ReprioritizeBacklogProposalPayload,
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
+  TriageFindingItem,
+  TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
 import { isCyboflowWorkflowName, type CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { Priority } from '../../../../shared/types/tasks';
+import { useState } from 'react';
 import { useLandingStore } from '../../stores/landingStore';
 import {
   parseWorkflowDefinitionSummary,
@@ -33,6 +36,7 @@ import {
   type CreateWorkflowResultJson,
   type LaunchSeedField,
   type ReprioritizeResultJson,
+  type TriageFindingsResultJson,
 } from './proposalResultTypes';
 import { useProposalEntityLabels, type ResolvedProposalEntity, type ResolvedStage } from './useProposalEntityLabels';
 
@@ -49,6 +53,7 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
   'open-session': 'open session',
   'create-backlog-items': 'add to backlog',
   'create-workflow': 'create workflow',
+  'triage-findings': 'triage findings',
 };
 
 const ENTITY_TYPE_LABEL: Record<CreateBacklogItem['taskType'], string> = {
@@ -590,6 +595,172 @@ export function CreateWorkflowBody({ payload }: { payload: CreateWorkflowProposa
         <Row label="new agents" value={`${agents.length} agent${agents.length === 1 ? '' : 's'}`} />
       )}
       <CreateWorkflowAgentRows agents={agents} result={null} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// triage-findings — grouped by op ("Dismiss 41 · Resolve 3 · Stage for
+// Compound 12"), each group expandable to its titles, never one row per item
+// (TASK-292): a 56-item sweep is one human decision per GROUP, so that is
+// what the card foregrounds.
+// ---------------------------------------------------------------------------
+
+/**
+ * The five decision groups a triage batch splits into. `set-selected` is
+ * split on its target state because "tick as a Compound seed" and "untick"
+ * are opposite decisions that happen to share an op.
+ */
+export type TriageGroupKey = 'dismiss' | 'resolve' | 'approve' | 'select' | 'deselect';
+
+export const TRIAGE_GROUP_LABEL: Record<TriageGroupKey, string> = {
+  dismiss: 'Dismiss',
+  resolve: 'Resolve',
+  approve: 'Stage for Compound',
+  select: 'Select for Compound',
+  deselect: 'Deselect',
+};
+
+const TRIAGE_GROUP_ORDER: readonly TriageGroupKey[] = ['dismiss', 'resolve', 'approve', 'select', 'deselect'];
+
+export function triageGroupKey(item: TriageFindingItem): TriageGroupKey {
+  if (item.op === 'set-selected') return item.selected === true ? 'select' : 'deselect';
+  return item.op;
+}
+
+/** Split a batch into its non-empty groups, in a fixed display order. */
+export function groupTriageItems(items: TriageFindingItem[]): Array<{ key: TriageGroupKey; items: TriageFindingItem[] }> {
+  const buckets = new Map<TriageGroupKey, TriageFindingItem[]>();
+  for (const item of items) {
+    const key = triageGroupKey(item);
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(item);
+    buckets.set(key, bucket);
+  }
+  return TRIAGE_GROUP_ORDER.filter((key) => buckets.has(key)).map((key) => ({ key, items: buckets.get(key) ?? [] }));
+}
+
+function triageItemResult(
+  result: TriageFindingsResultJson | null,
+  reviewItemId: string,
+): { ok: boolean; skipped?: string; error?: string } | null {
+  if (result === null) return null;
+  const found = result.items.find((i) => i.reviewItemId === reviewItemId);
+  return found ? { ok: found.ok, skipped: found.skipped, error: found.error } : null;
+}
+
+/**
+ * One expandable group: "Dismiss · 41" with a per-group ✓/skip/✕ tally once
+ * resolved, and the finding titles (stamped server-side at propose time)
+ * behind a disclosure. Collapsed by default — the counts ARE the summary.
+ */
+function TriageGroup({
+  groupKey,
+  items,
+  result,
+}: {
+  groupKey: TriageGroupKey;
+  items: TriageFindingItem[];
+  result: TriageFindingsResultJson | null;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const outcomes = items.map((item) => triageItemResult(result, item.reviewItemId));
+  const okCount = outcomes.filter((o) => o?.ok === true).length;
+  const skippedCount = outcomes.filter((o) => o != null && !o.ok && o.skipped != null).length;
+  const failedCount = outcomes.filter((o) => o != null && !o.ok && o.skipped == null).length;
+  return (
+    <div className="flex flex-col gap-1" data-testid="triage-group" data-group={groupKey}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex items-baseline gap-2 text-left hover:text-text-primary"
+        data-testid="triage-group-toggle"
+      >
+        <span className="w-3 shrink-0 text-[9px] text-text-tertiary" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+        <span className="font-bold text-text-primary">{TRIAGE_GROUP_LABEL[groupKey]}</span>
+        <span className="text-text-tertiary" data-testid="triage-group-count">
+          {items.length}
+        </span>
+        {result !== null && (
+          <span className="ml-auto shrink-0 text-[10px]" data-testid="triage-group-outcome">
+            {okCount > 0 && <span className="text-status-success">✓ {okCount}</span>}
+            {skippedCount > 0 && <span className="ml-1.5 text-text-tertiary">skipped {skippedCount}</span>}
+            {failedCount > 0 && <span className="ml-1.5 text-status-error">✕ {failedCount}</span>}
+          </span>
+        )}
+      </button>
+      {open && (
+        <ul className="ml-5 flex flex-col gap-0.5" data-testid="triage-group-items">
+          {items.map((item, index) => {
+            const outcome = outcomes[index];
+            return (
+              <li key={item.reviewItemId} className="flex items-baseline gap-2" data-testid="triage-row" data-review-item-id={item.reviewItemId}>
+                <span className="flex-1 truncate text-text-primary" title={item.reviewItemId}>
+                  {item.title != null && item.title !== '' ? item.title : item.reviewItemId}
+                </span>
+                {item.resolution != null && item.resolution !== '' && (
+                  <span className="shrink-0 truncate italic text-text-tertiary" title={item.resolution}>
+                    {item.resolution}
+                  </span>
+                )}
+                {outcome !== null && (
+                  <span
+                    className={`shrink-0 font-bold ${outcome.ok ? 'text-status-success' : outcome.skipped != null ? 'text-text-tertiary' : 'text-status-error'}`}
+                    data-testid="triage-outcome"
+                    data-ok={String(outcome.ok)}
+                    title={outcome.error ?? outcome.skipped}
+                  >
+                    {outcome.ok ? '✓' : outcome.skipped != null ? 'skipped' : '✕'}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Shared by the OPEN and RESOLVED paths, mirroring {@link CreateBacklogRows}. */
+export function TriageFindingsGroups({
+  items,
+  result,
+}: {
+  items: TriageFindingItem[];
+  result: TriageFindingsResultJson | null;
+}): React.ReactElement {
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-triage-findings">
+      {groupTriageItems(items).map((group) => (
+        <TriageGroup key={group.key} groupKey={group.key} items={group.items} result={result} />
+      ))}
+    </div>
+  );
+}
+
+/** The one-line "Dismiss 41 · Resolve 3 · Stage for Compound 12" headline. */
+export function triageHeadline(items: TriageFindingItem[]): string {
+  return groupTriageItems(items)
+    .map((group) => `${TRIAGE_GROUP_LABEL[group.key]} ${group.items.length}`)
+    .join(' · ');
+}
+
+export function TriageFindingsBody({ payload }: { payload: TriageFindingsProposalPayload }): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[13px] font-bold text-text-primary" data-testid="triage-headline">
+        {payload.summary != null && payload.summary !== '' ? payload.summary : triageHeadline(payload.items)}
+      </div>
+      <div className="text-[10px] text-text-tertiary">
+        {projectName}
+        {payload.summary != null && payload.summary !== '' ? ` · ${triageHeadline(payload.items)}` : ''}
+      </div>
+      <TriageFindingsGroups items={payload.items} result={null} />
     </div>
   );
 }

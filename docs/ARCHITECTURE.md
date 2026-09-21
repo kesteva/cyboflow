@@ -511,13 +511,21 @@ The global-agent family carries exactly TWO write-shaped tools with disjoint tar
 `cyboflow_propose_action` (an `agent_proposals` row a human confirms) and `cyboflow_widget_save`
 (the user's own `custom_widgets` library — never a view, an entity, or a proposal). The proposal
 kinds are `launch-run`, `reprioritize-backlog`, `edit-workflow`, `open-session`,
-`create-backlog-items`, and `create-workflow`; a confirmed proposal executes through
-`agentThread/proposalExecutor.ts` against the same chokepoints every other write uses.
+`create-backlog-items`, `create-workflow`, and `triage-findings`; a confirmed proposal executes
+through `agentThread/proposalExecutor.ts` against the same chokepoints every other write uses.
 `create-workflow` mints a custom flow (`WorkflowRegistry.createCustom`) together with the custom
 agents its steps bind (`AgentOverrideRouter` `createCustom`, agents first so the bindings resolve,
 unwound again if a later step fails); `prepareProposal` validates the definition, the agent
 drafts, and every step binding at propose time, and the read tool `cyboflow_agents` is what hands
-the assistant the bindable vocabulary (builtins + the project's custom agents). The
+the assistant the bindable vocabulary (builtins + the project's custom agents).
+`triage-findings` batches dismiss / resolve / approve / set-selected ops over up to 200 pending
+finding ids through `ReviewItemRouter.applyReviewItem` (findings only — gate kinds are folded
+run-pause co-writes and stay out of reach); every id is validated at propose time, and an item
+someone else triages between propose and confirm is skipped per item, never a batch failure.
+`launch-run` names its flow by `workflowId` or by name (built-in OR custom, resolved among the
+flows visible to the project at propose time), and the launch closure maps seeds by the flow's
+SHAPE (`shared/workflows/workflowSeedKind.ts`), as do `RunLauncher.launch`'s seed guards — a
+custom flow cloned from Sprint takes `taskIds` like Sprint does. The
 custom-widget authoring tools (`cyboflow_db_schema`, `cyboflow_widget_preview`,
 `cyboflow_widget_save`) route through `CustomViewsService` so a preview runs the exact query path
 the page will (see "Custom views" under Data Model and `docs/proposals/CUSTOM-VIEWS.md`).

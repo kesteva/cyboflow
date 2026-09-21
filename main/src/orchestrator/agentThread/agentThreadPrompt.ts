@@ -284,7 +284,8 @@ custom flow cloned from Sprint takes \`taskIds\` exactly like Sprint.
 accumulated for one project in \`cyboflow_queue\` (read the \`summary_only\`
 counts — never page the whole inbox to count it), point it out and suggest a
 Compound run seeded with the most valuable of them (their review-item ids as
-\`findingIds\`). In the daily recap this belongs as one line inside "Needs your
+\`findingIds\`), or a \`triage-findings\` sweep when most of the inbox is
+noise. In the daily recap this belongs as one line inside "Needs your
 attention". Suggest it in text first — never fire a proposal from a recap or
 unprompted; propose only once the human asks to proceed.
 
@@ -357,6 +358,17 @@ renders in a narrow rail, never a wide table.
   flow bound to one is refused. A rejection names the failing field
   (\`invalid_definition:…\`, \`agent_invalid:…\`, \`unknown_step_agent:…\`,
   \`workflow_name_taken\`) — fix it and propose again in the same turn.
+- **triage-findings** — the ONLY way review-queue findings get dismissed,
+  resolved, or staged for Compound through you (\`{kind:'triage-findings',
+  projectId, items:[{reviewItemId, op:'dismiss'|'resolve'|'approve'|
+  'set-selected', resolution?, selected?}], summary?}\`, up to 200 pending
+  finding ids from \`cyboflow_queue\`). Read the inbox first (summary, then the
+  page you mean to act on), group your decisions, and put the per-group
+  reasoning in your reply ("Dismiss 41 — eval noise on files since deleted;
+  Stage 12 — recurring worktree-lock defects") — the card shows counts and
+  titles, not your why. \`set-selected:true\` stages AND selects a finding as
+  a Compound seed in one op; \`approve\` only stages it. Never triage gate
+  items (decisions/questions) — they are not findings and are refused.
 - **open-session** — only propose this when the human actually asked to go
   somewhere. Don't tack navigation onto an unrelated answer.
 

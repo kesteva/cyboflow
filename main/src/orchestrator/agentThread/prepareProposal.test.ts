@@ -14,7 +14,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { computeSpecHash } from './specHash';
-import { parseAgentProposalPayload, prepareProposal, type PrepareProposalDeps } from './prepareProposal';
+import {
+  parseAgentProposalPayload,
+  prepareProposal,
+  type PrepareProposalDeps,
+  type ReviewItemTriageSnapshot,
+} from './prepareProposal';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 import type { TaskType } from '../../../../shared/types/tasks';
 
@@ -39,6 +44,8 @@ let takenWorkflowNames: Set<string>;
 let customAgents: Set<string>;
 /** Launchable flows keyed by id — `projectId` null = global. */
 let launchable: Map<string, { id: string; name: string; projectId: number | null }>;
+/** Review items keyed by id (the triage-findings validation reads). */
+let reviewItems: Map<string, ReviewItemTriageSnapshot>;
 
 beforeEach(() => {
   rawDb = new Database(':memory:');
@@ -57,6 +64,7 @@ beforeEach(() => {
   takenWorkflowNames = new Set();
   customAgents = new Set();
   launchable = new Map();
+  reviewItems = new Map();
 
   deps = {
     db: dbAdapter(rawDb),
@@ -71,6 +79,7 @@ beforeEach(() => {
       const byName = visible.filter((w) => w.name === ref.workflowName);
       return byName.find((w) => w.projectId !== null) ?? byName[0] ?? null;
     },
+    readReviewItem: (reviewItemId) => reviewItems.get(reviewItemId),
   };
 });
 
@@ -578,6 +587,142 @@ describe('createPrepareProposalDeps.resolveLaunchWorkflow', () => {
     expect(real.resolveLaunchWorkflow(1, { workflowId: 'wf-archived' })).toBeNull();
     expect(real.resolveLaunchWorkflow(1, { workflowName: '__quick__' })).toBeNull();
     expect(real.resolveLaunchWorkflow(1, {})).toBeNull();
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triage-findings (TASK-292)
+// ---------------------------------------------------------------------------
+
+function finding(over: Partial<ReviewItemTriageSnapshot> = {}): ReviewItemTriageSnapshot {
+  return { projectId: 1, kind: 'finding', status: 'pending', stagedAt: null, selected: false, title: 'A finding', ...over };
+}
+
+describe('parseAgentProposalPayload — triage-findings', () => {
+  it('narrows a mixed batch, keeping resolution on dismiss/resolve and selected on set-selected', () => {
+    expect(
+      parseAgentProposalPayload({
+        kind: 'triage-findings',
+        projectId: 1,
+        summary: 'Sweep the eval noise',
+        items: [
+          { reviewItemId: 'rvw_1', op: 'dismiss', resolution: 'noise' },
+          { reviewItemId: 'rvw_2', op: 'resolve' },
+          { reviewItemId: 'rvw_3', op: 'approve' },
+          { reviewItemId: 'rvw_4', op: 'set-selected', selected: true },
+        ],
+      }),
+    ).toEqual({
+      kind: 'triage-findings',
+      projectId: 1,
+      summary: 'Sweep the eval noise',
+      items: [
+        { reviewItemId: 'rvw_1', op: 'dismiss', resolution: 'noise' },
+        { reviewItemId: 'rvw_2', op: 'resolve' },
+        { reviewItemId: 'rvw_3', op: 'approve' },
+        { reviewItemId: 'rvw_4', op: 'set-selected', selected: true },
+      ],
+    });
+  });
+
+  it('rejects an empty batch, an unknown op, a set-selected without selected, a resolution on approve, and a caller-supplied title is dropped', () => {
+    expect(parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [] })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'promote' }] })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'set-selected' }] })).toBeNull();
+    expect(
+      parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'approve', resolution: 'x' }] }),
+    ).toBeNull();
+    expect(
+      parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'approve', selected: true }] }),
+    ).toBeNull();
+    expect(
+      parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'dismiss', title: 'spoofed' }] }),
+    ).toEqual({ kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'r', op: 'dismiss' }] });
+  });
+
+  it('caps the batch at 200 items', () => {
+    const items = Array.from({ length: 201 }, (_, i) => ({ reviewItemId: `rvw_${i}`, op: 'dismiss' }));
+    expect(parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'triage-findings', projectId: 1, items: items.slice(0, 200) })).not.toBeNull();
+  });
+});
+
+describe('prepareProposal — triage-findings validation', () => {
+  it('accepts a valid batch and stamps each row title server-side', () => {
+    reviewItems.set('rvw_1', finding({ title: 'Flaky retry' }));
+    reviewItems.set('rvw_2', finding({ title: 'Stale lock', stagedAt: '2026-09-01T00:00:00.000Z' }));
+    const result = prepareProposal(deps, {
+      kind: 'triage-findings',
+      projectId: 1,
+      items: [
+        { reviewItemId: 'rvw_1', op: 'dismiss', title: 'spoofed' },
+        { reviewItemId: 'rvw_2', op: 'set-selected', selected: false },
+      ],
+    });
+    expect(result).toEqual({
+      ok: true,
+      preconditions: null,
+      payload: {
+        kind: 'triage-findings',
+        projectId: 1,
+        items: [
+          { reviewItemId: 'rvw_1', op: 'dismiss', title: 'Flaky retry' },
+          { reviewItemId: 'rvw_2', op: 'set-selected', selected: false, title: 'Stale lock' },
+        ],
+      },
+    });
+  });
+
+  it('rejects an unknown project', () => {
+    expect(prepareProposal(deps, { kind: 'triage-findings', projectId: 99, items: [{ reviewItemId: 'rvw_1', op: 'dismiss' }] })).toEqual({
+      ok: false,
+      error: 'project_not_found',
+    });
+  });
+
+  it("rejects a missing id, another project's id, a non-finding, a non-pending row, and a duplicate", () => {
+    reviewItems.set('rvw_other', finding({ projectId: 2 }));
+    reviewItems.set('rvw_gate', finding({ kind: 'decision' }));
+    reviewItems.set('rvw_done', finding({ status: 'resolved' }));
+    reviewItems.set('rvw_ok', finding());
+    const batch = (items: unknown[]) => prepareProposal(deps, { kind: 'triage-findings', projectId: 1, items });
+
+    expect(batch([{ reviewItemId: 'rvw_missing', op: 'dismiss' }])).toEqual({ ok: false, error: 'review_item_not_found:rvw_missing' });
+    expect(batch([{ reviewItemId: 'rvw_other', op: 'dismiss' }])).toEqual({ ok: false, error: 'review_item_not_found:rvw_other' });
+    expect(batch([{ reviewItemId: 'rvw_gate', op: 'resolve' }])).toEqual({ ok: false, error: 'review_item_not_finding:rvw_gate' });
+    expect(batch([{ reviewItemId: 'rvw_done', op: 'dismiss' }])).toEqual({ ok: false, error: 'review_item_not_pending:rvw_done' });
+    expect(batch([{ reviewItemId: 'rvw_ok', op: 'dismiss' }, { reviewItemId: 'rvw_ok', op: 'resolve' }])).toEqual({
+      ok: false,
+      error: 'duplicate_review_item:rvw_ok',
+    });
+  });
+
+  it('requires a staged row to DEselect, but lets set-selected:true stage an unstaged one', () => {
+    reviewItems.set('rvw_unstaged', finding());
+    expect(
+      prepareProposal(deps, { kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'rvw_unstaged', op: 'set-selected', selected: false }] }),
+    ).toEqual({ ok: false, error: 'review_item_not_staged:rvw_unstaged' });
+    expect(
+      prepareProposal(deps, { kind: 'triage-findings', projectId: 1, items: [{ reviewItemId: 'rvw_unstaged', op: 'set-selected', selected: true }] })
+        .ok,
+    ).toBe(true);
+  });
+});
+
+describe('createPrepareProposalDeps.readReviewItem', () => {
+  it('reads the triage columns off review_items', async () => {
+    const { createPrepareProposalDeps } = await import('./prepareProposal');
+    const db = new Database(':memory:');
+    db.exec(
+      `CREATE TABLE review_items (id TEXT PRIMARY KEY, project_id INTEGER, kind TEXT, status TEXT, staged_at TEXT, selected INTEGER DEFAULT 0, title TEXT)`,
+    );
+    db.prepare(`INSERT INTO review_items VALUES ('rvw_1', 3, 'finding', 'pending', NULL, 0, 'Hello')`).run();
+    db.prepare(`INSERT INTO review_items VALUES ('rvw_2', 3, 'finding', 'pending', '2026-09-01', 1, 'Staged')`).run();
+    const real = createPrepareProposalDeps(dbAdapter(db));
+    expect(real.readReviewItem('rvw_1')).toEqual({ projectId: 3, kind: 'finding', status: 'pending', stagedAt: null, selected: false, title: 'Hello' });
+    expect(real.readReviewItem('rvw_2')).toMatchObject({ stagedAt: '2026-09-01', selected: true });
+    expect(real.readReviewItem('rvw_nope')).toBeUndefined();
     db.close();
   });
 });

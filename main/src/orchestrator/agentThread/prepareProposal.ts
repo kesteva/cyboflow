@@ -31,6 +31,10 @@ import {
   type OpenSessionProposalPayload,
   type ReprioritizeBacklogItem,
   type ReprioritizeBacklogProposalPayload,
+  type TriageFindingItem,
+  type TriageFindingsProposalPayload,
+  isTriageFindingOp,
+  TRIAGE_FINDINGS_MAX_ITEMS,
 } from '../../../../shared/types/agentThread';
 import { isCliSubstrate } from '../../../../shared/types/substrate';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
@@ -204,6 +208,35 @@ function parseCreateWorkflowAgent(raw: unknown): CreateWorkflowAgent | null {
   return agent;
 }
 
+/**
+ * Narrow one triage-findings entry. Strict like the other batch parsers: a
+ * malformed member rejects the whole payload. `set-selected` must carry
+ * `selected`; `resolution` is only meaningful on dismiss/resolve and is
+ * rejected elsewhere so the card never shows a note the op would drop. A
+ * caller-supplied `title` is ignored — prepareProposal stamps the row's.
+ */
+function parseTriageFindingItem(raw: unknown): TriageFindingItem | null {
+  if (!isRecord(raw)) return null;
+  const reviewItemId = raw.reviewItemId;
+  const op = raw.op;
+  if (typeof reviewItemId !== 'string' || reviewItemId.length === 0) return null;
+  if (!isTriageFindingOp(op)) return null;
+  const item: TriageFindingItem = { reviewItemId, op };
+  const resolution = raw.resolution;
+  if (resolution !== undefined) {
+    if (typeof resolution !== 'string' || (op !== 'dismiss' && op !== 'resolve')) return null;
+    item.resolution = resolution;
+  }
+  const selected = raw.selected;
+  if (op === 'set-selected') {
+    if (typeof selected !== 'boolean') return null;
+    item.selected = selected;
+  } else if (selected !== undefined) {
+    return null;
+  }
+  return item;
+}
+
 export function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
   if (!isRecord(raw)) return null;
   const target = raw.target;
@@ -340,6 +373,26 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
       const payload: CreateBacklogItemsProposalPayload = { kind: 'create-backlog-items', projectId, items };
       return payload;
     }
+    case 'triage-findings': {
+      const projectId = raw.projectId;
+      const itemsRaw = raw.items;
+      if (typeof projectId !== 'number') return null;
+      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
+      if (itemsRaw.length > TRIAGE_FINDINGS_MAX_ITEMS) return null;
+      const items: TriageFindingItem[] = [];
+      for (const entryRaw of itemsRaw) {
+        const item = parseTriageFindingItem(entryRaw);
+        if (!item) return null;
+        items.push(item);
+      }
+      const payload: TriageFindingsProposalPayload = { kind: 'triage-findings', projectId, items };
+      const summary = raw.summary;
+      if (summary !== undefined) {
+        if (typeof summary !== 'string') return null;
+        payload.summary = summary;
+      }
+      return payload;
+    }
     case 'create-workflow': {
       const projectId = raw.projectId;
       const name = raw.name;
@@ -416,6 +469,18 @@ export interface PrepareProposalDeps {
     projectId: number,
     ref: { workflowId?: string; workflowName?: string },
   ): { id: string; name: string; projectId: number | null } | null;
+  /** The triage-relevant columns of one review_items row by id (any project), or undefined when absent. */
+  readReviewItem(reviewItemId: string): ReviewItemTriageSnapshot | undefined;
+}
+
+/** What prepareProposal needs to know about a review item to admit it into a triage batch. */
+export interface ReviewItemTriageSnapshot {
+  projectId: number;
+  kind: string;
+  status: string;
+  stagedAt: string | null;
+  selected: boolean;
+  title: string;
 }
 
 /**
@@ -427,7 +492,11 @@ export interface PrepareProposalDeps {
  * `workflow_name_invalid:<why>`, `workflow_name_reserved`, `workflow_name_taken`,
  * `global_scope_with_agents`, `invalid_definition:<path: issue>`,
  * `agent_invalid:<key>:<why>`, `agent_key_reserved:<key>`,
- * `agent_key_taken:<key>`, `unknown_step_agent:<key>`.
+ * `agent_key_taken:<key>`, `unknown_step_agent:<key>`; for launch-run
+ * `unknown_workflow:<idOrName>`; and for triage-findings
+ * `review_item_not_found:<id>`, `review_item_not_finding:<id>`,
+ * `review_item_not_pending:<id>`, `review_item_not_staged:<id>`,
+ * `duplicate_review_item:<id>`.
  */
 export type PrepareProposalResult =
   | { ok: true; payload: AgentProposalPayload; preconditions: AgentProposalPreconditions | null }
@@ -566,9 +635,44 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
     // never dies on a flow the assistant misremembered (TASK-294).
     const error = resolveLaunchRunWorkflow(deps, payload);
     if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'triage-findings') {
+    // No preconditions: a finding that stops being pending between propose and
+    // confirm is SKIPPED per item by the executor, not CAS-refused as a whole.
+    // Everything else is checked now, mirroring create-backlog-items' posture
+    // that a confirmed card must never die on an id the assistant got wrong.
+    const error = validateTriageFindings(deps, payload);
+    if (error !== null) return { ok: false, error };
   }
 
   return { ok: true, payload, preconditions };
+}
+
+/**
+ * The triage-findings branch of prepareProposal; returns the error string or
+ * null when valid. Each id must exist, belong to the project, be a FINDING
+ * (gate kinds are folded run-pause co-writes and are not triaged from here),
+ * be pending, and appear once. A `set-selected:false` needs a staged row (the
+ * chokepoint refuses to toggle an unstaged one); `set-selected:true` on an
+ * unstaged row is fine — the executor stages it first. Titles are stamped
+ * from the rows so the card renders without a lookup.
+ */
+function validateTriageFindings(deps: PrepareProposalDeps, payload: TriageFindingsProposalPayload): string | null {
+  const projectExists = deps.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
+  if (!projectExists) return 'project_not_found';
+  const seen = new Set<string>();
+  for (const item of payload.items) {
+    if (seen.has(item.reviewItemId)) return `duplicate_review_item:${item.reviewItemId}`;
+    seen.add(item.reviewItemId);
+    const row = deps.readReviewItem(item.reviewItemId);
+    if (!row || row.projectId !== payload.projectId) return `review_item_not_found:${item.reviewItemId}`;
+    if (row.kind !== 'finding') return `review_item_not_finding:${item.reviewItemId}`;
+    if (row.status !== 'pending') return `review_item_not_pending:${item.reviewItemId}`;
+    if (item.op === 'set-selected' && item.selected === false && row.stagedAt === null) {
+      return `review_item_not_staged:${item.reviewItemId}`;
+    }
+    item.title = row.title;
+  }
+  return null;
 }
 
 /** Every `step.agent` a definition binds, fan-out inner steps included. */
@@ -735,6 +839,22 @@ export function createPrepareProposalDeps(db: DatabaseLike): PrepareProposalDeps
                 .get(ref.workflowName, projectId, QUICK_WORKFLOW_NAME) as { id: string; name: string; project_id: number | null } | undefined)
             : undefined;
       return row === undefined ? null : { id: row.id, name: row.name, projectId: row.project_id };
+    },
+    readReviewItem(reviewItemId) {
+      const row = db
+        .prepare('SELECT project_id, kind, status, staged_at, selected, title FROM review_items WHERE id = ?')
+        .get(reviewItemId) as
+        | { project_id: number; kind: string; status: string; staged_at: string | null; selected: number; title: string }
+        | undefined;
+      if (!row) return undefined;
+      return {
+        projectId: row.project_id,
+        kind: row.kind,
+        status: row.status,
+        stagedAt: row.staged_at,
+        selected: row.selected === 1,
+        title: row.title,
+      };
     },
   };
 }

@@ -10,6 +10,9 @@ import {
   type EditWorkflowResultJson,
   type CreateBacklogResultJson,
   type CreateWorkflowResultJson,
+  type ReviewItemStateSnapshot,
+  type TriageFindingsResultJson,
+  type TriageReviewItemChange,
 } from './proposalExecutor';
 import { computeSpecHash } from './specHash';
 import type {
@@ -124,6 +127,8 @@ function baseDeps(store: FakeStore, over: Partial<ProposalExecutorDeps> = {}): P
     createWorkflow: () => ({ workflowId: 'wf-7-custom-abcd1234' }),
     findWorkflowIdByName: () => null,
     customAgentExists: () => false,
+    applyReviewItemChange: async () => {},
+    readReviewItemState: () => ({ status: 'pending', stagedAt: null, selected: false }),
     ...over,
   };
 }
@@ -918,5 +923,184 @@ describe('reconcileOrphanedExecutingProposals — create-backlog-items', () => {
     const rj = store.proposals.get('p1')?.result as CreateBacklogResultJson;
     expect(rj.reconciled).toBe(true);
     expect(rj.items.map((i) => i.ok)).toEqual([false, false]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triage-findings (TASK-292)
+// ---------------------------------------------------------------------------
+
+describe('executeProposal — triage-findings', () => {
+  /** A fake review inbox: live state per id, mutated by the recorded chokepoint writes. */
+  function inbox(initial: Record<string, ReviewItemStateSnapshot>) {
+    const state = new Map(Object.entries(initial));
+    const writes: Array<{ projectId: number; change: TriageReviewItemChange }> = [];
+    const applyReviewItemChange = vi.fn(async (projectId: number, change: TriageReviewItemChange) => {
+      writes.push({ projectId, change });
+      const ids = change.op === 'set-selected' ? change.reviewItemIds : [change.reviewItemId];
+      for (const id of ids) {
+        const live = state.get(id);
+        if (!live) throw new Error(`review item ${id} not found`);
+        if (change.op === 'resolve' || change.op === 'dismiss') {
+          if (live.status !== 'pending') throw new Error(`already ${live.status}`);
+          state.set(id, { ...live, status: change.op === 'resolve' ? 'resolved' : 'dismissed' });
+        } else if (change.op === 'approve') {
+          if (live.stagedAt !== null) throw new Error('not untriaged');
+          state.set(id, { ...live, stagedAt: 'now' });
+        } else if (change.op === 'set-selected') {
+          if (live.stagedAt === null) throw new Error('not staged');
+          state.set(id, { ...live, selected: change.selected });
+        }
+      }
+    });
+    const readReviewItemState = (_projectId: number, id: string): ReviewItemStateSnapshot | null => state.get(id) ?? null;
+    return { state, writes, applyReviewItemChange, readReviewItemState };
+  }
+  const pending = (over: Partial<ReviewItemStateSnapshot> = {}): ReviewItemStateSnapshot => ({ status: 'pending', stagedAt: null, selected: false, ...over });
+
+  it('fans a mixed batch out through the chokepoint, actor user, one write per item (two for select-unstaged)', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'dismiss', resolution: 'noise' },
+          { reviewItemId: 'r2', op: 'resolve' },
+          { reviewItemId: 'r3', op: 'approve' },
+          { reviewItemId: 'r4', op: 'set-selected', selected: true },
+          { reviewItemId: 'r5', op: 'set-selected', selected: false },
+        ],
+      }),
+    );
+    const box = inbox({ r1: pending(), r2: pending(), r3: pending(), r4: pending(), r5: pending({ stagedAt: 's', selected: true }) });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('executed');
+    expect(box.writes.map((w) => w.change)).toEqual([
+      { op: 'dismiss', actor: 'user', reviewItemId: 'r1', resolution: 'noise' },
+      { op: 'resolve', actor: 'user', reviewItemId: 'r2', resolution: null },
+      { op: 'approve', actor: 'user', reviewItemId: 'r3' },
+      { op: 'approve', actor: 'user', reviewItemId: 'r4' },
+      { op: 'set-selected', actor: 'user', reviewItemIds: ['r4'], selected: true },
+      { op: 'set-selected', actor: 'user', reviewItemIds: ['r5'], selected: false },
+    ]);
+    expect(box.writes.every((w) => w.projectId === 7)).toBe(true);
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toEqual({
+      kind: 'triage-findings',
+      status: 'executed',
+      applied: 5,
+      skipped: 0,
+      items: [
+        { reviewItemId: 'r1', op: 'dismiss', ok: true },
+        { reviewItemId: 'r2', op: 'resolve', ok: true },
+        { reviewItemId: 'r3', op: 'approve', ok: true },
+        { reviewItemId: 'r4', op: 'set-selected', ok: true },
+        { reviewItemId: 'r5', op: 'set-selected', ok: true },
+      ],
+    });
+    expect(box.state.get('r4')).toEqual({ status: 'pending', stagedAt: 'now', selected: true });
+  });
+
+  it('skips (never fails) an item someone else resolved or deleted between propose and confirm', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'dismiss' },
+          { reviewItemId: 'r2', op: 'dismiss' },
+          { reviewItemId: 'r3', op: 'approve' },
+        ],
+      }),
+    );
+    const box = inbox({ r1: pending(), r2: pending({ status: 'resolved' }) });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('executed');
+    expect(box.applyReviewItemChange).toHaveBeenCalledTimes(1);
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toMatchObject({ status: 'executed', applied: 1, skipped: 2 });
+    expect(rj.items).toEqual([
+      { reviewItemId: 'r1', op: 'dismiss', ok: true },
+      { reviewItemId: 'r2', op: 'dismiss', ok: false, skipped: 'already resolved' },
+      { reviewItemId: 'r3', op: 'approve', ok: false, skipped: 'no longer exists' },
+    ]);
+  });
+
+  it('a chokepoint rejection fails that item only; the batch finalizes failed with the rest applied', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'approve' },
+          { reviewItemId: 'r2', op: 'dismiss' },
+        ],
+      }),
+    );
+    // r1 is pending but already staged → approve is refused by the chokepoint.
+    const box = inbox({ r1: pending({ stagedAt: 's' }), r2: pending() });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('failed');
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toMatchObject({ status: 'failed', applied: 1, skipped: 0 });
+    expect(rj.items[0]).toEqual({ reviewItemId: 'r1', op: 'approve', ok: false, error: 'not untriaged' });
+    expect(rj.items[1]).toEqual({ reviewItemId: 'r2', op: 'dismiss', ok: true });
+    expect(box.state.get('r2')?.status).toBe('dismissed');
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — triage-findings', () => {
+  const payload = {
+    kind: 'triage-findings' as const,
+    projectId: 7,
+    items: [
+      { reviewItemId: 'r1', op: 'dismiss' as const },
+      { reviewItemId: 'r2', op: 'approve' as const },
+      { reviewItemId: 'r3', op: 'set-selected' as const, selected: true },
+    ],
+  };
+
+  it('every row already reflects its op → executed, never re-written', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal(payload, { status: 'executing' }));
+    const live: Record<string, ReviewItemStateSnapshot> = {
+      r1: { status: 'dismissed', stagedAt: null, selected: false },
+      r2: { status: 'pending', stagedAt: 's', selected: false },
+      r3: { status: 'pending', stagedAt: 's', selected: true },
+    };
+    const applyReviewItemChange = vi.fn(async () => {});
+    const deps = baseDeps(store, { applyReviewItemChange, readReviewItemState: (_p, id) => live[id] ?? null });
+
+    const summary = await reconcileOrphanedExecutingProposals(deps);
+    expect(summary.outcomes[0]).toMatchObject({ kind: 'triage-findings', finalizedTo: 'executed' });
+    expect(applyReviewItemChange).not.toHaveBeenCalled();
+    expect(store.proposals.get('p1')?.result).toMatchObject({ kind: 'triage-findings', status: 'executed', applied: 3, reconciled: true });
+  });
+
+  it('a row that does not reflect its op → failed crashed-mid-execution with the per-item state', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal(payload, { status: 'executing' }));
+    const live: Record<string, ReviewItemStateSnapshot> = {
+      r1: { status: 'dismissed', stagedAt: null, selected: false },
+      r2: { status: 'pending', stagedAt: null, selected: false },
+      // Selected but never staged does not count as applied for set-selected:true.
+      r3: { status: 'pending', stagedAt: null, selected: true },
+    };
+    const deps = baseDeps(store, { readReviewItemState: (_p, id) => live[id] ?? null });
+
+    const summary = await reconcileOrphanedExecutingProposals(deps);
+    expect(summary.outcomes[0]).toMatchObject({ finalizedTo: 'failed', note: expect.stringContaining('crashed-mid-execution') });
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj.items.map((i) => i.ok)).toEqual([true, false, false]);
+    expect(rj.applied).toBe(1);
   });
 });

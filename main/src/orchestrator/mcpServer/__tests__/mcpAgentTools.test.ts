@@ -30,6 +30,9 @@ import {
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
+import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
+import { executeProposal, type ProposalExecutorDeps } from '../../agentThread/proposalExecutor';
+import { buildProposalExecutorReviewDeps } from '../../agentThread/proposalExecutorReviewDeps';
 import { AgentThreadDbStore } from '../../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../../agentThread/specHash';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -112,6 +115,8 @@ function buildDb(): Database.Database {
   // then 138, which widens it again for 'create-workflow'.
   apply('125_agent_proposal_create_backlog_kind.sql');
   apply('138_agent_proposal_create_workflow_kind.sql');
+  // ...and 141, which widens it once more for 'triage-findings'.
+  apply('141_agent_proposal_triage_findings_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
   // ...and workflows.tuning_level, which also decides WHICH definition
@@ -1002,6 +1007,110 @@ describe('McpQueryHandler global-agent tool family', () => {
         ok: false,
         error: 'unknown_workflow:wf-p1-docs',
       });
+    });
+
+    it('triage-findings: propose validates each id; Confirm dismisses 3 + stages 2 through ReviewItemRouter, and cyboflow_queue reflects it (TASK-292)', async () => {
+      for (const id of ['rvw_1', 'rvw_2', 'rvw_3', 'rvw_4', 'rvw_5']) seedReviewItem(db, id, 1, { title: `Finding ${id}` });
+      seedReviewItem(db, 'rvw_other', 2, { title: 'Other project' });
+      seedReviewItem(db, 'rvw_done', 1, { status: 'resolved' });
+      seedReviewItem(db, 'rvw_gate', 1, { kind: 'decision' });
+
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+      const triage = (items: unknown[]) => propose({ kind: 'triage-findings', projectId: 1, items });
+
+      // Propose-time rejections, each named.
+      expect(await triage([{ reviewItemId: 'rvw_other', op: 'dismiss' }])).toMatchObject({ ok: false, error: 'review_item_not_found:rvw_other' });
+      expect(await triage([{ reviewItemId: 'rvw_done', op: 'dismiss' }])).toMatchObject({ ok: false, error: 'review_item_not_pending:rvw_done' });
+      expect(await triage([{ reviewItemId: 'rvw_gate', op: 'resolve' }])).toMatchObject({ ok: false, error: 'review_item_not_finding:rvw_gate' });
+      expect(await triage([{ reviewItemId: 'rvw_1', op: 'set-selected', selected: false }])).toMatchObject({
+        ok: false,
+        error: 'review_item_not_staged:rvw_1',
+      });
+
+      const res = await triage([
+        { reviewItemId: 'rvw_1', op: 'dismiss', resolution: 'noise' },
+        { reviewItemId: 'rvw_2', op: 'dismiss' },
+        { reviewItemId: 'rvw_3', op: 'dismiss' },
+        { reviewItemId: 'rvw_4', op: 'set-selected', selected: true },
+        { reviewItemId: 'rvw_5', op: 'approve' },
+      ]);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('triage-findings');
+      expect(proposal.preconditions).toBeNull();
+      // Titles were stamped from the rows.
+      expect(proposal.payload.kind === 'triage-findings' && proposal.payload.items[0].title).toBe('Finding rvw_1');
+
+      // Someone resolves rvw_3 from the queue between propose and confirm.
+      const router = ReviewItemRouter.initialize(dbAdapter(db));
+      await router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId: 'rvw_3' });
+
+      // Confirm: the real executor over the real chokepoint (the other deps are unused here).
+      const unused = (): never => {
+        throw new Error('unexpected dep call');
+      };
+      const deps: ProposalExecutorDeps = {
+        store,
+        newIdempotencyKey: () => 'key-1',
+        createQuickSession: unused,
+        launchRun: unused,
+        cancelRun: unused,
+        dismissSession: unused,
+        runExists: unused,
+        applyTaskChange: unused,
+        readTaskFields: unused,
+        createBacklogItem: unused,
+        runInTransaction: <T>(fn: () => T): T => fn(),
+        readEffectiveWorkflowSpec: unused,
+        applyWorkflowSpec: unused,
+        createCustomAgent: unused,
+        deleteCustomAgent: unused,
+        createWorkflow: unused,
+        findWorkflowIdByName: unused,
+        customAgentExists: unused,
+        ...buildProposalExecutorReviewDeps({ reviewItemRouter: router, db: dbAdapter(db) }),
+      };
+      const outcome = await executeProposal(deps, proposalId);
+      expect(outcome.ok && outcome.status).toBe('executed');
+      expect(outcome.ok && outcome.result).toMatchObject({ kind: 'triage-findings', applied: 4, skipped: 1 });
+      expect(outcome.ok && outcome.result.kind === 'triage-findings' && outcome.result.items[2]).toEqual({
+        reviewItemId: 'rvw_3',
+        op: 'dismiss',
+        ok: false,
+        skipped: 'already resolved',
+      });
+
+      // One entity_events delta per chokepoint write (rvw_4 = approve + select).
+      const deltas = db
+        .prepare(`SELECT entity_id AS id, COUNT(*) AS n FROM entity_events WHERE entity_type = 'review_item' GROUP BY entity_id`)
+        .all() as Array<{ id: string; n: number }>;
+      expect(Object.fromEntries(deltas.map((d) => [d.id, d.n]))).toMatchObject({ rvw_1: 1, rvw_2: 1, rvw_4: 2, rvw_5: 1 });
+      expect(db.prepare('SELECT resolution, resolved_by FROM review_items WHERE id = ?').get('rvw_1')).toEqual({ resolution: 'noise', resolved_by: 'user' });
+
+      // cyboflow_queue reflects it: the dismissed ones are gone from the pending inbox,
+      // the staged ones are READY (staged_at set) — and rvw_4 is already ticked as a seed.
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-queue', requestId: 'q', runId: 'agent:thread-1', projectId: 1, kind: 'finding' }, socket);
+      const queue = parseLastWrite(writes).data as { items: Array<Record<string, unknown>>; total: number };
+      expect(queue.total).toBe(2);
+      expect(queue.items.map((i) => [i.id, i.staged_at !== null, i.selected])).toEqual([
+        ['rvw_4', true, true],
+        ['rvw_5', true, false],
+      ]);
+      // ...and the staged-but-unselected one is selectable as a Compound seed.
+      await router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: ['rvw_5'], selected: true });
+      expect(db.prepare('SELECT selected FROM review_items WHERE id = ?').get('rvw_5')).toEqual({ selected: 1 });
+
+      ReviewItemRouter._resetForTesting();
+      reviewItemChangeEvents.removeAllListeners();
     });
 
     it('open-session: accepts a discriminated navigation payload with null preconditions', async () => {
