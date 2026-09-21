@@ -811,8 +811,7 @@ export function readMarkdownSection(body: string | null | undefined, heading: st
  * cannot be perturbed by this guard. Pure.
  */
 export function stripMarkdownSection(body: string, heading: string): string {
-  const source = body ?? '';
-  const lines = source.split('\n');
+  const lines = body.split('\n');
   const ranges = findSections(lines, heading);
   if (ranges.length === 0) return body;
 

@@ -1059,6 +1059,20 @@ export function fencedMarkdown(text: string): string {
 }
 
 /**
+ * Collapse an untrusted HEADER field (an item's title, an artifact's label, an
+ * entity's title, a gate's title) onto one line.
+ *
+ * The bodies are fenced ({@link fencedMarkdown}); the one-line fields around
+ * each fence are interpolated raw, and they come from the same writers. A title
+ * is never validated as single-line, so one carrying a blank line and a `###`
+ * of its own would stand as free prompt text outside any fence. An ordinary
+ * single-line title is returned byte-identical.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/g, ' ').trim();
+}
+
+/**
  * Render the run's DELIVERABLES + ENTITIES section, or '' when no digest reader
  * is wired (CR-6).
  *
@@ -1079,7 +1093,7 @@ function digestRunSection(history: MonitorHistory): string {
   const parts: string[] = [];
   if (digest.artifacts.length > 0) {
     const rows = digest.artifacts
-      .map((a) => `### ${a.label} (\`${a.atype}\`)\n\n${fencedMarkdown(a.markdown)}`)
+      .map((a) => `### ${oneLine(a.label)} (\`${a.atype}\`)\n\n${fencedMarkdown(a.markdown)}`)
       .join('\n\n');
     parts.push(`\n\n## Run deliverables (what this run has actually produced)\n\n${rows}`);
   }
@@ -1087,7 +1101,7 @@ function digestRunSection(history: MonitorHistory): string {
     const rows = digest.entities
       .map((e) => {
         const body = e.body.trim();
-        return `- **${e.ref}** (${e.kind}) — ${e.title}${body.length > 0 ? `\n\n${fencedMarkdown(body)}` : ''}`;
+        return `- **${e.ref}** (${e.kind}) — ${oneLine(e.title)}${body.length > 0 ? `\n\n${fencedMarkdown(body)}` : ''}`;
       })
       .join('\n\n');
     parts.push(`\n\n## Run entities (the ideas / epics / tasks this run owns)\n\n${rows}`);
@@ -1435,7 +1449,7 @@ export function buildGateEscalationPrompt(
 A HUMAN GATE of this run has just opened, and you may attach ONE non-binding recommendation to it. You are NOT answering it.
 
 Gate step: **${req.stepName}** (id: \`${req.stepId}\`)
-Gate title: ${req.title}
+Gate title: ${oneLine(req.title)}
 
 What the human is being asked, verbatim:
 ${body.length > 0 ? fencedMarkdown(body) : '(the gate body is empty — judge from the run history below)'}${digestGateEscalation(req.escalation)}
@@ -1469,7 +1483,7 @@ function digestBlockingItem(item: PendingBlockingItem): string {
   const meta = [item.kind, item.severity ?? undefined, item.source ? `source: ${item.source}` : undefined]
     .filter((p): p is string => p !== undefined)
     .join(', ');
-  return `### ${item.title}
+  return `### ${oneLine(item.title)}
 - id: \`${item.id}\` (${meta})
 
 ${body.length > 0 ? fencedMarkdown(body) : '(this item has no body — judge from its title and the run history)'}`;
@@ -2526,7 +2540,9 @@ function reviewLoopSummary(req: ReviewLoopRequest, decision: ReviewLoopDecision)
     (decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside)
       .map((entry) => `\`${entry.id}\` (${entry.reason})`)
       .join(', ');
-  const setAsideLine = setAside.length > 0 ? `\n\nSet aside (filed as findings): ${setAside}` : '';
+  // "to be filed": this turn is injected inside the consult, BEFORE the host
+  // files anything — and the host prunes an entry whose finding does not land.
+  const setAsideLine = setAside.length > 0 ? `\n\nSet aside (to be filed as findings): ${setAside}` : '';
   if (decision.verdict === 'stop') {
     return `✖ Review round ${req.round}: no further automatic revision — the surviving entries go to the design gate. ${decision.rationale}${setAsideLine}`;
   }

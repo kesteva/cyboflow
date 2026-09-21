@@ -980,8 +980,13 @@ export class ProgrammaticRunHost implements ControllerHost {
       // exactly what a refused resolve leaves behind. There is no equivalent on
       // a decision menu (both its entries END or ADVANCE the run), so a decision
       // that names no choice is left alone by {@link annotateBlockingItem}.
+      // Keyed on the NORMALIZED choice, not the raw field: a refused resolve
+      // that named something off the finding menu must land on the same
+      // keep-it-blocking control, not silently write nothing.
       const forAnnotate: BlockingItemDecision =
-        decision.action === 'resolve' && item.kind === 'finding' && decision.choice === undefined
+        decision.action === 'resolve' &&
+        item.kind === 'finding' &&
+        normalizeBlockingChoice(item.kind, decision.choice) === undefined
           ? { ...decision, choice: 'continue' }
           : decision;
       await this.annotateBlockingItem(runId, item, forAnnotate);
@@ -1273,27 +1278,27 @@ export class ProgrammaticRunHost implements ControllerHost {
     error: string | undefined,
     opts?: { retryAvailable: boolean },
   ): Promise<TriageDecision> {
-    // The controller cannot honour a 'retry' any more: it would discard the
-    // verdict and fail the run. Consulting anyway would spend a query to produce
-    // a retry this method then narrates as if it had happened — guidance staged
-    // on a one-shot channel that outlives the walk, a chat note saying "retry",
-    // and an audit finding claiming the step was re-driven. Skip the consult and
-    // escalate, which is what the run is about to do regardless.
-    if (opts?.retryAvailable === false) {
-      this.args.logger?.info('[ProgrammaticRunHost] triage skipped: no retry budget left; escalating to human', {
-        runId: this.args.runId,
-        stepId: step.id,
-      });
-      this.injectMonitorTurn(
-        `Step **${step.name}** exhausted its retries and its retry budget — escalated to the review queue for your decision.`,
-      );
-      return 'escalate';
-    }
     const optional = step.optional === true;
     // What an unusable/absent verdict MEANS for this step, in the user's terms.
     const escalationOutcome = optional
       ? 'skipping the optional step'
       : 'escalated to the review queue for your decision';
+    // The controller cannot honour a 'retry' any more: it would discard the
+    // verdict and fail the run. Consulting anyway would spend a query to produce
+    // a retry this method then narrates as if it had happened — guidance staged
+    // on a one-shot channel that outlives the walk, a chat note saying "retry",
+    // and an audit finding claiming the step was re-driven. Skip the consult and
+    // escalate, which is what the run is about to do regardless. (Today only the
+    // REQUIRED-step caller passes `opts`; the optional wording is here so the
+    // note stays true if the optional path ever does too.)
+    if (opts?.retryAvailable === false) {
+      this.args.logger?.info('[ProgrammaticRunHost] triage skipped: no retry budget left; escalating to human', {
+        runId: this.args.runId,
+        stepId: step.id,
+      });
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries and its retry budget — ${escalationOutcome}.`);
+      return 'escalate';
+    }
     if (!this.args.monitor) {
       this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
@@ -1671,7 +1676,7 @@ export class ProgrammaticRunHost implements ControllerHost {
       // The audit must describe what the host HONOURED, not what the supervisor
       // asked for: an entry whose finding never landed is not set aside.
       const honoured = withoutFailedSetAsides(req, decision, failed);
-      await this.fileReviewLoopAudit(req, honoured);
+      await this.fileReviewLoopAudit(req, honoured, failed);
       return honoured;
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] review-loop consult failed; using the mechanical budget', {
@@ -1693,7 +1698,11 @@ export class ProgrammaticRunHost implements ControllerHost {
    * exact steering the re-run is about to be handed. Fail-soft: the decision is
    * already made, and losing its paper trail must not lose the decision.
    */
-  private async fileReviewLoopAudit(req: ReviewLoopRequest, decision: ReviewLoopDecision): Promise<void> {
+  private async fileReviewLoopAudit(
+    req: ReviewLoopRequest,
+    decision: ReviewLoopDecision,
+    failedSetAsides: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
     if (!this.args.fileMonitorFinding) return;
     try {
       const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
@@ -1722,6 +1731,20 @@ export class ProgrammaticRunHost implements ControllerHost {
           ...setAside.map((entry) => `- ${entry.id}: ${entry.reason}`),
           '',
           'Each is filed as its own non-blocking finding — set aside for the lap, not dropped from the run.',
+        );
+      }
+      // The one durable place the failure can be read: the backend log is not
+      // the review queue. Same predicate as `fileSetAsideFindings`' warn, so the
+      // two records can never disagree about what happened to an id.
+      if (failedSetAsides.size > 0) {
+        const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
+        lines.push(
+          '',
+          `- Set-aside findings that could not be filed: ${[...failedSetAsides]
+            .map((id) =>
+              `${id} (${decision.verdict === 'loop' && blockingIds.has(id) ? 'kept in the lap' : 'dropped from the set-aside list'})`,
+            )
+            .join(', ')}`,
         );
       }
       await this.args.fileMonitorFinding({

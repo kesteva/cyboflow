@@ -3182,12 +3182,12 @@ async function initializeServices(): Promise<boolean> {
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
     // ── SUPERVISED REVIEW LOOP (monitor steering each automatic design lap) ──
-    // Same late-bound posture: unwired, the audit note REJECTS (the host warns,
-    // and abandons a supervisor resolve) and set-aside findings are dropped.
+    // Same late-bound posture: unwired, BOTH reject — the host then abandons a
+    // supervisor resolve, and keeps a set-aside entry in the lap (never dropped).
     monitorFindingSink: (runId, input) =>
       monitorFindingSink ? monitorFindingSink(runId, input) : Promise.reject(new Error('monitor finding sink not wired yet')),
     setAsideFindingSink: (runId, input) =>
-      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.resolve(),
+      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.reject(new Error('set-aside finding sink not wired yet')),
     // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
     // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
     // recommendation, i.e. today's card exactly.

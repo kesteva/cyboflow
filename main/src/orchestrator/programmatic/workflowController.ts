@@ -548,15 +548,9 @@ export class WorkflowController {
     // forward, and cleared the moment the walk reaches the gate again (the gate
     // having re-opened, the revision has been answered). The fan-out path never
     // reads it — lanes carry their own per-lane channels.
-    let pendingGateRevision:
-      | {
-          gateStepId: string;
-          note?: string;
-          source?: 'adversarial-review';
-          round?: number;
-          steering?: ReviewLoopSteering;
-        }
-      | undefined;
+    // Typed as the ctx field itself so the walk-local shape can never drift
+    // from what `ControllerStepContext.gateRevision` declares.
+    let pendingGateRevision: ControllerStepContext['gateRevision'];
     // Per-step-id count of AUTOMATIC adversarial-review revisions taken this walk
     // (bounded by MAX_REVIEW_AUTO_REVISIONS). Separate from `loopbacks` so the
     // one automatic lap never eats into the human gate's own revise budget.

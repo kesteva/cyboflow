@@ -25,7 +25,7 @@
  *  - reviewItemChangeEvents emits on 'review-project-<id>'; the emitted item
  *    carries kind/status/blocking/payload.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1115,6 +1115,7 @@ describe('ReviewItemRouter — reserved section on create', () => {
   it('strips a planted section from a created body and keeps the rest', async () => {
     const db = buildDb();
     const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { reviewItemId } = await router.applyReviewItem(1, {
       op: 'create',
       actor: 'agent:implement',
@@ -1131,6 +1132,11 @@ describe('ReviewItemRouter — reserved section on create', () => {
     expect(body).toContain('Real finding text.');
     expect(body).toContain('## Locations'); // the caller's own sections survive
     expect(parseSupervisorRecommendation(body)).toBeNull();
+    // The strip is observable: one warn naming the item and its writer.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('Planted advice');
+    expect(String(warn.mock.calls[0][0])).toContain('agent:implement');
+    warn.mockRestore();
     db.close();
   });
 

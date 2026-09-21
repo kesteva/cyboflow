@@ -1208,10 +1208,12 @@ describe('ProgrammaticRunHost', () => {
         rationale: 'AR-1 is a one-line fix',
         steering: { address: ['AR-1', 'AR-2'], setAside: [] },
       });
-      // The audit names only entries that really do have a finding.
+      // The audit names only entries that really do have a finding — and says
+      // what happened to the one that does not (the queue is the durable record).
       const audit = fileMonitorFinding.mock.calls[0][0] as { body: string };
       expect(audit.body).toContain('addressing: AR-1, AR-2');
       expect(audit.body).not.toContain('Set aside for this round');
+      expect(audit.body).toContain('Set-aside findings that could not be filed: AR-2 (kept in the lap)');
     });
 
     it('an ADVISORY entry whose set-aside finding fails is pruned but NOT added to the lap', async () => {
@@ -1233,7 +1235,7 @@ describe('ProgrammaticRunHost', () => {
       });
       const audit = fileMonitorFinding.mock.calls[0][0] as { body: string };
       expect(audit.body).toContain('addressing: AR-1');
-      expect(audit.body).not.toContain('AR-3');
+      expect(audit.body).toContain('Set-aside findings that could not be filed: AR-3 (dropped from the set-aside list)');
     });
 
     it('a STOP whose set-aside finding fails returns an EMPTY set-aside list', async () => {
