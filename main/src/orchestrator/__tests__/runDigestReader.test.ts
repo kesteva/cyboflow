@@ -182,9 +182,30 @@ describe('readRunDigest — caps', () => {
 
     expect(artifact.markdown.startsWith('x'.repeat(100))).toBe(true);
     expect(artifact.markdown.endsWith(RUN_DIGEST_TRUNCATION_MARKER)).toBe(true);
-    expect(artifact.markdown.length).toBeLessThanOrEqual(
-      RUN_DIGEST_ITEM_MAX_CHARS + RUN_DIGEST_TRUNCATION_MARKER.length + 1,
-    );
+    // The marker counts against the cap — a truncated item never exceeds it.
+    expect(artifact.markdown.length).toBeLessThanOrEqual(RUN_DIGEST_ITEM_MAX_CHARS);
+  });
+
+  it('keeps the TOTAL under budget when the last item that fits is truncated', () => {
+    const db = buildDb();
+    // Four maximal items spend 48k of the 60k budget; the fifth is over-long
+    // and must be cut to the 12k remaining INCLUDING its marker.
+    for (let i = 0; i < 4; i++) {
+      addArtifact(db, `a${i}`, 'adversarial-review', `Review ${i}`, {
+        markdown: 'y'.repeat(RUN_DIGEST_ITEM_MAX_CHARS),
+      });
+    }
+    addArtifact(db, 'a4', 'adversarial-review', 'Review 4', {
+      markdown: 'z'.repeat(RUN_DIGEST_ITEM_MAX_CHARS + 500),
+    });
+
+    const digest = readRunDigest(dbAdapter(db), 'run-1');
+    const total = digest.artifacts.reduce((n, a) => n + a.markdown.length, 0);
+
+    expect(digest.artifacts).toHaveLength(5);
+    expect(digest.artifacts[4].markdown.endsWith(RUN_DIGEST_TRUNCATION_MARKER)).toBe(true);
+    expect(digest.artifacts[4].markdown.length).toBeLessThanOrEqual(RUN_DIGEST_ITEM_MAX_CHARS);
+    expect(total).toBeLessThanOrEqual(RUN_DIGEST_TOTAL_MAX_CHARS);
   });
 
   it('drops later items whole once the TOTAL budget is spent', () => {

@@ -73,7 +73,11 @@ export const RUN_DIGEST_TRUNCATION_MARKER = '… [truncated]';
  */
 function cap(text: string, limit: number): string {
   if (text.length <= limit) return text;
-  return `${text.slice(0, limit)}\n${RUN_DIGEST_TRUNCATION_MARKER}`;
+  // The marker (and the newline before it) counts against the limit: a cut that
+  // then appended the marker would hand back MORE than the cap it was asked to
+  // enforce, and the total budget below would overrun by one marker per item.
+  const room = Math.max(0, limit - RUN_DIGEST_TRUNCATION_MARKER.length - 1);
+  return `${text.slice(0, room)}\n${RUN_DIGEST_TRUNCATION_MARKER}`;
 }
 
 /** A markdown payload's `markdown` string, or undefined for anything else. */
