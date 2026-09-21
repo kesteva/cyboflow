@@ -83,13 +83,38 @@ export const GLOBAL_AGENT_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_queue',
     description:
-      'READ-ONLY, cross-project review_items inbox listing (kind, blocking, status, title, entity link). Defaults to pending items only; pass include_resolved to see resolved/dismissed ones too. Omit project_id to see every project.',
+      'READ-ONLY, cross-project review_items inbox. Defaults to pending items only; pass include_resolved to see resolved/dismissed ones too. Omit project_id to see every project. Rows are COMPACT by default — {id, project_id, run_id, kind, status, blocking, severity, source, title, entity_type, entity_id, staged_at, selected, created_at}, no body — pass include_body:true for the full shape. START WITH summary_only:true: it returns just the per-{kind,status,severity,source} tallies plus `total`, which is what you need before listing anything on a large inbox. Then page: limit (default 100, clamped to 250) + offset, with `total`, `truncated` and `nextOffset` in the reply (pass nextOffset back as offset to continue). Filters: kind, severity (a list), source_prefix (e.g. \'build-break-group\', \'visual-verify\', \'agent:eval\'), created_after / created_before (ISO timestamps). Rows are capped by count, not bytes — a page of 250 compact rows stays under ~100KB.',
     input: z.object({
       project_id: z.number().describe('Optional — scope to one project. Omitted = every project.').optional(),
       include_resolved: z.boolean().describe('Include resolved/dismissed items. Defaults to false.').optional(),
+      include_body: z.boolean().describe('Return the full row (body + payload) instead of the compact shape. Defaults to false.').optional(),
+      summary_only: z.boolean().describe('Return only {kind,status,severity,source} → count tallies (no rows). Defaults to false. Call this first on a large inbox.').optional(),
+      kind: z.enum(['finding', 'permission', 'decision', 'human_task', 'notification']).describe('Optional — only items of this kind.').optional(),
+      severity: z
+        .array(z.enum(['info', 'warning', 'error']))
+        .min(1)
+        .describe('Optional — only findings whose severity is in this list (e.g. ["error"] or ["error","warning"]).')
+        .optional(),
+      source_prefix: z.string().min(1).describe('Optional — only items whose source starts with this prefix (e.g. \'agent:eval\').').optional(),
+      created_after: z.string().min(1).describe('Optional ISO timestamp — only items created at or after it.').optional(),
+      created_before: z.string().min(1).describe('Optional ISO timestamp — only items created before it.').optional(),
+      limit: z.number().describe('Optional page size; default 100, clamped to <= 250.').optional(),
+      offset: z.number().describe('Optional paging offset (0-based); pass a previous reply\'s nextOffset to continue.').optional(),
     }),
     envelope: 'mcp-queue',
-    toEnvelope: (args) => ({ projectId: args.project_id, includeResolved: args.include_resolved }),
+    toEnvelope: (args) => ({
+      projectId: args.project_id,
+      includeResolved: args.include_resolved,
+      includeBody: args.include_body,
+      summaryOnly: args.summary_only,
+      kind: args.kind,
+      severity: args.severity,
+      sourcePrefix: args.source_prefix,
+      createdAfter: args.created_after,
+      createdBefore: args.created_before,
+      limit: args.limit,
+      offset: args.offset,
+    }),
   }),
 
   defineTool({

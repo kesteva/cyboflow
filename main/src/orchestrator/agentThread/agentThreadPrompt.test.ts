@@ -52,7 +52,7 @@ describe('agentThreadPrompt', () => {
     }
   });
 
-  it('is dense but not padded — within the ~60-300 line target', () => {
+  it('is dense but not padded — within the ~60-370 line target', () => {
     // Ceiling widened from 130 → 160 when the "What cyboflow is" product
     // overview + the cyboflow_reference tool bullet were added, then 160 → 230
     // when the "Recommending the right flow" section (decision map + compound
@@ -67,9 +67,12 @@ describe('agentThreadPrompt', () => {
     // Widened again 300 → 330 for the create-workflow proposal kind: its
     // payload shape, the cyboflow_agents tool bullet, and the quality-bar
     // bullet spelling out the definition shape + agent persona rules.
+    // Widened again 330 → 370 for TASK-292/293/294: the cyboflow_queue
+    // summary-first + paging guidance, the triage-findings proposal kind, and
+    // the launch-run custom-workflow (workflowId / custom name) rules.
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(330);
+    expect(lines).toBeLessThanOrEqual(370);
   });
 
   it('mentions Custom widgets and the two disjoint write-shaped tools', () => {

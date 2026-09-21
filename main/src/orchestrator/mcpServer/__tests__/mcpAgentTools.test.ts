@@ -196,11 +196,32 @@ function seedReviewItem(
   db: Database.Database,
   id: string,
   projectId: number,
-  opts?: { blocking?: boolean; status?: string; title?: string },
+  opts?: {
+    blocking?: boolean;
+    status?: string;
+    title?: string;
+    kind?: string;
+    severity?: string | null;
+    source?: string | null;
+    body?: string | null;
+    createdAt?: string;
+  },
 ): void {
   db.prepare(
-    `INSERT INTO review_items (id, project_id, kind, status, blocking, title) VALUES (?, ?, 'finding', ?, ?, ?)`,
-  ).run(id, projectId, opts?.status ?? 'pending', opts?.blocking ? 1 : 0, opts?.title ?? 'A finding');
+    `INSERT INTO review_items (id, project_id, kind, status, blocking, title, severity, source, body, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+  ).run(
+    id,
+    projectId,
+    opts?.kind ?? 'finding',
+    opts?.status ?? 'pending',
+    opts?.blocking ? 1 : 0,
+    opts?.title ?? 'A finding',
+    opts?.severity ?? null,
+    opts?.source ?? null,
+    opts?.body ?? null,
+    opts?.createdAt ?? null,
+  );
 }
 
 function seedQuestionRow(db: Database.Database, id: string, runId: string, status = 'pending'): void {
@@ -599,22 +620,32 @@ describe('McpQueryHandler global-agent tool family', () => {
   // -------------------------------------------------------------------------
 
   describe('mcp-queue', () => {
+    type QueueData = {
+      items: Array<Record<string, unknown>>;
+      total: number;
+      limit: number;
+      offset: number;
+      truncated: boolean;
+      nextOffset?: number;
+    };
+    async function queue(args: Partial<Extract<McpQueryMessage, { type: 'mcp-queue' }>>): Promise<McpQueryResponse> {
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', ...args } as McpQueryMessage,
+        socket,
+      );
+      return parseLastWrite(writes);
+    }
+
     it('defaults to pending items only; include_resolved surfaces resolved ones too', async () => {
       seedReviewItem(db, 'ri-pending', 1, { status: 'pending', title: 'Pending finding' });
       seedReviewItem(db, 'ri-resolved', 1, { status: 'resolved', title: 'Resolved finding' });
 
-      const pendingOnly = makeSocketDouble();
-      await handler.handleMessage({ type: 'mcp-queue', requestId: 'r1', runId: 'agent:thread-1' }, pendingOnly.socket);
-      const pendingData = parseLastWrite(pendingOnly.writes).data as { items: Array<{ id: string }>; total: number };
+      const pendingData = (await queue({})).data as QueueData;
       expect(pendingData.total).toBe(1);
       expect(pendingData.items[0].id).toBe('ri-pending');
 
-      const both = makeSocketDouble();
-      await handler.handleMessage(
-        { type: 'mcp-queue', requestId: 'r2', runId: 'agent:thread-1', includeResolved: true },
-        both.socket,
-      );
-      const bothData = parseLastWrite(both.writes).data as { items: Array<{ id: string }>; total: number };
+      const bothData = (await queue({ includeResolved: true })).data as QueueData;
       expect(bothData.total).toBe(2);
     });
 
@@ -622,6 +653,144 @@ describe('McpQueryHandler global-agent tool family', () => {
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage({ type: 'mcp-queue', requestId: 'r1', runId: 'run-abc' }, socket);
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'not_a_global_agent_run' });
+    });
+
+    it('returns COMPACT rows by default (no body / payload) and the full shape with includeBody', async () => {
+      seedReviewItem(db, 'ri-1', 1, { title: 'Compact me', severity: 'error', source: 'agent:eval', body: 'a very long body' });
+
+      const compact = (await queue({})).data as QueueData;
+      expect(compact.items).toHaveLength(1);
+      expect(compact.items[0]).toEqual({
+        id: 'ri-1',
+        project_id: 1,
+        run_id: null,
+        kind: 'finding',
+        status: 'pending',
+        blocking: false,
+        severity: 'error',
+        source: 'agent:eval',
+        title: 'Compact me',
+        entity_type: null,
+        entity_id: null,
+        staged_at: null,
+        selected: false,
+        created_at: expect.any(String),
+      });
+      expect(compact.items[0]).not.toHaveProperty('body');
+      expect(compact.items[0]).not.toHaveProperty('payload');
+
+      const full = (await queue({ includeBody: true })).data as QueueData;
+      expect(full.items[0]).toMatchObject({ id: 'ri-1', body: 'a very long body', payload: null });
+    });
+
+    it('pages with limit/offset, reporting total, truncated and nextOffset', async () => {
+      for (let i = 0; i < 7; i++) {
+        seedReviewItem(db, `ri-${i}`, 1, { title: `F${i}`, createdAt: `2026-09-0${i + 1}T00:00:00.000Z` });
+      }
+      const page1 = (await queue({ limit: 3 })).data as QueueData;
+      expect(page1).toMatchObject({ total: 7, limit: 3, offset: 0, truncated: true, nextOffset: 3 });
+      expect(page1.items.map((i) => i.id)).toEqual(['ri-0', 'ri-1', 'ri-2']);
+
+      const page2 = (await queue({ limit: 3, offset: page1.nextOffset })).data as QueueData;
+      expect(page2).toMatchObject({ total: 7, offset: 3, truncated: true, nextOffset: 6 });
+      expect(page2.items.map((i) => i.id)).toEqual(['ri-3', 'ri-4', 'ri-5']);
+
+      const page3 = (await queue({ limit: 3, offset: page2.nextOffset })).data as QueueData;
+      expect(page3).toMatchObject({ total: 7, offset: 6, truncated: false });
+      expect(page3).not.toHaveProperty('nextOffset');
+      expect(page3.items.map((i) => i.id)).toEqual(['ri-6']);
+    });
+
+    it('clamps limit to the 250 ceiling and defaults it to 100', async () => {
+      seedReviewItem(db, 'ri-1', 1);
+      expect(((await queue({ limit: 9999 })).data as QueueData).limit).toBe(250);
+      expect(((await queue({})).data as QueueData).limit).toBe(100);
+      expect(((await queue({ limit: 0 })).data as QueueData).limit).toBe(1);
+    });
+
+    it('filters by kind, severity list, source prefix and a created_at window', async () => {
+      seedReviewItem(db, 'ri-err', 1, { severity: 'error', source: 'agent:eval', createdAt: '2026-08-11T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-warn', 1, { severity: 'warning', source: 'visual-verify:1', createdAt: '2026-09-01T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-info', 1, { severity: 'info', source: 'build-break-group:x', createdAt: '2026-09-15T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-decision', 1, { kind: 'decision', source: 'gate:approve-idea', createdAt: '2026-09-16T00:00:00.000Z' });
+
+      const ids = async (args: Parameters<typeof queue>[0]): Promise<string[]> =>
+        ((await queue(args)).data as QueueData).items.map((i) => String(i.id));
+
+      expect(await ids({ kind: 'decision' })).toEqual(['ri-decision']);
+      expect(await ids({ severity: ['error'] })).toEqual(['ri-err']);
+      expect(await ids({ severity: ['error', 'warning'] })).toEqual(['ri-err', 'ri-warn']);
+      expect(await ids({ sourcePrefix: 'agent:eval' })).toEqual(['ri-err']);
+      expect(await ids({ sourcePrefix: 'visual-verify' })).toEqual(['ri-warn']);
+      expect(await ids({ createdAfter: '2026-09-01T00:00:00.000Z' })).toEqual(['ri-warn', 'ri-info', 'ri-decision']);
+      expect(await ids({ createdBefore: '2026-09-01T00:00:00.000Z' })).toEqual(['ri-err']);
+      expect(await ids({ createdAfter: '2026-09-01T00:00:00.000Z', createdBefore: '2026-09-16T00:00:00.000Z' })).toEqual([
+        'ri-warn',
+        'ri-info',
+      ]);
+      // A LIKE wildcard in the prefix is matched literally, not as a wildcard.
+      expect(await ids({ sourcePrefix: 'agent:%' })).toEqual([]);
+      // `total` reflects the filtered set, not the whole inbox.
+      expect(((await queue({ severity: ['error'] })).data as QueueData).total).toBe(1);
+    });
+
+    it('rejects an unknown kind or severity up front', async () => {
+      expect(await queue({ kind: 'bogus' })).toMatchObject({ ok: false, error: 'invalid_kind' });
+      expect(await queue({ severity: ['fatal'] })).toMatchObject({ ok: false, error: 'invalid_severity' });
+      expect(await queue({ severity: [] })).toMatchObject({ ok: false, error: 'invalid_severity' });
+    });
+
+    it('summary_only returns tallies only, over the same filters', async () => {
+      seedReviewItem(db, 'ri-1', 1, { severity: 'error', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-2', 1, { severity: 'error', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-3', 1, { severity: 'info', source: 'visual-verify:1' });
+      seedReviewItem(db, 'ri-4', 2, { severity: 'warning', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-5', 1, { status: 'resolved', severity: 'error', source: 'agent:eval' });
+
+      const res = await queue({ projectId: 1, summaryOnly: true });
+      expect(res.ok).toBe(true);
+      const data = res.data as { total: number; summary: Array<Record<string, unknown>> };
+      expect(data).not.toHaveProperty('items');
+      expect(data.total).toBe(3);
+      expect(data.summary).toEqual([
+        { kind: 'finding', status: 'pending', severity: 'error', source: 'agent:eval', count: 2 },
+        { kind: 'finding', status: 'pending', severity: 'info', source: 'visual-verify:1', count: 1 },
+      ]);
+
+      const withResolved = (await queue({ projectId: 1, summaryOnly: true, includeResolved: true })).data as {
+        total: number;
+        summary: Array<{ status: string; count: number }>;
+      };
+      expect(withResolved.total).toBe(4);
+      expect(withResolved.summary.find((r) => r.status === 'resolved')).toMatchObject({ count: 1 });
+    });
+
+    it('keeps a 456-row inbox in ONE call under the ~100KB cap (the Margin Letter shape)', async () => {
+      for (let i = 0; i < 456; i++) {
+        seedReviewItem(db, `rvw_${String(i).padStart(4, '0')}`, 1, {
+          title: `Finding number ${i} with a reasonably long title about something in the code`,
+          severity: i % 11 === 0 ? 'error' : i % 3 === 0 ? 'warning' : 'info',
+          source: i % 2 === 0 ? 'build-break-group:abc' : 'agent:eval',
+          body: 'x'.repeat(700),
+        });
+      }
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', projectId: 1 }, socket);
+      const res = parseLastWrite(writes);
+      const data = res.data as QueueData;
+      expect(data.total).toBe(456);
+      expect(data.items).toHaveLength(100);
+      expect(data.truncated).toBe(true);
+      expect(writes[writes.length - 1].length).toBeLessThan(100_000);
+
+      // The largest page the clamp allows also stays under the cap.
+      const maxPage = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', projectId: 1, limit: 999 },
+        maxPage.socket,
+      );
+      expect((parseLastWrite(maxPage.writes).data as QueueData).items).toHaveLength(250);
+      expect(maxPage.writes[maxPage.writes.length - 1].length).toBeLessThan(100_000);
     });
   });
 
