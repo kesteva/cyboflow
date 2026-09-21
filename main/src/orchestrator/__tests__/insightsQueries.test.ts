@@ -2506,6 +2506,107 @@ describe('selectDailyModelUsage', () => {
     expect(scoped).toHaveLength(1);
     expect(scoped[0].model).toBe('codex:gpt-5-codex');
   });
+
+  it('buckets a mixed 30-day window of Claude, Codex, and OMP runs into three provider-labelled buckets — unknown stays 0', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r-claude', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    seedRun(db, {
+      id: 'r-codex',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    seedRun(db, {
+      id: 'r-omp',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r-claude',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(
+      db,
+      'r-omp',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    const models = points.map((p) => p.model).sort();
+    expect(models).toEqual(['claude-opus-4-5', 'codex:gpt-5-codex', 'omp:gpt-5-mini']);
+    expect(points.find((p) => p.model === 'unknown')).toBeUndefined();
+    expect(points.find((p) => p.model === 'claude-opus-4-5')).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+    });
+    expect(points.find((p) => p.model === 'codex:gpt-5-codex')).toMatchObject({
+      inputTokens: 400,
+      outputTokens: 100,
+      totalTokens: 500,
+    });
+    expect(points.find((p) => p.model === 'omp:gpt-5-mini')).toMatchObject({
+      inputTokens: 60,
+      outputTokens: 15,
+      totalTokens: 75,
+    });
+  });
+
+  it('chart totalTokens sum equals the per-run card totals from selectRunUsageRollups for the same window (Codex/OMP included, no drops or double-counts)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r-claude', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    seedRun(db, {
+      id: 'r-codex',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    seedRun(db, {
+      id: 'r-omp',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r-claude',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(
+      db,
+      'r-omp',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const chartTotal = selectDailyModelUsage(dbAdapter(db), null, 30).reduce(
+      (sum, p) => sum + p.totalTokens,
+      0,
+    );
+    const cardTotal = selectRunUsageRollups(dbAdapter(db), ['r-claude', 'r-codex', 'r-omp']).reduce(
+      (sum, r) => sum + r.totalTokens,
+      0,
+    );
+    expect(chartTotal).toBe(cardTotal);
+    expect(chartTotal).toBe(120 + 500 + 75);
+  });
 });
 
 // ---------------------------------------------------------------------------
