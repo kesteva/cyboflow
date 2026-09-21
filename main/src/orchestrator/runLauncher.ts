@@ -17,10 +17,12 @@
 import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import type { WorkflowRegistry } from './workflowRegistry';
 import { QUICK_WORKFLOW_NAME } from './workflowRegistry';
+import { resolveEffectiveDefinition } from '../../../shared/tuning/workflowTuning';
+import { seedKindForWorkflow, type WorkflowSeedKind } from '../../../shared/workflows/workflowSeedKind';
 import { loadVerifyConfig } from './verifyConfigLoader';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
-import type { PermissionMode } from '../../../shared/types/workflows';
+import type { PermissionMode, WorkflowRow } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -141,6 +143,18 @@ export interface SprintLanesLike {
  */
 export interface SessionRefresherLike {
   refreshSessionFromDatabase(sessionId: string): unknown;
+}
+
+/**
+ * The seed kind a workflow row's EFFECTIVE definition takes (TASK-294). A row
+ * whose definition cannot be resolved (a custom flow with a broken spec — the
+ * same case listByProject hides) takes no seed, so every seed guard refuses
+ * it. Tolerates the partial rows test doubles hand in: a missing
+ * `tuning_level` reads as 'standard', i.e. the built-in definition by name.
+ */
+export function launchSeedKind(workflow: Pick<WorkflowRow, 'name' | 'spec_json'> & { tuning_level?: WorkflowRow['tuning_level'] }): WorkflowSeedKind {
+  const definition = resolveEffectiveDefinition(workflow.name, workflow.spec_json, workflow.tuning_level ?? 'standard');
+  return definition === null ? 'none' : seedKindForWorkflow(definition);
 }
 
 export class RunLauncher {
@@ -421,12 +435,21 @@ export class RunLauncher {
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
 
+    // The seed each guard below admits is decided by the flow's SHAPE, not its
+    // display name (TASK-294): a custom flow cloned from sprint takes taskIds
+    // exactly like the built-in, a custom planner-shaped one takes ideaIds. For
+    // the built-ins this resolves to the same answer the name checks gave.
+    // Resolved through the pure shared helper over the row itself (not a
+    // registry method) so the many test doubles that fake only `getById`
+    // keep working.
+    const seedKind = launchSeedKind(workflow);
+
     // Sprint seed-task validation — BEFORE createRun so an invalid request never
     // leaves a half-created run row behind.
     if (seedTaskIds !== undefined) {
-      if (workflow.name !== 'sprint') {
+      if (seedKind !== 'tasks') {
         throw new Error(
-          `RunLauncher.launch: seedTaskIds is only valid for the 'sprint' workflow (got '${workflow.name}')`,
+          `RunLauncher.launch: seedTaskIds is only valid for the 'sprint' workflow or a sprint-shaped custom flow (got '${workflow.name}')`,
         );
       }
       if (seedTaskIds.length < 1) {
@@ -442,8 +465,8 @@ export class RunLauncher {
     // behind. Mirrors the seedTaskIds guard; no store dependency (the seed is a
     // direct workflow_runs write).
     if (findingIds !== undefined) {
-      if (workflow.name !== 'compound') {
-        throw new Error("findingIds is only valid for the 'compound' workflow");
+      if (seedKind !== 'findings') {
+        throw new Error("findingIds is only valid for the 'compound' workflow or a compound-shaped custom flow");
       }
       if (findingIds.length < 1) {
         throw new Error('findingIds must contain at least one finding id');
@@ -458,8 +481,8 @@ export class RunLauncher {
     // write). The <=4 cap is enforced at the runs.start zod boundary.
     const ideaIds = launchOptions?.ideaIds;
     if (ideaIds !== undefined) {
-      if (workflow.name !== 'planner') {
-        throw new Error("ideaIds is only valid for the 'planner' workflow");
+      if (seedKind !== 'ideas') {
+        throw new Error("ideaIds is only valid for the 'planner' workflow or a planner-shaped custom flow");
       }
       if (ideaIds.length < 1) {
         throw new Error('ideaIds must contain at least one idea id');

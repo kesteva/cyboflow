@@ -99,7 +99,7 @@ import { isAcceptEditsAutoApprovable } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
-import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
+import type { ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
 import { selectFindingForSeed, selectRunFindingsForRuns } from '../reviewItemListing';
 import { selectSessionRunScope } from '../sessionRunScope';
 import { selectEvalReadout } from '../evalReadout';
@@ -682,7 +682,7 @@ export class McpQueryHandler {
           this.handleAgentEntity(msg, client);
           break;
         case 'mcp-queue':
-          this.handleAgentQueue(msg, client);
+          this.globalAgentTools.handleAgentQueue(msg, client);
           break;
         case 'mcp-workflows':
           this.globalAgentTools.handleAgentWorkflows(msg, client);
@@ -5488,40 +5488,6 @@ export class McpQueryHandler {
     }
 
     this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { task } });
-  }
-
-  private handleAgentQueue(
-    msg: Extract<McpQueryMessage, { type: 'mcp-queue' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-
-    const clauses: string[] = [];
-    const params: unknown[] = [];
-    if (!(msg.includeResolved ?? false)) {
-      clauses.push("status = 'pending'");
-    }
-    if (msg.projectId !== undefined) {
-      clauses.push('project_id = ?');
-      params.push(msg.projectId);
-    }
-    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    // Capped at 200 — an inbox digest, not an exhaustive dump.
-    const rows = this.db
-      .prepare(`SELECT * FROM review_items ${where} ORDER BY created_at ASC, id ASC LIMIT 200`)
-      .all(...params) as ReviewItemDbRow[];
-    const items = rows.map((r) => ReviewItemRouter.shapeRow(r));
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { items, total: items.length },
-    });
   }
 
   // --------------------------------------------------------------------------

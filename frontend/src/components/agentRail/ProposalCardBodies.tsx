@@ -23,15 +23,21 @@ import type {
   ReprioritizeBacklogProposalPayload,
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
+  StartQuickSessionProposalPayload,
+  TriageFindingItem,
+  TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
-import type { CyboflowWorkflowName } from '../../../../shared/types/workflows';
+import { isCyboflowWorkflowName, type CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { Priority } from '../../../../shared/types/tasks';
+import { useState } from 'react';
 import { useLandingStore } from '../../stores/landingStore';
 import {
   parseWorkflowDefinitionSummary,
   type CreateBacklogResultJson,
   type CreateWorkflowResultJson,
+  type LaunchSeedField,
   type ReprioritizeResultJson,
+  type TriageFindingsResultJson,
 } from './proposalResultTypes';
 import { useProposalEntityLabels, type ResolvedProposalEntity, type ResolvedStage } from './useProposalEntityLabels';
 
@@ -48,6 +54,8 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
   'open-session': 'open session',
   'create-backlog-items': 'add to backlog',
   'create-workflow': 'create workflow',
+  'triage-findings': 'triage findings',
+  'start-quick-session': 'start quick session',
 };
 
 const ENTITY_TYPE_LABEL: Record<CreateBacklogItem['taskType'], string> = {
@@ -75,6 +83,33 @@ export function workflowNameLabel(name: string): string {
   return Object.prototype.hasOwnProperty.call(WORKFLOW_LABEL, name)
     ? WORKFLOW_LABEL[name as CyboflowWorkflowName]
     : name;
+}
+
+/** Human label for a launch seed field the flow's shape did not take (TASK-294). */
+export const LAUNCH_SEED_FIELD_LABEL: Record<LaunchSeedField, string> = {
+  taskIds: 'tasks',
+  ideaIds: 'ideas',
+  findingIds: 'findings',
+};
+
+/**
+ * The muted "custom · global|project" tag beside a CUSTOM workflow's name, so
+ * a sprint-shaped custom flow named `dash` never passes for the built-in
+ * Sprint (TASK-294). A built-in name renders no tag; a custom name whose scope
+ * the propose handler did not stamp (an older row) still says "custom".
+ */
+export function CustomWorkflowTag({ payload }: { payload: LaunchRunProposalPayload }): React.ReactElement | null {
+  if (isCyboflowWorkflowName(payload.workflowName)) return null;
+  return (
+    <span
+      className="ml-1.5 align-middle text-[9px] font-normal uppercase tracking-[0.12em] text-text-tertiary"
+      data-testid="launch-run-custom-tag"
+      data-scope={payload.workflowScope ?? ''}
+      title={payload.workflowId}
+    >
+      custom{payload.workflowScope != null ? ` · ${payload.workflowScope}` : ''}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +215,7 @@ export function LaunchRunBody({ payload }: { payload: LaunchRunProposalPayload }
     <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-launch-run">
       <div className="text-[13px] font-bold text-text-primary">
         Launch {workflowNameLabel(payload.workflowName)}
+        <CustomWorkflowTag payload={payload} />
       </div>
       <div className="flex flex-col gap-1.5">
         <Row label="project" value={projectName} />
@@ -387,6 +423,63 @@ export function OpenSessionBody({ payload }: { payload: OpenSessionProposalPaylo
 }
 
 // ---------------------------------------------------------------------------
+// start-quick-session
+// ---------------------------------------------------------------------------
+
+/** How many brief lines the collapsed card shows before the disclosure. */
+export const BRIEF_PREVIEW_LINES = 6;
+
+/**
+ * The brief, first {@link BRIEF_PREVIEW_LINES} lines visible, the rest behind
+ * a disclosure. Preformatted (the brief is what the session agent will read
+ * verbatim — ids, paths and line breaks matter), never re-flowed.
+ */
+export function BriefBlock({ brief }: { brief: string }): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const lines = brief.split('\n');
+  const truncated = lines.length > BRIEF_PREVIEW_LINES;
+  const shown = open || !truncated ? brief : lines.slice(0, BRIEF_PREVIEW_LINES).join('\n');
+  return (
+    <div className="flex flex-col gap-1" data-testid="quick-session-brief" data-expanded={String(open)}>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-border-primary bg-surface-secondary p-2 font-mono text-[10.5px] leading-snug text-text-primary">
+        {shown}
+      </pre>
+      {truncated && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="self-start text-[10px] text-text-tertiary hover:text-text-primary"
+          data-testid="quick-session-brief-toggle"
+        >
+          {open ? 'Show less' : `Show all ${lines.length} lines`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function StartQuickSessionBody({ payload }: { payload: StartQuickSessionProposalPayload }): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  return (
+    <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-start-quick-session">
+      <div className="text-[13px] font-bold text-text-primary">Start quick session</div>
+      <div className="flex flex-col gap-1.5">
+        <Row label="project" value={projectName} />
+        <Row label="session" value={payload.name ?? 'auto-named'} />
+        <Row label="substrate" value={payload.substrate ?? 'project default'} />
+        <Row label="workspace" value={payload.inPlace === true ? 'project checkout (in place)' : 'own worktree'} />
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-text-tertiary">brief — the session's first prompt</span>
+        <BriefBlock brief={payload.brief} />
+      </div>
+      {payload.note != null && payload.note !== '' && <p className="italic text-text-tertiary">{payload.note}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // create-backlog-items
 // ---------------------------------------------------------------------------
 
@@ -561,6 +654,172 @@ export function CreateWorkflowBody({ payload }: { payload: CreateWorkflowProposa
         <Row label="new agents" value={`${agents.length} agent${agents.length === 1 ? '' : 's'}`} />
       )}
       <CreateWorkflowAgentRows agents={agents} result={null} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// triage-findings — grouped by op ("Dismiss 41 · Resolve 3 · Stage for
+// Compound 12"), each group expandable to its titles, never one row per item
+// (TASK-292): a 56-item sweep is one human decision per GROUP, so that is
+// what the card foregrounds.
+// ---------------------------------------------------------------------------
+
+/**
+ * The five decision groups a triage batch splits into. `set-selected` is
+ * split on its target state because "tick as a Compound seed" and "untick"
+ * are opposite decisions that happen to share an op.
+ */
+export type TriageGroupKey = 'dismiss' | 'resolve' | 'approve' | 'select' | 'deselect';
+
+export const TRIAGE_GROUP_LABEL: Record<TriageGroupKey, string> = {
+  dismiss: 'Dismiss',
+  resolve: 'Resolve',
+  approve: 'Stage for Compound',
+  select: 'Select for Compound',
+  deselect: 'Deselect',
+};
+
+const TRIAGE_GROUP_ORDER: readonly TriageGroupKey[] = ['dismiss', 'resolve', 'approve', 'select', 'deselect'];
+
+export function triageGroupKey(item: TriageFindingItem): TriageGroupKey {
+  if (item.op === 'set-selected') return item.selected === true ? 'select' : 'deselect';
+  return item.op;
+}
+
+/** Split a batch into its non-empty groups, in a fixed display order. */
+export function groupTriageItems(items: TriageFindingItem[]): Array<{ key: TriageGroupKey; items: TriageFindingItem[] }> {
+  const buckets = new Map<TriageGroupKey, TriageFindingItem[]>();
+  for (const item of items) {
+    const key = triageGroupKey(item);
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(item);
+    buckets.set(key, bucket);
+  }
+  return TRIAGE_GROUP_ORDER.filter((key) => buckets.has(key)).map((key) => ({ key, items: buckets.get(key) ?? [] }));
+}
+
+function triageItemResult(
+  result: TriageFindingsResultJson | null,
+  reviewItemId: string,
+): { ok: boolean; skipped?: string; error?: string } | null {
+  if (result === null) return null;
+  const found = result.items.find((i) => i.reviewItemId === reviewItemId);
+  return found ? { ok: found.ok, skipped: found.skipped, error: found.error } : null;
+}
+
+/**
+ * One expandable group: "Dismiss · 41" with a per-group ✓/skip/✕ tally once
+ * resolved, and the finding titles (stamped server-side at propose time)
+ * behind a disclosure. Collapsed by default — the counts ARE the summary.
+ */
+function TriageGroup({
+  groupKey,
+  items,
+  result,
+}: {
+  groupKey: TriageGroupKey;
+  items: TriageFindingItem[];
+  result: TriageFindingsResultJson | null;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const outcomes = items.map((item) => triageItemResult(result, item.reviewItemId));
+  const okCount = outcomes.filter((o) => o?.ok === true).length;
+  const skippedCount = outcomes.filter((o) => o != null && !o.ok && o.skipped != null).length;
+  const failedCount = outcomes.filter((o) => o != null && !o.ok && o.skipped == null).length;
+  return (
+    <div className="flex flex-col gap-1" data-testid="triage-group" data-group={groupKey}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex items-baseline gap-2 text-left hover:text-text-primary"
+        data-testid="triage-group-toggle"
+      >
+        <span className="w-3 shrink-0 text-[9px] text-text-tertiary" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+        <span className="font-bold text-text-primary">{TRIAGE_GROUP_LABEL[groupKey]}</span>
+        <span className="text-text-tertiary" data-testid="triage-group-count">
+          {items.length}
+        </span>
+        {result !== null && (
+          <span className="ml-auto shrink-0 text-[10px]" data-testid="triage-group-outcome">
+            {okCount > 0 && <span className="text-status-success">✓ {okCount}</span>}
+            {skippedCount > 0 && <span className="ml-1.5 text-text-tertiary">skipped {skippedCount}</span>}
+            {failedCount > 0 && <span className="ml-1.5 text-status-error">✕ {failedCount}</span>}
+          </span>
+        )}
+      </button>
+      {open && (
+        <ul className="ml-5 flex flex-col gap-0.5" data-testid="triage-group-items">
+          {items.map((item, index) => {
+            const outcome = outcomes[index];
+            return (
+              <li key={item.reviewItemId} className="flex items-baseline gap-2" data-testid="triage-row" data-review-item-id={item.reviewItemId}>
+                <span className="flex-1 truncate text-text-primary" title={item.reviewItemId}>
+                  {item.title != null && item.title !== '' ? item.title : item.reviewItemId}
+                </span>
+                {item.resolution != null && item.resolution !== '' && (
+                  <span className="shrink-0 truncate italic text-text-tertiary" title={item.resolution}>
+                    {item.resolution}
+                  </span>
+                )}
+                {outcome !== null && (
+                  <span
+                    className={`shrink-0 font-bold ${outcome.ok ? 'text-status-success' : outcome.skipped != null ? 'text-text-tertiary' : 'text-status-error'}`}
+                    data-testid="triage-outcome"
+                    data-ok={String(outcome.ok)}
+                    title={outcome.error ?? outcome.skipped}
+                  >
+                    {outcome.ok ? '✓' : outcome.skipped != null ? 'skipped' : '✕'}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Shared by the OPEN and RESOLVED paths, mirroring {@link CreateBacklogRows}. */
+export function TriageFindingsGroups({
+  items,
+  result,
+}: {
+  items: TriageFindingItem[];
+  result: TriageFindingsResultJson | null;
+}): React.ReactElement {
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-triage-findings">
+      {groupTriageItems(items).map((group) => (
+        <TriageGroup key={group.key} groupKey={group.key} items={group.items} result={result} />
+      ))}
+    </div>
+  );
+}
+
+/** The one-line "Dismiss 41 · Resolve 3 · Stage for Compound 12" headline. */
+export function triageHeadline(items: TriageFindingItem[]): string {
+  return groupTriageItems(items)
+    .map((group) => `${TRIAGE_GROUP_LABEL[group.key]} ${group.items.length}`)
+    .join(' · ');
+}
+
+export function TriageFindingsBody({ payload }: { payload: TriageFindingsProposalPayload }): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[13px] font-bold text-text-primary" data-testid="triage-headline">
+        {payload.summary != null && payload.summary !== '' ? payload.summary : triageHeadline(payload.items)}
+      </div>
+      <div className="text-[10px] text-text-tertiary">
+        {projectName}
+        {payload.summary != null && payload.summary !== '' ? ` · ${triageHeadline(payload.items)}` : ''}
+      </div>
+      <TriageFindingsGroups items={payload.items} result={null} />
     </div>
   );
 }

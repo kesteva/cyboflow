@@ -2,7 +2,8 @@
  * proposalResultTypes — local, DEFENSIVE mirrors of the proposal executor's
  * `result_json` shapes (main/src/orchestrator/agentThread/proposalExecutor.ts
  * — `LaunchRunResultJson` / `ReprioritizeResultJson` / `EditWorkflowResultJson` /
- * `CreateBacklogResultJson` / `CreateWorkflowResultJson`).
+ * `CreateBacklogResultJson` / `CreateWorkflowResultJson` / `TriageFindingsResultJson` /
+ * `StartQuickSessionResultJson`).
  *
  * `AgentProposal.result` is typed `unknown` (shared/types/agentThread.ts) —
  * deliberately, since the executor's typed result interfaces live main-only
@@ -13,6 +14,8 @@
  * there is no shared source of truth to keep them in lockstep automatically.
  */
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
+import { isTriageFindingOp, type TriageFindingOp } from '../../../../shared/types/agentThread';
+import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
 
 // ---------------------------------------------------------------------------
 // launch-run
@@ -24,6 +27,9 @@ export interface LaunchRunCompensationStep {
   error?: string;
 }
 
+/** The three launch seed fields a proposal may carry (mirrors the executor's LaunchSeedField). */
+export type LaunchSeedField = 'taskIds' | 'ideaIds' | 'findingIds';
+
 export interface LaunchRunResultJson {
   kind: 'launch-run';
   status: 'executed' | 'failed';
@@ -31,6 +37,8 @@ export interface LaunchRunResultJson {
   worktreePath?: string;
   runId?: string;
   branchName?: string;
+  /** Seed fields the launched flow's shape did not take — dropped before launch (TASK-294). */
+  ignoredSeeds?: LaunchSeedField[];
   error?: string;
   compensations?: LaunchRunCompensationStep[];
   reconciled?: boolean;
@@ -46,6 +54,10 @@ function isCompensationStep(v: unknown): v is LaunchRunCompensationStep {
   return (v.step === 'cancel-run' || v.step === 'dismiss-session') && typeof v.ok === 'boolean';
 }
 
+function isLaunchSeedField(v: unknown): v is LaunchSeedField {
+  return v === 'taskIds' || v === 'ideaIds' || v === 'findingIds';
+}
+
 /** Parse a proposal's `result` as a launch-run result, or null if it doesn't match. */
 export function parseLaunchRunResult(result: unknown): LaunchRunResultJson | null {
   if (!isRecord(result) || result.kind !== 'launch-run') return null;
@@ -53,6 +65,7 @@ export function parseLaunchRunResult(result: unknown): LaunchRunResultJson | nul
   const compensations = Array.isArray(result.compensations)
     ? result.compensations.filter(isCompensationStep)
     : undefined;
+  const ignoredSeeds = Array.isArray(result.ignoredSeeds) ? result.ignoredSeeds.filter(isLaunchSeedField) : undefined;
   return {
     kind: 'launch-run',
     status: result.status,
@@ -60,6 +73,7 @@ export function parseLaunchRunResult(result: unknown): LaunchRunResultJson | nul
     worktreePath: typeof result.worktreePath === 'string' ? result.worktreePath : undefined,
     runId: typeof result.runId === 'string' ? result.runId : undefined,
     branchName: typeof result.branchName === 'string' ? result.branchName : undefined,
+    ignoredSeeds: ignoredSeeds && ignoredSeeds.length > 0 ? ignoredSeeds : undefined,
     error: typeof result.error === 'string' ? result.error : undefined,
     compensations: compensations && compensations.length > 0 ? compensations : undefined,
     reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
@@ -284,6 +298,92 @@ export function parseCreateWorkflowResult(result: unknown): CreateWorkflowResult
     name: result.name,
     workflowId: typeof result.workflowId === 'string' ? result.workflowId : undefined,
     agents: result.agents.filter(isCreateWorkflowAgentResult),
+    error: typeof result.error === 'string' ? result.error : undefined,
+    compensations: compensations && compensations.length > 0 ? compensations : undefined,
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// triage-findings
+// ---------------------------------------------------------------------------
+
+export interface TriageFindingItemResultJson {
+  reviewItemId: string;
+  op: TriageFindingOp;
+  ok: boolean;
+  /** Present when the row was skipped as superseded (someone else triaged it first). */
+  skipped?: string;
+  error?: string;
+}
+
+export interface TriageFindingsResultJson {
+  kind: 'triage-findings';
+  status: 'executed' | 'failed';
+  items: TriageFindingItemResultJson[];
+  applied: number;
+  skipped: number;
+  reconciled?: boolean;
+}
+
+function isTriageFindingItemResult(v: unknown): v is TriageFindingItemResultJson {
+  if (!isRecord(v)) return false;
+  return typeof v.reviewItemId === 'string' && isTriageFindingOp(v.op) && typeof v.ok === 'boolean';
+}
+
+/** Parse a proposal's `result` as a triage-findings result, or null if it doesn't match. */
+export function parseTriageFindingsResult(result: unknown): TriageFindingsResultJson | null {
+  if (!isRecord(result) || result.kind !== 'triage-findings') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  if (!Array.isArray(result.items)) return null;
+  const items = result.items.filter(isTriageFindingItemResult);
+  return {
+    kind: 'triage-findings',
+    status: result.status,
+    items,
+    // Derived from the rows when the counts are missing, so an older/partial
+    // result still renders "applied N · skipped M" truthfully.
+    applied: typeof result.applied === 'number' ? result.applied : items.filter((i) => i.ok).length,
+    skipped: typeof result.skipped === 'number' ? result.skipped : items.filter((i) => i.skipped != null).length,
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// start-quick-session
+// ---------------------------------------------------------------------------
+
+export interface StartQuickSessionResultJson {
+  kind: 'start-quick-session';
+  status: 'executed' | 'failed';
+  sessionId?: string;
+  /** The `__quick__` sentinel run id — what the Open navigation carries as runId. */
+  runId?: string;
+  worktreePath?: string;
+  sessionName?: string;
+  substrate?: CliSubstrate;
+  claudePanelId?: string;
+  error?: string;
+  compensations?: LaunchRunCompensationStep[];
+  reconciled?: boolean;
+}
+
+/** Parse a proposal's `result` as a start-quick-session result, or null if it doesn't match. */
+export function parseStartQuickSessionResult(result: unknown): StartQuickSessionResultJson | null {
+  if (!isRecord(result) || result.kind !== 'start-quick-session') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  const compensations = Array.isArray(result.compensations)
+    ? result.compensations.filter(isCompensationStep)
+    : undefined;
+  return {
+    kind: 'start-quick-session',
+    status: result.status,
+    sessionId: typeof result.sessionId === 'string' ? result.sessionId : undefined,
+    runId: typeof result.runId === 'string' ? result.runId : undefined,
+    worktreePath: typeof result.worktreePath === 'string' ? result.worktreePath : undefined,
+    sessionName: typeof result.sessionName === 'string' ? result.sessionName : undefined,
+    substrate: isCliSubstrate(result.substrate) ? result.substrate : undefined,
+    claudePanelId: typeof result.claudePanelId === 'string' ? result.claudePanelId : undefined,
     error: typeof result.error === 'string' ? result.error : undefined,
     compensations: compensations && compensations.length > 0 ? compensations : undefined,
     reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,

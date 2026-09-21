@@ -5,6 +5,8 @@ import {
   parseEditWorkflowResult,
   parseCreateBacklogResult,
   parseCreateWorkflowResult,
+  parseTriageFindingsResult,
+  parseStartQuickSessionResult,
   parseWorkflowDefinitionSummary,
 } from './proposalResultTypes';
 
@@ -25,11 +27,20 @@ describe('parseLaunchRunResult', () => {
       worktreePath: '/tmp/wt',
       runId: 'run-1',
       branchName: 'agent/foo',
+      ignoredSeeds: undefined,
       error: undefined,
       compensations: undefined,
       reconciled: undefined,
       verified: undefined,
     });
+  });
+
+  it('keeps the known ignoredSeeds entries and drops unknown ones; an empty list reads as absent', () => {
+    expect(
+      parseLaunchRunResult({ kind: 'launch-run', status: 'executed', runId: 'r', ignoredSeeds: ['findingIds', 'bogus', 'taskIds'] })
+        ?.ignoredSeeds,
+    ).toEqual(['findingIds', 'taskIds']);
+    expect(parseLaunchRunResult({ kind: 'launch-run', status: 'executed', runId: 'r', ignoredSeeds: ['bogus'] })?.ignoredSeeds).toBeUndefined();
   });
 
   it('parses a failed result with compensations', () => {
@@ -297,5 +308,103 @@ describe('parseCreateWorkflowResult', () => {
     expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'superseded', name: 'x', agents: [] })).toBeNull();
     expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'executed', agents: [] })).toBeNull();
     expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'executed', name: 'x', agents: 'none' })).toBeNull();
+  });
+});
+
+describe('parseTriageFindingsResult', () => {
+  it('parses an executed result, keeping skipped/error per row', () => {
+    expect(
+      parseTriageFindingsResult({
+        kind: 'triage-findings',
+        status: 'executed',
+        applied: 1,
+        skipped: 1,
+        items: [
+          { reviewItemId: 'r1', op: 'dismiss', ok: true },
+          { reviewItemId: 'r2', op: 'set-selected', ok: false, skipped: 'already resolved' },
+        ],
+      }),
+    ).toEqual({
+      kind: 'triage-findings',
+      status: 'executed',
+      applied: 1,
+      skipped: 1,
+      items: [
+        { reviewItemId: 'r1', op: 'dismiss', ok: true, skipped: undefined, error: undefined },
+        { reviewItemId: 'r2', op: 'set-selected', ok: false, skipped: 'already resolved', error: undefined },
+      ],
+      reconciled: undefined,
+    });
+  });
+
+  it('drops malformed rows (unknown op / missing ok) and derives the counts when absent', () => {
+    const result = parseTriageFindingsResult({
+      kind: 'triage-findings',
+      status: 'failed',
+      items: [
+        { reviewItemId: 'r1', op: 'dismiss', ok: true },
+        { reviewItemId: 'r2', op: 'promote', ok: true },
+        { reviewItemId: 'r3', op: 'approve' },
+        { reviewItemId: 'r4', op: 'resolve', ok: false, skipped: 'gone' },
+        { reviewItemId: 'r5', op: 'resolve', ok: false, error: 'boom' },
+      ],
+    });
+    expect(result?.items.map((i) => i.reviewItemId)).toEqual(['r1', 'r4', 'r5']);
+    expect(result?.applied).toBe(1);
+    expect(result?.skipped).toBe(1);
+  });
+
+  it('returns null for a mismatched kind, a bad status, or missing items', () => {
+    expect(parseTriageFindingsResult({ kind: 'launch-run', status: 'executed' })).toBeNull();
+    expect(parseTriageFindingsResult({ kind: 'triage-findings', status: 'superseded', items: [] })).toBeNull();
+    expect(parseTriageFindingsResult({ kind: 'triage-findings', status: 'executed' })).toBeNull();
+  });
+});
+
+describe('parseStartQuickSessionResult', () => {
+  it('parses an executed result with every field', () => {
+    expect(
+      parseStartQuickSessionResult({
+        kind: 'start-quick-session',
+        status: 'executed',
+        sessionId: 'sess-q',
+        runId: 'run-q',
+        worktreePath: '/wt/sess-q',
+        sessionName: 'findings-sweep',
+        substrate: 'interactive',
+        claudePanelId: 'panel-1',
+      }),
+    ).toEqual({
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      worktreePath: '/wt/sess-q',
+      sessionName: 'findings-sweep',
+      substrate: 'interactive',
+      claudePanelId: 'panel-1',
+      error: undefined,
+      compensations: undefined,
+      reconciled: undefined,
+    });
+  });
+
+  it('keeps a failed result\'s error + compensations, drops a bad substrate and malformed steps', () => {
+    const r = parseStartQuickSessionResult({
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: 'sdk boom',
+      substrate: 'pty',
+      compensations: [{ step: 'dismiss-session', ok: true }, { bogus: true }],
+      reconciled: true,
+    });
+    expect(r).toMatchObject({ status: 'failed', error: 'sdk boom', reconciled: true, compensations: [{ step: 'dismiss-session', ok: true }] });
+    expect(r?.substrate).toBeUndefined();
+  });
+
+  it('returns null for another kind or a bad status', () => {
+    expect(parseStartQuickSessionResult({ kind: 'launch-run', status: 'executed' })).toBeNull();
+    expect(parseStartQuickSessionResult({ kind: 'start-quick-session', status: 'pending' })).toBeNull();
+    expect(parseStartQuickSessionResult(null)).toBeNull();
   });
 });

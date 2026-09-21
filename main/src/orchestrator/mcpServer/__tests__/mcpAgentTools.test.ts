@@ -30,6 +30,9 @@ import {
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
+import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
+import { executeProposal, type ProposalExecutorDeps } from '../../agentThread/proposalExecutor';
+import { buildProposalExecutorReviewDeps } from '../../agentThread/proposalExecutorReviewDeps';
 import { AgentThreadDbStore } from '../../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../../agentThread/specHash';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -112,6 +115,9 @@ function buildDb(): Database.Database {
   // then 138, which widens it again for 'create-workflow'.
   apply('125_agent_proposal_create_backlog_kind.sql');
   apply('138_agent_proposal_create_workflow_kind.sql');
+  // ...and 141, which widens it once more for 'triage-findings'.
+  apply('141_agent_proposal_triage_findings_kind.sql');
+  apply('142_agent_proposal_start_quick_session_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
   // ...and workflows.tuning_level, which also decides WHICH definition
@@ -196,11 +202,32 @@ function seedReviewItem(
   db: Database.Database,
   id: string,
   projectId: number,
-  opts?: { blocking?: boolean; status?: string; title?: string },
+  opts?: {
+    blocking?: boolean;
+    status?: string;
+    title?: string;
+    kind?: string;
+    severity?: string | null;
+    source?: string | null;
+    body?: string | null;
+    createdAt?: string;
+  },
 ): void {
   db.prepare(
-    `INSERT INTO review_items (id, project_id, kind, status, blocking, title) VALUES (?, ?, 'finding', ?, ?, ?)`,
-  ).run(id, projectId, opts?.status ?? 'pending', opts?.blocking ? 1 : 0, opts?.title ?? 'A finding');
+    `INSERT INTO review_items (id, project_id, kind, status, blocking, title, severity, source, body, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+  ).run(
+    id,
+    projectId,
+    opts?.kind ?? 'finding',
+    opts?.status ?? 'pending',
+    opts?.blocking ? 1 : 0,
+    opts?.title ?? 'A finding',
+    opts?.severity ?? null,
+    opts?.source ?? null,
+    opts?.body ?? null,
+    opts?.createdAt ?? null,
+  );
 }
 
 function seedQuestionRow(db: Database.Database, id: string, runId: string, status = 'pending'): void {
@@ -599,22 +626,32 @@ describe('McpQueryHandler global-agent tool family', () => {
   // -------------------------------------------------------------------------
 
   describe('mcp-queue', () => {
+    type QueueData = {
+      items: Array<Record<string, unknown>>;
+      total: number;
+      limit: number;
+      offset: number;
+      truncated: boolean;
+      nextOffset?: number;
+    };
+    async function queue(args: Partial<Extract<McpQueryMessage, { type: 'mcp-queue' }>>): Promise<McpQueryResponse> {
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', ...args } as McpQueryMessage,
+        socket,
+      );
+      return parseLastWrite(writes);
+    }
+
     it('defaults to pending items only; include_resolved surfaces resolved ones too', async () => {
       seedReviewItem(db, 'ri-pending', 1, { status: 'pending', title: 'Pending finding' });
       seedReviewItem(db, 'ri-resolved', 1, { status: 'resolved', title: 'Resolved finding' });
 
-      const pendingOnly = makeSocketDouble();
-      await handler.handleMessage({ type: 'mcp-queue', requestId: 'r1', runId: 'agent:thread-1' }, pendingOnly.socket);
-      const pendingData = parseLastWrite(pendingOnly.writes).data as { items: Array<{ id: string }>; total: number };
+      const pendingData = (await queue({})).data as QueueData;
       expect(pendingData.total).toBe(1);
       expect(pendingData.items[0].id).toBe('ri-pending');
 
-      const both = makeSocketDouble();
-      await handler.handleMessage(
-        { type: 'mcp-queue', requestId: 'r2', runId: 'agent:thread-1', includeResolved: true },
-        both.socket,
-      );
-      const bothData = parseLastWrite(both.writes).data as { items: Array<{ id: string }>; total: number };
+      const bothData = (await queue({ includeResolved: true })).data as QueueData;
       expect(bothData.total).toBe(2);
     });
 
@@ -622,6 +659,144 @@ describe('McpQueryHandler global-agent tool family', () => {
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage({ type: 'mcp-queue', requestId: 'r1', runId: 'run-abc' }, socket);
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'not_a_global_agent_run' });
+    });
+
+    it('returns COMPACT rows by default (no body / payload) and the full shape with includeBody', async () => {
+      seedReviewItem(db, 'ri-1', 1, { title: 'Compact me', severity: 'error', source: 'agent:eval', body: 'a very long body' });
+
+      const compact = (await queue({})).data as QueueData;
+      expect(compact.items).toHaveLength(1);
+      expect(compact.items[0]).toEqual({
+        id: 'ri-1',
+        project_id: 1,
+        run_id: null,
+        kind: 'finding',
+        status: 'pending',
+        blocking: false,
+        severity: 'error',
+        source: 'agent:eval',
+        title: 'Compact me',
+        entity_type: null,
+        entity_id: null,
+        staged_at: null,
+        selected: false,
+        created_at: expect.any(String),
+      });
+      expect(compact.items[0]).not.toHaveProperty('body');
+      expect(compact.items[0]).not.toHaveProperty('payload');
+
+      const full = (await queue({ includeBody: true })).data as QueueData;
+      expect(full.items[0]).toMatchObject({ id: 'ri-1', body: 'a very long body', payload: null });
+    });
+
+    it('pages with limit/offset, reporting total, truncated and nextOffset', async () => {
+      for (let i = 0; i < 7; i++) {
+        seedReviewItem(db, `ri-${i}`, 1, { title: `F${i}`, createdAt: `2026-09-0${i + 1}T00:00:00.000Z` });
+      }
+      const page1 = (await queue({ limit: 3 })).data as QueueData;
+      expect(page1).toMatchObject({ total: 7, limit: 3, offset: 0, truncated: true, nextOffset: 3 });
+      expect(page1.items.map((i) => i.id)).toEqual(['ri-0', 'ri-1', 'ri-2']);
+
+      const page2 = (await queue({ limit: 3, offset: page1.nextOffset })).data as QueueData;
+      expect(page2).toMatchObject({ total: 7, offset: 3, truncated: true, nextOffset: 6 });
+      expect(page2.items.map((i) => i.id)).toEqual(['ri-3', 'ri-4', 'ri-5']);
+
+      const page3 = (await queue({ limit: 3, offset: page2.nextOffset })).data as QueueData;
+      expect(page3).toMatchObject({ total: 7, offset: 6, truncated: false });
+      expect(page3).not.toHaveProperty('nextOffset');
+      expect(page3.items.map((i) => i.id)).toEqual(['ri-6']);
+    });
+
+    it('clamps limit to the 250 ceiling and defaults it to 100', async () => {
+      seedReviewItem(db, 'ri-1', 1);
+      expect(((await queue({ limit: 9999 })).data as QueueData).limit).toBe(250);
+      expect(((await queue({})).data as QueueData).limit).toBe(100);
+      expect(((await queue({ limit: 0 })).data as QueueData).limit).toBe(1);
+    });
+
+    it('filters by kind, severity list, source prefix and a created_at window', async () => {
+      seedReviewItem(db, 'ri-err', 1, { severity: 'error', source: 'agent:eval', createdAt: '2026-08-11T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-warn', 1, { severity: 'warning', source: 'visual-verify:1', createdAt: '2026-09-01T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-info', 1, { severity: 'info', source: 'build-break-group:x', createdAt: '2026-09-15T00:00:00.000Z' });
+      seedReviewItem(db, 'ri-decision', 1, { kind: 'decision', source: 'gate:approve-idea', createdAt: '2026-09-16T00:00:00.000Z' });
+
+      const ids = async (args: Parameters<typeof queue>[0]): Promise<string[]> =>
+        ((await queue(args)).data as QueueData).items.map((i) => String(i.id));
+
+      expect(await ids({ kind: 'decision' })).toEqual(['ri-decision']);
+      expect(await ids({ severity: ['error'] })).toEqual(['ri-err']);
+      expect(await ids({ severity: ['error', 'warning'] })).toEqual(['ri-err', 'ri-warn']);
+      expect(await ids({ sourcePrefix: 'agent:eval' })).toEqual(['ri-err']);
+      expect(await ids({ sourcePrefix: 'visual-verify' })).toEqual(['ri-warn']);
+      expect(await ids({ createdAfter: '2026-09-01T00:00:00.000Z' })).toEqual(['ri-warn', 'ri-info', 'ri-decision']);
+      expect(await ids({ createdBefore: '2026-09-01T00:00:00.000Z' })).toEqual(['ri-err']);
+      expect(await ids({ createdAfter: '2026-09-01T00:00:00.000Z', createdBefore: '2026-09-16T00:00:00.000Z' })).toEqual([
+        'ri-warn',
+        'ri-info',
+      ]);
+      // A LIKE wildcard in the prefix is matched literally, not as a wildcard.
+      expect(await ids({ sourcePrefix: 'agent:%' })).toEqual([]);
+      // `total` reflects the filtered set, not the whole inbox.
+      expect(((await queue({ severity: ['error'] })).data as QueueData).total).toBe(1);
+    });
+
+    it('rejects an unknown kind or severity up front', async () => {
+      expect(await queue({ kind: 'bogus' })).toMatchObject({ ok: false, error: 'invalid_kind' });
+      expect(await queue({ severity: ['fatal'] })).toMatchObject({ ok: false, error: 'invalid_severity' });
+      expect(await queue({ severity: [] })).toMatchObject({ ok: false, error: 'invalid_severity' });
+    });
+
+    it('summary_only returns tallies only, over the same filters', async () => {
+      seedReviewItem(db, 'ri-1', 1, { severity: 'error', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-2', 1, { severity: 'error', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-3', 1, { severity: 'info', source: 'visual-verify:1' });
+      seedReviewItem(db, 'ri-4', 2, { severity: 'warning', source: 'agent:eval' });
+      seedReviewItem(db, 'ri-5', 1, { status: 'resolved', severity: 'error', source: 'agent:eval' });
+
+      const res = await queue({ projectId: 1, summaryOnly: true });
+      expect(res.ok).toBe(true);
+      const data = res.data as { total: number; summary: Array<Record<string, unknown>> };
+      expect(data).not.toHaveProperty('items');
+      expect(data.total).toBe(3);
+      expect(data.summary).toEqual([
+        { kind: 'finding', status: 'pending', severity: 'error', source: 'agent:eval', count: 2 },
+        { kind: 'finding', status: 'pending', severity: 'info', source: 'visual-verify:1', count: 1 },
+      ]);
+
+      const withResolved = (await queue({ projectId: 1, summaryOnly: true, includeResolved: true })).data as {
+        total: number;
+        summary: Array<{ status: string; count: number }>;
+      };
+      expect(withResolved.total).toBe(4);
+      expect(withResolved.summary.find((r) => r.status === 'resolved')).toMatchObject({ count: 1 });
+    });
+
+    it('keeps a 456-row inbox in ONE call under the ~100KB cap (the Margin Letter shape)', async () => {
+      for (let i = 0; i < 456; i++) {
+        seedReviewItem(db, `rvw_${String(i).padStart(4, '0')}`, 1, {
+          title: `Finding number ${i} with a reasonably long title about something in the code`,
+          severity: i % 11 === 0 ? 'error' : i % 3 === 0 ? 'warning' : 'info',
+          source: i % 2 === 0 ? 'build-break-group:abc' : 'agent:eval',
+          body: 'x'.repeat(700),
+        });
+      }
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', projectId: 1 }, socket);
+      const res = parseLastWrite(writes);
+      const data = res.data as QueueData;
+      expect(data.total).toBe(456);
+      expect(data.items).toHaveLength(100);
+      expect(data.truncated).toBe(true);
+      expect(writes[writes.length - 1].length).toBeLessThan(100_000);
+
+      // The largest page the clamp allows also stays under the cap.
+      const maxPage = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-queue', requestId: 'r', runId: 'agent:thread-1', projectId: 1, limit: 999 },
+        maxPage.socket,
+      );
+      expect((parseLastWrite(maxPage.writes).data as QueueData).items).toHaveLength(250);
+      expect(maxPage.writes[maxPage.writes.length - 1].length).toBeLessThan(100_000);
     });
   });
 
@@ -787,6 +962,196 @@ describe('McpQueryHandler global-agent tool family', () => {
       expect(events).toHaveLength(1);
       expect(events[0].eventType).toBe('proposal-created');
       expect(JSON.parse(events[0].payloadJson)).toEqual({ proposalId, kind: 'launch-run' });
+    });
+
+    it('launch-run: resolves a CUSTOM flow by name or id, stamping id/name/scope; rejects an unknown one by name (TASK-294)', async () => {
+      // A custom sprint clone (definition.id stays 'sprint') + another custom flow, both
+      // project-scoped (this fixture's workflows table predates nullable project_id;
+      // the global-scope stamp is pinned in prepareProposal.test.ts).
+      seedWorkflowRow(db, 'wf-global-custom-e253eb7b', 1, 'dash', { ...CUSTOM_DEFINITION, id: 'sprint' });
+      seedWorkflowRow(db, 'wf-p1-docs', 1, 'docs-review', CUSTOM_DEFINITION);
+
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+
+      const byName = await propose({ kind: 'launch-run', projectId: 1, workflowName: 'dash', taskIds: ['tsk_1'] });
+      expect(byName.ok).toBe(true);
+      expect(store.getProposal((byName.data as { proposalId: string }).proposalId)?.payload).toEqual({
+        kind: 'launch-run',
+        projectId: 1,
+        workflowName: 'dash',
+        workflowId: 'wf-global-custom-e253eb7b',
+        workflowScope: 'project',
+        taskIds: ['tsk_1'],
+      });
+
+      const byId = await propose({ kind: 'launch-run', projectId: 1, workflowId: 'wf-p1-docs' });
+      expect(byId.ok).toBe(true);
+      expect(store.getProposal((byId.data as { proposalId: string }).proposalId)?.payload).toMatchObject({
+        workflowName: 'docs-review',
+        workflowId: 'wf-p1-docs',
+        workflowScope: 'project',
+      });
+
+      expect(await propose({ kind: 'launch-run', projectId: 1, workflowName: 'nope' })).toMatchObject({
+        ok: false,
+        error: 'unknown_workflow:nope',
+      });
+      // Another project's scoped flow is invisible here.
+      expect(await propose({ kind: 'launch-run', projectId: 2, workflowId: 'wf-p1-docs' })).toMatchObject({
+        ok: false,
+        error: 'unknown_workflow:wf-p1-docs',
+      });
+    });
+
+    it('triage-findings: propose validates each id; Confirm dismisses 3 + stages 2 through ReviewItemRouter, and cyboflow_queue reflects it (TASK-292)', async () => {
+      for (const id of ['rvw_1', 'rvw_2', 'rvw_3', 'rvw_4', 'rvw_5']) seedReviewItem(db, id, 1, { title: `Finding ${id}` });
+      seedReviewItem(db, 'rvw_other', 2, { title: 'Other project' });
+      seedReviewItem(db, 'rvw_done', 1, { status: 'resolved' });
+      seedReviewItem(db, 'rvw_gate', 1, { kind: 'decision' });
+
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+      const triage = (items: unknown[]) => propose({ kind: 'triage-findings', projectId: 1, items });
+
+      // Propose-time rejections, each named.
+      expect(await triage([{ reviewItemId: 'rvw_other', op: 'dismiss' }])).toMatchObject({ ok: false, error: 'review_item_not_found:rvw_other' });
+      expect(await triage([{ reviewItemId: 'rvw_done', op: 'dismiss' }])).toMatchObject({ ok: false, error: 'review_item_not_pending:rvw_done' });
+      expect(await triage([{ reviewItemId: 'rvw_gate', op: 'resolve' }])).toMatchObject({ ok: false, error: 'review_item_not_finding:rvw_gate' });
+      expect(await triage([{ reviewItemId: 'rvw_1', op: 'set-selected', selected: false }])).toMatchObject({
+        ok: false,
+        error: 'review_item_not_staged:rvw_1',
+      });
+
+      const res = await triage([
+        { reviewItemId: 'rvw_1', op: 'dismiss', resolution: 'noise' },
+        { reviewItemId: 'rvw_2', op: 'dismiss' },
+        { reviewItemId: 'rvw_3', op: 'dismiss' },
+        { reviewItemId: 'rvw_4', op: 'set-selected', selected: true },
+        { reviewItemId: 'rvw_5', op: 'approve' },
+      ]);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('triage-findings');
+      expect(proposal.preconditions).toBeNull();
+      // Titles were stamped from the rows.
+      expect(proposal.payload.kind === 'triage-findings' && proposal.payload.items[0].title).toBe('Finding rvw_1');
+
+      // Someone resolves rvw_3 from the queue between propose and confirm.
+      const router = ReviewItemRouter.initialize(dbAdapter(db));
+      await router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId: 'rvw_3' });
+
+      // Confirm: the real executor over the real chokepoint (the other deps are unused here).
+      const unused = (): never => {
+        throw new Error('unexpected dep call');
+      };
+      const deps: ProposalExecutorDeps = {
+        store,
+        newIdempotencyKey: () => 'key-1',
+        createQuickSession: unused,
+        startQuickSession: unused,
+        deliverQuickSessionBrief: unused,
+        launchRun: unused,
+        cancelRun: unused,
+        dismissSession: unused,
+        runExists: unused,
+        applyTaskChange: unused,
+        readTaskFields: unused,
+        createBacklogItem: unused,
+        runInTransaction: <T>(fn: () => T): T => fn(),
+        readEffectiveWorkflowSpec: unused,
+        applyWorkflowSpec: unused,
+        createCustomAgent: unused,
+        deleteCustomAgent: unused,
+        createWorkflow: unused,
+        findWorkflowIdByName: unused,
+        customAgentExists: unused,
+        ...buildProposalExecutorReviewDeps({ reviewItemRouter: router, db: dbAdapter(db) }),
+      };
+      const outcome = await executeProposal(deps, proposalId);
+      expect(outcome.ok && outcome.status).toBe('executed');
+      expect(outcome.ok && outcome.result).toMatchObject({ kind: 'triage-findings', applied: 4, skipped: 1 });
+      expect(outcome.ok && outcome.result.kind === 'triage-findings' && outcome.result.items[2]).toEqual({
+        reviewItemId: 'rvw_3',
+        op: 'dismiss',
+        ok: false,
+        skipped: 'already resolved',
+      });
+
+      // One entity_events delta per chokepoint write (rvw_4 = approve + select).
+      const deltas = db
+        .prepare(`SELECT entity_id AS id, COUNT(*) AS n FROM entity_events WHERE entity_type = 'review_item' GROUP BY entity_id`)
+        .all() as Array<{ id: string; n: number }>;
+      expect(Object.fromEntries(deltas.map((d) => [d.id, d.n]))).toMatchObject({ rvw_1: 1, rvw_2: 1, rvw_4: 2, rvw_5: 1 });
+      expect(db.prepare('SELECT resolution, resolved_by FROM review_items WHERE id = ?').get('rvw_1')).toEqual({ resolution: 'noise', resolved_by: 'user' });
+
+      // cyboflow_queue reflects it: the dismissed ones are gone from the pending inbox,
+      // the staged ones are READY (staged_at set) — and rvw_4 is already ticked as a seed.
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-queue', requestId: 'q', runId: 'agent:thread-1', projectId: 1, kind: 'finding' }, socket);
+      const queue = parseLastWrite(writes).data as { items: Array<Record<string, unknown>>; total: number };
+      expect(queue.total).toBe(2);
+      expect(queue.items.map((i) => [i.id, i.staged_at !== null, i.selected])).toEqual([
+        ['rvw_4', true, true],
+        ['rvw_5', true, false],
+      ]);
+      // ...and the staged-but-unselected one is selectable as a Compound seed.
+      await router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: ['rvw_5'], selected: true });
+      expect(db.prepare('SELECT selected FROM review_items WHERE id = ?').get('rvw_5')).toEqual({ selected: 1 });
+
+      ReviewItemRouter._resetForTesting();
+      reviewItemChangeEvents.removeAllListeners();
+    });
+
+    it('start-quick-session: propose stores the card with a slugged name and rejects bad input by name (TASK-295)', async () => {
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: '' })).toMatchObject({ ok: false, error: 'invalid_payload' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 99, brief: 'x' })).toMatchObject({ ok: false, error: 'project_not_found' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: 'x'.repeat(8193) })).toMatchObject({ ok: false, error: 'brief_too_long' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: 'x', name: '!!!' })).toMatchObject({ ok: false, error: 'invalid_name' });
+
+      const res = await propose({
+        kind: 'start-quick-session',
+        projectId: 1,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'Findings Sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      });
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('start-quick-session');
+      expect(proposal.preconditions).toBeNull();
+      expect(proposal.payload).toEqual({
+        kind: 'start-quick-session',
+        projectId: 1,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'findings-sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      });
     });
 
     it('open-session: accepts a discriminated navigation payload with null preconditions', async () => {

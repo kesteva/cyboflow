@@ -52,7 +52,7 @@ describe('agentThreadPrompt', () => {
     }
   });
 
-  it('is dense but not padded — within the ~60-300 line target', () => {
+  it('is dense but not padded — within the ~60-385 line target', () => {
     // Ceiling widened from 130 → 160 when the "What cyboflow is" product
     // overview + the cyboflow_reference tool bullet were added, then 160 → 230
     // when the "Recommending the right flow" section (decision map + compound
@@ -67,9 +67,14 @@ describe('agentThreadPrompt', () => {
     // Widened again 300 → 330 for the create-workflow proposal kind: its
     // payload shape, the cyboflow_agents tool bullet, and the quality-bar
     // bullet spelling out the definition shape + agent persona rules.
+    // Widened again 330 → 370 for TASK-292/293/294: the cyboflow_queue
+    // summary-first + paging guidance, the triage-findings proposal kind, and
+    // the launch-run custom-workflow (workflowId / custom name) rules.
+    // Widened again 370 → 385 for TASK-295: the start-quick-session proposal
+    // kind (payload shape + the self-contained-brief rule).
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(330);
+    expect(lines).toBeLessThanOrEqual(385);
   });
 
   it('mentions Custom widgets and the two disjoint write-shaped tools', () => {
@@ -117,6 +122,34 @@ describe('agentThreadPrompt', () => {
 
   it('mentions recommending the right flow', () => {
     expect(getAgentSystemPrompt()).toMatch(/recommending the right flow/i);
+  });
+
+  it('tells the assistant a launch-run may name a custom flow by exact name or by workflowId (TASK-294)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/`workflowId`/);
+    expect(prompt).toMatch(/unknown_workflow:<name>/);
+    expect(prompt).toMatch(/PREFER `workflowId` for\s+a custom flow/);
+  });
+
+  it('documents the triage-findings proposal kind and asks for per-group reasoning in the reply (TASK-292)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/\*\*triage-findings\*\*/);
+    expect(prompt).toMatch(/per-group\s+reasoning in your reply/);
+    expect(prompt).toMatch(/set-selected:true` stages AND selects/);
+  });
+
+  it('documents the start-quick-session proposal kind and the self-contained-brief rule (TASK-295)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/`start-quick-session`: `\{kind, projectId, brief, name\?,/);
+    expect(prompt).toMatch(/\*\*start-quick-session\*\*/);
+    expect(prompt).toMatch(/no access to this\s+conversation, so make it self-contained/);
+    expect(prompt).toMatch(/`open-session` only navigates/);
+  });
+
+  it('tells the assistant to size an inbox with cyboflow_queue summary_only before paging it (TASK-293)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/`summary_only:true` FIRST/);
+    expect(prompt).toMatch(/`nextOffset`/);
   });
 
   it('documents the create-workflow proposal kind and the agents read that precedes it', () => {
