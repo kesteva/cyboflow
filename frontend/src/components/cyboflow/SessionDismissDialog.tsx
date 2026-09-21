@@ -20,9 +20,12 @@ interface SessionDismissDialogProps {
   sessionId: string;
   // `completed` distinguishes "marked complete then dismissed" from a plain
   // dismiss so the caller (CyboflowRoot) can show a different toast.
-  // `tasksMovedToDone` (TASK-296) is only set on the landed close-out path —
-  // how many integrated sprint-lane tasks the close-out just moved to Done.
-  onSuccess?: (completed?: boolean, tasksMovedToDone?: number) => void;
+  // `result.tasksMovedToDone` (TASK-296) is only set on the landed close-out
+  // path — how many integrated sprint-lane tasks the close-out just moved to
+  // Done. `result.laneTasksLeftOpen` is the complement: set when the session
+  // has its own commits not (yet) on main, so the close-out stamped
+  // bookkeeping only and left those lane tasks open.
+  onSuccess?: (completed?: boolean, result?: { tasksMovedToDone?: number; laneTasksLeftOpen?: number }) => void;
 }
 
 export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: SessionDismissDialogProps) {
@@ -132,7 +135,10 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
       }
       const deleteResult = await API.sessions.delete(sessionId);
       if (deleteResult.success) {
-        onSuccess?.(true, stampResult.data.tasksMovedToDone);
+        onSuccess?.(true, {
+          tasksMovedToDone: stampResult.data.tasksMovedToDone,
+          laneTasksLeftOpen: stampResult.data.laneTasksLeftOpen,
+        });
         onClose();
       } else {
         useErrorStore.getState().showError({
