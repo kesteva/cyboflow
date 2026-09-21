@@ -648,9 +648,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             isOpen={isDismissOpen}
             onClose={() => setIsDismissOpen(false)}
             sessionId={lifecycleTarget.session.id}
-            onSuccess={(completed) => {
+            onSuccess={(completed, tasksMovedToDone) => {
               setIsDismissOpen(false);
-              handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
+              if (completed && tasksMovedToDone) {
+                handleActionSuccess(`Session marked complete (moved ${tasksMovedToDone} task${tasksMovedToDone === 1 ? '' : 's'} to Done)`);
+              } else {
+                handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
+              }
             }}
           />
         </>

@@ -164,7 +164,13 @@ export const sessionGitRouter = router({
     }): Promise<
       | {
           success: true;
-          data: { delivered: boolean; landed: boolean; ownCommits: number; completedNoCode: boolean };
+          data: {
+            delivered: boolean;
+            landed: boolean;
+            ownCommits: number;
+            completedNoCode: boolean;
+            integratedLaneCount?: number;
+          };
         }
       | SessionGitError
     > => {
@@ -173,7 +179,13 @@ export const sessionGitRouter = router({
 
   markComplete: protectedProcedure
     .input(sessionInput)
-    .mutation(async ({ ctx, input }): Promise<{ success: true; data: { stamped: number } } | SessionGitError> => {
+    .mutation(async ({
+      ctx,
+      input,
+    }): Promise<
+      | { success: true; data: { stamped: number; laneTasksLeftOpen?: number; tasksMovedToDone?: number } }
+      | SessionGitError
+    > => {
       return requireOps(ctx.sessionGitOps).markComplete(input);
     }),
 

@@ -154,7 +154,7 @@ import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
-import { createGitOps } from './ipc/gitOps';
+import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
@@ -4254,6 +4254,24 @@ app.whenReady().then(async () => {
       await TaskChangeRouter.getInstance().sweepStaleDerivedStageTasks();
     } catch (sweepErr) {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
+    }
+
+    // Boot backfill (TASK-296): heal sessions whose `markComplete` ran under the
+    // OLD bookkeeping-only stamp before this task landed — outcome='completed'
+    // but the sprint's integrated lanes never moved to Done because the
+    // close-out never ran. Fail-soft internally; never blocks boot.
+    try {
+      const landedSprintBackfill = await backfillLandedSprintCloseOuts(databaseService, loggerLike);
+      if (landedSprintBackfill.sessionsFixed > 0) {
+        console.log(
+          `[Main] Boot backfill: closed out ${landedSprintBackfill.sessionsFixed} landed sprint session(s) left incomplete by the pre-TASK-296 markComplete stamp (moved ${landedSprintBackfill.tasksMoved} task(s) to Done)`,
+        );
+      }
+    } catch (landedBackfillErr) {
+      console.warn(
+        '[Main] landed-sprint-close-out backfill failed (continuing boot):',
+        landedBackfillErr instanceof Error ? landedBackfillErr.message : String(landedBackfillErr),
+      );
     }
 
     // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by

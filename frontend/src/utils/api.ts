@@ -310,16 +310,24 @@ export class API {
      * nothing left to give main (the agent merged it in chat); `completedNoCode`
      * = a completed Planner/Launch run whose "delivery" is backlog rows, not
      * code (zero own commits). Any of the three turns Dismiss into a
-     * Mark-complete choice.
+     * Mark-complete choice. `integratedLaneCount` (TASK-296) is how many
+     * integrated sprint-lane tasks `markComplete` would move to Done when
+     * `landed` — the dismiss dialog's Mark-complete button copy.
      */
     async getDeliveryState(sessionId: string) {
       return trpc.cyboflow.sessionGit.getDeliveryState.query({ sessionId });
     },
 
     /**
-     * Stamp this session's runs as delivered-by-another-path. Bookkeeping only —
-     * it archives nothing, so callers follow it with `delete`. Order matters:
-     * the stamp is what makes that archive KEEP the session's findings.
+     * Mark a session's work as delivered by a path we never observed. When the
+     * branch has ALREADY landed on main (merged/rebased by hand outside the
+     * app), this runs the FULL sprint close-out an in-app merge performs —
+     * integrated lanes move to Done (`data.tasksMovedToDone`), the batch goes
+     * terminal, outcome='merged' is stamped. Otherwise it is the old
+     * bookkeeping-only stamp (outcome='completed'; `data.laneTasksLeftOpen`
+     * reports any integrated-lane tasks left untouched). Either way it archives
+     * nothing itself, so callers follow it with `delete` — the stamp is what
+     * makes that archive KEEP the session's findings.
      */
     async markComplete(sessionId: string) {
       return trpc.cyboflow.sessionGit.markComplete.mutate({ sessionId });

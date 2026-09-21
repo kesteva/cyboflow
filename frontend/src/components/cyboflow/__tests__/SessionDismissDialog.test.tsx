@@ -161,6 +161,27 @@ describe('SessionDismissDialog', () => {
       expect(await screen.findByText('Mark complete')).toBeInTheDocument();
     });
 
+    it('TASK-296: shows the moved-task count on the button when landed carries an integratedLaneCount, and forwards tasksMovedToDone to onSuccess', async () => {
+      vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: true, ownCommits: 3, completedNoCode: false, integratedLaneCount: 2 },
+      });
+      vi.mocked(API.sessions.markComplete).mockResolvedValue({
+        success: true,
+        data: { stamped: 1, tasksMovedToDone: 2 },
+      });
+
+      render(<SessionDismissDialog {...defaultProps} />);
+
+      const markCompleteButton = await screen.findByText('Mark complete (moves 2 tasks to Done)');
+
+      await act(async () => {
+        fireEvent.click(markCompleteButton);
+      });
+
+      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true, 2);
+    });
+
     it('Mark complete calls markComplete BEFORE delete, then onSuccess(true) and onClose', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
@@ -185,7 +206,7 @@ describe('SessionDismissDialog', () => {
       });
 
       expect(callOrder).toEqual(['markComplete', 'delete']);
-      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true);
+      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true, undefined);
       expect(defaultProps.onClose).toHaveBeenCalled();
     });
 
@@ -272,7 +293,7 @@ describe('SessionDismissDialog', () => {
       });
 
       expect(callOrder).toEqual(['markComplete', 'delete']);
-      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true);
+      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true, undefined);
       expect(defaultProps.onClose).toHaveBeenCalled();
     });
 

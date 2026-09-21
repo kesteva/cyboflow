@@ -20,7 +20,9 @@ interface SessionDismissDialogProps {
   sessionId: string;
   // `completed` distinguishes "marked complete then dismissed" from a plain
   // dismiss so the caller (CyboflowRoot) can show a different toast.
-  onSuccess?: (completed?: boolean) => void;
+  // `tasksMovedToDone` (TASK-296) is only set on the landed close-out path —
+  // how many integrated sprint-lane tasks the close-out just moved to Done.
+  onSuccess?: (completed?: boolean, tasksMovedToDone?: number) => void;
 }
 
 export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: SessionDismissDialogProps) {
@@ -38,11 +40,16 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
   // all land on 'plain' — the existing ConfirmDialog, unchanged.
   const [probeState, setProbeState] = useState<ProbeState>('loading');
   const [isStamping, setIsStamping] = useState(false);
+  // TASK-296: how many integrated sprint-lane tasks Mark-complete would move
+  // to Done — only ever nonzero when the probe reported `landed`. Drives the
+  // Mark-complete button copy ("Mark complete (moves N tasks to Done)").
+  const [laneTaskCount, setLaneTaskCount] = useState(0);
 
   useEffect(() => {
     if (!isOpen) {
       setProbeState('loading');
       setIsStamping(false);
+      setLaneTaskCount(0);
       return;
     }
     let cancelled = false;
@@ -59,6 +66,7 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
         clearTimeout(watchdog);
         if (result.success && result.data && (result.data.delivered || result.data.landed)) {
           setProbeState('delivered');
+          setLaneTaskCount(result.data.integratedLaneCount ?? 0);
         } else if (result.success && result.data && result.data.completedNoCode) {
           setProbeState('completedNoCode');
         } else {
@@ -124,7 +132,7 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
       }
       const deleteResult = await API.sessions.delete(sessionId);
       if (deleteResult.success) {
-        onSuccess?.(true);
+        onSuccess?.(true, stampResult.data.tasksMovedToDone);
         onClose();
       } else {
         useErrorStore.getState().showError({
@@ -196,7 +204,7 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
               loading={isStamping}
               loadingText="Marking complete..."
             >
-              Mark complete
+              {laneTaskCount > 0 ? `Mark complete (moves ${laneTaskCount} tasks to Done)` : 'Mark complete'}
             </Button>
           </div>
         </div>
