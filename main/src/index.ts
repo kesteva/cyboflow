@@ -231,6 +231,11 @@ import {
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
+import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/proposalExecutorLaunchDeps';
+import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
+import { buildProposalExecutorQuickSessionDeps } from './orchestrator/agentThread/proposalExecutorQuickSessionDeps';
+import { generateQuickWorktreeBranchName } from './ipc/session';
+import { reportEagerSpawnFailure } from './ipc/eagerSpawnFailure';
 import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
@@ -5508,58 +5513,22 @@ app.whenReady().then(async () => {
     const proposalExecutorDeps: ProposalExecutorDeps = {
       store: agentThreadStore,
       newIdempotencyKey: () => randomUUID(),
-      createQuickSession: async ({ projectId, nameHint }) => {
-        const { session } = await createQuickSessionCore(
-          {
-            taskQueue: taskQueue!,
-            sessionManager,
-            workflowRegistry,
-            getDb: () => databaseService.getDb(),
-          },
-          // Pin 'sdk': an agent-launched host session backs a workflow run, not a user
-          // quick session, so its sentinel must not inherit the quick-session PTY default.
-          { projectId, nameHint, requestedSubstrate: 'sdk' },
-        );
-        return { sessionId: session.id, worktreePath: session.worktreePath };
-      },
-      launchRun: async (args) => {
-        const workflow = workflowRegistry
-          .listByProject(args.projectId)
-          .find((w) => w.name === args.workflowName);
-        if (!workflow) {
-          throw new Error(`launch-run: no '${args.workflowName}' workflow for project ${args.projectId}`);
-        }
-        const project = sessionManager.getProjectById(args.projectId);
-        if (!project) throw new Error(`launch-run: project ${args.projectId} not found`);
-        // Map seeds to the launcher's per-workflow params, respecting its seed guards
-        // (seedTaskIds→sprint, findingIds→compound, ideaIds→planner, single ideaId→ship).
-        const seedTaskIds = args.workflowName === 'sprint' ? args.taskIds : undefined;
-        const findingIds = args.workflowName === 'compound' ? args.findingIds : undefined;
-        const ideaId = args.workflowName === 'ship' ? args.ideaIds?.[0] : undefined;
-        const launchOptions =
-          args.workflowName === 'planner' && args.ideaIds && args.ideaIds.length > 0
-            ? { ideaIds: args.ideaIds }
-            : undefined;
-        const { runId, worktreePath, branchName } = await runLauncher.launch(
-          workflow.id,
-          project.path,
-          args.substrate,
-          undefined,
-          ideaId,
-          args.sessionId,
-          undefined,
-          undefined,
-          seedTaskIds,
-          args.projectId,
-          undefined,
-          findingIds,
-          undefined,
-          undefined,
-          undefined,
-          launchOptions,
-        );
-        return { runId, worktreePath, branchName };
-      },
+      // launch-run host sessions + start-quick-session mint/brief delivery: proposalExecutorQuickSessionDeps.ts.
+      ...buildProposalExecutorQuickSessionDeps({
+        createQuickSessionCore, stampQuickSessionRuntimeConfig, reportEagerSpawnFailure,
+        quickSessionCore: { taskQueue: taskQueue!, sessionManager, workflowRegistry, getDb: () => databaseService.getDb(), dismissHalfCreatedSession: dismissSessionFully },
+        newSessionName: generateQuickWorktreeBranchName,
+        sessionManager, panelManager, substrateFacade, interactiveReplManager,
+        getClaudePanelManager: () => (require('./ipc/claudePanel') as typeof import('./ipc/claudePanel')).claudePanelManager,
+        ptyBriefing: QUICK_PTY_BRIEFING, logger: loggerLike,
+      }),
+      // launch-run: workflow resolution (by id or name, custom flows included)
+      // + shape-derived seed mapping live in proposalExecutorLaunchDeps.ts.
+      ...buildProposalExecutorLaunchDeps({
+        workflowRegistry,
+        getProjectById: (projectId) => sessionManager.getProjectById(projectId),
+        runLauncher,
+      }),
       cancelRun: async (runId) => {
         await cancelRunHandler(runId, cancelRunDepsBag);
       },
@@ -5615,6 +5584,8 @@ app.whenReady().then(async () => {
       runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
       // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
       ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
+      // triage-findings: the ReviewItemRouter chokepoint + a live-state read.
+      ...buildProposalExecutorReviewDeps({ reviewItemRouter: ReviewItemRouter.getInstance(), db: experimentsDb }),
       logger: loggerLike,
     };
     setProposalExecutorDeps(proposalExecutorDeps);

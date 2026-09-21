@@ -29,6 +29,8 @@ import type {
   CreateBacklogItemsProposalPayload,
   CreateWorkflowProposalPayload,
   AgentProposalStatus,
+  TriageFindingsProposalPayload,
+  StartQuickSessionProposalPayload,
 } from '../../../../shared/types/agentThread';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -344,6 +346,11 @@ describe('ProposalCard — open state, per-kind body', () => {
     render(<ProposalCard proposal={proposal} />);
 
     expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch speedboat');
+    // A custom name carries the muted "custom" tag; with no stamped scope it
+    // says just that (an older row the propose handler never stamped).
+    const tag = screen.getByTestId('launch-run-custom-tag');
+    expect(tag).toHaveTextContent(/^custom$/);
+    expect(tag).toHaveAttribute('data-scope', '');
     const labels = screen.getAllByTestId('proposal-entity-label');
     expect(labels[0]).toHaveTextContent('TASK-041');
     expect(labels[0]).toHaveTextContent('Fix the flaky retry test');
@@ -351,6 +358,28 @@ describe('ProposalCard — open state, per-kind body', () => {
     expect(labels[1]).toHaveTextContent('IDEA-008');
     expect(labels[1]).toHaveTextContent('Faster cold start');
     expect(screen.queryByTestId('proposal-entity-unresolved')).not.toBeInTheDocument();
+  });
+
+  it('launch-run: a custom flow with a stamped scope shows "custom · global|project"; a built-in shows no tag (TASK-294)', () => {
+    const { rerender } = render(
+      <ProposalCard
+        proposal={makeLaunchRunProposal({
+          payload: { workflowName: 'dash', workflowId: 'wf-global-custom-e253eb7b', workflowScope: 'global' },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch dash');
+    const tag = screen.getByTestId('launch-run-custom-tag');
+    expect(tag).toHaveTextContent('custom · global');
+    expect(tag).toHaveAttribute('data-scope', 'global');
+    expect(tag).toHaveAttribute('title', 'wf-global-custom-e253eb7b');
+
+    rerender(<ProposalCard proposal={makeLaunchRunProposal({ payload: { workflowName: 'docs-review', workflowScope: 'project' } })} />);
+    expect(screen.getByTestId('launch-run-custom-tag')).toHaveTextContent('custom · project');
+
+    rerender(<ProposalCard proposal={makeLaunchRunProposal()} />);
+    expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch Sprint');
+    expect(screen.queryByTestId('launch-run-custom-tag')).not.toBeInTheDocument();
   });
 
   it('launch-run: a finding seed id resolves its title (no ref) via a batched reviewItems.get fetch', async () => {
@@ -769,6 +798,26 @@ describe('ProposalCard — launch-run resolved', () => {
     expect(setActiveRun).toHaveBeenCalledWith('run-new');
   });
 
+  it('says which seeds the flow ignored, when the executor reports any (TASK-294)', () => {
+    const proposal = makeLaunchRunProposal({
+      payload: { workflowName: 'dash', workflowScope: 'global', taskIds: ['tsk_1'], findingIds: ['rvw_1'] },
+      status: 'executed',
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-d', sessionId: 'sess-d', ignoredSeeds: ['findingIds'] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Run launched.');
+    expect(screen.getByTestId('launch-run-ignored-seeds')).toHaveTextContent('Ignored findings — this flow takes no such seed.');
+  });
+
+  it('shows no ignored-seeds note when nothing was dropped', () => {
+    render(
+      <ProposalCard
+        proposal={makeLaunchRunProposal({ status: 'executed', result: { kind: 'launch-run', status: 'executed', runId: 'run-1' } })}
+      />,
+    );
+    expect(screen.queryByTestId('launch-run-ignored-seeds')).not.toBeInTheDocument();
+  });
+
   it('shows a readable workflow + "loading session" label — never the opaque run id — while nothing has hydrated yet', () => {
     const proposal = makeLaunchRunProposal({
       status: 'executed',
@@ -1032,5 +1081,246 @@ describe('ProposalCard — open-session Confirm navigation', () => {
     await waitFor(() => expect(mockConfirmProposal).toHaveBeenCalled());
     expect(setActiveRun).not.toHaveBeenCalled();
     expect(setActiveQuickSession).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triage-findings — grouped counts + expandable titles, per-group outcomes
+// (TASK-292)
+// ---------------------------------------------------------------------------
+
+function makeTriageProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  items?: TriageFindingsProposalPayload['items'];
+  summary?: string;
+} = {}): AgentProposal {
+  const payload: TriageFindingsProposalPayload = {
+    kind: 'triage-findings',
+    projectId: 1,
+    items: overrides.items ?? [
+      { reviewItemId: 'rvw_a', op: 'dismiss', resolution: 'eval noise', title: 'Unused import in foo.ts' },
+      { reviewItemId: 'rvw_b', op: 'dismiss', title: 'Trailing whitespace' },
+      { reviewItemId: 'rvw_c', op: 'resolve', title: 'Fixed in #42' },
+      { reviewItemId: 'rvw_d', op: 'set-selected', selected: true, title: 'Worktree lock leaks on crash' },
+      { reviewItemId: 'rvw_e', op: 'approve', title: 'Retry storm on 429' },
+    ],
+    ...(overrides.summary !== undefined ? { summary: overrides.summary } : {}),
+  };
+  return baseProposal({ kind: 'triage-findings', payload, status: overrides.status ?? 'proposed', result: overrides.result ?? null });
+}
+
+describe('ProposalCard — triage-findings', () => {
+  it('open state: a grouped headline with counts, no per-item rows until a group is expanded', () => {
+    render(<ProposalCard proposal={makeTriageProposal()} />);
+
+    expect(screen.getByTestId('proposal-card')).toHaveAttribute('data-kind', 'triage-findings');
+    expect(screen.getByText(/Proposed action · triage findings/i)).toBeInTheDocument();
+    expect(screen.getByTestId('triage-headline')).toHaveTextContent('Dismiss 2 · Resolve 1 · Stage for Compound 1 · Select for Compound 1');
+
+    const groups = screen.getAllByTestId('triage-group');
+    expect(groups.map((g) => g.getAttribute('data-group'))).toEqual(['dismiss', 'resolve', 'approve', 'select']);
+    expect(within(groups[0]).getByTestId('triage-group-count')).toHaveTextContent('2');
+    expect(screen.queryAllByTestId('triage-row')).toHaveLength(0);
+
+    fireEvent.click(within(groups[0]).getByTestId('triage-group-toggle'));
+    const rows = within(groups[0]).getAllByTestId('triage-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Unused import in foo.ts');
+    expect(rows[0]).toHaveTextContent('eval noise');
+    expect(rows[0]).toHaveAttribute('data-review-item-id', 'rvw_a');
+    // Still no outcome markers before confirm.
+    expect(screen.queryAllByTestId('triage-outcome')).toHaveLength(0);
+  });
+
+  it('open state: a summary replaces the headline and the counts move to the caption', () => {
+    render(<ProposalCard proposal={makeTriageProposal({ summary: 'Sweep the eval noise' })} />);
+    expect(screen.getByTestId('triage-headline')).toHaveTextContent('Sweep the eval noise');
+    expect(screen.getByText(/Project #1 · Dismiss 2/)).toBeInTheDocument();
+  });
+
+  it('resolved: applied / skipped counts plus per-group ✓ / skipped / ✕ tallies', () => {
+    const proposal = makeTriageProposal({
+      status: 'failed',
+      result: {
+        kind: 'triage-findings',
+        status: 'failed',
+        applied: 3,
+        skipped: 1,
+        items: [
+          { reviewItemId: 'rvw_a', op: 'dismiss', ok: true },
+          { reviewItemId: 'rvw_b', op: 'dismiss', ok: false, skipped: 'already resolved' },
+          { reviewItemId: 'rvw_c', op: 'resolve', ok: true },
+          { reviewItemId: 'rvw_d', op: 'set-selected', ok: true },
+          { reviewItemId: 'rvw_e', op: 'approve', ok: false, error: 'not untriaged' },
+        ],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByTestId('triage-resolved-summary')).toHaveTextContent('Triaged 3 of 5 findings · 1 skipped (already triaged) · 1 failed.');
+    expect(screen.queryByTestId('proposal-card-confirm')).not.toBeInTheDocument();
+
+    const groups = screen.getAllByTestId('triage-group');
+    expect(within(groups[0]).getByTestId('triage-group-outcome')).toHaveTextContent('✓ 1skipped 1');
+    expect(within(groups[2]).getByTestId('triage-group-outcome')).toHaveTextContent('✕ 1');
+
+    fireEvent.click(within(groups[0]).getByTestId('triage-group-toggle'));
+    const outcomes = within(groups[0]).getAllByTestId('triage-outcome');
+    expect(outcomes[0]).toHaveTextContent('✓');
+    expect(outcomes[1]).toHaveTextContent('skipped');
+    expect(outcomes[1]).toHaveAttribute('title', 'already resolved');
+  });
+
+  it('resolved executed: a clean sweep reads as fully triaged', () => {
+    const proposal = makeTriageProposal({
+      status: 'executed',
+      items: [{ reviewItemId: 'rvw_a', op: 'dismiss', title: 'x' }],
+      result: { kind: 'triage-findings', status: 'executed', applied: 1, skipped: 0, items: [{ reviewItemId: 'rvw_a', op: 'dismiss', ok: true }] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+    expect(screen.getByTestId('triage-resolved-summary')).toHaveTextContent('Triaged 1 of 1 finding.');
+    expect(screen.getByTestId('proposal-status-circle')).toHaveAttribute('data-tone', 'success');
+  });
+
+  it('dismissed collapses to the neutral resolved row', () => {
+    render(<ProposalCard proposal={makeTriageProposal({ status: 'dismissed' })} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start-quick-session (TASK-295)
+// ---------------------------------------------------------------------------
+
+const LONG_BRIEF = Array.from({ length: 9 }, (_, i) => `line ${i + 1}: look at rvw_${i + 1}`).join('\n');
+
+function makeStartQuickSessionProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  payload?: Partial<StartQuickSessionProposalPayload>;
+} = {}): AgentProposal {
+  const payload: StartQuickSessionProposalPayload = {
+    kind: 'start-quick-session',
+    projectId: 1,
+    brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+    ...overrides.payload,
+  };
+  return baseProposal({ kind: 'start-quick-session', payload, status: overrides.status ?? 'proposed', result: overrides.result ?? null });
+}
+
+describe('ProposalCard — start-quick-session', () => {
+  const realSetActiveQuickSession = useCyboflowStore.getState().setActiveQuickSession;
+
+  afterEach(() => {
+    useCyboflowStore.setState({ setActiveQuickSession: realSetActiveQuickSession });
+    useNavigationStore.setState({ view: 'home' });
+  });
+
+  it('open state: project, session name, substrate, workspace and the brief, with defaults spelled out', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal()} />);
+    const body = screen.getByTestId('proposal-body-start-quick-session');
+    expect(body).toHaveTextContent('Start quick session');
+    expect(body).toHaveTextContent('auto-named');
+    expect(body).toHaveTextContent('project default');
+    expect(body).toHaveTextContent('own worktree');
+    expect(screen.getByTestId('quick-session-brief')).toHaveTextContent('Look at findings rvw_1 and rvw_2');
+    // A short brief needs no disclosure.
+    expect(screen.queryByTestId('quick-session-brief-toggle')).toBeNull();
+    expect(screen.getByTestId('proposal-card-confirm')).toBeInTheDocument();
+  });
+
+  it('open state: explicit name / substrate / in-place / note are shown', () => {
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          payload: { name: 'findings-sweep', substrate: 'interactive', inPlace: true, note: 'five findings share a root cause' },
+        })}
+      />,
+    );
+    const body = screen.getByTestId('proposal-body-start-quick-session');
+    expect(body).toHaveTextContent('findings-sweep');
+    expect(body).toHaveTextContent('interactive');
+    expect(body).toHaveTextContent('project checkout (in place)');
+    expect(body).toHaveTextContent('five findings share a root cause');
+  });
+
+  it('a long brief shows its first six lines and expands on demand', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal({ payload: { brief: LONG_BRIEF } })} />);
+    const block = screen.getByTestId('quick-session-brief');
+    expect(block).toHaveAttribute('data-expanded', 'false');
+    expect(block).toHaveTextContent('line 6');
+    expect(block).not.toHaveTextContent('line 7');
+    const toggle = screen.getByTestId('quick-session-brief-toggle');
+    expect(toggle).toHaveTextContent('Show all 9 lines');
+    fireEvent.click(toggle);
+    expect(block).toHaveAttribute('data-expanded', 'true');
+    expect(block).toHaveTextContent('line 9');
+    expect(toggle).toHaveTextContent('Show less');
+  });
+
+  it('resolved executed: names the session and opens the quick session (with its sentinel run) on click', () => {
+    const setActiveRun = vi.fn();
+    const setActiveQuickSession = vi.fn();
+    useCyboflowStore.setState({ setActiveRun, setActiveQuickSession });
+    const setActiveProjectId = vi.fn();
+    useNavigationStore.setState({ setActiveProjectId });
+
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          status: 'executed',
+          result: {
+            kind: 'start-quick-session',
+            status: 'executed',
+            sessionId: 'sess-q',
+            runId: 'run-q',
+            worktreePath: '/wt/sess-q',
+            sessionName: 'findings-sweep',
+            substrate: 'interactive',
+            claudePanelId: 'panel-1',
+          },
+        })}
+      />,
+    );
+
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Session started.');
+    expect(row).toHaveTextContent('findings-sweep · interactive');
+    expect(row).toHaveTextContent('Open');
+    expect(row).not.toHaveTextContent('sess-q');
+    expect(screen.queryByTestId('proposal-card-confirm')).toBeNull();
+
+    fireEvent.click(row);
+    expect(setActiveProjectId).toHaveBeenCalledWith(1);
+    expect(setActiveQuickSession).toHaveBeenCalledWith('sess-q', 'run-q');
+    expect(setActiveRun).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+
+  it('resolved failed: the error plus whether the half-created session was dismissed', () => {
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          status: 'failed',
+          result: {
+            kind: 'start-quick-session',
+            status: 'failed',
+            error: 'sdk boom',
+            sessionId: 'sess-q',
+            compensations: [{ step: 'dismiss-session', ok: true }],
+          },
+        })}
+      />,
+    );
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Session not started.');
+    expect(row).toHaveTextContent('sdk boom (the half-created session was dismissed)');
+    expect(row.tagName).not.toBe('BUTTON');
+  });
+
+  it('dismissed collapses to the neutral resolved row', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal({ status: 'dismissed' })} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
   });
 });

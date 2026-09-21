@@ -13,15 +13,18 @@
  *      { ok:false, reason:'claimed' }. A missing row ⇒ { ok:false, reason:'not-found' }.
  *   2. PRECONDITION CHECK (edit-workflow only — spec-hash CAS): a mismatch supersedes
  *      the proposal with a refreshed-diff loopback turn, never a blind overwrite.
- *      (launch-run and create-backlog-items carry no precondition; reprioritize's
- *      per-task expectedVersions are consumed PER ITEM by the chokepoint, not as a
- *      whole-proposal gate.)
+ *      (launch-run, create-backlog-items and triage-findings carry no precondition;
+ *      reprioritize's per-task expectedVersions are consumed PER ITEM by the
+ *      chokepoint, not as a whole-proposal gate; a triage item no longer pending at
+ *      confirm time is skipped per item.)
  *   3. SIDE EFFECTS through the chokepoints, carrying the idempotency key / expected
  *      versions where the target supports them. launch-run runs a COMPENSATION SAGA:
  *      created resources are tracked and unwound in reverse on any post-session
  *      failure, with each compensation step's outcome persisted for reconciliation.
  *      create-workflow runs the same saga shape: agents first, then the flow, and
  *      every agent minted so far is deleted again when a later step fails.
+ *      start-quick-session likewise: the session is minted first, then its brief is
+ *      delivered as the first prompt, and a delivery failure dismisses the session.
  *   4. TERMINAL TRANSITION — store.finalizeProposal to 'executed' | 'failed' with a
  *      typed result_json (the card renders it: per-item ✓/✕, saga detail, etc.).
  *   5. BOOT RECONCILIATION — reconcileOrphanedExecutingProposals verifies OBSERVABLE
@@ -58,6 +61,10 @@ import type {
   EditWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogProposalPayload,
+  StartQuickSessionProposalPayload,
+  TriageFindingItem,
+  TriageFindingOp,
+  TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
 
 // ---------------------------------------------------------------------------
@@ -78,21 +85,51 @@ export interface AgentProposalStoreLike {
 }
 
 /**
- * The launch-run side effect, high-level. The wiring closure (index.ts) resolves the
- * workflow id + project path from (projectId, workflowName) and maps the seeds to
- * RunLauncher.launch's per-workflow positional params (taskIds→sprint,
- * ideaIds→planner/ship, findingIds→compound), respecting the launcher's own seed
- * guards. The executor stays free of workflow-resolution concerns and owns only the
- * session→run sequencing + compensation saga.
+ * The launch-run side effect, high-level. The wiring closure
+ * (proposalExecutorLaunchDeps.ts) resolves the workflow row — by `workflowId`
+ * when the proposal carries one, else by `workflowName` — plus the project
+ * path, and maps the seeds to RunLauncher.launch's positional params by the
+ * flow's SHAPE (`seedKindForWorkflow`: taskIds→a task fan-out flow,
+ * ideaIds→a plan-phase flow, findingIds→a compound-shaped flow), never by the
+ * row's display name, so a custom sprint-shaped flow seeds like the built-in.
+ * Seeds the resolved shape does not take are dropped and reported back as
+ * `ignoredSeeds` so the result card can say so. The executor stays free of
+ * workflow-resolution concerns and owns only the session→run sequencing +
+ * compensation saga.
  */
 export interface LaunchRunSideEffectArgs {
   projectId: number;
-  workflowName: CyboflowWorkflowName;
+  /** Display name — a built-in name or a custom flow's; used for the session-name template. */
+  workflowName: CyboflowWorkflowName | string;
+  /** The resolved workflows.id, when the proposal was stamped with one (custom flows always are). */
+  workflowId?: string;
   sessionId: string;
   substrate?: CliSubstrate;
   taskIds?: string[];
   ideaIds?: string[];
   findingIds?: string[];
+}
+
+/** What the executor asks the boot layer to mint for a start-quick-session confirm. */
+export interface StartQuickSessionArgs {
+  projectId: number;
+  /** A branch-safe slug (normalized at propose time); absent → the boot layer mints one. */
+  name?: string;
+  /** Absent → the project's quick-session default (the wizard's PTY/SDK choice). */
+  substrate?: CliSubstrate;
+  inPlace: boolean;
+}
+
+/** The minted session — everything the brief delivery and the card need. */
+export interface StartQuickSessionCreated {
+  sessionId: string;
+  /** The `__quick__` sentinel run (what open-session navigation carries as runId). */
+  runId: string;
+  worktreePath: string;
+  /** The session's actual name (the slug, possibly `-<n>` suffixed on a collision). */
+  name: string;
+  /** The RESOLVED substrate the sentinel landed on — decides how the brief is delivered. */
+  substrate: CliSubstrate;
 }
 
 /** One reprioritize applyChange, actor pinned 'user' by the executor. */
@@ -110,6 +147,23 @@ export interface TaskFieldsSnapshot {
   stageId: string | null;
 }
 
+/**
+ * One triage-findings write, actor pinned 'user' by the executor. Each shape
+ * is a ReviewItemRouter.applyReviewItem op verbatim (the wiring closure
+ * forwards it as-is), so the executor adds no write path of its own.
+ */
+export type TriageReviewItemChange =
+  | { op: 'resolve' | 'dismiss'; actor: 'user'; reviewItemId: string; resolution?: string | null }
+  | { op: 'approve'; actor: 'user'; reviewItemId: string }
+  | { op: 'set-selected'; actor: 'user'; reviewItemIds: string[]; selected: boolean };
+
+/** Live review-item state read before each triage write and during reconciliation. */
+export interface ReviewItemStateSnapshot {
+  status: 'pending' | 'resolved' | 'dismissed';
+  stagedAt: string | null;
+  selected: boolean;
+}
+
 export interface ProposalExecutorDeps {
   /** The agent_proposals CAS store (the single writer for the status machine). */
   store: AgentProposalStoreLike;
@@ -122,16 +176,35 @@ export interface ProposalExecutorDeps {
     projectId: number;
     nameHint: string;
   }) => Promise<{ sessionId: string; worktreePath: string }>;
-  /** Launch the seeded workflow run into the host session (RunLauncher.launch). */
+  /**
+   * Launch the seeded workflow run into the host session (RunLauncher.launch).
+   * `ignoredSeeds` names the seed fields the flow's shape does not consume and
+   * that were therefore dropped before the launch (never an error).
+   */
   launchRun: (
     args: LaunchRunSideEffectArgs,
-  ) => Promise<{ runId: string; worktreePath: string; branchName: string }>;
+  ) => Promise<{ runId: string; worktreePath: string; branchName: string; ignoredSeeds?: LaunchSeedField[] }>;
   /** Compensation: cancel a run created before a later boundary failed (git-neutral). */
   cancelRun: (runId: string) => Promise<void>;
   /** Compensation: the FULL safe session-dismiss path (cancels hosted runs, then removes the worktree). */
   dismissSession: (sessionId: string) => Promise<void>;
   /** Reconciliation: does the run recorded in an orphan's result_json still exist? */
   runExists: (runId: string) => boolean;
+
+  // --- start-quick-session: mint a USER quick session, then deliver its brief ---
+  /**
+   * Mint a quick session the way the launch wizard does (createQuickSessionCore
+   * + the runtime-config stamps), on the requested or default substrate. Unlike
+   * `createQuickSession` above this is a user session, never SDK-pinned.
+   */
+  startQuickSession: (args: StartQuickSessionArgs) => Promise<StartQuickSessionCreated>;
+  /**
+   * Deliver the brief as the session's FIRST prompt on its resolved substrate
+   * (SDK: the chat panel's first turn; PTY: the REPL's spawn prompt). Resolves
+   * to the chat panel it created; throws when the delivery could not start —
+   * the executor then dismisses the session it just minted.
+   */
+  deliverQuickSessionBrief: (args: StartQuickSessionCreated & { brief: string }) => Promise<{ claudePanelId: string }>;
 
   // --- reprioritize-backlog: sequential per-item applyChange, partial-failure tolerant ---
   /** One TaskChangeRouter.applyChange (actor 'user'); throws (TaskChangeError) on rejection. */
@@ -182,6 +255,12 @@ export interface ProposalExecutorDeps {
   /** Reconciliation: does `projectId` carry a custom agent under `agentKey`? */
   customAgentExists: (projectId: number, agentKey: string) => boolean;
 
+  // --- triage-findings: sequential per-item ReviewItemRouter writes, skip-tolerant ---
+  /** One ReviewItemRouter.applyReviewItem (actor 'user'); throws (ReviewItemError) on rejection. */
+  applyReviewItemChange: (projectId: number, change: TriageReviewItemChange) => Promise<void>;
+  /** The item's current status / staged / selected state (null when it is gone or belongs elsewhere). */
+  readReviewItemState: (projectId: number, reviewItemId: string) => ReviewItemStateSnapshot | null;
+
   logger?: LoggerLike;
 }
 
@@ -195,6 +274,9 @@ interface CompensationStep {
   error?: string;
 }
 
+/** The three launch seed fields a proposal may carry. */
+export type LaunchSeedField = 'taskIds' | 'ideaIds' | 'findingIds';
+
 export interface LaunchRunResultJson {
   kind: 'launch-run';
   status: 'executed' | 'failed';
@@ -202,6 +284,8 @@ export interface LaunchRunResultJson {
   worktreePath?: string;
   runId?: string;
   branchName?: string;
+  /** Seed fields the launched flow's shape does not take, dropped before launch. */
+  ignoredSeeds?: LaunchSeedField[];
   error?: string;
   compensations?: CompensationStep[];
   /** Set by boot reconciliation (not the live confirm path). */
@@ -279,12 +363,54 @@ export interface CreateWorkflowResultJson {
   verified?: string;
 }
 
+export interface TriageFindingItemResultJson {
+  reviewItemId: string;
+  op: TriageFindingOp;
+  ok: boolean;
+  /**
+   * Present when the item was NOT written because someone else got there
+   * first (it was no longer pending at confirm time, or no longer exists) —
+   * reported, never a batch failure. `ok` is false on a skipped row.
+   */
+  skipped?: string;
+  error?: string;
+}
+
+export interface TriageFindingsResultJson {
+  kind: 'triage-findings';
+  status: 'executed' | 'failed';
+  items: TriageFindingItemResultJson[];
+  /** Rows written through the chokepoint. */
+  applied: number;
+  /** Rows skipped as superseded (not counted as failures). */
+  skipped: number;
+  reconciled?: boolean;
+}
+
+export interface StartQuickSessionResultJson {
+  kind: 'start-quick-session';
+  status: 'executed' | 'failed';
+  sessionId?: string;
+  /** The `__quick__` sentinel run id — what the card's Open navigation carries. */
+  runId?: string;
+  worktreePath?: string;
+  sessionName?: string;
+  substrate?: CliSubstrate;
+  claudePanelId?: string;
+  error?: string;
+  compensations?: CompensationStep[];
+  /** Set by boot reconciliation (not the live confirm path). */
+  reconciled?: boolean;
+}
+
 export type ProposalResultJson =
   | LaunchRunResultJson
   | ReprioritizeResultJson
   | EditWorkflowResultJson
   | CreateBacklogResultJson
-  | CreateWorkflowResultJson;
+  | CreateWorkflowResultJson
+  | TriageFindingsResultJson
+  | StartQuickSessionResultJson;
 
 // ---------------------------------------------------------------------------
 // Result
@@ -394,6 +520,10 @@ export async function executeProposal(
       );
     case 'create-workflow':
       return runCreateWorkflow(deps, proposal, proposal.payload as CreateWorkflowProposalPayload, proposalId);
+    case 'triage-findings':
+      return runTriageFindings(deps, proposal, proposal.payload as TriageFindingsProposalPayload, proposalId);
+    case 'start-quick-session':
+      return runStartQuickSession(deps, proposal, proposal.payload as StartQuickSessionProposalPayload, proposalId);
     default:
       // Unreachable: open-session is handled above, and the union is closed. Finalize
       // failed defensively so a future kind never strands the claimed row.
@@ -433,6 +563,7 @@ async function runLaunch(
     const run = await deps.launchRun({
       projectId: payload.projectId,
       workflowName: payload.workflowName,
+      ...(payload.workflowId !== undefined ? { workflowId: payload.workflowId } : {}),
       sessionId: session.sessionId,
       substrate: payload.substrate,
       taskIds: payload.taskIds,
@@ -448,6 +579,7 @@ async function runLaunch(
       worktreePath: run.worktreePath,
       runId: run.runId,
       branchName: run.branchName,
+      ...(run.ignoredSeeds !== undefined && run.ignoredSeeds.length > 0 ? { ignoredSeeds: run.ignoredSeeds } : {}),
     };
     deps.store.finalizeProposal(proposalId, 'executed', JSON.stringify(result));
     return { ok: true, proposalId, kind: proposal.kind, status: 'executed', result };
@@ -493,6 +625,58 @@ async function compensateLaunch(
     }
   }
   return steps;
+}
+
+// ---------------------------------------------------------------------------
+// start-quick-session — startQuickSession -> deliverQuickSessionBrief, with the
+// same two-boundary compensation shape as launch-run
+// ---------------------------------------------------------------------------
+
+async function runStartQuickSession(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: StartQuickSessionProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  let created: StartQuickSessionCreated | undefined;
+  try {
+    created = await deps.startQuickSession({
+      projectId: payload.projectId,
+      ...(payload.name !== undefined ? { name: payload.name } : {}),
+      ...(payload.substrate !== undefined ? { substrate: payload.substrate } : {}),
+      inPlace: payload.inPlace === true,
+    });
+    const { claudePanelId } = await deps.deliverQuickSessionBrief({ ...created, brief: payload.brief });
+    const result: StartQuickSessionResultJson = {
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: created.sessionId,
+      runId: created.runId,
+      worktreePath: created.worktreePath,
+      sessionName: created.name,
+      substrate: created.substrate,
+      claudePanelId,
+    };
+    deps.store.finalizeProposal(proposalId, 'executed', JSON.stringify(result));
+    return { ok: true, proposalId, kind: proposal.kind, status: 'executed', result };
+  } catch (err) {
+    // A session minted before the brief could start is dismissed again (the
+    // FULL dismiss: hosted sentinel cancelled, worktree removed) — never left
+    // as an idle orphan the human has to find. No runId step: the sentinel is
+    // the session's own and goes with it.
+    const compensations = created !== undefined ? await compensateLaunch(deps, { sessionId: created.sessionId }) : [];
+    const result: StartQuickSessionResultJson = {
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: errMsg(err),
+      ...(created !== undefined
+        ? { sessionId: created.sessionId, runId: created.runId, worktreePath: created.worktreePath, sessionName: created.name, substrate: created.substrate }
+        : {}),
+      ...(compensations.length > 0 ? { compensations } : {}),
+    };
+    deps.store.finalizeProposal(proposalId, 'failed', JSON.stringify(result));
+    return { ok: true, proposalId, kind: proposal.kind, status: 'failed', result };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +852,91 @@ async function runCreateWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// triage-findings — sequential per-item chokepoint writes, superseded-tolerant
+// ---------------------------------------------------------------------------
+
+/** The chokepoint change(s) one triage item maps to, given the row's live state. */
+function triageChanges(item: TriageFindingItem, live: ReviewItemStateSnapshot): TriageReviewItemChange[] {
+  const id = item.reviewItemId;
+  switch (item.op) {
+    case 'dismiss':
+    case 'resolve':
+      return [{ op: item.op, actor: 'user', reviewItemId: id, resolution: item.resolution ?? null }];
+    case 'approve':
+      return [{ op: 'approve', actor: 'user', reviewItemId: id }];
+    case 'set-selected': {
+      const selected = item.selected === true;
+      // Selecting an unstaged finding stages it first: the chokepoint only
+      // toggles READY (staged) rows, and "stage for Compound" is one decision
+      // from the human's side, not two clicks.
+      const stage: TriageReviewItemChange[] = selected && live.stagedAt === null ? [{ op: 'approve', actor: 'user', reviewItemId: id }] : [];
+      return [...stage, { op: 'set-selected', actor: 'user', reviewItemIds: [id], selected }];
+    }
+  }
+}
+
+async function runTriageFindings(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: TriageFindingsProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  const items: TriageFindingItemResultJson[] = [];
+  let applied = 0;
+  let skipped = 0;
+  let anyFailed = false;
+  // Same posture as runReprioritize: ReviewItemRouter.applyReviewItem is one
+  // item per call, so each item is its own call and a rejection does NOT abort
+  // the rest. One extra arm: a row that stopped being pending between propose
+  // and confirm (a human triaged it from the queue meanwhile) is SKIPPED and
+  // reported — the assistant's intent for it is moot, not wrong — rather than
+  // surfacing the chokepoint's invalid_status as a failure of the batch.
+  for (const item of payload.items) {
+    const live = deps.readReviewItemState(payload.projectId, item.reviewItemId);
+    if (live === null) {
+      skipped++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, skipped: 'no longer exists' });
+      continue;
+    }
+    if (live.status !== 'pending') {
+      skipped++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, skipped: `already ${live.status}` });
+      continue;
+    }
+    try {
+      for (const change of triageChanges(item, live)) {
+        await deps.applyReviewItemChange(payload.projectId, change);
+      }
+      applied++;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: true });
+    } catch (err) {
+      anyFailed = true;
+      items.push({ reviewItemId: item.reviewItemId, op: item.op, ok: false, error: errMsg(err) });
+    }
+  }
+
+  const status: 'executed' | 'failed' = anyFailed ? 'failed' : 'executed';
+  const result: TriageFindingsResultJson = { kind: 'triage-findings', status, items, applied, skipped };
+  deps.store.finalizeProposal(proposalId, status, JSON.stringify(result));
+  return { ok: true, proposalId, kind: proposal.kind, status, result };
+}
+
+/** Does the row's live state already reflect what `item` asked for? (Reconciliation read.) */
+function triageItemApplied(item: TriageFindingItem, live: ReviewItemStateSnapshot | null): boolean {
+  if (live === null) return false;
+  switch (item.op) {
+    case 'dismiss':
+      return live.status === 'dismissed';
+    case 'resolve':
+      return live.status === 'resolved';
+    case 'approve':
+      return live.stagedAt !== null;
+    case 'set-selected':
+      return live.selected === (item.selected === true) && (item.selected !== true || live.stagedAt !== null);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // edit-workflow — spec-hash CAS + safeParse + updateSpec inside one transaction
 // ---------------------------------------------------------------------------
 
@@ -813,6 +1082,14 @@ export interface ReconcileSummary {
  *     time, so its presence is the confirm's own trace); otherwise
  *     'crashed-mid-execution' — with whatever landed listed, since a half-minted
  *     agent set is exactly what the human has to clean up by hand.
+ *   - triage-findings: every item's row already reflects its op (dismissed /
+ *     resolved / staged / selected as asked) ⇒ executed; otherwise
+ *     'crashed-mid-execution' with the per-item verified state. A row someone
+ *     else triaged meanwhile reads as applied for dismiss/resolve only when the
+ *     status matches — reconciliation never re-writes.
+ *   - start-quick-session: NOT verifiable (a minted session carries no back-link to
+ *     the proposal, and its name may have been generated) ⇒ always
+ *     'crashed-mid-execution', never a re-run — like create-backlog-items.
  */
 export async function reconcileOrphanedExecutingProposals(deps: ProposalExecutorDeps): Promise<ReconcileSummary> {
   const orphans = deps.store.listProposalsByStatus('executing');
@@ -969,6 +1246,43 @@ async function reconcileOne(deps: ProposalExecutorDeps, proposal: AgentProposal)
         kind: proposal.kind,
         finalizedTo: status,
         note: applied ? verified : `crashed-mid-execution: ${verified}; check the Agents pane for partially created agents`,
+      };
+    }
+
+    case 'triage-findings': {
+      const payload = proposal.payload as TriageFindingsProposalPayload;
+      const items: TriageFindingItemResultJson[] = [];
+      let applied = 0;
+      for (const item of payload.items) {
+        const ok = triageItemApplied(item, deps.readReviewItemState(payload.projectId, item.reviewItemId));
+        if (ok) applied++;
+        items.push({ reviewItemId: item.reviewItemId, op: item.op, ok });
+      }
+      const allApplied = applied === payload.items.length;
+      const status: 'executed' | 'failed' = allApplied ? 'executed' : 'failed';
+      const result: TriageFindingsResultJson = { kind: 'triage-findings', status, items, applied, skipped: 0, reconciled: true };
+      deps.store.finalizeProposal(proposal.id, status, JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: status,
+        note: allApplied ? 'all items already applied' : 'crashed-mid-execution: some items not applied',
+      };
+    }
+
+    case 'start-quick-session': {
+      const result: StartQuickSessionResultJson = {
+        kind: 'start-quick-session',
+        status: 'failed',
+        reconciled: true,
+        error: 'crashed-mid-execution',
+      };
+      deps.store.finalizeProposal(proposal.id, 'failed', JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: 'failed',
+        note: 'crashed-mid-execution: a started session is not verifiable from the proposal',
       };
     }
 

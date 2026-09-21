@@ -10,6 +10,11 @@ import {
   type EditWorkflowResultJson,
   type CreateBacklogResultJson,
   type CreateWorkflowResultJson,
+  type ReviewItemStateSnapshot,
+  type StartQuickSessionCreated,
+  type StartQuickSessionResultJson,
+  type TriageFindingsResultJson,
+  type TriageReviewItemChange,
 } from './proposalExecutor';
 import { computeSpecHash } from './specHash';
 import type {
@@ -124,9 +129,21 @@ function baseDeps(store: FakeStore, over: Partial<ProposalExecutorDeps> = {}): P
     createWorkflow: () => ({ workflowId: 'wf-7-custom-abcd1234' }),
     findWorkflowIdByName: () => null,
     customAgentExists: () => false,
+    applyReviewItemChange: async () => {},
+    readReviewItemState: () => ({ status: 'pending', stagedAt: null, selected: false }),
+    startQuickSession: async () => QUICK_CREATED,
+    deliverQuickSessionBrief: async () => ({ claudePanelId: 'panel-q' }),
     ...over,
   };
 }
+
+const QUICK_CREATED: StartQuickSessionCreated = {
+  sessionId: 'sess-q',
+  runId: 'run-q',
+  worktreePath: '/wt/sess-q',
+  name: 'sunny-lake-20260921',
+  substrate: 'sdk',
+};
 
 // ---------------------------------------------------------------------------
 // Guard rails: not-found, open-session, double-confirm race
@@ -198,6 +215,51 @@ describe('executeProposal — launch-run', () => {
     expect(stored?.status).toBe('executed');
     const rj = stored?.result as LaunchRunResultJson;
     expect(rj).toMatchObject({ kind: 'launch-run', status: 'executed', sessionId: 'sess-9', runId: 'run-9', branchName: 'br-9' });
+  });
+
+  it('carries a stamped workflowId into the launch, keeps the display name for the session hint, and records ignored seeds (TASK-294)', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal(
+        {
+          kind: 'launch-run',
+          projectId: 7,
+          workflowName: 'dash',
+          workflowId: 'wf-global-custom-e253eb7b',
+          workflowScope: 'global',
+          taskIds: ['T1'],
+          findingIds: ['F1'],
+        },
+        { id: 'prop-dash0001' },
+      ),
+    );
+    const createQuickSession = vi.fn(async () => ({ sessionId: 'sess-d', worktreePath: '/wt/sess-d' }));
+    const launchRun = vi.fn(async () => ({ runId: 'run-d', worktreePath: '/wt/sess-d', branchName: 'br-d', ignoredSeeds: ['findingIds' as const] }));
+    const deps = baseDeps(store, { createQuickSession, launchRun });
+
+    const result = await executeProposal(deps, 'prop-dash0001');
+    expect(result.ok && result.status).toBe('executed');
+    expect(createQuickSession).toHaveBeenCalledWith({ projectId: 7, nameHint: 'agent-dash-prop-das' });
+    expect(launchRun).toHaveBeenCalledWith({
+      projectId: 7,
+      workflowName: 'dash',
+      workflowId: 'wf-global-custom-e253eb7b',
+      sessionId: 'sess-d',
+      substrate: undefined,
+      taskIds: ['T1'],
+      ideaIds: undefined,
+      findingIds: ['F1'],
+    });
+    const rj = store.proposals.get('prop-dash0001')?.result as LaunchRunResultJson;
+    expect(rj).toMatchObject({ kind: 'launch-run', status: 'executed', runId: 'run-d', ignoredSeeds: ['findingIds'] });
+  });
+
+  it('omits ignoredSeeds from the result when the launch dropped nothing', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'launch-run', projectId: 7, workflowName: 'sprint', taskIds: ['T1'] }));
+    const deps = baseDeps(store, { launchRun: async () => ({ runId: 'r', worktreePath: '/w', branchName: 'b', ignoredSeeds: [] }) });
+    await executeProposal(deps, 'p1');
+    expect(store.proposals.get('p1')?.result).not.toHaveProperty('ignoredSeeds');
   });
 
   it('saga: session-create fails → no compensation, finalized failed', async () => {
@@ -873,5 +935,322 @@ describe('reconcileOrphanedExecutingProposals — create-backlog-items', () => {
     const rj = store.proposals.get('p1')?.result as CreateBacklogResultJson;
     expect(rj.reconciled).toBe(true);
     expect(rj.items.map((i) => i.ok)).toEqual([false, false]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triage-findings (TASK-292)
+// ---------------------------------------------------------------------------
+
+describe('executeProposal — triage-findings', () => {
+  /** A fake review inbox: live state per id, mutated by the recorded chokepoint writes. */
+  function inbox(initial: Record<string, ReviewItemStateSnapshot>) {
+    const state = new Map(Object.entries(initial));
+    const writes: Array<{ projectId: number; change: TriageReviewItemChange }> = [];
+    const applyReviewItemChange = vi.fn(async (projectId: number, change: TriageReviewItemChange) => {
+      writes.push({ projectId, change });
+      const ids = change.op === 'set-selected' ? change.reviewItemIds : [change.reviewItemId];
+      for (const id of ids) {
+        const live = state.get(id);
+        if (!live) throw new Error(`review item ${id} not found`);
+        if (change.op === 'resolve' || change.op === 'dismiss') {
+          if (live.status !== 'pending') throw new Error(`already ${live.status}`);
+          state.set(id, { ...live, status: change.op === 'resolve' ? 'resolved' : 'dismissed' });
+        } else if (change.op === 'approve') {
+          if (live.stagedAt !== null) throw new Error('not untriaged');
+          state.set(id, { ...live, stagedAt: 'now' });
+        } else if (change.op === 'set-selected') {
+          if (live.stagedAt === null) throw new Error('not staged');
+          state.set(id, { ...live, selected: change.selected });
+        }
+      }
+    });
+    const readReviewItemState = (_projectId: number, id: string): ReviewItemStateSnapshot | null => state.get(id) ?? null;
+    return { state, writes, applyReviewItemChange, readReviewItemState };
+  }
+  const pending = (over: Partial<ReviewItemStateSnapshot> = {}): ReviewItemStateSnapshot => ({ status: 'pending', stagedAt: null, selected: false, ...over });
+
+  it('fans a mixed batch out through the chokepoint, actor user, one write per item (two for select-unstaged)', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'dismiss', resolution: 'noise' },
+          { reviewItemId: 'r2', op: 'resolve' },
+          { reviewItemId: 'r3', op: 'approve' },
+          { reviewItemId: 'r4', op: 'set-selected', selected: true },
+          { reviewItemId: 'r5', op: 'set-selected', selected: false },
+        ],
+      }),
+    );
+    const box = inbox({ r1: pending(), r2: pending(), r3: pending(), r4: pending(), r5: pending({ stagedAt: 's', selected: true }) });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('executed');
+    expect(box.writes.map((w) => w.change)).toEqual([
+      { op: 'dismiss', actor: 'user', reviewItemId: 'r1', resolution: 'noise' },
+      { op: 'resolve', actor: 'user', reviewItemId: 'r2', resolution: null },
+      { op: 'approve', actor: 'user', reviewItemId: 'r3' },
+      { op: 'approve', actor: 'user', reviewItemId: 'r4' },
+      { op: 'set-selected', actor: 'user', reviewItemIds: ['r4'], selected: true },
+      { op: 'set-selected', actor: 'user', reviewItemIds: ['r5'], selected: false },
+    ]);
+    expect(box.writes.every((w) => w.projectId === 7)).toBe(true);
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toEqual({
+      kind: 'triage-findings',
+      status: 'executed',
+      applied: 5,
+      skipped: 0,
+      items: [
+        { reviewItemId: 'r1', op: 'dismiss', ok: true },
+        { reviewItemId: 'r2', op: 'resolve', ok: true },
+        { reviewItemId: 'r3', op: 'approve', ok: true },
+        { reviewItemId: 'r4', op: 'set-selected', ok: true },
+        { reviewItemId: 'r5', op: 'set-selected', ok: true },
+      ],
+    });
+    expect(box.state.get('r4')).toEqual({ status: 'pending', stagedAt: 'now', selected: true });
+  });
+
+  it('skips (never fails) an item someone else resolved or deleted between propose and confirm', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'dismiss' },
+          { reviewItemId: 'r2', op: 'dismiss' },
+          { reviewItemId: 'r3', op: 'approve' },
+        ],
+      }),
+    );
+    const box = inbox({ r1: pending(), r2: pending({ status: 'resolved' }) });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('executed');
+    expect(box.applyReviewItemChange).toHaveBeenCalledTimes(1);
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toMatchObject({ status: 'executed', applied: 1, skipped: 2 });
+    expect(rj.items).toEqual([
+      { reviewItemId: 'r1', op: 'dismiss', ok: true },
+      { reviewItemId: 'r2', op: 'dismiss', ok: false, skipped: 'already resolved' },
+      { reviewItemId: 'r3', op: 'approve', ok: false, skipped: 'no longer exists' },
+    ]);
+  });
+
+  it('a chokepoint rejection fails that item only; the batch finalizes failed with the rest applied', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'triage-findings',
+        projectId: 7,
+        items: [
+          { reviewItemId: 'r1', op: 'approve' },
+          { reviewItemId: 'r2', op: 'dismiss' },
+        ],
+      }),
+    );
+    // r1 is pending but already staged → approve is refused by the chokepoint.
+    const box = inbox({ r1: pending({ stagedAt: 's' }), r2: pending() });
+    const deps = baseDeps(store, { applyReviewItemChange: box.applyReviewItemChange, readReviewItemState: box.readReviewItemState });
+
+    const result = await executeProposal(deps, 'p1');
+    expect(result.ok && result.status).toBe('failed');
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj).toMatchObject({ status: 'failed', applied: 1, skipped: 0 });
+    expect(rj.items[0]).toEqual({ reviewItemId: 'r1', op: 'approve', ok: false, error: 'not untriaged' });
+    expect(rj.items[1]).toEqual({ reviewItemId: 'r2', op: 'dismiss', ok: true });
+    expect(box.state.get('r2')?.status).toBe('dismissed');
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — triage-findings', () => {
+  const payload = {
+    kind: 'triage-findings' as const,
+    projectId: 7,
+    items: [
+      { reviewItemId: 'r1', op: 'dismiss' as const },
+      { reviewItemId: 'r2', op: 'approve' as const },
+      { reviewItemId: 'r3', op: 'set-selected' as const, selected: true },
+    ],
+  };
+
+  it('every row already reflects its op → executed, never re-written', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal(payload, { status: 'executing' }));
+    const live: Record<string, ReviewItemStateSnapshot> = {
+      r1: { status: 'dismissed', stagedAt: null, selected: false },
+      r2: { status: 'pending', stagedAt: 's', selected: false },
+      r3: { status: 'pending', stagedAt: 's', selected: true },
+    };
+    const applyReviewItemChange = vi.fn(async () => {});
+    const deps = baseDeps(store, { applyReviewItemChange, readReviewItemState: (_p, id) => live[id] ?? null });
+
+    const summary = await reconcileOrphanedExecutingProposals(deps);
+    expect(summary.outcomes[0]).toMatchObject({ kind: 'triage-findings', finalizedTo: 'executed' });
+    expect(applyReviewItemChange).not.toHaveBeenCalled();
+    expect(store.proposals.get('p1')?.result).toMatchObject({ kind: 'triage-findings', status: 'executed', applied: 3, reconciled: true });
+  });
+
+  it('a row that does not reflect its op → failed crashed-mid-execution with the per-item state', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal(payload, { status: 'executing' }));
+    const live: Record<string, ReviewItemStateSnapshot> = {
+      r1: { status: 'dismissed', stagedAt: null, selected: false },
+      r2: { status: 'pending', stagedAt: null, selected: false },
+      // Selected but never staged does not count as applied for set-selected:true.
+      r3: { status: 'pending', stagedAt: null, selected: true },
+    };
+    const deps = baseDeps(store, { readReviewItemState: (_p, id) => live[id] ?? null });
+
+    const summary = await reconcileOrphanedExecutingProposals(deps);
+    expect(summary.outcomes[0]).toMatchObject({ finalizedTo: 'failed', note: expect.stringContaining('crashed-mid-execution') });
+    const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
+    expect(rj.items.map((i) => i.ok)).toEqual([true, false, false]);
+    expect(rj.applied).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start-quick-session (TASK-295)
+// ---------------------------------------------------------------------------
+
+describe('executeProposal — start-quick-session', () => {
+  it('mints the session, delivers the brief as its first prompt, and finalizes executed with the Open target', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'start-quick-session',
+        projectId: 7,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'findings-sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      }),
+    );
+    const created: StartQuickSessionCreated = { ...QUICK_CREATED, name: 'findings-sweep', substrate: 'interactive' };
+    const startQuickSession = vi.fn(async () => created);
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'panel-1' }));
+    const deps = baseDeps(store, { startQuickSession, deliverQuickSessionBrief });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('executed');
+    expect(startQuickSession).toHaveBeenCalledWith({ projectId: 7, name: 'findings-sweep', substrate: 'interactive', inPlace: true });
+    // The brief rides on the minted session's own resolved shape — nothing re-derived.
+    expect(deliverQuickSessionBrief).toHaveBeenCalledWith({ ...created, brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.' });
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      worktreePath: '/wt/sess-q',
+      sessionName: 'findings-sweep',
+      substrate: 'interactive',
+      claudePanelId: 'panel-1',
+    });
+  });
+
+  it('defaults: no name / substrate → the boot layer mints them; inPlace false', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const startQuickSession = vi.fn(async () => QUICK_CREATED);
+    await executeProposal(baseDeps(store, { startQuickSession }), 'p1');
+    expect(startQuickSession).toHaveBeenCalledWith({ projectId: 7, inPlace: false });
+  });
+
+  it('saga: session-create fails → no compensation, finalized failed', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const dismissSession = vi.fn(async () => {});
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'never' }));
+    const deps = baseDeps(store, {
+      startQuickSession: async () => {
+        throw new Error('git identity missing');
+      },
+      deliverQuickSessionBrief,
+      dismissSession,
+    });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('failed');
+    expect(deliverQuickSessionBrief).not.toHaveBeenCalled();
+    expect(dismissSession).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({ kind: 'start-quick-session', status: 'failed', error: 'git identity missing' });
+  });
+
+  it('saga: brief delivery fails after the session exists → the session is dismissed, finalized failed', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const dismissSession = vi.fn(async () => {});
+    const cancelRun = vi.fn(async () => {});
+    const deps = baseDeps(store, {
+      deliverQuickSessionBrief: async () => {
+        throw new Error('the Claude panel manager is not available yet');
+      },
+      dismissSession,
+      cancelRun,
+    });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('failed');
+    // The FULL dismiss sweeps the sentinel with the session — no separate cancel-run step.
+    expect(dismissSession).toHaveBeenCalledWith('sess-q');
+    expect(cancelRun).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toMatchObject({
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: 'the Claude panel manager is not available yet',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      sessionName: 'sunny-lake-20260921',
+      compensations: [{ step: 'dismiss-session', ok: true }],
+    });
+  });
+
+  it('saga: a failing dismiss is RECORDED, never thrown away', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const deps = baseDeps(store, {
+      deliverQuickSessionBrief: async () => {
+        throw new Error('spawn failed');
+      },
+      dismissSession: async () => {
+        throw new Error('worktree busy');
+      },
+    });
+    await executeProposal(deps, 'p1');
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj.compensations).toEqual([{ step: 'dismiss-session', ok: false, error: 'worktree busy' }]);
+    expect(store.proposals.get('p1')?.status).toBe('failed');
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — start-quick-session', () => {
+  it('always fails a stranded start as crashed-mid-execution, never re-minting the session', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }, { status: 'executing' }));
+    const startQuickSession = vi.fn(async () => QUICK_CREATED);
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'x' }));
+
+    const summary = await reconcileOrphanedExecutingProposals(baseDeps(store, { startQuickSession, deliverQuickSessionBrief }));
+
+    expect(summary.outcomes[0].finalizedTo).toBe('failed');
+    expect(summary.outcomes[0].note).toMatch(/crashed-mid-execution/);
+    expect(startQuickSession).not.toHaveBeenCalled();
+    expect(deliverQuickSessionBrief).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({ kind: 'start-quick-session', status: 'failed', reconciled: true, error: 'crashed-mid-execution' });
   });
 });

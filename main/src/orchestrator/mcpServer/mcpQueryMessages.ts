@@ -606,12 +606,28 @@ export type McpQueryMessage =
       projectId?: number;
     }
   | {
-      /** READ-ONLY, cross-project review_items inbox. Defaults to pending items only. */
+      /**
+       * READ-ONLY, cross-project review_items inbox. Defaults to pending items
+       * only. Rows come back COMPACT (no body / payload) unless `includeBody`;
+       * `summaryOnly` returns {kind,status,severity,source} tallies instead of
+       * rows. Paged (`limit` default 100, clamped to 250; `offset`) and filtered
+       * (kind / severity / source prefix / created_at window) so a large inbox
+       * never overflows the tool-result cap (TASK-293).
+       */
       type: 'mcp-queue';
       requestId: string;
       runId: string;
       projectId?: number;
       includeResolved?: boolean;
+      includeBody?: boolean;
+      summaryOnly?: boolean;
+      kind?: string;
+      severity?: string[];
+      sourcePrefix?: string;
+      createdAfter?: string;
+      createdBefore?: string;
+      limit?: number;
+      offset?: number;
     }
   | {
       /** READ-ONLY, cross-project workflow listing. Omitted projectId = every workflow row. */

@@ -31,6 +31,13 @@ import {
   type OpenSessionProposalPayload,
   type ReprioritizeBacklogItem,
   type ReprioritizeBacklogProposalPayload,
+  type StartQuickSessionProposalPayload,
+  type TriageFindingItem,
+  type TriageFindingsProposalPayload,
+  isTriageFindingOp,
+  START_QUICK_SESSION_BRIEF_MAX_CHARS,
+  START_QUICK_SESSION_NAME_MAX_CHARS,
+  TRIAGE_FINDINGS_MAX_ITEMS,
 } from '../../../../shared/types/agentThread';
 import { isCliSubstrate } from '../../../../shared/types/substrate';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
@@ -204,6 +211,35 @@ function parseCreateWorkflowAgent(raw: unknown): CreateWorkflowAgent | null {
   return agent;
 }
 
+/**
+ * Narrow one triage-findings entry. Strict like the other batch parsers: a
+ * malformed member rejects the whole payload. `set-selected` must carry
+ * `selected`; `resolution` is only meaningful on dismiss/resolve and is
+ * rejected elsewhere so the card never shows a note the op would drop. A
+ * caller-supplied `title` is ignored — prepareProposal stamps the row's.
+ */
+function parseTriageFindingItem(raw: unknown): TriageFindingItem | null {
+  if (!isRecord(raw)) return null;
+  const reviewItemId = raw.reviewItemId;
+  const op = raw.op;
+  if (typeof reviewItemId !== 'string' || reviewItemId.length === 0) return null;
+  if (!isTriageFindingOp(op)) return null;
+  const item: TriageFindingItem = { reviewItemId, op };
+  const resolution = raw.resolution;
+  if (resolution !== undefined) {
+    if (typeof resolution !== 'string' || (op !== 'dismiss' && op !== 'resolve')) return null;
+    item.resolution = resolution;
+  }
+  const selected = raw.selected;
+  if (op === 'set-selected') {
+    if (typeof selected !== 'boolean') return null;
+    item.selected = selected;
+  } else if (selected !== undefined) {
+    return null;
+  }
+  return item;
+}
+
 export function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
   if (!isRecord(raw)) return null;
   const target = raw.target;
@@ -236,9 +272,21 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
     case 'launch-run': {
       const projectId = raw.projectId;
       const workflowName = raw.workflowName;
+      const workflowId = raw.workflowId;
       if (typeof projectId !== 'number') return null;
-      if (typeof workflowName !== 'string' || !isCyboflowWorkflowName(workflowName)) return null;
-      const payload: LaunchRunProposalPayload = { kind: 'launch-run', projectId, workflowName };
+      // Exactly one of workflowId / workflowName is required; either may be a
+      // custom flow (resolved in prepareProposal — the parser only shapes).
+      if (workflowName !== undefined && (typeof workflowName !== 'string' || workflowName.trim().length === 0)) return null;
+      if (workflowId !== undefined && (typeof workflowId !== 'string' || workflowId.length === 0)) return null;
+      if (workflowName === undefined && workflowId === undefined) return null;
+      const payload: LaunchRunProposalPayload = {
+        kind: 'launch-run',
+        projectId,
+        // A missing name is filled in by prepareProposal once the id resolves;
+        // the placeholder never survives to a persisted row.
+        workflowName: typeof workflowName === 'string' ? workflowName.trim() : '',
+      };
+      if (typeof workflowId === 'string') payload.workflowId = workflowId;
 
       const substrate = raw.substrate;
       if (substrate !== undefined) {
@@ -328,6 +376,54 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
       const payload: CreateBacklogItemsProposalPayload = { kind: 'create-backlog-items', projectId, items };
       return payload;
     }
+    case 'triage-findings': {
+      const projectId = raw.projectId;
+      const itemsRaw = raw.items;
+      if (typeof projectId !== 'number') return null;
+      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
+      if (itemsRaw.length > TRIAGE_FINDINGS_MAX_ITEMS) return null;
+      const items: TriageFindingItem[] = [];
+      for (const entryRaw of itemsRaw) {
+        const item = parseTriageFindingItem(entryRaw);
+        if (!item) return null;
+        items.push(item);
+      }
+      const payload: TriageFindingsProposalPayload = { kind: 'triage-findings', projectId, items };
+      const summary = raw.summary;
+      if (summary !== undefined) {
+        if (typeof summary !== 'string') return null;
+        payload.summary = summary;
+      }
+      return payload;
+    }
+    case 'start-quick-session': {
+      const projectId = raw.projectId;
+      const brief = raw.brief;
+      if (typeof projectId !== 'number') return null;
+      if (typeof brief !== 'string' || brief.trim().length === 0) return null;
+      const payload: StartQuickSessionProposalPayload = { kind: 'start-quick-session', projectId, brief };
+      const name = raw.name;
+      if (name !== undefined) {
+        if (typeof name !== 'string') return null;
+        payload.name = name;
+      }
+      const substrate = raw.substrate;
+      if (substrate !== undefined) {
+        if (!isCliSubstrate(substrate)) return null;
+        payload.substrate = substrate;
+      }
+      const inPlace = raw.inPlace;
+      if (inPlace !== undefined) {
+        if (typeof inPlace !== 'boolean') return null;
+        payload.inPlace = inPlace;
+      }
+      const note = raw.note;
+      if (note !== undefined) {
+        if (typeof note !== 'string') return null;
+        payload.note = note;
+      }
+      return payload;
+    }
     case 'create-workflow': {
       const projectId = raw.projectId;
       const name = raw.name;
@@ -393,6 +489,29 @@ export interface PrepareProposalDeps {
   workflowNameTaken(projectId: number | null, name: string): boolean;
   /** Does `projectId` already carry a custom agent (an agent_overrides row) under `agentKey`? */
   customAgentExists(projectId: number, agentKey: string): boolean;
+  /**
+   * The workflow a launch-run proposal names, among the flows VISIBLE to
+   * `projectId` (global rows + the project's own; an archived row is not
+   * launchable). By id when given, else by exact name — a project-scoped row
+   * shadows a same-named global one, matching the launch wizard. Null when
+   * nothing matches.
+   */
+  resolveLaunchWorkflow(
+    projectId: number,
+    ref: { workflowId?: string; workflowName?: string },
+  ): { id: string; name: string; projectId: number | null } | null;
+  /** The triage-relevant columns of one review_items row by id (any project), or undefined when absent. */
+  readReviewItem(reviewItemId: string): ReviewItemTriageSnapshot | undefined;
+}
+
+/** What prepareProposal needs to know about a review item to admit it into a triage batch. */
+export interface ReviewItemTriageSnapshot {
+  projectId: number;
+  kind: string;
+  status: string;
+  stagedAt: string | null;
+  selected: boolean;
+  title: string;
 }
 
 /**
@@ -404,11 +523,45 @@ export interface PrepareProposalDeps {
  * `workflow_name_invalid:<why>`, `workflow_name_reserved`, `workflow_name_taken`,
  * `global_scope_with_agents`, `invalid_definition:<path: issue>`,
  * `agent_invalid:<key>:<why>`, `agent_key_reserved:<key>`,
- * `agent_key_taken:<key>`, `unknown_step_agent:<key>`.
+ * `agent_key_taken:<key>`, `unknown_step_agent:<key>`; for launch-run
+ * `unknown_workflow:<idOrName>`; and for triage-findings
+ * `review_item_not_found:<id>`, `review_item_not_finding:<id>`,
+ * `review_item_not_pending:<id>`, `review_item_not_staged:<id>`,
+ * `duplicate_review_item:<id>`; and for start-quick-session `project_not_found`,
+ * `brief_too_long`, `invalid_name`.
  */
 export type PrepareProposalResult =
   | { ok: true; payload: AgentProposalPayload; preconditions: AgentProposalPreconditions | null }
   | { ok: false; error: string };
+
+/**
+ * The launch-run branch of prepareProposal: resolve the named workflow among
+ * the flows visible to the project and stamp `workflowId` / `workflowName` /
+ * `workflowScope` back onto the payload. Returns the error string or null.
+ *
+ * A BUILT-IN name that resolves to no row is let through unstamped: the
+ * built-in rows are minted by WorkflowRegistry's boot reconcile, so their
+ * absence only ever means a fixture/fresh DB, and the launch closure resolves
+ * a built-in by name at confirm time exactly as it did before workflowId
+ * existed. A custom name/id that resolves to nothing is an assistant mistake
+ * and is refused with a NAMED error, never a bare invalid_payload.
+ */
+function resolveLaunchRunWorkflow(deps: PrepareProposalDeps, payload: LaunchRunProposalPayload): string | null {
+  const ref = payload.workflowId !== undefined ? { workflowId: payload.workflowId } : { workflowName: payload.workflowName };
+  const row = deps.resolveLaunchWorkflow(payload.projectId, ref);
+  if (row === null) {
+    if (payload.workflowId === undefined && isCyboflowWorkflowName(payload.workflowName)) return null;
+    return `unknown_workflow:${payload.workflowId ?? payload.workflowName}`;
+  }
+  payload.workflowId = row.id;
+  payload.workflowName = row.name;
+  if (isCyboflowWorkflowName(row.name)) {
+    delete payload.workflowScope;
+  } else {
+    payload.workflowScope = row.projectId === null ? 'global' : 'project';
+  }
+  return null;
+}
 
 /**
  * Validate a raw proposal payload and capture its preconditions.
@@ -508,10 +661,93 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
     // fix in the same turn instead of the human confirming a card that fails.
     const error = validateCreateWorkflow(deps, payload);
     if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'launch-run') {
+    // No preconditions (shared type contract), but the workflow is resolved
+    // NOW — by id or by name, custom flows included — so a confirmed card
+    // never dies on a flow the assistant misremembered (TASK-294).
+    const error = resolveLaunchRunWorkflow(deps, payload);
+    if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'triage-findings') {
+    // No preconditions: a finding that stops being pending between propose and
+    // confirm is SKIPPED per item by the executor, not CAS-refused as a whole.
+    // Everything else is checked now, mirroring create-backlog-items' posture
+    // that a confirmed card must never die on an id the assistant got wrong.
+    const error = validateTriageFindings(deps, payload);
+    if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'start-quick-session') {
+    // No preconditions (nothing exists yet to race against). The project must
+    // exist, the brief must fit, and the name — a git branch component, since
+    // quick-session names ARE worktree names — is normalized to a slug NOW so
+    // the card shows exactly what the worktree will be called.
+    const error = validateStartQuickSession(deps, payload);
+    if (error !== null) return { ok: false, error };
   }
-  // launch-run carries no preconditions (shared type contract).
 
   return { ok: true, payload, preconditions };
+}
+
+/**
+ * Normalize a proposed quick-session name to a branch-safe slug: lower-case,
+ * runs of anything outside `[a-z0-9._-]` collapsed to one `-`, runs of dots
+ * collapsed to one (`..` is a forbidden ref sequence), leading / trailing
+ * separators trimmed, capped at {@link START_QUICK_SESSION_NAME_MAX_CHARS}, and
+ * a trailing `.lock` dropped (git refuses a component ending in it). The slug
+ * becomes the worktree branch (`git worktree add -b`), so every form
+ * `git check-ref-format --branch` rejects must be gone here, at propose time,
+ * not at execution. Returns '' when nothing survives (the caller rejects that
+ * as invalid_name).
+ */
+export function normalizeQuickSessionName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[-._]+|[-._]+$/g, '')
+    .slice(0, START_QUICK_SESSION_NAME_MAX_CHARS)
+    .replace(/\.lock$/, '')
+    .replace(/[-._]+$/g, '');
+}
+
+/** The start-quick-session branch of prepareProposal; returns the error string or null. */
+function validateStartQuickSession(deps: PrepareProposalDeps, payload: StartQuickSessionProposalPayload): string | null {
+  const projectExists = deps.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
+  if (!projectExists) return 'project_not_found';
+  if (payload.brief.length > START_QUICK_SESSION_BRIEF_MAX_CHARS) return 'brief_too_long';
+  if (payload.name !== undefined) {
+    const slug = normalizeQuickSessionName(payload.name);
+    if (slug === '') return 'invalid_name';
+    payload.name = slug;
+  }
+  return null;
+}
+
+/**
+ * The triage-findings branch of prepareProposal; returns the error string or
+ * null when valid. Each id must exist, belong to the project, be a FINDING
+ * (gate kinds are folded run-pause co-writes and are not triaged from here),
+ * be pending, and appear once. A `set-selected:false` needs a staged row (the
+ * chokepoint refuses to toggle an unstaged one); `set-selected:true` on an
+ * unstaged row is fine — the executor stages it first. Titles are stamped
+ * from the rows so the card renders without a lookup.
+ */
+function validateTriageFindings(deps: PrepareProposalDeps, payload: TriageFindingsProposalPayload): string | null {
+  const projectExists = deps.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
+  if (!projectExists) return 'project_not_found';
+  const seen = new Set<string>();
+  for (const item of payload.items) {
+    if (seen.has(item.reviewItemId)) return `duplicate_review_item:${item.reviewItemId}`;
+    seen.add(item.reviewItemId);
+    const row = deps.readReviewItem(item.reviewItemId);
+    if (!row || row.projectId !== payload.projectId) return `review_item_not_found:${item.reviewItemId}`;
+    if (row.kind !== 'finding') return `review_item_not_finding:${item.reviewItemId}`;
+    if (row.status !== 'pending') return `review_item_not_pending:${item.reviewItemId}`;
+    if (item.op === 'set-selected' && item.selected === false && row.stagedAt === null) {
+      return `review_item_not_staged:${item.reviewItemId}`;
+    }
+    item.title = row.title;
+  }
+  return null;
 }
 
 /** Every `step.agent` a definition binds, fan-out inner steps included. */
@@ -654,6 +890,46 @@ export function createPrepareProposalDeps(db: DatabaseLike): PrepareProposalDeps
     },
     customAgentExists(projectId: number, agentKey: string): boolean {
       return db.prepare('SELECT 1 FROM agent_overrides WHERE project_id = ? AND agent_key = ? LIMIT 1').get(projectId, agentKey) !== undefined;
+    },
+    resolveLaunchWorkflow(projectId, ref) {
+      // Visibility mirrors WorkflowRegistry.listByProject (global rows + the
+      // project's own, minus the quick sentinel); archived rows are not
+      // launchable. By name, a project-scoped row wins over a global one —
+      // `ORDER BY project_id IS NULL` sorts the project row (0) first.
+      const row =
+        ref.workflowId !== undefined
+          ? (db
+              .prepare(
+                `SELECT id, name, project_id FROM workflows
+                  WHERE id = ? AND (project_id = ? OR project_id IS NULL) AND archived_at IS NULL AND name != ?`,
+              )
+              .get(ref.workflowId, projectId, QUICK_WORKFLOW_NAME) as { id: string; name: string; project_id: number | null } | undefined)
+          : ref.workflowName !== undefined
+            ? (db
+                .prepare(
+                  `SELECT id, name, project_id FROM workflows
+                    WHERE name = ? AND (project_id = ? OR project_id IS NULL) AND archived_at IS NULL AND name != ?
+                    ORDER BY project_id IS NULL ASC LIMIT 1`,
+                )
+                .get(ref.workflowName, projectId, QUICK_WORKFLOW_NAME) as { id: string; name: string; project_id: number | null } | undefined)
+            : undefined;
+      return row === undefined ? null : { id: row.id, name: row.name, projectId: row.project_id };
+    },
+    readReviewItem(reviewItemId) {
+      const row = db
+        .prepare('SELECT project_id, kind, status, staged_at, selected, title FROM review_items WHERE id = ?')
+        .get(reviewItemId) as
+        | { project_id: number; kind: string; status: string; staged_at: string | null; selected: number; title: string }
+        | undefined;
+      if (!row) return undefined;
+      return {
+        projectId: row.project_id,
+        kind: row.kind,
+        status: row.status,
+        stagedAt: row.staged_at,
+        selected: row.selected === 1,
+        title: row.title,
+      };
     },
   };
 }
