@@ -281,6 +281,23 @@ describe('onThreadEvent live-tail', () => {
     expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
     await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
   });
+
+  it('resets liveEvents to [] when sendMessage starts a new turn', async () => {
+    useAgentThreadStore.setState({
+      thread: makeThread(),
+      liveEvents: [
+        makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+      ],
+    });
+    expect(useAgentThreadStore.getState().liveEvents).toHaveLength(1);
+
+    const sendPromise = useAgentThreadStore.getState().sendMessage('hello again');
+    // Cleared synchronously, before the mutation resolves.
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+
+    await sendPromise;
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
