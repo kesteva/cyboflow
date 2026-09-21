@@ -926,8 +926,22 @@ export interface ControllerHost {
    * decision (retry / escalate-to-human / fail). Absent ⇒ the controller fails the
    * run. The production host always implements it (escalate by default, or the
    * monitor's verdict when one is wired).
+   *
+   * `opts.retryAvailable` tells the host whether a 'retry' verdict can actually
+   * be HONOURED — i.e. whether this step's per-step triage budget
+   * (MAX_STEP_LOOPBACKS) still has room. It is false on the last consult, where
+   * the controller would discard a 'retry' and fail the run: a host that spent a
+   * consult there would stage retry guidance for a spawn that never happens and
+   * file an audit record asserting a re-drive that never happened. Absent ⇒ true,
+   * so every caller that does not pass it (tests, any other controller) behaves
+   * exactly as before this option existed.
    */
-  triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
+  triageFailure?(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    error: string | undefined,
+    opts?: { retryAvailable: boolean },
+  ): Promise<TriageDecision>;
 
   /**
    * Optional LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted

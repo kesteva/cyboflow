@@ -2906,7 +2906,14 @@ export class WorkflowController {
     this.emit({ kind: 'step-failed', runId: baseCtx.runId, phaseId: phase.id, stepId: step.id, error: lastError });
 
     const ctx: ControllerStepContext = { ...baseCtx, attempt };
-    const decision = this.host.triageFailure ? await this.host.triageFailure(step, ctx, lastError) : 'fail';
+    // Tell the host up front whether a 'retry' verdict is still spendable. When
+    // it is not, `tryTriageRetry()` below returns null and the run ends failed —
+    // so the host must not pay for a consult whose retry it would then have to
+    // narrate as if it had happened (staged guidance, chat note, audit finding).
+    const retryAvailable = (triageRetries.get(step.id) ?? 0) < MAX_STEP_LOOPBACKS;
+    const decision = this.host.triageFailure
+      ? await this.host.triageFailure(step, ctx, lastError, { retryAvailable })
+      : 'fail';
 
     const tryTriageRetry = (): { terminal: false; i: number } | null => {
       const used = triageRetries.get(step.id) ?? 0;

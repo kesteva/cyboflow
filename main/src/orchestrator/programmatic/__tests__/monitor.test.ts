@@ -3239,8 +3239,25 @@ describe('DefaultMonitorSession.reviewBlockingItems', () => {
     expect(readOpts).toEqual([{ withRunDigest: true }]);
     expect((structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0].schema).toBe(MONITOR_BLOCKING_ITEMS_SCHEMA);
     expect(injected).toHaveLength(1);
-    expect(injected[0].text).toContain('resolved **null deref in parser**');
+    // The note is composed BEFORE the host applies anything, so the resolve line
+    // states an intent and one trailing caveat carries the conditions (FB-2).
+    expect(injected[0].text).toContain('resolving **null deref in parser**');
+    expect(injected[0].text).not.toContain('resolved **null deref in parser**');
+    expect(injected[0].text).toContain("a resolve lands only within the supervisor's resolve budget");
     expect(injected[0].text).toContain('Approve the plan');
+  });
+
+  it('omits the resolve caveat when nothing is being resolved', async () => {
+    const { reader } = fakeHistory(digestHistory);
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      items: [{ reviewItemId: 'rvw_d1', action: 'recommend', choice: 'approve', rationale: 'matches the brief.' }],
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    await session.reviewBlockingItems(blockingReq());
+
+    expect(injected[0].text).not.toContain('a resolve lands only');
   });
 
   it('says so plainly when it had nothing to add', async () => {

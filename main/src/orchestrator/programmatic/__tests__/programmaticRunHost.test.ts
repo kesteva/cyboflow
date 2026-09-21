@@ -335,6 +335,52 @@ describe('ProgrammaticRunHost', () => {
     expect(injectedText(injected)).toContain('Triage — Build epics: escalate. a product call');
   });
 
+  // ── FB-3: no consult the controller could not honour ───────────────────────
+  it("escalates WITHOUT consulting the monitor when the controller has no retry left", async () => {
+    const monitor = makeMonitor('retry', 'worth one more go', 'pin the fixture clock');
+    const injected: ClaudeStreamEvent[] = [];
+    const setRetryGuidance = vi.fn();
+    const fileMonitorFinding = vi.fn().mockResolvedValue(undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      setRetryGuidance,
+      fileMonitorFinding,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(
+      await host.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom', { retryAvailable: false }),
+    ).toBe('escalate');
+
+    expect(monitor.triage).not.toHaveBeenCalled();
+    expect(setRetryGuidance).not.toHaveBeenCalled();
+    expect(fileMonitorFinding).not.toHaveBeenCalled();
+    expect(injectedText(injected)).toContain(
+      'Step **Implement** exhausted its retries and its retry budget — escalated to the review queue for your decision.',
+    );
+  });
+
+  it('consults as usual when a retry is still available (and when the option is absent)', async () => {
+    for (const opts of [{ retryAvailable: true }, undefined]) {
+      const monitor = makeMonitor('retry', 'worth one more go');
+      const host = new ProgrammaticRunHost({
+        runId: 'r',
+        projectId: 1,
+        reporter: makeReporter(),
+        gate: makeGate('approve'),
+        monitor,
+        injectEvent: () => undefined,
+      });
+
+      expect(await host.triageFailure(step({ id: 'impl', name: 'Implement' }), ctx, 'boom', opts)).toBe('retry');
+      expect(monitor.triage).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("is fail-soft — a throwing monitor.triage defaults to 'escalate' and does not abort the walk", async () => {
     const monitor: MonitorSession = {
       triage: vi.fn().mockRejectedValue(new Error('triage boom')),
@@ -1603,9 +1649,15 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
       resolution: 'resolved by supervisor: already fixed in 9a1b2c3. The guard landed.',
     });
     const audit = fileMonitorFinding.mock.calls[0][0] as { title: string; body: string; category: string };
-    expect(audit.title).toBe('Resolved blocking finding: null deref in parser');
+    expect(audit.title).toBe('Supervisor resolve — null deref in parser');
     expect(audit.category).toBe('escalation-resolve');
     expect(audit.body).toContain('rvw_f1');
+    // FB-8: the record is filed BEFORE the resolve, so it claims an intent, not
+    // an accomplished close, and says what happens when the resolve is refused.
+    expect(audit.body).toContain('is resolving this blocking finding on its own authority');
+    expect(audit.body).toContain('whether or not the resolve lands');
+    expect(audit.body).toContain('Item: `rvw_f1`');
+    expect(audit.body).not.toContain('Resolved item:');
     // The resolve landed BEFORE awaitClear read the queue — no park flicker.
     expect(trace).toEqual(['list', 'proceed']);
   });
@@ -1872,6 +1924,80 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
 
     await expect(host.awaitBlockingReviewItems('r')).resolves.toBe('proceed');
     expect(blockingGate.awaitClear).toHaveBeenCalledTimes(1);
+  });
+
+  // ── FB-4: a cancel between the consult and the applies discards the batch ──
+  it('discards the verdicts (and marks nothing reviewed) when the run is canceled mid-consult', async () => {
+    const controller = new AbortController();
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    const resolveReviewItemAsMonitor = vi.fn();
+    const annotateReviewItem = vi.fn();
+    const fileMonitorFinding = vi.fn();
+    const monitor: MonitorSession = {
+      triage: vi.fn(),
+      answer: vi.fn().mockResolvedValue(''),
+      // The cancel lands WHILE the consult is in flight: the verdict resolves,
+      // but the walk it belongs to no longer exists.
+      reviewBlockingItems: vi.fn(async (): Promise<BlockingItemDecision[]> => {
+        controller.abort();
+        return [{ reviewItemId: 'rvw_f1', action: 'resolve', rationale: 'already fixed.' }];
+      }),
+    };
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate, monitor,
+      resolveReviewItemAsMonitor, annotateReviewItem, fileMonitorFinding,
+    });
+
+    await host.awaitBlockingReviewItems('r', controller.signal);
+
+    expect(resolveReviewItemAsMonitor).not.toHaveBeenCalled();
+    expect(annotateReviewItem).not.toHaveBeenCalled();
+    expect(fileMonitorFinding).not.toHaveBeenCalled();
+    // …and the ids are NOT burned: a resumed run's next boundary looks again.
+    await host.awaitBlockingReviewItems('r');
+    expect(monitor.reviewBlockingItems).toHaveBeenCalledTimes(2);
+  });
+
+  // ── FB-8: the designed invalid_status race is not a failure and costs nothing ─
+  it('spends no walk budget on a resolve the human answered first', async () => {
+    const refusal = Object.assign(new Error('review item is not pending'), { code: 'invalid_status' });
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const blockingGate = makeBlockingGate([blockingItem()]);
+    // The FIRST resolve is refused (a human triaged it mid-consult); the rest land.
+    const resolveReviewItemAsMonitor = vi.fn(async ({ reviewItemId }: { reviewItemId: string }) => {
+      if (reviewItemId === 'rvw_f0') throw refusal;
+    });
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        reviewBlockingItems: vi.fn(async (req: BlockingItemsEscalationRequest) =>
+          req.items.map((i) => ({ reviewItemId: i.id, action: 'resolve' as const, rationale: 'already fixed.' })),
+        ),
+      },
+      resolveReviewItemAsMonitor,
+      annotateReviewItem: vi.fn().mockResolvedValue(undefined),
+      fileMonitorFinding: vi.fn().mockResolvedValue(undefined),
+      logger,
+    });
+
+    // CAP + 1 boundaries, one item each: the refused one must not have cost a unit.
+    for (let i = 0; i <= MONITOR_WALK_RESOLVE_CAP; i += 1) {
+      blockingGate.items = [blockingItem({ id: `rvw_f${i}` })];
+      await host.awaitBlockingReviewItems('r');
+    }
+
+    expect(resolveReviewItemAsMonitor).toHaveBeenCalledTimes(MONITOR_WALK_RESOLVE_CAP + 1);
+    expect(logger.info).toHaveBeenCalledWith(
+      '[ProgrammaticRunHost] blocking finding triaged before the supervisor resolve landed',
+      expect.objectContaining({ reviewItemId: 'rvw_f0' }),
+    );
+    // The designed race gets its OWN info log, not the generic apply warning.
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      '[ProgrammaticRunHost] blocking-item verdict not applied (fail-soft)',
+      expect.anything(),
+    );
   });
 
   it('is a no-op (no barrier, no consult) for a host built without a blocking gate', async () => {

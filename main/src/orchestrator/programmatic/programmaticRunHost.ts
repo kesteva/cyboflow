@@ -884,6 +884,8 @@ export class ProgrammaticRunHost implements ControllerHost {
    *      The second half is what stops a run that parks, is unparked, and parks
    *      again from re-litigating the same items.
    *   4. Consult, mark every item reviewed, then apply the verdicts one by one.
+   *      An ABORT observed between the consult and the applies discards the
+   *      whole batch and marks nothing — see the comment at that check.
    *
    * NEVER THROWS and never delays the park beyond its own consult: the caller
    * awaits it only so the applies land before `awaitClear` reads the queue (a
@@ -909,6 +911,20 @@ export class ProgrammaticRunHost implements ControllerHost {
 
       const req: BlockingItemsEscalationRequest = { kind: 'blocking-items', items: fresh };
       const decisions = await monitor.reviewBlockingItems(req, signal);
+      // Canceled WHILE the consult was in flight (same guard as
+      // `adviseReviewLoop`): the walk this verdict belongs to no longer exists,
+      // so applying it would resolve blocking findings and file audit rows for a
+      // run that is gone — and `clearPendingForRun` dismisses only `decision`
+      // rows, so those findings would still be pending and still resolvable.
+      // The ids are deliberately NOT marked reviewed either: a resumed run's
+      // next boundary is entitled to a first look at items nobody answered.
+      if (signal?.aborted === true) {
+        this.args.logger?.info('[ProgrammaticRunHost] blocking-items verdicts discarded; the run was canceled mid-consult', {
+          runId,
+          items: fresh.length,
+        });
+        return;
+      }
       // Mark BEFORE applying: an item the supervisor was shown has had its one
       // look, whether or not the apply below succeeds. Re-asking on the next
       // boundary would spend another query to reach the same verdict — and,
@@ -1019,7 +1035,10 @@ export class ProgrammaticRunHost implements ControllerHost {
    *
    * The walk counter is still incremented on the RESOLVE landing, not on the
    * audit finding: only a resolve that actually unblocks the run may spend walk
-   * budget.
+   * budget. That is also why the record is worded as an INTENT ("is resolving",
+   * filed before the resolve) rather than an accomplished fact: the resolve it
+   * precedes may still be refused `invalid_status` by a human who answered
+   * first, and a note that claimed the close would then be a lie in the queue.
    */
   private async resolveBlockingFinding(
     runId: string,
@@ -1027,8 +1046,16 @@ export class ProgrammaticRunHost implements ControllerHost {
     rationale: string,
   ): Promise<boolean> {
     const audited = await this.fileMonitorAuditFinding(
-      `Resolved blocking finding: ${item.title}`,
-      `${rationale}\n\nResolved item: \`${item.id}\` — ${item.title}`,
+      `Supervisor resolve — ${item.title}`,
+      [
+        'The run supervisor is resolving this blocking finding on its own authority; this record is filed ' +
+          'before the resolve and counts against its resolve budget whether or not the resolve lands (a human ' +
+          "who answers first wins — the item's own resolver shows who closed it).",
+        '',
+        rationale,
+        '',
+        `Item: \`${item.id}\` — ${item.title}`,
+      ].join('\n'),
       ESCALATION_RESOLVE_FINDING_CATEGORY,
     );
     if (!audited) {
@@ -1038,10 +1065,26 @@ export class ProgrammaticRunHost implements ControllerHost {
       );
       return false;
     }
-    await this.args.resolveReviewItemAsMonitor?.({
-      reviewItemId: item.id,
-      resolution: `resolved by supervisor: ${rationale}`,
-    });
+    try {
+      await this.args.resolveReviewItemAsMonitor?.({
+        reviewItemId: item.id,
+        resolution: `resolved by supervisor: ${rationale}`,
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        // The DESIGNED race, not a failure: a human triaged the item while the
+        // consult was in flight and their answer wins. Info, not warn — and no
+        // walk budget is spent, because nothing was closed. The caller falls
+        // through to the recommendation, whose own annotate absorbs the same
+        // refusal at debug if the item is closed for good.
+        this.args.logger?.info('[ProgrammaticRunHost] blocking finding triaged before the supervisor resolve landed', {
+          runId,
+          reviewItemId: item.id,
+        });
+        return false;
+      }
+      throw err;
+    }
     this.walkResolveCount += 1;
     this.args.logger?.info('[ProgrammaticRunHost] blocking finding resolved by the supervisor', {
       runId,
@@ -1193,12 +1236,32 @@ export class ProgrammaticRunHost implements ControllerHost {
    *     controller never opens a gate for an optional step (item 7D consults this
    *     seam before skipping one), so "escalated to the review queue" would
    *     promise the user a gate that is never going to appear.
+   *
+   * `opts.retryAvailable === false` short-circuits the whole method to
+   * 'escalate' WITHOUT a consult: see the comment on that branch.
    */
   async triageFailure(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    opts?: { retryAvailable: boolean },
   ): Promise<TriageDecision> {
+    // The controller cannot honour a 'retry' any more: it would discard the
+    // verdict and fail the run. Consulting anyway would spend a query to produce
+    // a retry this method then narrates as if it had happened — guidance staged
+    // on a one-shot channel that outlives the walk, a chat note saying "retry",
+    // and an audit finding claiming the step was re-driven. Skip the consult and
+    // escalate, which is what the run is about to do regardless.
+    if (opts?.retryAvailable === false) {
+      this.args.logger?.info('[ProgrammaticRunHost] triage skipped: no retry budget left; escalating to human', {
+        runId: this.args.runId,
+        stepId: step.id,
+      });
+      this.injectMonitorTurn(
+        `Step **${step.name}** exhausted its retries and its retry budget — escalated to the review queue for your decision.`,
+      );
+      return 'escalate';
+    }
     const optional = step.optional === true;
     // What an unusable/absent verdict MEANS for this step, in the user's terms.
     const escalationOutcome = optional

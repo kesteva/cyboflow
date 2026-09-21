@@ -2516,9 +2516,15 @@ function gateEscalationSummary(req: GateEscalationRequest, decision: GateEscalat
  *
  * ONE note for the whole consult, not one per item: a run that parks on five
  * findings would otherwise post five turns at the same instant, and the thing
- * the human needs to see is the SHAPE of the answer — what was closed
- * autonomously versus what is still waiting for them. Resolves are listed first
- * and named, because those are the ones that happened without asking.
+ * the human needs to see is the SHAPE of the answer — what the supervisor is
+ * closing autonomously versus what is still waiting for them. Resolves are
+ * listed first and named, because those are the ones that happen without asking.
+ *
+ * This note is composed BEFORE the host applies anything, so a resolve line is
+ * phrased as an INTENT, never as a completed close: the host still has to clear
+ * both resolve caps, find a resolve sink wired, and land the audit record, and a
+ * human who answers first wins the race outright. The trailing caveat says so
+ * once for the whole note rather than hedging every line.
  */
 function blockingItemsSummary(
   req: BlockingItemsEscalationRequest,
@@ -2531,11 +2537,16 @@ function blockingItemsSummary(
     return `• Blocking review: ${req.items.length} item${req.items.length === 1 ? '' : 's'} still need${req.items.length === 1 ? 's' : ''} you — I had nothing to add. The run is parked.`;
   }
   const lines = [
-    ...resolved.map((d) => `  - resolved **${titleOf(d.reviewItemId)}** — ${d.rationale}`),
+    ...resolved.map((d) => `  - resolving **${titleOf(d.reviewItemId)}** — ${d.rationale}`),
     ...recommended.map(
       (d) => `  - **${titleOf(d.reviewItemId)}**: I would ${d.choice ?? 'leave it to you'} — ${d.rationale}`,
     ),
   ];
+  if (resolved.length > 0) {
+    lines.push(
+      "  - (a resolve lands only within the supervisor's resolve budget and only if nobody answered first — an item that stays pending was not resolved)",
+    );
+  }
   return `• Blocking review (${req.items.length} item${req.items.length === 1 ? '' : 's'}):\n${lines.join('\n')}`;
 }
 

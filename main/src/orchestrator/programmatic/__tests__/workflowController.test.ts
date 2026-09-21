@@ -594,6 +594,29 @@ describe('WorkflowController', () => {
       expect(runner.calls.filter((c) => c.id === 'a').length).toBe(MAX_STEP_LOOPBACKS + 1);
     });
 
+    // FB-3: the host must know when a 'retry' verdict could not be honoured, so
+    // it does not narrate a re-drive the controller is about to discard.
+    it("tells the host whether a 'retry' is still spendable (retryAvailable)", async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: Array.from({ length: 50 }, () => ({ status: 'failed' as const })) });
+      const seen: Array<boolean | undefined> = [];
+      const host = makeTriageHost('retry', { a: ['approve'] });
+      host.triageFailure = async (_step, _ctx, _error, opts) => {
+        seen.push(opts?.retryAvailable);
+        // What the production host does on the last consult: no monitor query,
+        // straight to the gate.
+        return opts?.retryAvailable === false ? 'escalate' : 'retry';
+      };
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(seen).toEqual([...Array.from({ length: MAX_STEP_LOOPBACKS }, () => true), false]);
+      // The budget-exhausted consult opened the gate instead of failing silently.
+      expect(host.gateCalls).toEqual(['a']);
+      expect(result.outcome).toBe('completed');
+      expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped' });
+    });
+
     it("'escalate' triage opens a human gate; approve SKIPS the failed step and advances", async () => {
       const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
       const runner = makeRunner({ a: [{ status: 'failed', error: 'boom' }] });
