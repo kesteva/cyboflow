@@ -163,6 +163,25 @@ describe('WorkflowStepCard', () => {
     expect(head.getAttribute('style')).toContain('repeating-linear-gradient');
   });
 
+  it('human gate step with no modelLabel (backend never supplies a stepModels entry for gates): row reads exactly "agent ×N", no model segment/dot', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP_HUMAN}
+        phase={MOCK_PHASE}
+        stepIndex={5}
+        status="running"
+      />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-human-review')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('step-card-model-dot-human-review')).not.toBeInTheDocument();
+
+    const row = screen.getByTestId('step-card-agent-row-human-review');
+    expect(row).not.toHaveAttribute('title');
+    expect(row).toHaveTextContent('human');
+    expect(row).toHaveTextContent('×0');
+  });
+
   it('optional variant: OPTIONAL chip visible in head bar', () => {
     render(
       <WorkflowStepCard

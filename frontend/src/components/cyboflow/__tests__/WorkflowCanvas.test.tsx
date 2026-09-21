@@ -497,6 +497,43 @@ describe('WorkflowCanvas', () => {
     expect(screen.getByTestId('step-card-step-a')).toBeInTheDocument();
   });
 
+  it('falls back to the "other" family swatch for an unrecognized model family bucket', () => {
+    const stepModels = new Map([['step-a', { label: 'Mystery Model', family: 'not-a-real-family' }]]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    // MODEL_FAMILY_COLORS.other = #7a7268 (shared/types/agents.ts) — unresolved
+    // family buckets must not throw and must not silently render `undefined`.
+    expect(screen.getByTestId('step-card-model-dot-step-a')).toHaveStyle({
+      backgroundColor: '#7a7268',
+    });
+  });
+
+  it('threading a stepModels entry does not change the step card/wrapper height or column width (138x120 unchanged)', () => {
+    const stepModels = new Map([
+      ['step-a', { label: 'Opus 5', family: 'opus' }],
+      ['step-b', { label: 'Auto', family: 'auto' }],
+    ]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    // ROW_H (wrapper height) and COL_W (column width) are unaffected by the
+    // model segment folding into the existing row — no new row was added.
+    expect(screen.getByTestId('step-wrapper-step-a')).toHaveStyle({ height: '120px' });
+    expect(screen.getByTestId('step-wrapper-step-b')).toHaveStyle({ height: '120px' });
+    expect(screen.getByTestId('phase-column-phase-1')).toHaveStyle({ width: '138px' });
+  });
+
   it('measures edge/token overlay coordinates relative to the inner content, not the outer scroll viewport', () => {
     // Deliberately give workflow-canvas-viewport a DIFFERENT rect than
     // workflow-canvas-inner — if the measurement effect ever regressed to use
