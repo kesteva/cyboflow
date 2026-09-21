@@ -35,6 +35,7 @@ import {
 } from '../../../../shared/types/sprintBatch';
 import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
 import {
+  normalizeAdversarialId,
   parseAdversarialReviewDoc,
   type ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
@@ -144,6 +145,44 @@ function blockingSectionHasEntries(text: string): boolean {
   if (/^####\s+AR-\d+/m.test(body)) return true;
   return !/^none\.?$/i.test(body.trim());
 }
+
+/**
+ * The normalized `AR-n` ids of a parse's `## Blocking` entries, as a set.
+ *
+ * Normalized because the two documents being compared were written by the same
+ * language model in two different turns (`AR-3` in one, `ar 3` in the other is a
+ * real spelling drift), and a raw string compare would read that as a different
+ * round. Set, not array: the sections are unordered, so only membership is a
+ * signal.
+ */
+function blockingIdSet(parsed: ParsedAdversarialReview): Set<string> {
+  return new Set(parsed.blocking.map((entry) => normalizeAdversarialId(entry.id)));
+}
+
+/** Whether two `AR-n` id sets hold exactly the same ids (order-insensitive). */
+function sameIdSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
+/** An id set as a stable, readable log fragment. */
+function formatIdSet(ids: Set<string>): string {
+  return ids.size > 0 ? [...ids].sort().join(', ') : '(none)';
+}
+
+/**
+ * The ONE document a blocking adversarial-review round is judged from — see
+ * `WorkflowController.selectReviewDocument`. `fromArtifact` is what the lap acts
+ * on: a text-sourced document has to be carried on the revision, because the
+ * re-run's prompt would otherwise re-read the same stale artifact.
+ */
+type SelectedReviewDocument = {
+  /** The document verbatim; absent only when the text is blank and there is no artifact. */
+  markdown?: string;
+  parsed: ParsedAdversarialReview;
+  fromArtifact: boolean;
+};
 
 /** Whether a run's cancel signal has fired (re-read per call — see consultReviewLoop). */
 function isAborted(signal: AbortSignal | undefined): boolean {
@@ -971,15 +1010,27 @@ export class WorkflowController {
             const round = (reviewRounds.get(step.id) ?? 0) + 1;
             reviewRounds.set(step.id, round);
             const earlier = priorRounds.get(step.id) ?? [];
+            // ONE document per blocking round, selected here and reused by the
+            // ledger, the consult and the lap's revision. The ledger has to read
+            // the same document the consult judges: pushing the TEXT parse while
+            // the consult sees the artifact records "round N: no blocking
+            // entries" for a round the artifact says had three, which
+            // misrepresents the trend the next consult reads. A CLEAN round
+            // selects nothing — there is no lap to steer, and an artifact read
+            // there would be pure cost.
+            const document = review.blocking ? this.selectReviewDocument(step, review) : undefined;
+            const ledgerParsed = document?.parsed ?? review.parsed;
             priorRounds.set(step.id, [
               ...earlier,
               {
                 round,
-                blockingIds: review.parsed.blocking.map((e) => e.id),
-                blockingTitles: review.parsed.blocking.map((e) => e.title),
+                blockingIds: ledgerParsed.blocking.map((e) => e.id),
+                blockingTitles: ledgerParsed.blocking.map((e) => e.title),
               },
             ]);
-            if (review.blocking && review.index >= 0) {
+            // `document !== undefined` is implied by `review.blocking` above; it
+            // is spelled out because the compiler cannot narrow one from the other.
+            if (review.blocking && review.index >= 0 && document !== undefined) {
               const used = reviewAutoRevisions.get(step.id) ?? 0;
               const outcome = await this.decideReviewLoop({
                 step,
@@ -987,6 +1038,7 @@ export class WorkflowController {
                 round,
                 used,
                 review,
+                document,
                 priorRounds: earlier,
                 ctx: { ...baseCtx, attempt },
                 signal,
@@ -1007,6 +1059,14 @@ export class WorkflowController {
                   source: 'adversarial-review',
                   ...(review.note !== null ? { note: review.note } : {}),
                   round,
+                  // Carry the document ONLY when it did not come from the
+                  // artifact: the re-run's prompt reads the artifact itself, so
+                  // the artifact path stays byte-identical, while a text-sourced
+                  // document would otherwise be re-replaced by the same stale
+                  // artifact the selection just rejected.
+                  ...(!document.fromArtifact && document.markdown !== undefined
+                    ? { reviewMarkdown: document.markdown }
+                    : {}),
                   ...(outcome.steering !== undefined ? { steering: outcome.steering } : {}),
                 };
                 i = review.index;
@@ -3204,6 +3264,62 @@ export class WorkflowController {
   }
 
   /**
+   * Decide ONCE which document describes THIS review round — the run's artifact
+   * or the reviewer's captured text — for everything downstream of one blocking
+   * result: the round ledger, the supervisor consult, and the lap's re-run
+   * prompt.
+   *
+   * The artifact is PREFERRED, because it is the only channel that carries
+   * `## Findings` (a set-aside id the supervisor names is validated against it)
+   * and the promoted `## Prior entries` ledger. But `readAdversarialReviewResult`
+   * reads the VERDICT from the text first, while the artifact is written by a
+   * separate `cyboflow_report_artifact` call that can fail or lag — and when it
+   * does, the artifact still holds round N-1's `AR-n` set. Handing that to the
+   * supervisor (or to the re-run prompt) steers this round's lap at the PREVIOUS
+   * round's defects. So the artifact is used only when it can be shown to
+   * describe the same round:
+   *
+   *   - the verdict itself came from the artifact (`source === 'artifact'`, i.e.
+   *     the text carried no verdict at all — there is no second document), or
+   *   - the text parsed to no blocking entries (a `REVIEW: BLOCKING` trailer over
+   *     a `None.` section, or a dropped section): nothing to compare, and the
+   *     text holds nothing the artifact does not, or
+   *   - the two blocking id sets are equal.
+   *
+   * Otherwise the TEXT wins and the mismatch is logged with both id sets. The
+   * text is the weaker document (no `## Findings`), but it is the one the verdict
+   * came from, and steering must never disagree with the verdict.
+   */
+  private selectReviewDocument(
+    step: WorkflowStep,
+    review: { text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' },
+  ): SelectedReviewDocument {
+    const fromText = (): SelectedReviewDocument => ({
+      ...(review.text.trim().length > 0 ? { markdown: review.text } : {}),
+      parsed: review.parsed,
+      fromArtifact: false,
+    });
+    const artifact = this.readAdversarialReviewArtifact();
+    if (typeof artifact !== 'string' || artifact.trim().length === 0) return fromText();
+    const artifactParsed = parseAdversarialReviewDoc(artifact);
+    const textIds = blockingIdSet(review.parsed);
+    if (review.source === 'artifact' || textIds.size === 0) {
+      return { markdown: artifact, parsed: artifactParsed, fromArtifact: true };
+    }
+    const artifactIds = blockingIdSet(artifactParsed);
+    if (sameIdSet(textIds, artifactIds)) {
+      return { markdown: artifact, parsed: artifactParsed, fromArtifact: true };
+    }
+    this.host.log?.(
+      'warn',
+      `step '${step.id}': the review artifact carries a different blocking set than the result text ` +
+        `(artifact: ${formatIdSet(artifactIds)}; text: ${formatIdSet(textIds)}) — the artifact is a previous ` +
+        `round's; steering from the reviewer's text`,
+    );
+    return fromText();
+  }
+
+  /**
    * Decide what ONE blocking adversarial-review round does: take another
    * automatic lap (optionally steered), or fall through to the human gate.
    *
@@ -3226,6 +3342,8 @@ export class WorkflowController {
     round: number;
     used: number;
     review: { note: string | null; text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    /** The round's selected document, threaded straight through to the consult. */
+    document: SelectedReviewDocument;
     priorRounds: ReviewLoopPriorRound[];
     ctx: ControllerStepContext;
     signal?: AbortSignal;
@@ -3272,17 +3390,16 @@ export class WorkflowController {
    * `undefined` — the mechanical path — for an absent seam, an aborted run, or
    * any throw, so a broken supervisor can never cost the walk a step.
    *
-   * The request PREFERS the run's artifact over the reviewer's captured text for
-   * `reviewMarkdown`/`parsed`, even when the verdict itself came from the text:
-   * the reviewer's final message carries only its `## Blocking` section, so a
-   * text-only parse has no `findings` at all and the supervisor could never
-   * validate a set-aside id that lives under `## Findings`. The VERDICT keeps
-   * its own channel order (an explicit `REVIEW: CLEAN` in the text still wins).
-   *
-   * With no artifact the fallback is the reviewer's WHOLE captured text, not the
-   * extracted `## Blocking` slice: the slice is what a re-run's prompt quotes,
-   * while the supervisor is deciding whether to spend a lap and needs everything
-   * the reviewer actually said.
+   * The request is composed from `args.document`, the ONE document the caller
+   * already selected for this round (see `selectReviewDocument`): normally the
+   * run's artifact, because the reviewer's final message carries only its
+   * `## Blocking` section and a text-only parse has no `findings` at all, so the
+   * supervisor could never validate a set-aside id that lives under
+   * `## Findings`; the reviewer's WHOLE captured text when the artifact is
+   * missing or is demonstrably a previous round's. The same document backs the
+   * round ledger and the lap's re-run prompt, so steering can never disagree with
+   * the ids the supervisor was shown. The VERDICT keeps its own channel order (an
+   * explicit `REVIEW: CLEAN` in the text still wins).
    */
   private async consultReviewLoop(args: {
     step: WorkflowStep;
@@ -3290,6 +3407,7 @@ export class WorkflowController {
     round: number;
     used: number;
     review: { note: string | null; text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' };
+    document: SelectedReviewDocument;
     priorRounds: ReviewLoopPriorRound[];
     ctx: ControllerStepContext;
     signal?: AbortSignal;
@@ -3300,14 +3418,7 @@ export class WorkflowController {
     // an inline `args.signal?.aborted` is narrowed by the first test and the
     // second one becomes a no-op the compiler rejects.
     if (isAborted(args.signal)) return undefined;
-    const artifact = this.readAdversarialReviewArtifact();
-    const useArtifact = typeof artifact === 'string' && artifact.trim().length > 0;
-    const reviewMarkdown = useArtifact
-      ? artifact
-      : args.review.text.trim().length > 0
-        ? args.review.text
-        : undefined;
-    const parsed = useArtifact ? parseAdversarialReviewDoc(artifact) : args.review.parsed;
+    const { markdown: reviewMarkdown, parsed } = args.document;
     try {
       const decision = await advise.call(this.host, {
         stepId: args.step.id,

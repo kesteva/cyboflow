@@ -174,6 +174,19 @@ export interface ControllerStepContext {
      * human-gate revision, where the prompt is byte-identical to before.
      */
     steering?: ReviewLoopSteering;
+    /**
+     * The review document this revision was composed from, carried on the ctx
+     * instead of being re-read at spawn time.
+     *
+     * Set ONLY when the controller did NOT select the run's adversarial-review
+     * ARTIFACT as this round's document (see
+     * `WorkflowController.selectReviewDocument`): the artifact is missing, or the
+     * reviewer wrote a verdict in its text while its `cyboflow_report_artifact`
+     * call failed or lagged, leaving the artifact on the PREVIOUS round's `AR-n`
+     * set. Absent whenever the artifact WAS the selected document, where the step
+     * runner reads it exactly as before — so that path is byte-identical.
+     */
+    reviewMarkdown?: string;
   };
   /**
    * Provenance for the gate this ctx opens, when a supervisor intervention put

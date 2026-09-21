@@ -299,9 +299,19 @@ export class SpawnStepRunner implements StepRunner {
     // revision is actually in flight, so no other turn pays for the read.
     const gateRevision = ctx.gateRevision
       ? (() => {
-          const reviewMarkdown = this.opts.adversarialReviewMarkdown?.();
+          // A revision that already carries `reviewMarkdown` WINS: the controller
+          // sets it only when it judged the run's artifact to be a previous
+          // round's, so re-reading the artifact here would hand the re-run the
+          // very document the controller just rejected. Absent (every human-gate
+          // revision, and every automatic lap whose artifact was current) ⇒ read
+          // the artifact exactly as before, so that path is byte-identical.
+          const { reviewMarkdown: carried, ...rest } = ctx.gateRevision;
+          const reviewMarkdown =
+            carried !== undefined && carried.trim().length > 0
+              ? carried
+              : this.opts.adversarialReviewMarkdown?.();
           return {
-            ...ctx.gateRevision,
+            ...rest,
             ...(reviewMarkdown !== undefined && reviewMarkdown.trim().length > 0
               ? { reviewMarkdown }
               : {}),

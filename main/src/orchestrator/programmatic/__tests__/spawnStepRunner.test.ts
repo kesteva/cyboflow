@@ -759,3 +759,57 @@ describe('programmaticDisallowedTools', () => {
     expect(unseeded.prompt).not.toContain('This run is SEEDED');
   });
 });
+
+describe('SpawnStepRunner — gateRevision review document (CX-4)', () => {
+  const CARRIED = ['## Blocking', '', '#### AR-2 — this round’s defect', '**What:** z'].join('\n');
+  const ARTIFACT = ['## Blocking', '', '#### AR-1 — last round’s defect', '**What:** x'].join('\n');
+
+  function revisionCtx(reviewMarkdown?: string): ControllerStepContext {
+    return {
+      ...ctx,
+      gateRevision: {
+        gateStepId: 'approve-design',
+        source: 'adversarial-review',
+        round: 2,
+        ...(reviewMarkdown !== undefined ? { reviewMarkdown } : {}),
+      },
+    };
+  }
+
+  it('prefers a revision’s own reviewMarkdown over the run’s artifact', async () => {
+    // The controller only sets it when it judged the artifact to be a PREVIOUS
+    // round's, so re-reading the artifact here would hand the re-run exactly the
+    // document the controller just rejected.
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<() => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx(CARRIED));
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-2 — this round’s defect');
+    expect(passed.prompt).not.toContain('AR-1 — last round’s defect');
+  });
+
+  it('reads the run’s artifact when the revision carries no reviewMarkdown (existing behaviour)', async () => {
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<() => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx());
+
+    expect(readArtifact).toHaveBeenCalledTimes(1);
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
+
+  it('falls back to the artifact when a carried reviewMarkdown is blank', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: () => ARTIFACT });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx('   '));
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
+});

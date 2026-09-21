@@ -3420,7 +3420,7 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
 
   type Seen = {
     id: string;
-    gateRevision?: { gateStepId: string; note?: string; source?: string; round?: number };
+    gateRevision?: ControllerStepContext['gateRevision'];
   };
 
   /** Scripted review results per adversarial-review turn; every other step is ok. */
@@ -3459,7 +3459,9 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     // The gate opened exactly once, AFTER the revision round.
     expect(host.gateCalls).toEqual(['approve-design']);
     // First pass carries nothing; every re-run turn carries the review-sourced
-    // revision with the `## Blocking` section as its note.
+    // revision with the `## Blocking` section as its note — and, because this
+    // host publishes no artifact, the selected document is the reviewer's own
+    // text, which the revision carries so the re-run is not left with nothing.
     for (const turn of runner.seen.slice(0, 3)) expect(turn.gateRevision).toBeUndefined();
     for (const turn of runner.seen.slice(3, 6)) {
       expect(turn.gateRevision).toEqual({
@@ -3472,6 +3474,7 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
           '**Severity:** blocker   **Area:** prototype',
           '**What:** no Home affordance.',
         ].join('\n'),
+        reviewMarkdown: BLOCKING_RESULT,
       });
     }
     // The gate's approve clears it: epics runs with no revision armed.
@@ -4011,6 +4014,88 @@ describe('WorkflowController — supervised adversarial-review loop (cap 3)', ()
     expect(host.requests).toHaveLength(1);
     expect(host.requests[0].reviewMarkdown).toBe(REVIEW_DOC);
     expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-3']);
+  });
+
+  // ── CX-4 / FB-6: one document per round, and never a stale one ─────────────
+  it('steers from the TEXT when the artifact still carries the previous round’s blocking set', async () => {
+    // Round 2's `cyboflow_report_artifact` failed (or lagged), so the artifact
+    // still holds round 1's AR-1 while the reviewer's text raised AR-2. Handing
+    // the supervisor the artifact steers THIS round's lap at LAST round's defect.
+    // Round 1 is the control: the two id sets agree, so the artifact wins there.
+    const round1Text = ['## Blocking', '', '#### AR-1 — first defect', '**What:** x', '', 'REVIEW: BLOCKING'].join('\n');
+    const round1Artifact = [
+      '## Blocking', '', '#### AR-1 — first defect', '**What:** x', '',
+      '## Findings', '', '#### AR-9 — a nit', '**What:** y',
+    ].join('\n');
+    const round2Text = ['## Blocking', '', '#### AR-2 — second defect', '**What:** z', '', 'REVIEW: BLOCKING'].join('\n');
+    const runner = reviewRunner([round1Text, round2Text, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP]);
+    host.readAdversarialReview = () => round1Artifact; // never updated for round 2
+
+    await new WorkflowController(runner, host).run('run-stale-artifact', reviewDef());
+
+    // Round 1: the ids agree ⇒ the artifact (the only document with `## Findings`).
+    expect(host.requests[0].reviewMarkdown).toBe(round1Artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-9']);
+    // Round 2: the sets disagree ⇒ the reviewer's own text.
+    expect(host.requests[1].reviewMarkdown).toBe(round2Text);
+    expect(host.requests[1].parsed.blocking.map((e) => e.id)).toEqual(['AR-2']);
+    // ...and the ledger that consult reads describes round 1's SELECTED document.
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1'], blockingTitles: ['first defect'] },
+    ]);
+    // The current-artifact lap carries nothing (the re-run reads the artifact
+    // itself, byte-identical to before); the stale-artifact lap carries the text.
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
+    expect(runner.seen[4].gateRevision?.reviewMarkdown).toBe(round2Text);
+  });
+
+  it('uses the artifact when it carries THIS round’s blocking set, and leaves the lap’s revision bare', async () => {
+    const text = ['## Blocking', '', '#### AR-2 — the defect', '**What:** z', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '## Blocking', '', '#### AR-2 — the defect', '**What:** z', '',
+      '## Findings', '', '#### AR-5 — advisory only', '**What:** y',
+    ].join('\n');
+    const readArtifact = vi.fn<() => string | undefined>(() => artifact);
+    const runner = reviewRunner([text, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP]);
+    host.readAdversarialReview = readArtifact;
+
+    await new WorkflowController(runner, host).run('run-artifact-current', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.findings.map((e) => e.id)).toEqual(['AR-5']);
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
+    // Exactly one read — the blocking round's. The CLEAN round that ends the loop
+    // selects no document at all, so it costs no artifact read.
+    expect(readArtifact).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the ARTIFACT — and its ids in the round ledger — when a BLOCKING trailer has no entries', async () => {
+    // `REVIEW: BLOCKING` over a `None.` section: there is nothing to compare, and
+    // the text holds nothing the artifact does not. Pushing the TEXT parse into
+    // the ledger would record "round 1: no blocking entries" for a round the
+    // artifact says had three, misrepresenting the trend to the next consult.
+    const trailerOnly = ['## Blocking', '', 'None.', '', 'REVIEW: BLOCKING'].join('\n');
+    const artifact = [
+      '## Blocking', '',
+      '#### AR-1 — one', '**What:** a', '',
+      '#### AR-2 — two', '**What:** b', '',
+      '#### AR-3 — three', '**What:** c',
+    ].join('\n');
+    const runner = reviewRunner([trailerOnly, trailerOnly, CLEAN_RESULT]);
+    const host = supervisedHost([LOOP, LOOP]);
+    host.readAdversarialReview = () => artifact;
+
+    await new WorkflowController(runner, host).run('run-trailer-only', reviewDef());
+
+    expect(host.requests[0].reviewMarkdown).toBe(artifact);
+    expect(host.requests[0].parsed.blocking.map((e) => e.id)).toEqual(['AR-1', 'AR-2', 'AR-3']);
+    expect(host.requests[1].priorRounds).toEqual([
+      { round: 1, blockingIds: ['AR-1', 'AR-2', 'AR-3'], blockingTitles: ['one', 'two', 'three'] },
+    ]);
+    // The artifact IS the current document ⇒ nothing is carried on the lap.
+    expect(runner.seen[2].gateRevision?.reviewMarkdown).toBeUndefined();
   });
 
   it('an OPERATOR-skipped gate disarms the escalation a `stop` armed', async () => {
