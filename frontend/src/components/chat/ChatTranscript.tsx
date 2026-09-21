@@ -793,6 +793,22 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
   const hasDiffs = message.segments.some(seg => seg.type === 'diff');
   const hasToolResults = message.segments.some(seg => seg.type === 'tool_result');
 
+  // Visibility-aware equivalents of the flags above — gated on the settings
+  // toggles (showThinking/showToolCalls) and per-segment empty-content
+  // guards, mirroring MessageSegment.tsx's own per-segment visibility checks
+  // (e.g. the `thinking` case at MessageSegment.tsx:53). A message whose only
+  // segments are hidden by settings or empty/whitespace must render NO row —
+  // falling through to `!hasRenderableContent` below would otherwise leak the
+  // hidden content via the raw-JSON "Unhandled message type" dump.
+  const hasVisibleText = message.segments.some(
+    seg => seg.type === 'text' && seg.content.trim().length > 0,
+  );
+  const hasVisibleThinking = settings.showThinking === true && message.segments.some(
+    seg => seg.type === 'thinking' && seg.content.trim().length > 0,
+  );
+  const hasVisibleToolCalls = settings.showToolCalls === true && hasToolCalls;
+  const hasVisibleToolResults = settings.showToolCalls === true && hasToolResults;
+
   // Special rendering for system messages
   if (isSystem) {
     return <>{renderSystemMessage(message, needsExtraSpacing)}</>;
@@ -800,6 +816,25 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
 
   // Check if this message has any renderable content (including TodoWrite for now, filtered later)
   const hasRenderableContent = hasTextContent || hasToolCalls || hasThinking || hasDiffs || hasToolResults;
+
+  // If the message has KNOWN renderable segment types (hasRenderableContent)
+  // but none of them are actually visible — hidden by settings.showThinking /
+  // settings.showToolCalls, or empty/whitespace-only content — render
+  // nothing. This must run before the `!hasRenderableContent` raw-JSON
+  // fallback below so hidden content never leaks into the "Unhandled message
+  // type" dump; it must NOT fire for messages with genuinely unrecognized
+  // segment types (those have hasRenderableContent === false and still need
+  // to reach the fallback).
+  if (
+    hasRenderableContent &&
+    !hasVisibleText &&
+    !hasVisibleThinking &&
+    !hasVisibleToolCalls &&
+    !hasVisibleToolResults &&
+    !hasDiffs
+  ) {
+    return null;
+  }
 
   // If no renderable content and not a special system message, skip or show raw
   if (!hasRenderableContent) {
