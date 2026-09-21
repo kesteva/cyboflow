@@ -1108,6 +1108,14 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // pattern). CustomWidgetServerManager.ensure/stop already match
         // CustomWidgetServerLike's shape, so no adapter is needed.
         customWidgetServer: customWidgetServerManager ?? undefined,
+        // runs.getStepModels (IDEA-061 per-step model rail): closure over
+        // resolveRunEffectiveAgents so the standalone orchestrator tree never
+        // imports agentOverlayWriter.ts directly (see runStepModels.ts's
+        // "DEPENDENCY INJECTION" note). Reads databaseService.getDb() live
+        // (the real better-sqlite3 handle resolveRunEffectiveAgents needs)
+        // rather than the narrowed DatabaseLike `db` this closure receives.
+        resolveRunEffectiveAgents: (_db, runId, logger) =>
+          resolveRunEffectiveAgents(databaseService.getDb(), runId, logger),
       }),
   });
 }

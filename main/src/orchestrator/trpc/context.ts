@@ -41,6 +41,7 @@ import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
 import type { CustomViewsServiceLike } from '../customViews/customViewsService';
+import type { EffectiveAgentsResolver } from '../runStepModels';
 
 /**
  * Narrow structural interface for `CustomWidgetServerManager`
@@ -640,6 +641,22 @@ export interface ContextDeps {
    * procedures throw PRECONDITION_FAILED.
    */
   customWidgetServer?: CustomWidgetServerLike;
+
+  /**
+   * Resolve a run's FULL effective agent set (project `agent_overrides` +
+   * workflow `agentConfigs` + variant deltas — the same layering
+   * `agentOverlayWriter.installAgentOverlay` writes to a run's worktree).
+   * Backs `runs.getStepModels` (IDEA-061's per-step model rail /
+   * `runStepModels.resolveRunStepModels`).
+   *
+   * Injected from `main/src/index.ts` as a closure over
+   * `resolveRunEffectiveAgents` (`services/panels/claude/agentOverlayWriter.ts`)
+   * — kept as a plain callback (like `gitDiff`) so the standalone-typecheck
+   * invariant holds: this tree never imports `main/src/services/*` directly.
+   * `undefined` (the unit-test default) ⇒ `getStepModels` throws
+   * PRECONDITION_FAILED.
+   */
+  resolveRunEffectiveAgents?: EffectiveAgentsResolver;
 }
 
 /**
@@ -702,6 +719,7 @@ export function createContext(deps: ContextDeps = {}): {
   sessionOps?: SessionOpsLike;
   customViews?: CustomViewsServiceLike;
   customWidgetServer?: CustomWidgetServerLike;
+  resolveRunEffectiveAgents?: EffectiveAgentsResolver;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -730,6 +748,7 @@ export function createContext(deps: ContextDeps = {}): {
     sessionOps,
     customViews,
     customWidgetServer,
+    resolveRunEffectiveAgents,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -765,6 +784,7 @@ export function createContext(deps: ContextDeps = {}): {
     sessionOps,
     customViews,
     customWidgetServer,
+    resolveRunEffectiveAgents,
   };
 }
 
