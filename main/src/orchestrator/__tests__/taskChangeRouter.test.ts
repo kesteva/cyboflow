@@ -3586,6 +3586,29 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const event = await emitNoopUpdate(router, idea.taskId);
       expect(event.task.inFlow).toEqual([]);
     });
+
+    it('emit-path SHAPE PARITY: the idea inFlow overlay agrees with taskListing.selectTaskById for the same fixture', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      // taskListing.selectTaskById's UNION reads experiment_id unconditionally
+      // (migration 049) — buildDb() doesn't carry it, so the parity read below
+      // would otherwise throw 'no such column: experiment_id'.
+      db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT;');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      seedRunWithSeedIdeas(db, {
+        runId: 'run-parity',
+        seedIdeaId: idea.taskId,
+        seedIdeaIds: [idea.taskId],
+        status: 'running',
+      });
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      const viaListing = selectTaskById(dbAdapter(db), idea.taskId)!;
+      expect(event.task.inFlow).toHaveLength(1);
+      expect(event.task.inFlow).toEqual(viaListing.inFlow);
+    });
   });
 
   // -------------------------------------------------------------------------
