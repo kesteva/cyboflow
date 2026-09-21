@@ -408,6 +408,18 @@ export function TaskBody({
       {/* Title */}
       <div className="text-[13px] font-semibold leading-snug text-text-primary">{task.title}</div>
 
+      {/* Idea-only "planning" hint (TASK-224): explains the breathing glow
+          the moment an idea is seeded into a live, non-terminal Planner/Ship
+          run — mirrors the FlowMarker pill above (same agent/step source),
+          just phrased for an idea rather than a task ("planning" vs a bare
+          agent pill), since an idea never itself "runs". */}
+      {task.type === 'idea' && task.inFlow.length > 0 && (
+        <p className="text-[10.5px] text-text-tertiary" data-testid="idea-planning-hint">
+          planning · {task.inFlow[0].agent}
+          {task.inFlow[0].stepId ? ` / ${task.inFlow[0].stepId}` : ''}
+        </p>
+      )}
+
       {/* Summary */}
       {task.summary && (
         <p className="line-clamp-3 text-[11.5px] leading-snug text-text-secondary">{task.summary}</p>

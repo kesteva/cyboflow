@@ -25,7 +25,7 @@ import {
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { IDEA_COMPONENT_KEYS } from '../../../../shared/types/ideaComponents';
 
-function buildDb(): Database.Database {
+function buildDb(opts?: { skipSeedIdeaIds?: boolean }): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(`
@@ -76,7 +76,9 @@ function buildDb(): Database.Database {
   // 017 (seed_idea_id) + 061 (seed_idea_ids) are needed by selectRunDecomposition's
   // listRunOwnedOrBatchIdeaIds resolution (the run-owned-ideas fixtures below).
   db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
+  if (!opts?.skipSeedIdeaIds) {
+    db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
+  }
   // Migration 101 adds the idea component ledger table that selectProjectBacklog/
   // selectTaskById/selectIdeaDecomposition now resolve for every idea row. It is
   // self-contained (no dependency on other new tables), so the full file applies
@@ -582,6 +584,14 @@ function seedTask(db: Database.Database, id: string, ref: string, position: numb
   ).run(id, ref, `Title ${ref}`, stageId(position));
 }
 
+/** Insert a bare top-level idea at a given stage position. */
+function seedIdea(db: Database.Database, id: string, ref: string, position: number): void {
+  db.prepare(
+    `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id, created_at)
+     VALUES (?, 1, ?, ?, 'b', 'board-1-default', ?, '2026-01-01T00:00:00.000Z')`,
+  ).run(id, ref, `Title ${ref}`, stageId(position));
+}
+
 function addEdge(
   db: Database.Database,
   taskId: string,
@@ -839,8 +849,8 @@ describe('taskListing — resolveBacklogRef', () => {
  * migration 019 without pulling in its full history) so the batch + session
  * LEFT JOIN arms of computeTaskOverlay have real tables/columns to hit.
  */
-function buildOverlayDb(): Database.Database {
-  const db = buildDb();
+function buildOverlayDb(opts?: { skipSeedIdeaIds?: boolean }): Database.Database {
+  const db = buildDb(opts);
   const migDir = join(__dirname, '..', '..', 'database', 'migrations');
   db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
@@ -987,6 +997,120 @@ describe('computeTaskOverlay — inFlow (direct + sprint-batch runs)', () => {
     expect(overlay.inFlow).toEqual([
       { agent: 'agent', runId: 'run-4', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeTaskOverlay — inFlow for IDEAS seeded into a live Planner/Ship run
+// (TASK-224: seed_idea_id / seed_idea_ids, migrations 017/061)
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed a workflow_runs row stamped with the Planner/Ship idea-seed link:
+ * `seed_idea_id` (migration 017, single-idea) and/or `seed_idea_ids` (migration
+ * 061, JSON array — multi-idea). Probes for the seed_idea_ids column so the
+ * SAME helper works against both `buildOverlayDb()` (has it) and
+ * `buildOverlayDb({ skipSeedIdeaIds: true })` (pre-061 — the column literally
+ * doesn't exist, so the INSERT must omit it rather than erroring).
+ */
+function seedIdeaSeededRun(
+  db: Database.Database,
+  opts: {
+    runId: string;
+    status: string;
+    seedIdeaId?: string | null;
+    seedIdeaIds?: string[] | null;
+    sessionId?: string | null;
+  },
+): void {
+  seedWorkflow(db);
+  const hasSeedIdeaIds = (db.pragma('table_info(workflow_runs)') as Array<{ name: string }>).some(
+    (c) => c.name === 'seed_idea_ids',
+  );
+  if (hasSeedIdeaIds) {
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids, session_id)
+       VALUES (?, 'wf-1', 1, ?, 'default', ?, ?, ?)`,
+    ).run(
+      opts.runId,
+      opts.status,
+      opts.seedIdeaId ?? null,
+      opts.seedIdeaIds ? JSON.stringify(opts.seedIdeaIds) : null,
+      opts.sessionId ?? null,
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, session_id)
+       VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
+    ).run(opts.runId, opts.status, opts.seedIdeaId ?? null, opts.sessionId ?? null);
+  }
+}
+
+describe('computeTaskOverlay — inFlow for ideas seeded into a live Planner/Ship run', () => {
+  it('a single-idea seed_idea_id RUNNING run projects an inFlow entry with resolved session identity', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_a', 'IDEA-801', 1);
+    seedSession(db, 'sess-3', 'quick-20260715-090000');
+    seedIdeaSeededRun(db, { runId: 'run-single', status: 'running', seedIdeaId: 'ide_a', sessionId: 'sess-3' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_a', stage_id: stageId(1), type: 'idea' });
+    expect(overlay.inFlow).toEqual([
+      {
+        agent: 'agent',
+        runId: 'run-single',
+        stepId: null,
+        runStatus: 'running',
+        sessionId: 'sess-3',
+        sessionName: 'quick-20260715-090000',
+      },
+    ]);
+  });
+
+  it('a multi-idea seed_idea_ids JSON array run lights EVERY seeded idea', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_b', 'IDEA-802', 1);
+    seedIdea(db, 'ide_c', 'IDEA-803', 1);
+    seedIdeaSeededRun(db, {
+      runId: 'run-multi',
+      status: 'running',
+      seedIdeaId: 'ide_b', // dual-written to the first element (production invariant)
+      seedIdeaIds: ['ide_b', 'ide_c'],
+    });
+
+    const overlayB = computeTaskOverlay(dbAdapter(db), { id: 'ide_b', stage_id: stageId(1), type: 'idea' });
+    const overlayC = computeTaskOverlay(dbAdapter(db), { id: 'ide_c', stage_id: stageId(1), type: 'idea' });
+    expect(overlayB.inFlow).toHaveLength(1);
+    expect(overlayB.inFlow[0].runId).toBe('run-multi');
+    expect(overlayC.inFlow).toHaveLength(1);
+    expect(overlayC.inFlow[0].runId).toBe('run-multi');
+  });
+
+  it('a TERMINAL idea-seeded run (completed) projects NO inFlow entry', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_d', 'IDEA-804', 9);
+    seedIdeaSeededRun(db, { runId: 'run-done', status: 'completed', seedIdeaId: 'ide_d' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_d', stage_id: stageId(9), type: 'idea' });
+    expect(overlay.inFlow).toEqual([]);
+  });
+
+  it('pre-061 schema (seed_idea_ids column absent) falls back to seed_idea_id alone', () => {
+    const db = buildOverlayDb({ skipSeedIdeaIds: true });
+    seedIdea(db, 'ide_e', 'IDEA-805', 1);
+    seedIdeaSeededRun(db, { runId: 'run-pre061', status: 'running', seedIdeaId: 'ide_e' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_e', stage_id: stageId(1), type: 'idea' });
+    expect(overlay.inFlow).toEqual([
+      { agent: 'agent', runId: 'run-pre061', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+    ]);
+  });
+
+  it('an idea with no seeded run projects an empty inFlow (untouched idea)', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_f', 'IDEA-806', 1);
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_f', stage_id: stageId(1), type: 'idea' });
+    expect(overlay.inFlow).toEqual([]);
   });
 });
 
