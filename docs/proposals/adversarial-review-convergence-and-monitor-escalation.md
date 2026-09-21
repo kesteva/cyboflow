@@ -126,6 +126,19 @@ branch).
   "revision requested" section leaks into the epics/tasks steps after a skipped gate; it is
   only cleared at L745 / L865 when the gate actually opens).
 
+**Freshness (follow-up, 2026-09-21).** The critique is ONE row per run, so it survives a
+whole-run rewind and a Revise loopback — and a previous walk's critique would open this gate
+over a surface that no longer exists. `hasReviewableDesignSurface` now takes an optional
+`{ reviewReportedSinceMs }` bound, threaded from the controller through
+`shouldSkipHumanGate(step, runId, ctx)`; a critique whose `artifacts.reported_at` (migration
+141) predates the bound reads as ABSENT. The bound is the review step's visit start on this
+walk, the WALK start when that step did not run this walk (e.g. it self-skipped), and NOTHING
+when the review step is in `completedStepIds` (the critique belongs to the surviving
+timeline). Unknown age and absent bound both mean no constraint. Only the critique branch is
+bounded — the prototype / arch-design / brief / idea surfaces are a separate question.
+`reported_at` is re-stamped on EVERY report including an identical re-report, which is
+precisely what `revision` (and the `entity_events` delta log) does NOT do.
+
 Tests: `runEntityOwnership` (populated review → true; empty doc → false; no artifact →
 existing behaviour); controller: lap → gate skipped → next step's ctx has no `gateRevision`.
 
@@ -204,6 +217,19 @@ revision prompts), `programmaticRunHost.ts`.
 
 - New optional host seam `readAdversarialReview?(): string | undefined` (same reader as the
   revision prompt).
+
+  **Freshness (follow-up, 2026-09-21).** The seam is now
+  `readAdversarialReview?(opts?: { reportedSinceMs?: number })`. Because the artifact row is
+  one-per-run it outlives its walk, and a reviewer turn that returns no text on the NEXT walk
+  would fall back onto the previous walk's blockers — a phantom loop. An artifact last
+  reported (`artifacts.reported_at`, migration 141) before the bound reads as absent. The
+  bound is the review step's visit start on this walk, the walk start when that step did not
+  run this walk, and nothing when the review step completed before this walk; absent bound and
+  unknown age both mean no constraint. Both controller reads in a visit (the verdict fallback
+  and `selectReviewDocument`) use the SAME instant, and the id-set mismatch check stays the
+  second line of defence. The gate-revision quote is deliberately unbounded — the human just
+  read that critique. `reported_at` is re-stamped on every report, including an identical
+  re-report that moves neither `revision` nor the audit log.
 - In `tryAdversarialReviewLoopback`: when `resultText` is empty OR `parseCodeReviewVerdict`
   returns `null` with no populated `## Blocking` in the text, read the artifact and treat
   `parseAdversarialReviewDoc(md).blocking.length > 0` as blocking; the quoted `blocking`

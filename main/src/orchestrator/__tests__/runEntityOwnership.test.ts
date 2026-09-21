@@ -624,7 +624,8 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
         id           TEXT PRIMARY KEY,
         run_id       TEXT,
         atype        TEXT NOT NULL,
-        payload_json TEXT
+        payload_json TEXT,
+        reported_at  TEXT
       );
     `);
     return db;
@@ -678,14 +679,28 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
   });
 
   /** Writes an `adversarial-review` artifact with the given markdown payload. */
-  function insertReview(db: Database.Database, runId: string, markdown: string): void {
-    db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
-      `art_rev_${runId}`,
-      runId,
-      'adversarial-review',
-      JSON.stringify({ markdown }),
-    );
+  function insertReview(
+    db: Database.Database,
+    runId: string,
+    markdown: string,
+    reportedAt: string | null = null,
+  ): void {
+    db.prepare(
+      'INSERT INTO artifacts (id, run_id, atype, payload_json, reported_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(`art_rev_${runId}`, runId, 'adversarial-review', JSON.stringify({ markdown }), reportedAt);
   }
+
+  const BLOCKING_DOC = [
+    '## Blocking',
+    '',
+    '#### AR-1 — no way back from Spend',
+    '**What:** no Home affordance.',
+    '',
+    '## Findings',
+    '',
+    'None.',
+  ].join('\n');
+  const FRESHNESS_BOUND = Date.parse('2026-09-21T10:00:00.000Z');
 
   it('true when a POPULATED adversarial-review artifact exists with no prototype or architecture', () => {
     // The reviewer raised a blocking defect against something that left no other
@@ -730,5 +745,47 @@ describe('runEntityOwnership.hasReviewableDesignSurface', () => {
     insertRun(db, 'run-rev-proto', null);
     db.prepare("INSERT INTO artifacts (id, run_id, atype) VALUES ('art_p', 'run-rev-proto', 'ui-prototype')").run();
     expect(hasReviewableDesignSurface(dbAdapter(db), 'run-rev-proto')).toBe(true);
+  });
+
+  // ── Freshness bound (FB-9) ────────────────────────────────────────────────
+  // The critique row survives a rewind / Revise, so on the NEXT walk it would
+  // open this gate over a design surface that no longer exists.
+
+  it('false when the ONLY surface is a critique reported BEFORE the bound', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-stale', null);
+    insertReview(db, 'run-stale', BLOCKING_DOC, '2026-09-21T09:00:00.000Z');
+    expect(
+      hasReviewableDesignSurface(dbAdapter(db), 'run-stale', { reviewReportedSinceMs: FRESHNESS_BOUND }),
+    ).toBe(false);
+  });
+
+  it('true when that same critique was reported AFTER the bound', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-fresh', null);
+    insertReview(db, 'run-fresh', BLOCKING_DOC, '2026-09-21T10:30:00.000Z');
+    expect(
+      hasReviewableDesignSurface(dbAdapter(db), 'run-fresh', { reviewReportedSinceMs: FRESHNESS_BOUND }),
+    ).toBe(true);
+  });
+
+  it('true with NO opts — the unbounded read is unchanged', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-unbounded', null);
+    insertReview(db, 'run-unbounded', BLOCKING_DOC, '2000-01-01T00:00:00.000Z');
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-unbounded')).toBe(true);
+    expect(hasReviewableDesignSurface(dbAdapter(db), 'run-unbounded', {})).toBe(true);
+  });
+
+  it('ONLY the critique branch is bounded: a stale critique + a prototype is still true', () => {
+    const db = buildDesignDb();
+    insertRun(db, 'run-stale-proto', null);
+    insertReview(db, 'run-stale-proto', BLOCKING_DOC, '2026-09-21T09:00:00.000Z');
+    db.prepare(
+      "INSERT INTO artifacts (id, run_id, atype) VALUES ('art_sp', 'run-stale-proto', 'ui-prototype')",
+    ).run();
+    expect(
+      hasReviewableDesignSurface(dbAdapter(db), 'run-stale-proto', { reviewReportedSinceMs: FRESHNESS_BOUND }),
+    ).toBe(true);
   });
 });

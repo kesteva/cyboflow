@@ -12,6 +12,8 @@ import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } 
 import type { FanOutDriver } from '../types';
 import type { SystemicPauseResolver } from '../systemicPauseGate';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
+import Database from 'better-sqlite3';
+import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 
 function makeSpawner(impl?: () => Promise<void>): ClaudeSpawnerLike {
   return {
@@ -882,5 +884,114 @@ describe('readGateResolutionNote', () => {
     );
     expect(noteOf(null)).toBeUndefined();
     expect(noteOf('   ')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FB-9 — the adversarial-review freshness bound reaches BOTH db-backed seams
+// ---------------------------------------------------------------------------
+// The critique artifact is one row per run and survives a rewind / Revise, so
+// the runner's two readers (the controller's verdict fallback and the optional
+// approve-design gate's precondition) must both refuse a row this walk did not
+// produce. Driven end-to-end against a real :memory: DB, because the wiring
+// itself — which reader gets which bound — is the thing under test.
+
+describe('DefaultProgrammaticRunner — adversarial-review freshness (FB-9)', () => {
+  const CRITIQUE = ['## Blocking', '', '#### AR-1 — x', '**What:** y.', '', '## Findings', '', 'None.'].join('\n');
+  const LONG_AGO = '2000-01-01T00:00:00.000Z';
+  const FAR_AHEAD = '2999-01-01T00:00:00.000Z';
+
+  /** A real DB carrying just the columns the two readers SELECT. */
+  function dbWithCritique(reportedAt: string): { db: DatabaseLike; close: () => void } {
+    const raw = new Database(':memory:');
+    raw.exec(`
+      CREATE TABLE artifacts (
+        id           TEXT PRIMARY KEY,
+        run_id       TEXT NOT NULL,
+        atype        TEXT NOT NULL,
+        payload_json TEXT,
+        reported_at  TEXT
+      );
+    `);
+    raw.prepare(
+      'INSERT INTO artifacts (id, run_id, atype, payload_json, reported_at) VALUES (?, ?, ?, ?, ?)',
+    ).run('art_1', 'run-1', 'adversarial-review', JSON.stringify({ markdown: CRITIQUE }), reportedAt);
+    return { db: dbAdapter(raw), close: () => raw.close() };
+  }
+
+  /** expand-spec → adversarial-review (loopback) → approve-design. */
+  function reviewDef(gateOptional: boolean): WorkflowDefinition {
+    return {
+      id: 'd',
+      phases: [
+        {
+          id: 'p',
+          label: 'P',
+          color: '#3b6dd6',
+          steps: [
+            { id: 'expand-spec', name: 'Spec', agent: 'executor', mcps: [], retries: 0 },
+            {
+              id: 'adversarial-review',
+              name: 'Review',
+              agent: 'adversarial-review',
+              mcps: [],
+              retries: 0,
+              optional: true,
+              loopback: 'expand-spec',
+            },
+            {
+              id: 'approve-design',
+              name: 'Approve design',
+              agent: 'human',
+              mcps: [],
+              retries: 0,
+              human: true,
+              ...(gateOptional ? { optional: true } : {}),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  async function runWith(reportedAt: string, gateOptional: boolean): Promise<{
+    spawnPrompts: string[];
+    gateCalls: number;
+  }> {
+    const { db, close } = dbWithCritique(reportedAt);
+    try {
+      const spawner = makeSpawner();
+      const gate = gateOf('approve');
+      await new DefaultProgrammaticRunner({ spawner, reporter, gate, db }).run(ctxFor(reviewDef(gateOptional)));
+      const spawnPrompts = vi
+        .mocked(spawner.spawnCliProcess)
+        .mock.calls.map(([o]) => String((o as ClaudeSpawnerOptions).prompt));
+      return {
+        spawnPrompts,
+        gateCalls: vi.mocked(gate.resolve).mock.calls.length,
+      };
+    } finally {
+      close();
+    }
+  }
+
+  it('the controller reader: a critique reported BEFORE this walk does not arm the loopback', async () => {
+    // The reviewer's turn captured no text, so the verdict falls back to the
+    // artifact — which here is a previous walk's survivor.
+    const stale = await runWith(LONG_AGO, false);
+    expect(stale.spawnPrompts).toHaveLength(2); // one turn each: expand-spec, adversarial-review — no lap
+
+    // The SAME row reported after the bound still loops (the fallback works).
+    const fresh = await runWith(FAR_AHEAD, false);
+    expect(fresh.spawnPrompts.length).toBeGreaterThan(2);
+  });
+
+  it('the gate precondition: a stale critique is not a reviewable design surface', async () => {
+    // Nothing else in this DB is a surface, so the critique alone decides.
+    const stale = await runWith(LONG_AGO, true);
+    expect(stale.gateCalls).toBe(0); // gate skipped — no surface to review
+
+    const fresh = await runWith(FAR_AHEAD, true);
+    expect(fresh.gateCalls).toBeGreaterThan(0); // gate opened over this round's critique
   });
 });

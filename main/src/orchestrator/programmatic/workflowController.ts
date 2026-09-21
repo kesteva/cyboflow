@@ -570,6 +570,34 @@ export class WorkflowController {
     // set vs. churn), and `step_results` cannot supply it — every lap of a step
     // collapses into one row there.
     const priorRounds = new Map<string, ReviewLoopPriorRound[]>();
+    // FRESHNESS bound for this walk's adversarial-review reads (FB-9). The
+    // critique artifact is ONE row per run (one-per-(run, atype), migration 136),
+    // so it outlives the walk that wrote it: a whole-run rewind starts a NEW walk
+    // and `StepResultStore.deleteForSteps` purges step_results, but nothing
+    // touches `artifacts`. Reading that survivor as this round's verdict arms a
+    // phantom design loop, and counts as a "reviewable design surface" for a
+    // surface that no longer exists. `artifacts.reported_at` (migration 141) is
+    // re-stamped on EVERY report — including an identical no-op re-report, which
+    // neither `revision` nor the audit log records — so an instant is enough to
+    // tell this round's critique from a previous one's.
+    //
+    // Walk-entry value, refined at each review-step visit below:
+    //   - the review step is in `completedStepIds` ⇒ NO bound. The critique
+    //     belongs to the SURVIVING timeline (a crash-resume past the review step,
+    //     or a rewind whose target is AFTER it — `deleteForSteps` only purges the
+    //     at-and-after slice), so it is this run's current critique by definition.
+    //   - otherwise ⇒ the walk's start instant. The review step will either run
+    //     this walk (and re-stamp the bound at its visit) or self-skip, and in the
+    //     self-skip case anything older than this walk is a previous walk's.
+    const reviewStepIds = def.phases
+      .flatMap((p) => p.steps)
+      .filter((st) => st.agent === 'adversarial-review')
+      .map((st) => st.id);
+    let reviewReportedSinceMs: number | undefined = reviewStepIds.some((id) =>
+      (completedStepIds ?? new Set<string>()).has(id),
+    )
+      ? undefined
+      : this.nowMs();
     // Provenance for the NEXT human gate, armed when the supervisor stops the
     // automatic review loop and consumed by the one gate that follows (cleared
     // the moment that gate's call returns). Never sticky: it describes one gate
@@ -832,7 +860,11 @@ export class WorkflowController {
         if (isPureHumanGate(step) && step.optional === true && this.host.shouldSkipHumanGate) {
           let gateSkipReason: string | null = null;
           try {
-            gateSkipReason = this.host.shouldSkipHumanGate(step, runId);
+            gateSkipReason = this.host.shouldSkipHumanGate(
+              step,
+              runId,
+              reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : undefined,
+            );
           } catch {
             gateSkipReason = null;
           }
@@ -914,6 +946,16 @@ export class WorkflowController {
         // step-specific defects; they only apply once the human GAVE UP on the pause
         // ('giveup') or the pause budget is exhausted, at which point the systemic
         // result falls through the ordinary failure path below unchanged.
+        //
+        // This review step is about to RUN, so the round starts now: anything the
+        // artifact carries from before this instant is a previous round's. Stamped
+        // ONCE per VISIT, deliberately not per retry attempt — an attempt that
+        // reported the artifact and then failed still reported it this round, and
+        // re-stamping would make its own report read as stale.
+        if (step.agent === 'adversarial-review') {
+          reviewReportedSinceMs = this.nowMs();
+        }
+
         const maxAttempts = step.retries + 1;
         let attempt = 0;
         let lastError: string | undefined;
@@ -992,7 +1034,7 @@ export class WorkflowController {
           // the step advances and the human gate presents the surviving entries.
           const review =
             step.agent === 'adversarial-review'
-              ? this.readAdversarialReviewResult(step, phase.steps, okResultText)
+              ? this.readAdversarialReviewResult(step, phase.steps, okResultText, reviewReportedSinceMs)
               : null;
           if (review !== null) {
             // One completed review result = one round, whatever the verdict and
@@ -1012,7 +1054,9 @@ export class WorkflowController {
             // misrepresents the trend the next consult reads. A CLEAN round
             // selects nothing — there is no lap to steer, and an artifact read
             // there would be pure cost.
-            const document = review.blocking ? this.selectReviewDocument(step, review) : undefined;
+            const document = review.blocking
+              ? this.selectReviewDocument(step, review, reviewReportedSinceMs)
+              : undefined;
             const ledgerParsed = document?.parsed ?? review.parsed;
             priorRounds.set(step.id, [
               ...earlier,
@@ -2522,7 +2566,7 @@ export class WorkflowController {
     //     provably safe                → the `inFlight.size === 0` drain below.
 
     /** Wall clock, seam-injected so the cohort ceiling is testable. */
-    const nowMs = (): number => this.host.now?.() ?? Date.now();
+    const nowMs = (): number => this.nowMs();
 
     /** itemId → its live walk. Resolves to `[itemId, outcome]` so `race` names the winner. */
     const inFlight = new Map<string, Promise<[string, LaneWalkOutcome]>>();
@@ -3187,6 +3231,7 @@ export class WorkflowController {
     step: WorkflowStep,
     phaseSteps: WorkflowStep[],
     resultText: string | null | undefined,
+    reportedSinceMs: number | undefined,
   ): {
     /** Index of the loopback target within `phaseSteps`, or -1 when unresolvable. */
     index: number;
@@ -3231,11 +3276,23 @@ export class WorkflowController {
       };
     }
     // No verdict in the text at all (often: no text at all) — fall back to the
-    // artifact. Fail-soft: a throwing reader reads as "no artifact", i.e. as
-    // today's advance.
-    const artifact = this.readAdversarialReviewArtifact();
+    // artifact, BOUNDED by this round's freshness instant so a previous walk's
+    // surviving critique cannot masquerade as this round's verdict. Fail-soft: a
+    // throwing reader reads as "no artifact", i.e. as today's advance.
+    const artifact = this.readAdversarialReviewArtifact(reportedSinceMs);
     const parsed = parseAdversarialReviewDoc(artifact);
     if (parsed.blocking.length === 0) {
+      // A live run's log has to say WHY it advanced past a review whose text said
+      // nothing — "the artifact was a previous round's" and "there was no
+      // artifact" look identical from the outside otherwise.
+      this.host.log?.(
+        'info',
+        `step '${step.id}': the reviewer's text carried no verdict; ` +
+          (artifact !== undefined
+            ? 'the review artifact carried no blocking entries'
+            : `no review artifact reported since ${reportedSinceMs !== undefined ? new Date(reportedSinceMs).toISOString() : '(no bound)'}`) +
+          ' — advancing',
+      );
       return { index: targetIndex, blocking: false, note: null, text, parsed, source: 'artifact' };
     }
     return {
@@ -3248,10 +3305,30 @@ export class WorkflowController {
     };
   }
 
-  /** The run's adversarial-review artifact, or undefined (a throwing reader reads as absent). */
-  private readAdversarialReviewArtifact(): string | undefined {
+  /**
+   * Wall clock, seam-injected. The controller's two clock readers — the fan-out
+   * cohort ceiling and the adversarial-review freshness bound — go through this
+   * one method so a test scripts both from a single `host.now`.
+   */
+  private nowMs(): number {
+    return this.host.now?.() ?? Date.now();
+  }
+
+  /**
+   * The run's adversarial-review artifact, or undefined (a throwing reader reads
+   * as absent).
+   *
+   * `reportedSinceMs` is this round's freshness bound (see `run()`'s
+   * `reviewReportedSinceMs`): an artifact last reported before it belongs to a
+   * PREVIOUS walk — the row is one-per-run and survives a rewind / Revise — and
+   * must read as absent rather than as this round's verdict. `undefined` ⇒ no
+   * bound is sent, which is today's unconditional read.
+   */
+  private readAdversarialReviewArtifact(reportedSinceMs: number | undefined): string | undefined {
     try {
-      return this.host.readAdversarialReview?.();
+      return this.host.readAdversarialReview?.(
+        reportedSinceMs !== undefined ? { reportedSinceMs } : undefined,
+      );
     } catch {
       return undefined;
     }
@@ -3287,13 +3364,18 @@ export class WorkflowController {
   private selectReviewDocument(
     step: WorkflowStep,
     review: { text: string; parsed: ParsedAdversarialReview; source: 'text' | 'artifact' },
+    reportedSinceMs: number | undefined,
   ): SelectedReviewDocument {
     const fromText = (): SelectedReviewDocument => ({
       ...(review.text.trim().length > 0 ? { markdown: review.text } : {}),
       parsed: review.parsed,
       fromArtifact: false,
     });
-    const artifact = this.readAdversarialReviewArtifact();
+    // Same bound as the verdict read above — one instant per review-step visit,
+    // so both reads agree about which round the artifact belongs to. The id-set
+    // mismatch check below stays the SECOND line of defence: an artifact that IS
+    // this round's can still lag behind the text it is compared with.
+    const artifact = this.readAdversarialReviewArtifact(reportedSinceMs);
     if (typeof artifact !== 'string' || artifact.trim().length === 0) return fromText();
     const artifactParsed = parseAdversarialReviewDoc(artifact);
     const textIds = blockingIdSet(review.parsed);

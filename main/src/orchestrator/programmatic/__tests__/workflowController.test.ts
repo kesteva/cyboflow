@@ -4145,3 +4145,236 @@ describe('WorkflowController — supervised adversarial-review loop (cap 3)', ()
     expect(blockedHost.requests).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// FB-9 — the adversarial-review FRESHNESS bound
+// ---------------------------------------------------------------------------
+// The critique artifact is ONE row per run, so it outlives the walk that wrote
+// it: after a whole-run rewind or a human Revise the previous walk's critique is
+// still sitting in the table. The controller stamps an instant and hands it to
+// every artifact read so a survivor reads as absent instead of arming a phantom
+// design loop (or opening approve-design over a surface that is gone).
+
+describe('WorkflowController — adversarial-review freshness bound (FB-9)', () => {
+  /** Planner's refine phase in miniature; `gateOptional` arms the skip seam. */
+  function freshnessDef(gateOptional = false): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({
+          id: 'adversarial-review',
+          agent: 'adversarial-review',
+          optional: true,
+          loopback: 'expand-spec',
+        }),
+        step({
+          id: 'approve-design',
+          agent: 'human',
+          human: true,
+          loopback: 'expand-spec',
+          ...(gateOptional ? { optional: true } : {}),
+        }),
+        step({ id: 'epics' }),
+      ]),
+    ]);
+  }
+
+  const ARTIFACT = ['## Blocking', '', '#### AR-1 — x', '**What:** y.', '', '## Findings', '', 'None.'].join('\n');
+  const CLEAN = 'Reported.\n\n## Blocking\n\nNone.\n\nREVIEW: CLEAN';
+
+  /**
+   * A host clock that ticks 1000ms per read, so every instant the controller
+   * captures is distinguishable and assertable. Walk entry takes the FIRST tick;
+   * each review-step visit takes the next one.
+   */
+  function tickingNow(): () => number {
+    let t = 0;
+    return () => (t += 1000);
+  }
+
+  /** Scripted review results per adversarial-review turn; every other step is ok. */
+  function runnerFor(reviewResults: (string | null)[]): StepRunner & { seen: string[] } {
+    const seen: string[] = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      async runStep(s) {
+        seen.push(s.id);
+        if (s.id === 'adversarial-review') {
+          return { status: 'ok', resultText: queue.length > 0 ? queue.shift()! : CLEAN };
+        }
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it('passes the review-step VISIT instant, and the SAME bound to every read within that visit', async () => {
+    // The reviewer's text carried no verdict, so the verdict falls back to the
+    // artifact AND selectReviewDocument reads it again — the two must agree about
+    // which round the artifact belongs to, or they could disagree about the
+    // verdict itself.
+    const bounds: Array<{ reportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor(['']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) => {
+      bounds.push(opts);
+      return ARTIFACT;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-bound', freshnessDef());
+
+    // Walk entry took tick 1 (1000); the review step's first visit took tick 2.
+    // Two reads in THAT visit — the verdict fallback and the document select —
+    // and both carry the same instant. (The second visit's turn returns CLEAN,
+    // which never consults the artifact at all.)
+    expect(bounds).toHaveLength(2);
+    expect(bounds[0]).toEqual({ reportedSinceMs: 2000 });
+    expect(bounds[1]).toEqual({ reportedSinceMs: 2000 });
+  });
+
+  it('a LAP gets a NEW, later bound on the second visit', async () => {
+    const bounds: number[] = [];
+    const runner = runnerFor(['', '']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) => {
+      if (opts?.reportedSinceMs !== undefined) bounds.push(opts.reportedSinceMs);
+      return ARTIFACT;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-lap', freshnessDef());
+
+    // Visit 1 looped the phase back; visit 2 hit the mechanical cap and advanced.
+    expect(runner.seen.filter((id) => id === 'adversarial-review')).toHaveLength(2);
+    expect(new Set(bounds)).toEqual(new Set([2000, 3000]));
+    expect(Math.max(...bounds)).toBeGreaterThan(Math.min(...bounds));
+  });
+
+  it('a STALE artifact (reported before the bound) advances instead of looping, and logs WHY', async () => {
+    // The reader models the real row: it answers only when the bound is satisfied.
+    const reportedAt = 0; // before this walk even started
+    const log = vi.fn();
+    const runner = runnerFor(['']);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.log = log;
+    host.readAdversarialReview = (opts) =>
+      opts?.reportedSinceMs !== undefined && reportedAt < opts.reportedSinceMs ? undefined : ARTIFACT;
+
+    const result = await new WorkflowController(runner, host).run('run-fb9-stale', freshnessDef());
+
+    expect(result.outcome).toBe('completed');
+    // No lap: the phase ran exactly once.
+    expect(runner.seen.filter((id) => id === 'expand-spec')).toHaveLength(1);
+    const infoLines = log.mock.calls.filter((c) => c[0] === 'info').map((c) => String(c[1]));
+    expect(infoLines.some((l) => l.includes("'adversarial-review'") && l.includes('no verdict'))).toBe(true);
+  });
+
+  it('the SAME reader loops when the bound is satisfied — the pre-existing fallback still works', async () => {
+    const reportedAt = Number.MAX_SAFE_INTEGER; // reported after any bound
+    const runner = runnerFor(['', CLEAN]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.readAdversarialReview = (opts) =>
+      opts?.reportedSinceMs !== undefined && reportedAt < opts.reportedSinceMs ? undefined : ARTIFACT;
+
+    await new WorkflowController(runner, host).run('run-fb9-fresh', freshnessDef());
+
+    expect(runner.seen.filter((id) => id === 'expand-spec')).toHaveLength(2);
+  });
+
+  it('shouldSkipHumanGate gets the review step VISIT instant when the review step ran this walk', async () => {
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([CLEAN]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-gate', freshnessDef(true));
+
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 2000 }]);
+  });
+
+  it('shouldSkipHumanGate gets NO ctx when the review step completed BEFORE this walk', async () => {
+    // A crash-resume (or a rewind whose target is after the review step) past the
+    // reviewer: the critique belongs to the SURVIVING timeline, so the gate must
+    // see it exactly as it does today.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9-resume',
+      freshnessDef(true),
+      undefined,
+      undefined,
+      new Set(['expand-spec', 'adversarial-review']),
+    );
+
+    expect(runner.seen).not.toContain('adversarial-review');
+    expect(ctxs).toEqual([undefined]);
+  });
+
+  it('shouldSkipHumanGate gets the WALK-START instant when the review step never ran this walk', async () => {
+    // Operator-skipped here, but the shape is general: the review step is in the
+    // definition and was NOT completed before this walk, yet no turn of it ran —
+    // so anything the artifact carries predates this walk.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner = runnerFor([]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+    const directives = createRunDirectives();
+    directives.userSkippedStepIds.add('adversarial-review');
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9-notrun',
+      freshnessDef(true),
+      undefined,
+      undefined,
+      undefined,
+      directives,
+    );
+
+    expect(runner.seen).not.toContain('adversarial-review');
+    // Tick 1 — the walk's own start, never refined by a visit that did not happen.
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 1000 }]);
+  });
+
+  it('an optional review step that self-skips by FAILING still gets its VISIT instant', async () => {
+    // Deliberate: a turn that reported the artifact and then failed DID report it
+    // this round, so the bound must not fall back to the walk start there.
+    const ctxs: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const runner: StepRunner & { seen: string[] } = {
+      seen: [],
+      async runStep(s) {
+        (runner as { seen: string[] }).seen.push(s.id);
+        if (s.id === 'adversarial-review') return { status: 'failed', error: 'boom' };
+        return { status: 'ok' };
+      },
+    };
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') ctxs.push(ctx);
+      return null;
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-selfskip', freshnessDef(true));
+
+    expect(runner.seen).toContain('adversarial-review');
+    expect(ctxs).toEqual([{ reviewReportedSinceMs: 2000 }]);
+  });
+});

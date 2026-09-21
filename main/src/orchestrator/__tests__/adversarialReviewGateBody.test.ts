@@ -14,6 +14,7 @@ import {
   composeAdversarialReviewGateBody,
   countApproveDesignRevisionsUsed,
   readAdversarialReviewMarkdown,
+  readAdversarialReviewReportedAtMs,
 } from '../adversarialReviewGateBody';
 import { countRunPendingFindings } from '../reviewItemListing';
 
@@ -25,7 +26,8 @@ function buildDb(): Database.Database {
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       atype TEXT NOT NULL,
-      payload_json TEXT
+      payload_json TEXT,
+      reported_at TEXT
     );
     CREATE TABLE review_items (
       id TEXT PRIMARY KEY,
@@ -42,13 +44,46 @@ function buildDb(): Database.Database {
   return db;
 }
 
-function seedReview(db: Database.Database, runId: string, markdown: string | null): void {
-  db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
+function seedReview(
+  db: Database.Database,
+  runId: string,
+  markdown: string | null,
+  reportedAt: string | null = null,
+): void {
+  db.prepare(
+    'INSERT INTO artifacts (id, run_id, atype, payload_json, reported_at) VALUES (?, ?, ?, ?, ?)',
+  ).run(
     `art-${runId}`,
     runId,
     'adversarial-review',
     markdown === null ? null : JSON.stringify({ markdown }),
+    reportedAt,
   );
+}
+
+/**
+ * A PRE-141 fixture: an `artifacts` table with no `reported_at` column at all.
+ * Both readers must fail-soft to "age unknown" there — the freshness bound can
+ * only ever make an artifact read as absent, so a DB that has not been migrated
+ * must keep today's behaviour instead of losing its critique.
+ */
+function buildLegacyDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE artifacts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      atype TEXT NOT NULL,
+      payload_json TEXT
+    );
+  `);
+  db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
+    'art-legacy',
+    'run-1',
+    'adversarial-review',
+    JSON.stringify({ markdown: REVIEW_DOC }),
+  );
+  return db;
 }
 
 /**
@@ -136,6 +171,79 @@ describe('readAdversarialReviewMarkdown', () => {
       JSON.stringify({ markdown: '# Brief' }),
     );
     expect(readAdversarialReviewMarkdown(dbAdapter(db), 'run-1')).toBeUndefined();
+  });
+});
+
+describe('readAdversarialReviewReportedAtMs', () => {
+  it('parses a zoned ISO value to its epoch ms', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, '2026-09-21T10:00:00.000Z');
+    expect(readAdversarialReviewReportedAtMs(dbAdapter(db), 'run-1')).toBe(
+      Date.parse('2026-09-21T10:00:00.000Z'),
+    );
+  });
+
+  it('parses the UNZONED SQLite shape as UTC, not local', () => {
+    // The repo's recurring timestamp trap: `new Date('2026-09-21 10:00:00')`
+    // reads LOCAL, which on a UTC-7 host puts the row 7 hours in the future and
+    // would make a fresh critique read as stale (or vice versa).
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, '2026-09-21 10:00:00');
+    expect(readAdversarialReviewReportedAtMs(dbAdapter(db), 'run-1')).toBe(
+      Date.parse('2026-09-21T10:00:00.000Z'),
+    );
+  });
+
+  it('is null for a NULL column value, no row, and a table without the column', () => {
+    const db = buildDb();
+    seedReview(db, 'run-null', REVIEW_DOC, null);
+    const adapter = dbAdapter(db);
+    expect(readAdversarialReviewReportedAtMs(adapter, 'run-null')).toBeNull();
+    expect(readAdversarialReviewReportedAtMs(adapter, 'run-missing')).toBeNull();
+    // pre-141 DB: the SELECT itself throws, and that must read as "unknown".
+    expect(readAdversarialReviewReportedAtMs(dbAdapter(buildLegacyDb()), 'run-1')).toBeNull();
+  });
+
+  it('is null for an unparseable value', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, 'not a timestamp');
+    expect(readAdversarialReviewReportedAtMs(dbAdapter(db), 'run-1')).toBeNull();
+  });
+});
+
+describe('readAdversarialReviewMarkdown freshness bound', () => {
+  const BOUND = Date.parse('2026-09-21T10:00:00.000Z');
+
+  it('reads as ABSENT when the artifact was reported BEFORE the bound', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, '2026-09-21T09:59:59.999Z');
+    expect(readAdversarialReviewMarkdown(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND })).toBeUndefined();
+  });
+
+  it('reads the markdown when reported AT the bound, and when reported after it', () => {
+    const at = buildDb();
+    seedReview(at, 'run-1', REVIEW_DOC, '2026-09-21T10:00:00.000Z');
+    expect(readAdversarialReviewMarkdown(dbAdapter(at), 'run-1', { reportedSinceMs: BOUND })).toBe(REVIEW_DOC);
+
+    const after = buildDb();
+    seedReview(after, 'run-1', REVIEW_DOC, '2026-09-21T10:00:00.001Z');
+    expect(readAdversarialReviewMarkdown(dbAdapter(after), 'run-1', { reportedSinceMs: BOUND })).toBe(REVIEW_DOC);
+  });
+
+  it('applies NO constraint when the age is unknown (NULL column, or no column at all)', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, null);
+    expect(readAdversarialReviewMarkdown(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND })).toBe(REVIEW_DOC);
+    expect(
+      readAdversarialReviewMarkdown(dbAdapter(buildLegacyDb()), 'run-1', { reportedSinceMs: BOUND }),
+    ).toBe(REVIEW_DOC);
+  });
+
+  it('applies NO constraint with no opts — the unbounded read is unchanged', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, '2000-01-01T00:00:00.000Z');
+    expect(readAdversarialReviewMarkdown(dbAdapter(db), 'run-1')).toBe(REVIEW_DOC);
+    expect(readAdversarialReviewMarkdown(dbAdapter(db), 'run-1', {})).toBe(REVIEW_DOC);
   });
 });
 

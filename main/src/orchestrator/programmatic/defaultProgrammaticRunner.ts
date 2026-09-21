@@ -80,6 +80,11 @@ import {
 } from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
+// ONE reader for the run's design critique — the gate body, the gate-revision
+// quote and the controller's verdict fallback must never disagree about what the
+// artifact says, and only the gate-body copy knows the `reported_at` freshness
+// rule (migration 141). This module used to keep a byte-identical private copy.
+import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
 
 /**
  * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
@@ -607,36 +612,6 @@ export function readApproveRunbookResolution(db: DatabaseLike, runId: string): s
 }
 
 /**
- * Read the run's `adversarial-review` artifact markdown — the design critique the
- * approve-design gate was composed from.
- *
- * A gate 'revise' sends the design steps back to re-run, and a programmatic step
- * turn is a fresh SDK session that remembers nothing: the re-run agent has never
- * seen the review whose entries it is being asked to address. The artifact is the
- * only durable copy (one per atype per run, ENRICHED by a re-review rather than
- * duplicated), so the revision section quotes it back verbatim.
- *
- * Fail-soft like readProjectBriefMarkdown: a missing table or unparseable payload
- * yields undefined and the revision section simply carries the note alone.
- */
-export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
-  try {
-    const row = db
-      .prepare(
-        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
-      )
-      .get(runId) as { payloadJson?: string | null } | undefined;
-    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
-    const parsed: unknown = JSON.parse(row.payloadJson);
-    if (typeof parsed !== 'object' || parsed === null) return undefined;
-    const markdown = (parsed as { markdown?: unknown }).markdown;
-    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * The raw resolution text of this run's most recent RESOLVED gate for `stepId`.
  *
  * The gate resolver reduces a resolution to approve/reject/revise/abort and drops
@@ -831,7 +806,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
 
     // The design critique the approve-design gate reviewed, re-read per step. Only
     // the gate-revision section renders it, and only on a run that reported the
-    // artifact — every other prompt is byte-identical.
+    // artifact — every other prompt is byte-identical. Deliberately UNBOUNDED (no
+    // `reportedSinceMs`): the human just read this critique at the gate, so its
+    // age is not the question — quoting it back is the whole point.
     const adversarialReviewMarkdown = (): string | undefined =>
       this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId) : undefined;
 
@@ -970,9 +947,18 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // park the run over an empty review surface. A POPULATED adversarial-review
     // artifact counts as a surface too, so a critique with entries always opens
     // the gate. hasReviewableDesignSurface is fail-open (any read error opens it).
-    const humanGateSkip = (step: WorkflowStep): string | null => {
+    //
+    // `ctx.reviewReportedSinceMs` is the controller's "this round started at"
+    // instant: a critique last reported before it is a PREVIOUS walk's leftover
+    // (the artifact row survives a rewind / Revise) and must not by itself open
+    // the gate over a surface that no longer exists. Absent ctx ⇒ no bound.
+    const humanGateSkip = (step: WorkflowStep, gateCtx?: { reviewReportedSinceMs?: number }): string | null => {
       if (step.id !== 'approve-design' || !this.deps.db) return null;
-      return hasReviewableDesignSurface(this.deps.db, ctx.runId)
+      return hasReviewableDesignSurface(
+        this.deps.db,
+        ctx.runId,
+        gateCtx?.reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs: gateCtx.reviewReportedSinceMs } : undefined,
+      )
         ? null
         : 'no design surface to review — no prototype artifact, no architecture design section, and no adversarial-review entries';
     };
@@ -1001,8 +987,16 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       humanGateSkip,
       ...(gateResolutionNote ? { readGateResolutionNote: gateResolutionNote } : {}),
       // Same reader the revision prompt uses, handed to the controller so a
-      // review whose final text never arrived still loops on its artifact.
-      ...(this.deps.db ? { readAdversarialReview: adversarialReviewMarkdown } : {}),
+      // review whose final text never arrived still loops on its artifact —
+      // but BOUND here: the controller passes the round's "reported since"
+      // instant so a previous walk's surviving critique reads as absent
+      // instead of arming a phantom loopback.
+      ...(this.deps.db
+        ? {
+            readAdversarialReview: (opts?: { reportedSinceMs?: number }): string | undefined =>
+              readAdversarialReviewMarkdown(this.deps.db!, ctx.runId, opts),
+          }
+        : {}),
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),

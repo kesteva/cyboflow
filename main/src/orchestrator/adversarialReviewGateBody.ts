@@ -34,12 +34,43 @@ import { parseGateResolution } from '../../../shared/types/reviews';
 // The legacy free-text sniff, borrowed rather than re-implemented so this count can
 // never disagree with what the gate readers decided the run actually did (CR-13).
 import { gateDecisionFromResolution } from './gateDecision';
+// The shared parser, NOT `new Date(raw)`: a SQLite-shaped unzoned value is UTC and
+// the platform parser reads it as LOCAL (the repo's recurring timestamp trap).
+// timestampUtils is a dependency-free util, so it keeps this module's
+// standalone-typecheck invariant.
+import { parseTimestamp } from '../utils/timestampUtils';
 
 /** The step id whose gate this module speaks for. */
 export const APPROVE_DESIGN_STEP_ID = 'approve-design';
 
 /** Source stamped on a programmatic human-gate decision item for that step. */
 const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
+
+/**
+ * When this run's `adversarial-review` artifact was LAST reported, as epoch ms —
+ * `artifacts.reported_at` (migration 141), which the ArtifactRouter re-stamps on
+ * every report including an identical no-op re-report.
+ *
+ * `null` means "age unknown", and every caller must read that as NO CONSTRAINT.
+ * It is returned for a pre-141 row, a fixture table without the column, an
+ * unparseable value, a missing row, or any throw. The freshness bound can only
+ * ever make an artifact read as ABSENT, so an unknown age that suppressed the
+ * critique would silently regress runs whose DB simply has not been migrated.
+ */
+export function readAdversarialReviewReportedAtMs(db: DatabaseLike, runId: string): number | null {
+  try {
+    const row = db
+      .prepare(
+        "SELECT reported_at AS reportedAt FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
+      )
+      .get(runId) as { reportedAt?: string | null } | undefined;
+    if (typeof row?.reportedAt !== 'string' || row.reportedAt.length === 0) return null;
+    const ms = parseTimestamp(row.reportedAt).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The markdown of this run's `adversarial-review` artifact, or undefined when the
@@ -49,9 +80,25 @@ const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
  * Reads the run's CURRENT critique, not one pinned at gate-open: the artifact is
  * one-per-run and a post-Revise re-review ENRICHES it, which is exactly what the
  * re-presented gate should be showing.
+ *
+ * FRESHNESS. The row is one-per-run, so it also survives a whole-run rewind or a
+ * Revise loopback — a previous walk's critique is still there for the next walk
+ * to misread as its own. `opts.reportedSinceMs` is the caller's "this round
+ * started at" instant: a critique last reported BEFORE it belongs to a previous
+ * round and reads as ABSENT (`undefined`). An unknown age (see
+ * {@link readAdversarialReviewReportedAtMs}) and an absent `opts` both mean no
+ * constraint — today's behaviour, unchanged.
  */
-export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
+export function readAdversarialReviewMarkdown(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { reportedSinceMs?: number },
+): string | undefined {
   try {
+    if (opts?.reportedSinceMs !== undefined) {
+      const reportedAtMs = readAdversarialReviewReportedAtMs(db, runId);
+      if (reportedAtMs !== null && reportedAtMs < opts.reportedSinceMs) return undefined;
+    }
     const row = db
       .prepare(
         "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",

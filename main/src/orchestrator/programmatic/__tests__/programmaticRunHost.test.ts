@@ -451,6 +451,43 @@ describe('ProgrammaticRunHost', () => {
     expect(none.readAdversarialReview()).toBeUndefined();
   });
 
+  it('readAdversarialReview forwards the freshness bound verbatim to the injected reader', () => {
+    // The host neither reads nor invents the instant — the controller owns it.
+    const reader = vi.fn(() => '## Blocking\n\n#### AR-1 — x\n');
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      readAdversarialReview: reader,
+    });
+
+    expect(host.readAdversarialReview({ reportedSinceMs: 5 })).toBe('## Blocking\n\n#### AR-1 — x\n');
+    expect(reader).toHaveBeenCalledWith({ reportedSinceMs: 5 });
+
+    // No bound ⇒ nothing invented on the way through.
+    host.readAdversarialReview();
+    expect(reader).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('shouldSkipHumanGate forwards the freshness ctx to humanGateSkip and stays fail-soft', () => {
+    const humanGateSkip = vi.fn(() => 'no design surface to review');
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      humanGateSkip,
+    });
+    const gateStep = step({ id: 'approve-design', optional: true });
+
+    expect(host.shouldSkipHumanGate(gateStep, 'r', { reviewReportedSinceMs: 5 })).toBe(
+      'no design surface to review',
+    );
+    expect(humanGateSkip).toHaveBeenCalledWith(gateStep, { reviewReportedSinceMs: 5 });
+
+    // No ctx ⇒ the predicate sees undefined, and an unwired host still opens the gate.
+    host.shouldSkipHumanGate(gateStep, 'r');
+    expect(humanGateSkip).toHaveBeenLastCalledWith(gateStep, undefined);
+
+    const none = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
+    expect(none.shouldSkipHumanGate(gateStep, 'r', { reviewReportedSinceMs: 5 })).toBeNull();
+  });
+
   // ── Fan-out lane driver (generalize-parallel-fan-out; LIVE resolution) ──────
   it('exposes the provider-resolved fan-out driver on host.fanOut, consulting the provider on EVERY read', () => {
     const fanOutDriver: FanOutDriver = {

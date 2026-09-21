@@ -420,8 +420,22 @@ export interface ApproveIdeasBatchRow {
  * exception is the review read at the end, which is independently fail-soft
  * (an unreadable payload reads as "no review") and can therefore only ever ADD
  * a reason to open the gate, never a reason to skip one.
+ *
+ * FRESHNESS (`opts.reviewReportedSinceMs`). The critique is ONE row per run, so
+ * it survives a whole-run rewind and a Revise loopback: on the next walk a
+ * previous walk's critique would open this gate over a design surface that no
+ * longer exists. The bound is the caller's "this round started at" instant — a
+ * critique last reported before it is not a surface. Absent bound, or an unknown
+ * `reported_at` age, ⇒ no constraint (today's behaviour). ONLY the critique
+ * branch is bounded: whether the prototype / arch-design / project-brief / idea
+ * surfaces go stale across walks is a separate, pre-existing question this does
+ * not answer.
  */
-export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boolean {
+export function hasReviewableDesignSurface(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { reviewReportedSinceMs?: number },
+): boolean {
   try {
     const artifactRow = db
       .prepare(
@@ -447,10 +461,17 @@ export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boo
       if (typeof row?.body === 'string' && row.body.includes('## Architecture design')) return true;
     }
     // Last resort before skipping: a critique with at least one entry is a
-    // surface in its own right. `readAdversarialReviewMarkdown` is itself
-    // fail-soft (an unreadable payload reads as "no review"), so this can only
-    // ever ADD a reason to open the gate, never a reason to skip one.
-    const review = parseAdversarialReviewDoc(readAdversarialReviewMarkdown(db, runId));
+    // surface in its own right — provided it is THIS round's (see the freshness
+    // note above). `readAdversarialReviewMarkdown` is itself fail-soft (an
+    // unreadable payload reads as "no review"), so this can only ever ADD a
+    // reason to open the gate, never a reason to skip one.
+    const review = parseAdversarialReviewDoc(
+      readAdversarialReviewMarkdown(
+        db,
+        runId,
+        opts?.reviewReportedSinceMs !== undefined ? { reportedSinceMs: opts.reviewReportedSinceMs } : undefined,
+      ),
+    );
     if (review.blocking.length + review.findings.length > 0) return true;
     return false;
   } catch {

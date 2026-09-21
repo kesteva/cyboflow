@@ -887,8 +887,21 @@ export interface ControllerHost {
    * review), or null to open the gate normally. Absent ⇒ every gate opens
    * (today's behavior). A thrown consult is treated as null (fail-open toward
    * the gate — never silently skip a human review on an error).
+   *
+   * `ctx.reviewReportedSinceMs` is the FRESHNESS bound for the adversarial-review
+   * half of that precondition: a critique artifact reported BEFORE this instant
+   * belongs to a previous walk (the row survives a rewind / Revise) and reads as
+   * ABSENT, so it alone no longer opens the gate. The controller supplies the
+   * instant the review step's visit started this walk, or — when that step did
+   * not run this walk — the walk's own start; it supplies NOTHING when the review
+   * step completed before this walk (the critique belongs to the surviving
+   * timeline). Absent ctx / absent field ⇒ no constraint, today's behaviour.
    */
-  shouldSkipHumanGate?(step: WorkflowStep, runId: string): string | null;
+  shouldSkipHumanGate?(
+    step: WorkflowStep,
+    runId: string,
+    ctx?: { reviewReportedSinceMs?: number },
+  ): string | null;
 
   /**
    * Optional read-back of the free text a human typed when resolving a gate.
@@ -921,11 +934,21 @@ export interface ControllerHost {
    * controller therefore falls back to this reader when the text carries no
    * verdict of its own.
    *
+   * `opts.reportedSinceMs` is the FRESHNESS bound. The artifact is ONE row per
+   * run, so it also outlives the walk that wrote it: after a whole-run rewind or
+   * a Revise loopback the PREVIOUS walk's critique is still there, and reading it
+   * as this round's verdict arms a phantom design loop. An artifact last reported
+   * BEFORE this instant therefore reads as ABSENT. The controller supplies the
+   * instant the review step's visit started this walk, or the walk's own start
+   * when that step did not run this walk, and supplies NOTHING when the review
+   * step completed before this walk. Absent opts — and an unknown `reported_at`
+   * age — ⇒ no constraint, today's behaviour.
+   *
    * Fail-soft: returns undefined when there is no artifact or the host cannot
    * read it. Absent ⇒ the controller reads only the reviewer's final text
    * (today's behaviour).
    */
-  readAdversarialReview?(): string | undefined;
+  readAdversarialReview?(opts?: { reportedSinceMs?: number }): string | undefined;
 
   /**
    * Optional monitor feed. The controller calls this at run/step boundaries.
@@ -1151,11 +1174,15 @@ export interface ControllerHost {
   reportBuildBreakGroup?(input: { runId: string; group: BuildBreakGroup }): void;
 
   /**
-   * Optional wall clock, for the one place the controller needs one: the
-   * fan-out pool's corroboration window (SAME_ERROR_COHORT_MAX_MS), which bounds
-   * how long a lane's 'failed' write is held waiting for a sibling to corroborate
-   * it. Absent ⇒ `Date.now()`. Exists so a test can advance the ceiling without
-   * faking timers around real agent promises.
+   * Optional wall clock, for the two places the controller needs one:
+   *   - the fan-out pool's corroboration window (SAME_ERROR_COHORT_MAX_MS),
+   *     which bounds how long a lane's 'failed' write is held waiting for a
+   *     sibling to corroborate it; and
+   *   - the adversarial-review FRESHNESS bound — the instant stamped at walk
+   *     entry and at each review-step visit, compared against the critique
+   *     artifact's `reported_at` (see `readAdversarialReview`).
+   * Absent ⇒ `Date.now()`. Exists so a test can advance the ceiling (or script
+   * the review instants) without faking timers around real agent promises.
    */
   now?(): number;
 

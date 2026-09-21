@@ -381,8 +381,12 @@ export interface ProgrammaticRunHostArgs {
    * (ControllerHost.shouldSkipHumanGate, run-bound by the runner). Returns a
    * skip reason when the gate's reviewable surface is absent, null to open the
    * gate. Absent ⇒ every gate opens.
+   *
+   * The second arg carries the controller's `reviewReportedSinceMs` freshness
+   * bound: a critique artifact reported before it is a previous walk's and does
+   * not count as a surface. Passed straight through — this host adds nothing.
    */
-  humanGateSkip?: (step: WorkflowStep) => string | null;
+  humanGateSkip?: (step: WorkflowStep, ctx?: { reviewReportedSinceMs?: number }) => string | null;
   /**
    * Read-back of the free text a human typed when resolving one of this run's
    * gates (ControllerHost.readGateResolutionNote, run-bound by the runner). The
@@ -402,8 +406,12 @@ export interface ProgrammaticRunHostArgs {
    * than read inline because this host holds no DB handle. MUST be fail-soft
    * (return undefined, never throw). Absent ⇒ the controller reads only the
    * reviewer's final text.
+   *
+   * `opts.reportedSinceMs` is the controller's freshness bound — an artifact
+   * last reported before it is a previous walk's and reads as absent. Passed
+   * straight through; this host neither reads nor invents the instant.
    */
-  readAdversarialReview?: () => string | undefined;
+  readAdversarialReview?: (opts?: { reportedSinceMs?: number }) => string | undefined;
   /**
    * LANE-TRIAGE task reader. Resolves the ref / title / CURRENT body for a
    * fan-out item so `triageLaneFailure` can ENRICH the controller's bare
@@ -789,8 +797,12 @@ export class ProgrammaticRunHost implements ControllerHost {
     }
   }
 
-  shouldSkipHumanGate(step: WorkflowStep): string | null {
-    return this.args.humanGateSkip?.(step) ?? null;
+  shouldSkipHumanGate(
+    step: WorkflowStep,
+    _runId?: string,
+    ctx?: { reviewReportedSinceMs?: number },
+  ): string | null {
+    return this.args.humanGateSkip?.(step, ctx) ?? null;
   }
 
   /**
@@ -819,9 +831,9 @@ export class ProgrammaticRunHost implements ControllerHost {
    * the reviewer's chat text is survivable while a thrown read would abort a walk
    * that is mid-review.
    */
-  readAdversarialReview(): string | undefined {
+  readAdversarialReview(opts?: { reportedSinceMs?: number }): string | undefined {
     try {
-      return this.args.readAdversarialReview?.();
+      return this.args.readAdversarialReview?.(opts);
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] adversarial-review artifact read failed (fail-soft)', {
         runId: this.args.runId,
