@@ -6,6 +6,7 @@ import {
   parseCreateBacklogResult,
   parseCreateWorkflowResult,
   parseTriageFindingsResult,
+  parseStartQuickSessionResult,
   parseWorkflowDefinitionSummary,
 } from './proposalResultTypes';
 
@@ -357,5 +358,53 @@ describe('parseTriageFindingsResult', () => {
     expect(parseTriageFindingsResult({ kind: 'launch-run', status: 'executed' })).toBeNull();
     expect(parseTriageFindingsResult({ kind: 'triage-findings', status: 'superseded', items: [] })).toBeNull();
     expect(parseTriageFindingsResult({ kind: 'triage-findings', status: 'executed' })).toBeNull();
+  });
+});
+
+describe('parseStartQuickSessionResult', () => {
+  it('parses an executed result with every field', () => {
+    expect(
+      parseStartQuickSessionResult({
+        kind: 'start-quick-session',
+        status: 'executed',
+        sessionId: 'sess-q',
+        runId: 'run-q',
+        worktreePath: '/wt/sess-q',
+        sessionName: 'findings-sweep',
+        substrate: 'interactive',
+        claudePanelId: 'panel-1',
+      }),
+    ).toEqual({
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      worktreePath: '/wt/sess-q',
+      sessionName: 'findings-sweep',
+      substrate: 'interactive',
+      claudePanelId: 'panel-1',
+      error: undefined,
+      compensations: undefined,
+      reconciled: undefined,
+    });
+  });
+
+  it('keeps a failed result\'s error + compensations, drops a bad substrate and malformed steps', () => {
+    const r = parseStartQuickSessionResult({
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: 'sdk boom',
+      substrate: 'pty',
+      compensations: [{ step: 'dismiss-session', ok: true }, { bogus: true }],
+      reconciled: true,
+    });
+    expect(r).toMatchObject({ status: 'failed', error: 'sdk boom', reconciled: true, compensations: [{ step: 'dismiss-session', ok: true }] });
+    expect(r?.substrate).toBeUndefined();
+  });
+
+  it('returns null for another kind or a bad status', () => {
+    expect(parseStartQuickSessionResult({ kind: 'launch-run', status: 'executed' })).toBeNull();
+    expect(parseStartQuickSessionResult({ kind: 'start-quick-session', status: 'pending' })).toBeNull();
+    expect(parseStartQuickSessionResult(null)).toBeNull();
   });
 });

@@ -23,6 +23,7 @@ import type {
   ReprioritizeBacklogProposalPayload,
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
+  StartQuickSessionProposalPayload,
   TriageFindingItem,
   TriageFindingsProposalPayload,
 } from '../../../../shared/types/agentThread';
@@ -54,6 +55,7 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
   'create-backlog-items': 'add to backlog',
   'create-workflow': 'create workflow',
   'triage-findings': 'triage findings',
+  'start-quick-session': 'start quick session',
 };
 
 const ENTITY_TYPE_LABEL: Record<CreateBacklogItem['taskType'], string> = {
@@ -416,6 +418,63 @@ export function OpenSessionBody({ payload }: { payload: OpenSessionProposalPaylo
       </div>
       <Row label={nav.target === 'run' ? 'run' : 'session'} value={nav.target === 'run' ? nav.runId : nav.sessionId} />
       <p className="text-text-tertiary">Read-only navigation — no state changes on confirm.</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// start-quick-session
+// ---------------------------------------------------------------------------
+
+/** How many brief lines the collapsed card shows before the disclosure. */
+export const BRIEF_PREVIEW_LINES = 6;
+
+/**
+ * The brief, first {@link BRIEF_PREVIEW_LINES} lines visible, the rest behind
+ * a disclosure. Preformatted (the brief is what the session agent will read
+ * verbatim — ids, paths and line breaks matter), never re-flowed.
+ */
+export function BriefBlock({ brief }: { brief: string }): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const lines = brief.split('\n');
+  const truncated = lines.length > BRIEF_PREVIEW_LINES;
+  const shown = open || !truncated ? brief : lines.slice(0, BRIEF_PREVIEW_LINES).join('\n');
+  return (
+    <div className="flex flex-col gap-1" data-testid="quick-session-brief" data-expanded={String(open)}>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-border-primary bg-surface-secondary p-2 font-mono text-[10.5px] leading-snug text-text-primary">
+        {shown}
+      </pre>
+      {truncated && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="self-start text-[10px] text-text-tertiary hover:text-text-primary"
+          data-testid="quick-session-brief-toggle"
+        >
+          {open ? 'Show less' : `Show all ${lines.length} lines`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function StartQuickSessionBody({ payload }: { payload: StartQuickSessionProposalPayload }): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  return (
+    <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-start-quick-session">
+      <div className="text-[13px] font-bold text-text-primary">Start quick session</div>
+      <div className="flex flex-col gap-1.5">
+        <Row label="project" value={projectName} />
+        <Row label="session" value={payload.name ?? 'auto-named'} />
+        <Row label="substrate" value={payload.substrate ?? 'project default'} />
+        <Row label="workspace" value={payload.inPlace === true ? 'project checkout (in place)' : 'own worktree'} />
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-text-tertiary">brief — the session's first prompt</span>
+        <BriefBlock brief={payload.brief} />
+      </div>
+      {payload.note != null && payload.note !== '' && <p className="italic text-text-tertiary">{payload.note}</p>}
     </div>
   );
 }

@@ -31,9 +31,12 @@ import {
   type OpenSessionProposalPayload,
   type ReprioritizeBacklogItem,
   type ReprioritizeBacklogProposalPayload,
+  type StartQuickSessionProposalPayload,
   type TriageFindingItem,
   type TriageFindingsProposalPayload,
   isTriageFindingOp,
+  START_QUICK_SESSION_BRIEF_MAX_CHARS,
+  START_QUICK_SESSION_NAME_MAX_CHARS,
   TRIAGE_FINDINGS_MAX_ITEMS,
 } from '../../../../shared/types/agentThread';
 import { isCliSubstrate } from '../../../../shared/types/substrate';
@@ -393,6 +396,34 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
       }
       return payload;
     }
+    case 'start-quick-session': {
+      const projectId = raw.projectId;
+      const brief = raw.brief;
+      if (typeof projectId !== 'number') return null;
+      if (typeof brief !== 'string' || brief.trim().length === 0) return null;
+      const payload: StartQuickSessionProposalPayload = { kind: 'start-quick-session', projectId, brief };
+      const name = raw.name;
+      if (name !== undefined) {
+        if (typeof name !== 'string') return null;
+        payload.name = name;
+      }
+      const substrate = raw.substrate;
+      if (substrate !== undefined) {
+        if (!isCliSubstrate(substrate)) return null;
+        payload.substrate = substrate;
+      }
+      const inPlace = raw.inPlace;
+      if (inPlace !== undefined) {
+        if (typeof inPlace !== 'boolean') return null;
+        payload.inPlace = inPlace;
+      }
+      const note = raw.note;
+      if (note !== undefined) {
+        if (typeof note !== 'string') return null;
+        payload.note = note;
+      }
+      return payload;
+    }
     case 'create-workflow': {
       const projectId = raw.projectId;
       const name = raw.name;
@@ -496,7 +527,8 @@ export interface ReviewItemTriageSnapshot {
  * `unknown_workflow:<idOrName>`; and for triage-findings
  * `review_item_not_found:<id>`, `review_item_not_finding:<id>`,
  * `review_item_not_pending:<id>`, `review_item_not_staged:<id>`,
- * `duplicate_review_item:<id>`.
+ * `duplicate_review_item:<id>`; and for start-quick-session `project_not_found`,
+ * `brief_too_long`, `invalid_name`.
  */
 export type PrepareProposalResult =
   | { ok: true; payload: AgentProposalPayload; preconditions: AgentProposalPreconditions | null }
@@ -642,9 +674,45 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
     // that a confirmed card must never die on an id the assistant got wrong.
     const error = validateTriageFindings(deps, payload);
     if (error !== null) return { ok: false, error };
+  } else if (payload.kind === 'start-quick-session') {
+    // No preconditions (nothing exists yet to race against). The project must
+    // exist, the brief must fit, and the name — a git branch component, since
+    // quick-session names ARE worktree names — is normalized to a slug NOW so
+    // the card shows exactly what the worktree will be called.
+    const error = validateStartQuickSession(deps, payload);
+    if (error !== null) return { ok: false, error };
   }
 
   return { ok: true, payload, preconditions };
+}
+
+/**
+ * Normalize a proposed quick-session name to a branch-safe slug: lower-case,
+ * runs of anything outside `[a-z0-9._-]` collapsed to one `-`, leading /
+ * trailing separators trimmed, capped at {@link START_QUICK_SESSION_NAME_MAX_CHARS}.
+ * Returns '' when nothing survives (the caller rejects that as invalid_name).
+ */
+export function normalizeQuickSessionName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[-._]+|[-._]+$/g, '')
+    .slice(0, START_QUICK_SESSION_NAME_MAX_CHARS)
+    .replace(/[-._]+$/g, '');
+}
+
+/** The start-quick-session branch of prepareProposal; returns the error string or null. */
+function validateStartQuickSession(deps: PrepareProposalDeps, payload: StartQuickSessionProposalPayload): string | null {
+  const projectExists = deps.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
+  if (!projectExists) return 'project_not_found';
+  if (payload.brief.length > START_QUICK_SESSION_BRIEF_MAX_CHARS) return 'brief_too_long';
+  if (payload.name !== undefined) {
+    const slug = normalizeQuickSessionName(payload.name);
+    if (slug === '') return 'invalid_name';
+    payload.name = slug;
+  }
+  return null;
 }
 
 /**

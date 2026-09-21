@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { computeSpecHash } from './specHash';
 import {
+  normalizeQuickSessionName,
   parseAgentProposalPayload,
   prepareProposal,
   type PrepareProposalDeps,
@@ -724,5 +725,79 @@ describe('createPrepareProposalDeps.readReviewItem', () => {
     expect(real.readReviewItem('rvw_2')).toMatchObject({ stagedAt: '2026-09-01', selected: true });
     expect(real.readReviewItem('rvw_nope')).toBeUndefined();
     db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start-quick-session (TASK-295)
+// ---------------------------------------------------------------------------
+
+describe('parseAgentProposalPayload — start-quick-session', () => {
+  it('narrows the full shape and keeps only the declared optionals', () => {
+    expect(
+      parseAgentProposalPayload({
+        kind: 'start-quick-session',
+        projectId: 1,
+        brief: 'Look at rvw_1',
+        name: 'Findings Sweep',
+        substrate: 'interactive',
+        inPlace: true,
+        note: 'why',
+        extra: 'dropped',
+      }),
+    ).toEqual({
+      kind: 'start-quick-session',
+      projectId: 1,
+      brief: 'Look at rvw_1',
+      name: 'Findings Sweep',
+      substrate: 'interactive',
+      inPlace: true,
+      note: 'why',
+    });
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1, brief: 'x' })).toEqual({
+      kind: 'start-quick-session',
+      projectId: 1,
+      brief: 'x',
+    });
+  });
+
+  it('rejects a missing project, an empty/blank brief, a bad substrate, a non-boolean inPlace, a non-string name', () => {
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', brief: 'x' })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1 })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1, brief: '   ' })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1, brief: 'x', substrate: 'pty' })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1, brief: 'x', inPlace: 'yes' })).toBeNull();
+    expect(parseAgentProposalPayload({ kind: 'start-quick-session', projectId: 1, brief: 'x', name: 7 })).toBeNull();
+  });
+});
+
+describe('normalizeQuickSessionName', () => {
+  it('slugs to a branch-safe, lower-case, dash-joined name', () => {
+    expect(normalizeQuickSessionName('Findings Sweep')).toBe('findings-sweep');
+    expect(normalizeQuickSessionName('  Look at: rvw_1 / rvw_2!  ')).toBe('look-at-rvw_1-rvw_2');
+    expect(normalizeQuickSessionName('--already.fine-1--')).toBe('already.fine-1');
+    expect(normalizeQuickSessionName('a'.repeat(80) + '-tail')).toBe('a'.repeat(64));
+    expect(normalizeQuickSessionName('!!!')).toBe('');
+  });
+});
+
+describe('prepareProposal — start-quick-session validation', () => {
+  it('accepts a brief on an existing project and stamps the name as a slug', () => {
+    const r = prepareProposal(deps, { kind: 'start-quick-session', projectId: 1, brief: 'Hello', name: 'Findings Sweep' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.preconditions).toBeNull();
+    expect(r.payload).toEqual({ kind: 'start-quick-session', projectId: 1, brief: 'Hello', name: 'findings-sweep' });
+  });
+
+  it('rejects an unknown project, an over-long brief, and a name with nothing branch-safe in it', () => {
+    expect(prepareProposal(deps, { kind: 'start-quick-session', projectId: 99, brief: 'Hello' })).toEqual({ ok: false, error: 'project_not_found' });
+    expect(prepareProposal(deps, { kind: 'start-quick-session', projectId: 1, brief: 'x'.repeat(8193) })).toEqual({ ok: false, error: 'brief_too_long' });
+    expect(prepareProposal(deps, { kind: 'start-quick-session', projectId: 1, brief: 'x'.repeat(8192) }).ok).toBe(true);
+    expect(prepareProposal(deps, { kind: 'start-quick-session', projectId: 1, brief: 'Hello', name: '???' })).toEqual({ ok: false, error: 'invalid_name' });
+  });
+
+  it('an empty brief is a shape error (invalid_payload), not a named one', () => {
+    expect(prepareProposal(deps, { kind: 'start-quick-session', projectId: 1, brief: '' })).toEqual({ ok: false, error: 'invalid_payload' });
   });
 });

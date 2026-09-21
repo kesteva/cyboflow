@@ -2,7 +2,8 @@
  * proposalResultTypes — local, DEFENSIVE mirrors of the proposal executor's
  * `result_json` shapes (main/src/orchestrator/agentThread/proposalExecutor.ts
  * — `LaunchRunResultJson` / `ReprioritizeResultJson` / `EditWorkflowResultJson` /
- * `CreateBacklogResultJson` / `CreateWorkflowResultJson` / `TriageFindingsResultJson`).
+ * `CreateBacklogResultJson` / `CreateWorkflowResultJson` / `TriageFindingsResultJson` /
+ * `StartQuickSessionResultJson`).
  *
  * `AgentProposal.result` is typed `unknown` (shared/types/agentThread.ts) —
  * deliberately, since the executor's typed result interfaces live main-only
@@ -14,6 +15,7 @@
  */
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { isTriageFindingOp, type TriageFindingOp } from '../../../../shared/types/agentThread';
+import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
 
 // ---------------------------------------------------------------------------
 // launch-run
@@ -343,6 +345,47 @@ export function parseTriageFindingsResult(result: unknown): TriageFindingsResult
     // result still renders "applied N · skipped M" truthfully.
     applied: typeof result.applied === 'number' ? result.applied : items.filter((i) => i.ok).length,
     skipped: typeof result.skipped === 'number' ? result.skipped : items.filter((i) => i.skipped != null).length,
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// start-quick-session
+// ---------------------------------------------------------------------------
+
+export interface StartQuickSessionResultJson {
+  kind: 'start-quick-session';
+  status: 'executed' | 'failed';
+  sessionId?: string;
+  /** The `__quick__` sentinel run id — what the Open navigation carries as runId. */
+  runId?: string;
+  worktreePath?: string;
+  sessionName?: string;
+  substrate?: CliSubstrate;
+  claudePanelId?: string;
+  error?: string;
+  compensations?: LaunchRunCompensationStep[];
+  reconciled?: boolean;
+}
+
+/** Parse a proposal's `result` as a start-quick-session result, or null if it doesn't match. */
+export function parseStartQuickSessionResult(result: unknown): StartQuickSessionResultJson | null {
+  if (!isRecord(result) || result.kind !== 'start-quick-session') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  const compensations = Array.isArray(result.compensations)
+    ? result.compensations.filter(isCompensationStep)
+    : undefined;
+  return {
+    kind: 'start-quick-session',
+    status: result.status,
+    sessionId: typeof result.sessionId === 'string' ? result.sessionId : undefined,
+    runId: typeof result.runId === 'string' ? result.runId : undefined,
+    worktreePath: typeof result.worktreePath === 'string' ? result.worktreePath : undefined,
+    sessionName: typeof result.sessionName === 'string' ? result.sessionName : undefined,
+    substrate: isCliSubstrate(result.substrate) ? result.substrate : undefined,
+    claudePanelId: typeof result.claudePanelId === 'string' ? result.claudePanelId : undefined,
+    error: typeof result.error === 'string' ? result.error : undefined,
+    compensations: compensations && compensations.length > 0 ? compensations : undefined,
     reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
   };
 }

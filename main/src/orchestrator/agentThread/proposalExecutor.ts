@@ -23,6 +23,8 @@
  *      failure, with each compensation step's outcome persisted for reconciliation.
  *      create-workflow runs the same saga shape: agents first, then the flow, and
  *      every agent minted so far is deleted again when a later step fails.
+ *      start-quick-session likewise: the session is minted first, then its brief is
+ *      delivered as the first prompt, and a delivery failure dismisses the session.
  *   4. TERMINAL TRANSITION — store.finalizeProposal to 'executed' | 'failed' with a
  *      typed result_json (the card renders it: per-item ✓/✕, saga detail, etc.).
  *   5. BOOT RECONCILIATION — reconcileOrphanedExecutingProposals verifies OBSERVABLE
@@ -59,6 +61,7 @@ import type {
   EditWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogProposalPayload,
+  StartQuickSessionProposalPayload,
   TriageFindingItem,
   TriageFindingOp,
   TriageFindingsProposalPayload,
@@ -105,6 +108,28 @@ export interface LaunchRunSideEffectArgs {
   taskIds?: string[];
   ideaIds?: string[];
   findingIds?: string[];
+}
+
+/** What the executor asks the boot layer to mint for a start-quick-session confirm. */
+export interface StartQuickSessionArgs {
+  projectId: number;
+  /** A branch-safe slug (normalized at propose time); absent → the boot layer mints one. */
+  name?: string;
+  /** Absent → the project's quick-session default (the wizard's PTY/SDK choice). */
+  substrate?: CliSubstrate;
+  inPlace: boolean;
+}
+
+/** The minted session — everything the brief delivery and the card need. */
+export interface StartQuickSessionCreated {
+  sessionId: string;
+  /** The `__quick__` sentinel run (what open-session navigation carries as runId). */
+  runId: string;
+  worktreePath: string;
+  /** The session's actual name (the slug, possibly `-<n>` suffixed on a collision). */
+  name: string;
+  /** The RESOLVED substrate the sentinel landed on — decides how the brief is delivered. */
+  substrate: CliSubstrate;
 }
 
 /** One reprioritize applyChange, actor pinned 'user' by the executor. */
@@ -165,6 +190,21 @@ export interface ProposalExecutorDeps {
   dismissSession: (sessionId: string) => Promise<void>;
   /** Reconciliation: does the run recorded in an orphan's result_json still exist? */
   runExists: (runId: string) => boolean;
+
+  // --- start-quick-session: mint a USER quick session, then deliver its brief ---
+  /**
+   * Mint a quick session the way the launch wizard does (createQuickSessionCore
+   * + the runtime-config stamps), on the requested or default substrate. Unlike
+   * `createQuickSession` above this is a user session, never SDK-pinned.
+   */
+  startQuickSession: (args: StartQuickSessionArgs) => Promise<StartQuickSessionCreated>;
+  /**
+   * Deliver the brief as the session's FIRST prompt on its resolved substrate
+   * (SDK: the chat panel's first turn; PTY: the REPL's spawn prompt). Resolves
+   * to the chat panel it created; throws when the delivery could not start —
+   * the executor then dismisses the session it just minted.
+   */
+  deliverQuickSessionBrief: (args: StartQuickSessionCreated & { brief: string }) => Promise<{ claudePanelId: string }>;
 
   // --- reprioritize-backlog: sequential per-item applyChange, partial-failure tolerant ---
   /** One TaskChangeRouter.applyChange (actor 'user'); throws (TaskChangeError) on rejection. */
@@ -347,13 +387,30 @@ export interface TriageFindingsResultJson {
   reconciled?: boolean;
 }
 
+export interface StartQuickSessionResultJson {
+  kind: 'start-quick-session';
+  status: 'executed' | 'failed';
+  sessionId?: string;
+  /** The `__quick__` sentinel run id — what the card's Open navigation carries. */
+  runId?: string;
+  worktreePath?: string;
+  sessionName?: string;
+  substrate?: CliSubstrate;
+  claudePanelId?: string;
+  error?: string;
+  compensations?: CompensationStep[];
+  /** Set by boot reconciliation (not the live confirm path). */
+  reconciled?: boolean;
+}
+
 export type ProposalResultJson =
   | LaunchRunResultJson
   | ReprioritizeResultJson
   | EditWorkflowResultJson
   | CreateBacklogResultJson
   | CreateWorkflowResultJson
-  | TriageFindingsResultJson;
+  | TriageFindingsResultJson
+  | StartQuickSessionResultJson;
 
 // ---------------------------------------------------------------------------
 // Result
@@ -465,6 +522,8 @@ export async function executeProposal(
       return runCreateWorkflow(deps, proposal, proposal.payload as CreateWorkflowProposalPayload, proposalId);
     case 'triage-findings':
       return runTriageFindings(deps, proposal, proposal.payload as TriageFindingsProposalPayload, proposalId);
+    case 'start-quick-session':
+      return runStartQuickSession(deps, proposal, proposal.payload as StartQuickSessionProposalPayload, proposalId);
     default:
       // Unreachable: open-session is handled above, and the union is closed. Finalize
       // failed defensively so a future kind never strands the claimed row.
@@ -566,6 +625,58 @@ async function compensateLaunch(
     }
   }
   return steps;
+}
+
+// ---------------------------------------------------------------------------
+// start-quick-session — startQuickSession -> deliverQuickSessionBrief, with the
+// same two-boundary compensation shape as launch-run
+// ---------------------------------------------------------------------------
+
+async function runStartQuickSession(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: StartQuickSessionProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  let created: StartQuickSessionCreated | undefined;
+  try {
+    created = await deps.startQuickSession({
+      projectId: payload.projectId,
+      ...(payload.name !== undefined ? { name: payload.name } : {}),
+      ...(payload.substrate !== undefined ? { substrate: payload.substrate } : {}),
+      inPlace: payload.inPlace === true,
+    });
+    const { claudePanelId } = await deps.deliverQuickSessionBrief({ ...created, brief: payload.brief });
+    const result: StartQuickSessionResultJson = {
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: created.sessionId,
+      runId: created.runId,
+      worktreePath: created.worktreePath,
+      sessionName: created.name,
+      substrate: created.substrate,
+      claudePanelId,
+    };
+    deps.store.finalizeProposal(proposalId, 'executed', JSON.stringify(result));
+    return { ok: true, proposalId, kind: proposal.kind, status: 'executed', result };
+  } catch (err) {
+    // A session minted before the brief could start is dismissed again (the
+    // FULL dismiss: hosted sentinel cancelled, worktree removed) — never left
+    // as an idle orphan the human has to find. No runId step: the sentinel is
+    // the session's own and goes with it.
+    const compensations = created !== undefined ? await compensateLaunch(deps, { sessionId: created.sessionId }) : [];
+    const result: StartQuickSessionResultJson = {
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: errMsg(err),
+      ...(created !== undefined
+        ? { sessionId: created.sessionId, runId: created.runId, worktreePath: created.worktreePath, sessionName: created.name, substrate: created.substrate }
+        : {}),
+      ...(compensations.length > 0 ? { compensations } : {}),
+    };
+    deps.store.finalizeProposal(proposalId, 'failed', JSON.stringify(result));
+    return { ok: true, proposalId, kind: proposal.kind, status: 'failed', result };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1087,9 @@ export interface ReconcileSummary {
  *     'crashed-mid-execution' with the per-item verified state. A row someone
  *     else triaged meanwhile reads as applied for dismiss/resolve only when the
  *     status matches — reconciliation never re-writes.
+ *   - start-quick-session: NOT verifiable (a minted session carries no back-link to
+ *     the proposal, and its name may have been generated) ⇒ always
+ *     'crashed-mid-execution', never a re-run — like create-backlog-items.
  */
 export async function reconcileOrphanedExecutingProposals(deps: ProposalExecutorDeps): Promise<ReconcileSummary> {
   const orphans = deps.store.listProposalsByStatus('executing');
@@ -1153,6 +1267,22 @@ async function reconcileOne(deps: ProposalExecutorDeps, proposal: AgentProposal)
         kind: proposal.kind,
         finalizedTo: status,
         note: allApplied ? 'all items already applied' : 'crashed-mid-execution: some items not applied',
+      };
+    }
+
+    case 'start-quick-session': {
+      const result: StartQuickSessionResultJson = {
+        kind: 'start-quick-session',
+        status: 'failed',
+        reconciled: true,
+        error: 'crashed-mid-execution',
+      };
+      deps.store.finalizeProposal(proposal.id, 'failed', JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: 'failed',
+        note: 'crashed-mid-execution: a started session is not verifiable from the proposal',
       };
     }
 

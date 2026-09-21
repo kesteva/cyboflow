@@ -30,6 +30,7 @@ import type {
   CreateWorkflowProposalPayload,
   AgentProposalStatus,
   TriageFindingsProposalPayload,
+  StartQuickSessionProposalPayload,
 } from '../../../../shared/types/agentThread';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -1184,6 +1185,142 @@ describe('ProposalCard — triage-findings', () => {
 
   it('dismissed collapses to the neutral resolved row', () => {
     render(<ProposalCard proposal={makeTriageProposal({ status: 'dismissed' })} />);
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start-quick-session (TASK-295)
+// ---------------------------------------------------------------------------
+
+const LONG_BRIEF = Array.from({ length: 9 }, (_, i) => `line ${i + 1}: look at rvw_${i + 1}`).join('\n');
+
+function makeStartQuickSessionProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  payload?: Partial<StartQuickSessionProposalPayload>;
+} = {}): AgentProposal {
+  const payload: StartQuickSessionProposalPayload = {
+    kind: 'start-quick-session',
+    projectId: 1,
+    brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+    ...overrides.payload,
+  };
+  return baseProposal({ kind: 'start-quick-session', payload, status: overrides.status ?? 'proposed', result: overrides.result ?? null });
+}
+
+describe('ProposalCard — start-quick-session', () => {
+  const realSetActiveQuickSession = useCyboflowStore.getState().setActiveQuickSession;
+
+  afterEach(() => {
+    useCyboflowStore.setState({ setActiveQuickSession: realSetActiveQuickSession });
+    useNavigationStore.setState({ view: 'home' });
+  });
+
+  it('open state: project, session name, substrate, workspace and the brief, with defaults spelled out', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal()} />);
+    const body = screen.getByTestId('proposal-body-start-quick-session');
+    expect(body).toHaveTextContent('Start quick session');
+    expect(body).toHaveTextContent('auto-named');
+    expect(body).toHaveTextContent('project default');
+    expect(body).toHaveTextContent('own worktree');
+    expect(screen.getByTestId('quick-session-brief')).toHaveTextContent('Look at findings rvw_1 and rvw_2');
+    // A short brief needs no disclosure.
+    expect(screen.queryByTestId('quick-session-brief-toggle')).toBeNull();
+    expect(screen.getByTestId('proposal-card-confirm')).toBeInTheDocument();
+  });
+
+  it('open state: explicit name / substrate / in-place / note are shown', () => {
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          payload: { name: 'findings-sweep', substrate: 'interactive', inPlace: true, note: 'five findings share a root cause' },
+        })}
+      />,
+    );
+    const body = screen.getByTestId('proposal-body-start-quick-session');
+    expect(body).toHaveTextContent('findings-sweep');
+    expect(body).toHaveTextContent('interactive');
+    expect(body).toHaveTextContent('project checkout (in place)');
+    expect(body).toHaveTextContent('five findings share a root cause');
+  });
+
+  it('a long brief shows its first six lines and expands on demand', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal({ payload: { brief: LONG_BRIEF } })} />);
+    const block = screen.getByTestId('quick-session-brief');
+    expect(block).toHaveAttribute('data-expanded', 'false');
+    expect(block).toHaveTextContent('line 6');
+    expect(block).not.toHaveTextContent('line 7');
+    const toggle = screen.getByTestId('quick-session-brief-toggle');
+    expect(toggle).toHaveTextContent('Show all 9 lines');
+    fireEvent.click(toggle);
+    expect(block).toHaveAttribute('data-expanded', 'true');
+    expect(block).toHaveTextContent('line 9');
+    expect(toggle).toHaveTextContent('Show less');
+  });
+
+  it('resolved executed: names the session and opens the quick session (with its sentinel run) on click', () => {
+    const setActiveRun = vi.fn();
+    const setActiveQuickSession = vi.fn();
+    useCyboflowStore.setState({ setActiveRun, setActiveQuickSession });
+    const setActiveProjectId = vi.fn();
+    useNavigationStore.setState({ setActiveProjectId });
+
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          status: 'executed',
+          result: {
+            kind: 'start-quick-session',
+            status: 'executed',
+            sessionId: 'sess-q',
+            runId: 'run-q',
+            worktreePath: '/wt/sess-q',
+            sessionName: 'findings-sweep',
+            substrate: 'interactive',
+            claudePanelId: 'panel-1',
+          },
+        })}
+      />,
+    );
+
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Session started.');
+    expect(row).toHaveTextContent('findings-sweep · interactive');
+    expect(row).toHaveTextContent('Open');
+    expect(row).not.toHaveTextContent('sess-q');
+    expect(screen.queryByTestId('proposal-card-confirm')).toBeNull();
+
+    fireEvent.click(row);
+    expect(setActiveProjectId).toHaveBeenCalledWith(1);
+    expect(setActiveQuickSession).toHaveBeenCalledWith('sess-q', 'run-q');
+    expect(setActiveRun).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+
+  it('resolved failed: the error plus whether the half-created session was dismissed', () => {
+    render(
+      <ProposalCard
+        proposal={makeStartQuickSessionProposal({
+          status: 'failed',
+          result: {
+            kind: 'start-quick-session',
+            status: 'failed',
+            error: 'sdk boom',
+            sessionId: 'sess-q',
+            compensations: [{ step: 'dismiss-session', ok: true }],
+          },
+        })}
+      />,
+    );
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Session not started.');
+    expect(row).toHaveTextContent('sdk boom (the half-created session was dismissed)');
+    expect(row.tagName).not.toBe('BUTTON');
+  });
+
+  it('dismissed collapses to the neutral resolved row', () => {
+    render(<ProposalCard proposal={makeStartQuickSessionProposal({ status: 'dismissed' })} />);
     expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
   });
 });

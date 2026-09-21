@@ -511,7 +511,8 @@ The global-agent family carries exactly TWO write-shaped tools with disjoint tar
 `cyboflow_propose_action` (an `agent_proposals` row a human confirms) and `cyboflow_widget_save`
 (the user's own `custom_widgets` library — never a view, an entity, or a proposal). The proposal
 kinds are `launch-run`, `reprioritize-backlog`, `edit-workflow`, `open-session`,
-`create-backlog-items`, `create-workflow`, and `triage-findings`; a confirmed proposal executes
+`create-backlog-items`, `create-workflow`, `triage-findings`, and `start-quick-session`; a
+confirmed proposal executes
 through `agentThread/proposalExecutor.ts` against the same chokepoints every other write uses.
 `create-workflow` mints a custom flow (`WorkflowRegistry.createCustom`) together with the custom
 agents its steps bind (`AgentOverrideRouter` `createCustom`, agents first so the bindings resolve,
@@ -525,7 +526,13 @@ someone else triages between propose and confirm is skipped per item, never a ba
 `launch-run` names its flow by `workflowId` or by name (built-in OR custom, resolved among the
 flows visible to the project at propose time), and the launch closure maps seeds by the flow's
 SHAPE (`shared/workflows/workflowSeedKind.ts`), as do `RunLauncher.launch`'s seed guards — a
-custom flow cloned from Sprint takes `taskIds` like Sprint does. The
+custom flow cloned from Sprint takes `taskIds` like Sprint does. `start-quick-session` mints a
+USER quick session (`createQuickSessionCore`, the wizard's substrate default and worktree
+toggle — never the SDK pin a `launch-run` host session gets) and delivers the proposal's
+`brief` as its first prompt the way a typed first message lands on each substrate (SDK: a
+registered Chat panel + `startPanel`; PTY: the REPL's positional spawn prompt), via
+`agentThread/proposalExecutorQuickSessionDeps.ts`; a delivery failure dismisses the
+half-created session. The
 custom-widget authoring tools (`cyboflow_db_schema`, `cyboflow_widget_preview`,
 `cyboflow_widget_save`) route through `CustomViewsService` so a preview runs the exact query path
 the page will (see "Custom views" under Data Model and `docs/proposals/CUSTOM-VIEWS.md`).

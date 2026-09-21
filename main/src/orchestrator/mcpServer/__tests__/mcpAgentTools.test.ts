@@ -117,6 +117,7 @@ function buildDb(): Database.Database {
   apply('138_agent_proposal_create_workflow_kind.sql');
   // ...and 141, which widens it once more for 'triage-findings'.
   apply('141_agent_proposal_triage_findings_kind.sql');
+  apply('142_agent_proposal_start_quick_session_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
   // ...and workflows.tuning_level, which also decides WHICH definition
@@ -1061,6 +1062,8 @@ describe('McpQueryHandler global-agent tool family', () => {
         store,
         newIdempotencyKey: () => 'key-1',
         createQuickSession: unused,
+        startQuickSession: unused,
+        deliverQuickSessionBrief: unused,
         launchRun: unused,
         cancelRun: unused,
         dismissSession: unused,
@@ -1111,6 +1114,44 @@ describe('McpQueryHandler global-agent tool family', () => {
 
       ReviewItemRouter._resetForTesting();
       reviewItemChangeEvents.removeAllListeners();
+    });
+
+    it('start-quick-session: propose stores the card with a slugged name and rejects bad input by name (TASK-295)', async () => {
+      const propose = async (payload: Record<string, unknown>): Promise<McpQueryResponse> => {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          { type: 'mcp-propose-action', requestId: 'r', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+          socket,
+        );
+        return parseLastWrite(writes);
+      };
+
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: '' })).toMatchObject({ ok: false, error: 'invalid_payload' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 99, brief: 'x' })).toMatchObject({ ok: false, error: 'project_not_found' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: 'x'.repeat(8193) })).toMatchObject({ ok: false, error: 'brief_too_long' });
+      expect(await propose({ kind: 'start-quick-session', projectId: 1, brief: 'x', name: '!!!' })).toMatchObject({ ok: false, error: 'invalid_name' });
+
+      const res = await propose({
+        kind: 'start-quick-session',
+        projectId: 1,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'Findings Sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      });
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('start-quick-session');
+      expect(proposal.preconditions).toBeNull();
+      expect(proposal.payload).toEqual({
+        kind: 'start-quick-session',
+        projectId: 1,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'findings-sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      });
     });
 
     it('open-session: accepts a discriminated navigation payload with null preconditions', async () => {

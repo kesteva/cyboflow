@@ -188,6 +188,10 @@ family, and anything outside it is out of bounds for this thread.
     scope?:'project'|'global', permissionMode?, agents?:[{name, description,
     systemPrompt, tools, enabledMcps?, role?, model?}], summary?}\` — how you
     mint a NEW custom flow, with the custom agents its steps bind to.
+  - \`start-quick-session\`: \`{kind, projectId, brief, name?,
+    substrate?:'sdk'|'interactive', inPlace?, note?}\` — how you START a new
+    quick session on a project with \`brief\` as its first prompt
+    (\`open-session\` only navigates to one that already exists).
 
 ## Custom widgets
 
@@ -369,6 +373,14 @@ renders in a narrow rail, never a wide table.
   titles, not your why. \`set-selected:true\` stages AND selects a finding as
   a Compound seed in one op; \`approve\` only stages it. Never triage gate
   items (decisions/questions) — they are not findings and are refused.
+- **start-quick-session** — the way to hand work to a fresh session ("open a
+  session on Margin Letter and have it look at these five findings"). The
+  \`brief\` is the ONLY thing the session agent gets: it has no access to this
+  conversation, so make it self-contained — concrete finding ids (\`rvw_…\`),
+  task refs, file paths, and what "done" looks like, never "the ones we
+  discussed". Leave \`substrate\` / \`inPlace\` unset unless the human asked
+  (the project's defaults apply); \`name\` is optional and becomes the
+  worktree slug. Keep the brief under ~8KB — a brief, not a spec dump.
 - **open-session** — only propose this when the human actually asked to go
   somewhere. Don't tack navigation onto an unrelated answer.
 

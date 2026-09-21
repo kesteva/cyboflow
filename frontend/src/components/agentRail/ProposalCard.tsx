@@ -57,6 +57,7 @@ import {
   LAUNCH_SEED_FIELD_LABEL,
   TriageFindingsBody,
   TriageFindingsGroups,
+  StartQuickSessionBody,
   workflowNameLabel,
 } from './ProposalCardBodies';
 import {
@@ -66,6 +67,7 @@ import {
   parseCreateBacklogResult,
   parseCreateWorkflowResult,
   parseTriageFindingsResult,
+  parseStartQuickSessionResult,
 } from './proposalResultTypes';
 import { navigateToProposalTarget } from './proposalNavigation';
 
@@ -382,6 +384,61 @@ function OpenSessionResolved({ proposal }: { proposal: AgentProposal }): React.R
   return <ResolvedLine tone="success" glyph="✓" verb="Opened." />;
 }
 
+/**
+ * Resolved start-quick-session row: the same "Open" affordance an executed
+ * launch-run row has, dispatching the open-session navigation to the minted
+ * quick session (its `__quick__` sentinel runId rides along so the center pane
+ * resolves the run-backed chat, exactly like TypeGroupedQueue's openQuickSession).
+ */
+function StartQuickSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  const r = parseStartQuickSessionResult(proposal.result);
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  if (r === null) {
+    return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} verb="Resolved." glyph={proposal.status === 'failed' ? '✕' : '✓'} />;
+  }
+  if (r.status === 'executed' && r.sessionId != null) {
+    const payload = proposal.payload.kind === 'start-quick-session' ? proposal.payload : null;
+    const sessionId = r.sessionId;
+    const detail = r.sessionName != null ? `${r.sessionName}${r.substrate != null ? ` · ${r.substrate}` : ''}` : undefined;
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          navigateToProposalTarget({
+            target: 'quick-session',
+            sessionId,
+            ...(r.runId != null ? { runId: r.runId } : {}),
+            ...(payload != null ? { projectId: payload.projectId } : {}),
+          })
+        }
+        data-testid="proposal-card-resolved-row"
+        className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+      >
+        <StatusCircle tone="success" glyph="✓" />
+        <div className="text-[11px] leading-snug">
+          <span className="font-bold text-text-primary">Session started.</span>
+          {detail != null && <span className="text-text-tertiary"> {detail}</span>}
+          <span className="text-text-tertiary"> — Open</span>
+        </div>
+      </button>
+    );
+  }
+  if (r.status === 'executed') {
+    return <ResolvedLine tone="success" glyph="✓" verb="Session started." detail={r.sessionName} />;
+  }
+  const compensated = r.compensations?.some((c) => c.step === 'dismiss-session' && c.ok) === true;
+  return (
+    <ResolvedLine
+      tone="error"
+      glyph="✕"
+      verb="Session not started."
+      detail={compensated ? `${r.error ?? 'failed'} (the half-created session was dismissed)` : r.error}
+    />
+  );
+}
+
 // ---------------------------------------------------------------------------
 // ProposalCard
 // ---------------------------------------------------------------------------
@@ -480,6 +537,9 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'triage-findings' && proposal.payload.kind === 'triage-findings' && (
             <TriageFindingsBody payload={proposal.payload} />
           )}
+          {proposal.kind === 'start-quick-session' && proposal.payload.kind === 'start-quick-session' && (
+            <StartQuickSessionBody payload={proposal.payload} />
+          )}
         </div>
       )}
 
@@ -515,6 +575,7 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'create-backlog-items' && <CreateBacklogResolved proposal={proposal} />}
           {proposal.kind === 'create-workflow' && <CreateWorkflowResolved proposal={proposal} />}
           {proposal.kind === 'triage-findings' && <TriageFindingsResolved proposal={proposal} />}
+          {proposal.kind === 'start-quick-session' && <StartQuickSessionResolved proposal={proposal} />}
         </>
       )}
 

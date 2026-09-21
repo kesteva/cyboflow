@@ -105,6 +105,7 @@ export const AGENT_PROPOSAL_KINDS = [
   'create-backlog-items',
   'create-workflow',
   'triage-findings',
+  'start-quick-session',
 ] as const;
 
 export type AgentProposalKind = (typeof AGENT_PROPOSAL_KINDS)[number];
@@ -480,6 +481,43 @@ export interface TriageFindingsProposalPayload {
 /** Ceiling on one triage-findings proposal — one card, one reviewable decision. */
 export const TRIAGE_FINDINGS_MAX_ITEMS = 200;
 
+/**
+ * Start a NEW quick session on a project, seeded with an opening brief
+ * (TASK-295). `open-session` only navigates to a session that already exists;
+ * this kind MINTS one — on confirm the executor creates it through the same
+ * createQuickSessionCore path the launch wizard uses, delivers `brief` as the
+ * session's FIRST prompt (an SDK session's first turn; a PTY session's spawn
+ * prompt), and the resolved card links to it.
+ *
+ * The brief must be SELF-CONTAINED: the session agent has no access to the
+ * rail conversation, so it needs concrete ids and paths, never "the findings
+ * we discussed". `name` (optional) is normalized at propose time to a
+ * branch-safe slug — quick-session names ARE worktree/branch names — and an
+ * absent one is minted the way the wizard mints one (adjective-noun-date).
+ * `substrate` defaults to the project's quick-session default (the PTY/SDK
+ * choice the wizard would make), never the SDK pin a launch-run host session
+ * gets. `inPlace` mirrors the wizard's "work in the project checkout" toggle.
+ */
+export interface StartQuickSessionProposalPayload {
+  kind: 'start-quick-session';
+  projectId: number;
+  /** The opening prompt. Required, non-empty, at most {@link START_QUICK_SESSION_BRIEF_MAX_CHARS}. */
+  brief: string;
+  /** Session / worktree name; stamped as a branch-safe slug at propose time. */
+  name?: string;
+  substrate?: CliSubstrate;
+  /** Work directly in the project checkout (no worktree). Default false. */
+  inPlace?: boolean;
+  /** One-line rationale rendered on the card. */
+  note?: string;
+}
+
+/** Ceiling on a start-quick-session brief (~8KB) — a brief, not a spec dump. */
+export const START_QUICK_SESSION_BRIEF_MAX_CHARS = 8192;
+
+/** Ceiling on a normalized quick-session name (a git branch name component). */
+export const START_QUICK_SESSION_NAME_MAX_CHARS = 64;
+
 export type AgentProposalPayload =
   | LaunchRunProposalPayload
   | ReprioritizeBacklogProposalPayload
@@ -487,7 +525,8 @@ export type AgentProposalPayload =
   | OpenSessionProposalPayload
   | CreateBacklogItemsProposalPayload
   | CreateWorkflowProposalPayload
-  | TriageFindingsProposalPayload;
+  | TriageFindingsProposalPayload
+  | StartQuickSessionProposalPayload;
 
 // ---------------------------------------------------------------------------
 // Per-kind proposal preconditions

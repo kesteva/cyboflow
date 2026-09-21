@@ -233,6 +233,8 @@ import {
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
 import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/proposalExecutorLaunchDeps';
 import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
+import { buildProposalExecutorQuickSessionDeps } from './orchestrator/agentThread/proposalExecutorQuickSessionDeps';
+import { generateQuickWorktreeBranchName } from './ipc/session';
 import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
@@ -5510,20 +5512,18 @@ app.whenReady().then(async () => {
     const proposalExecutorDeps: ProposalExecutorDeps = {
       store: agentThreadStore,
       newIdempotencyKey: () => randomUUID(),
-      createQuickSession: async ({ projectId, nameHint }) => {
-        const { session } = await createQuickSessionCore(
-          {
-            taskQueue: taskQueue!,
-            sessionManager,
-            workflowRegistry,
-            getDb: () => databaseService.getDb(),
-          },
-          // Pin 'sdk': an agent-launched host session backs a workflow run, not a user
-          // quick session, so its sentinel must not inherit the quick-session PTY default.
-          { projectId, nameHint, requestedSubstrate: 'sdk' },
-        );
-        return { sessionId: session.id, worktreePath: session.worktreePath };
-      },
+      // launch-run host sessions + start-quick-session mint/brief delivery: proposalExecutorQuickSessionDeps.ts.
+      ...buildProposalExecutorQuickSessionDeps({
+        createQuickSessionCore, stampQuickSessionRuntimeConfig,
+        quickSessionCore: { taskQueue: taskQueue!, sessionManager, workflowRegistry, getDb: () => databaseService.getDb(), dismissHalfCreatedSession: dismissSessionFully },
+        newSessionName: generateQuickWorktreeBranchName,
+        sessionManager,
+        panelManager,
+        getClaudePanelManager: () => (require('./ipc/claudePanel') as typeof import('./ipc/claudePanel')).claudePanelManager,
+        substrateFacade,
+        interactiveReplManager,
+        ptyBriefing: QUICK_PTY_BRIEFING, logger: loggerLike,
+      }),
       // launch-run: workflow resolution (by id or name, custom flows included)
       // + shape-derived seed mapping live in proposalExecutorLaunchDeps.ts.
       ...buildProposalExecutorLaunchDeps({

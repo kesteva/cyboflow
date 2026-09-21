@@ -11,6 +11,8 @@ import {
   type CreateBacklogResultJson,
   type CreateWorkflowResultJson,
   type ReviewItemStateSnapshot,
+  type StartQuickSessionCreated,
+  type StartQuickSessionResultJson,
   type TriageFindingsResultJson,
   type TriageReviewItemChange,
 } from './proposalExecutor';
@@ -129,9 +131,19 @@ function baseDeps(store: FakeStore, over: Partial<ProposalExecutorDeps> = {}): P
     customAgentExists: () => false,
     applyReviewItemChange: async () => {},
     readReviewItemState: () => ({ status: 'pending', stagedAt: null, selected: false }),
+    startQuickSession: async () => QUICK_CREATED,
+    deliverQuickSessionBrief: async () => ({ claudePanelId: 'panel-q' }),
     ...over,
   };
 }
+
+const QUICK_CREATED: StartQuickSessionCreated = {
+  sessionId: 'sess-q',
+  runId: 'run-q',
+  worktreePath: '/wt/sess-q',
+  name: 'sunny-lake-20260921',
+  substrate: 'sdk',
+};
 
 // ---------------------------------------------------------------------------
 // Guard rails: not-found, open-session, double-confirm race
@@ -1102,5 +1114,143 @@ describe('reconcileOrphanedExecutingProposals — triage-findings', () => {
     const rj = store.proposals.get('p1')?.result as TriageFindingsResultJson;
     expect(rj.items.map((i) => i.ok)).toEqual([true, false, false]);
     expect(rj.applied).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start-quick-session (TASK-295)
+// ---------------------------------------------------------------------------
+
+describe('executeProposal — start-quick-session', () => {
+  it('mints the session, delivers the brief as its first prompt, and finalizes executed with the Open target', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'start-quick-session',
+        projectId: 7,
+        brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.',
+        name: 'findings-sweep',
+        substrate: 'interactive',
+        inPlace: true,
+      }),
+    );
+    const created: StartQuickSessionCreated = { ...QUICK_CREATED, name: 'findings-sweep', substrate: 'interactive' };
+    const startQuickSession = vi.fn(async () => created);
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'panel-1' }));
+    const deps = baseDeps(store, { startQuickSession, deliverQuickSessionBrief });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('executed');
+    expect(startQuickSession).toHaveBeenCalledWith({ projectId: 7, name: 'findings-sweep', substrate: 'interactive', inPlace: true });
+    // The brief rides on the minted session's own resolved shape — nothing re-derived.
+    expect(deliverQuickSessionBrief).toHaveBeenCalledWith({ ...created, brief: 'Look at findings rvw_1 and rvw_2 in main/src/foo.ts and propose fixes.' });
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({
+      kind: 'start-quick-session',
+      status: 'executed',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      worktreePath: '/wt/sess-q',
+      sessionName: 'findings-sweep',
+      substrate: 'interactive',
+      claudePanelId: 'panel-1',
+    });
+  });
+
+  it('defaults: no name / substrate → the boot layer mints them; inPlace false', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const startQuickSession = vi.fn(async () => QUICK_CREATED);
+    await executeProposal(baseDeps(store, { startQuickSession }), 'p1');
+    expect(startQuickSession).toHaveBeenCalledWith({ projectId: 7, inPlace: false });
+  });
+
+  it('saga: session-create fails → no compensation, finalized failed', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const dismissSession = vi.fn(async () => {});
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'never' }));
+    const deps = baseDeps(store, {
+      startQuickSession: async () => {
+        throw new Error('git identity missing');
+      },
+      deliverQuickSessionBrief,
+      dismissSession,
+    });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('failed');
+    expect(deliverQuickSessionBrief).not.toHaveBeenCalled();
+    expect(dismissSession).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({ kind: 'start-quick-session', status: 'failed', error: 'git identity missing' });
+  });
+
+  it('saga: brief delivery fails after the session exists → the session is dismissed, finalized failed', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const dismissSession = vi.fn(async () => {});
+    const cancelRun = vi.fn(async () => {});
+    const deps = baseDeps(store, {
+      deliverQuickSessionBrief: async () => {
+        throw new Error('the Claude panel manager is not available yet');
+      },
+      dismissSession,
+      cancelRun,
+    });
+
+    const result = await executeProposal(deps, 'p1');
+
+    expect(result.ok && result.status).toBe('failed');
+    // The FULL dismiss sweeps the sentinel with the session — no separate cancel-run step.
+    expect(dismissSession).toHaveBeenCalledWith('sess-q');
+    expect(cancelRun).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toMatchObject({
+      kind: 'start-quick-session',
+      status: 'failed',
+      error: 'the Claude panel manager is not available yet',
+      sessionId: 'sess-q',
+      runId: 'run-q',
+      sessionName: 'sunny-lake-20260921',
+      compensations: [{ step: 'dismiss-session', ok: true }],
+    });
+  });
+
+  it('saga: a failing dismiss is RECORDED, never thrown away', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }));
+    const deps = baseDeps(store, {
+      deliverQuickSessionBrief: async () => {
+        throw new Error('spawn failed');
+      },
+      dismissSession: async () => {
+        throw new Error('worktree busy');
+      },
+    });
+    await executeProposal(deps, 'p1');
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj.compensations).toEqual([{ step: 'dismiss-session', ok: false, error: 'worktree busy' }]);
+    expect(store.proposals.get('p1')?.status).toBe('failed');
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — start-quick-session', () => {
+  it('always fails a stranded start as crashed-mid-execution, never re-minting the session', async () => {
+    const store = new FakeStore();
+    store.add(makeProposal({ kind: 'start-quick-session', projectId: 7, brief: 'Hello' }, { status: 'executing' }));
+    const startQuickSession = vi.fn(async () => QUICK_CREATED);
+    const deliverQuickSessionBrief = vi.fn(async () => ({ claudePanelId: 'x' }));
+
+    const summary = await reconcileOrphanedExecutingProposals(baseDeps(store, { startQuickSession, deliverQuickSessionBrief }));
+
+    expect(summary.outcomes[0].finalizedTo).toBe('failed');
+    expect(summary.outcomes[0].note).toMatch(/crashed-mid-execution/);
+    expect(startQuickSession).not.toHaveBeenCalled();
+    expect(deliverQuickSessionBrief).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as StartQuickSessionResultJson;
+    expect(rj).toEqual({ kind: 'start-quick-session', status: 'failed', reconciled: true, error: 'crashed-mid-execution' });
   });
 });
