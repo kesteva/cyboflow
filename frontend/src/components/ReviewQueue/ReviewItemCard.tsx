@@ -108,7 +108,6 @@ const TARGET_CHIP_LABEL: Record<FindingProposedTarget, string> = {
 const RECOMMENDATION_CHIP_LABEL: Record<SupervisorRecommendationChoice, string> = {
   approve: 'Approve',
   reject: 'Reject',
-  revise: 'Revise',
   continue: 'Continue, log as findings',
   rerun: 'Rerun planning with findings',
   dismiss: 'Continue without logging',
@@ -365,11 +364,12 @@ type GateButton = 'approve' | 'revise' | 'no-findings' | 'reject';
  * The mapping is per-gate because the recommendation names a CHOICE while the
  * card renders BUTTONS, and the two menus differ: at an approve-design gate
  * `continue`/`rerun`/`dismiss` are the three controls, while every other gate
- * has only Approve and Reject — so a `revise` recommendation there emphasizes
- * Reject, which is the button that actually sends the step back (its in-session
- * handler resolves 'reject' for a plain gate; there is no third control to
- * point at). A recommendation naming a choice this gate does not offer
- * emphasizes nothing, and the card keeps today's emphasis.
+ * renders only Approve and Reject — so a plain gate maps `approve`→Approve and
+ * `reject`→Reject, and nothing else. In particular there is no "send it back"
+ * arm here: a plain gate's Reject ENDS THE RUN, so routing a third choice onto
+ * it would emphasize the destructive button on advice nobody gave. A
+ * recommendation naming a choice this gate does not offer emphasizes nothing,
+ * and the card keeps today's emphasis.
  */
 function recommendedGateButton(
   choice: SupervisorRecommendationChoice | undefined,
@@ -383,7 +383,7 @@ function recommendedGateButton(
     return null;
   }
   if (choice === 'approve') return 'approve';
-  if (choice === 'reject' || choice === 'revise') return 'reject';
+  if (choice === 'reject') return 'reject';
   return null;
 }
 

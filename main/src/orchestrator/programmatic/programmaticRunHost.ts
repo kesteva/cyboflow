@@ -145,26 +145,29 @@ const ESCALATION_RESOLVE_FINDING_CATEGORY = 'escalation-resolve';
 /** The recommendation menu for a blocking FINDING — keep it, or drop it. */
 const FINDING_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = ['continue', 'dismiss'];
 
-/** The recommendation menu for any other blocking item (a decision gate, a pause). */
-const DECISION_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = [
-  'revise',
-  'approve',
-  'reject',
-];
+/**
+ * The recommendation menu for any other blocking item (a decision gate, a pause)
+ * — the two CONTROLS such an item's card renders, and nothing else.
+ */
+const DECISION_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = ['approve', 'reject'];
 
 /**
  * Normalize the supervisor's free-text `choice` onto the menu this item's KIND
- * actually offers, defaulting to the menu's FIRST entry.
+ * actually offers. An absent or off-menu choice returns `undefined` — there is
+ * NO default.
  *
- * The defaults are chosen to be the least consequential answer of each menu:
- * `continue` keeps a finding blocking (today's behaviour), and `revise` sends a
- * decision back rather than emphasizing the approve or reject button on advice
- * the supervisor did not actually name.
+ * A default is exactly what this must not have. Every entry on a decision menu
+ * points the human at a consequential button (Reject ends the run), so falling
+ * back to one would emphasize a control on advice the supervisor never gave.
+ * The honest degradation is silence: the caller writes no recommendation and the
+ * item renders exactly as it does today.
  */
-function normalizeBlockingChoice(kind: ReviewItemKind, choice: string | undefined): SupervisorRecommendationChoice {
+function normalizeBlockingChoice(
+  kind: ReviewItemKind,
+  choice: string | undefined,
+): SupervisorRecommendationChoice | undefined {
   const menu = kind === 'finding' ? FINDING_RECOMMENDATION_CHOICES : DECISION_RECOMMENDATION_CHOICES;
-  const found = menu.find((c) => c === choice?.trim().toLowerCase());
-  return found ?? menu[0];
+  return menu.find((c) => c === choice?.trim().toLowerCase());
 }
 
 /** The `ReviewItemError.code` a refusal carries when the human answered first. */
@@ -971,7 +974,17 @@ export class ProgrammaticRunHost implements ControllerHost {
         // through to the recommendation like any other refused resolve.
         if (await this.resolveBlockingFinding(runId, item, decision.rationale)) return;
       }
-      await this.annotateBlockingItem(runId, item, decision);
+      // A downgraded `resolve` names no `choice` — the supervisor answered
+      // "close it", not "recommend X" — so on a FINDING it is written as
+      // `continue`, which is that menu's keep-it-blocking control and therefore
+      // exactly what a refused resolve leaves behind. There is no equivalent on
+      // a decision menu (both its entries END or ADVANCE the run), so a decision
+      // that names no choice is left alone by {@link annotateBlockingItem}.
+      const forAnnotate: BlockingItemDecision =
+        decision.action === 'resolve' && item.kind === 'finding' && decision.choice === undefined
+          ? { ...decision, choice: 'continue' }
+          : decision;
+      await this.annotateBlockingItem(runId, item, forAnnotate);
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] blocking-item verdict not applied (fail-soft)', {
         runId,
@@ -1122,6 +1135,11 @@ export class ProgrammaticRunHost implements ControllerHost {
   /**
    * Write the supervisor's recommendation onto a still-blocking item.
    *
+   * A `choice` the item's menu does not offer — or none at all — writes NOTHING
+   * and is treated as a `pass` for that item. There is no fallback choice to
+   * pick: see {@link normalizeBlockingChoice} for why guessing one would point
+   * the human at a button nobody recommended.
+   *
    * Shares the `invalid_status` treatment with the gate path: a human who
    * triaged the item while the consult was in flight is the DESIGNED outcome of
    * a consult that runs beside an open queue, so it is a debug line, not a
@@ -1134,6 +1152,15 @@ export class ProgrammaticRunHost implements ControllerHost {
   ): Promise<void> {
     const sink = this.args.annotateReviewItem;
     const choice = normalizeBlockingChoice(item.kind, decision.choice);
+    if (choice === undefined) {
+      this.args.logger?.info('[ProgrammaticRunHost] off-menu recommendation choice; item left as it is', {
+        runId,
+        reviewItemId: item.id,
+        kind: item.kind,
+        choice: decision.choice,
+      });
+      return;
+    }
     if (!sink) {
       this.args.logger?.info('[ProgrammaticRunHost] no annotate sink; blocking-item recommendation logged only', {
         runId,

@@ -2733,14 +2733,17 @@ const digestHistory: MonitorHistory = {
 };
 
 describe('MONITOR_GATE_ESCALATION_SCHEMA', () => {
-  it('requires action + rationale, offers the six choices, and forbids extra fields', () => {
+  it('requires action + rationale, offers the five choices, and forbids extra fields', () => {
     const props = MONITOR_GATE_ESCALATION_SCHEMA.properties as Record<string, { enum?: string[]; description?: string }>;
     expect(MONITOR_GATE_ESCALATION_SCHEMA.required).toEqual(['action', 'rationale']);
     expect(MONITOR_GATE_ESCALATION_SCHEMA.additionalProperties).toBe(false);
     expect(props.action.enum).toEqual(['recommend', 'pass']);
-    expect(props.choice.enum).toEqual(['approve', 'reject', 'revise', 'continue', 'rerun', 'dismiss']);
+    expect(props.choice.enum).toEqual(['approve', 'reject', 'continue', 'rerun', 'dismiss']);
     // The supervisor must never think it can settle the gate.
     expect(props.choice.enum).not.toContain('resolve');
+    // No plain gate has a Revise control: its Reject ENDS the run, so a `revise`
+    // recommendation could only ever point the human at the destructive button.
+    expect(props.choice.enum).not.toContain('revise');
     // The downgrade the parser performs has to be stated where the model reads it.
     expect(props.action.description).toContain('downgraded to `pass`');
   });
@@ -2761,9 +2764,9 @@ describe('parseGateEscalationOutput (downgrade table)', () => {
   });
 
   it('downgrades a choice OUTSIDE this gate’s menu to pass', () => {
-    // 'revise' is a valid choice word but not an approve-design control.
+    // 'approve' is a valid choice word but not an approve-design control.
     expect(
-      parseGateEscalationOutput({ action: 'recommend', choice: 'revise', rationale: 'x' }, gateReq()),
+      parseGateEscalationOutput({ action: 'recommend', choice: 'approve', rationale: 'x' }, gateReq()),
     ).toEqual({ action: 'pass', rationale: 'x' });
     // ...and the mirror: 'continue' is not on a plain gate's menu.
     expect(
@@ -2774,8 +2777,20 @@ describe('parseGateEscalationOutput (downgrade table)', () => {
     ).toEqual({ action: 'pass', rationale: 'x' });
   });
 
-  it('accepts the plain three-way menu on a non-design gate', () => {
-    for (const choice of ['approve', 'reject', 'revise'] as const) {
+  it('downgrades a revise recommendation on a plain gate to pass', () => {
+    // CX-3: a plain gate renders Approve and Reject only, and Reject ends the
+    // run — so `revise` is off the vocabulary entirely and must not emphasize
+    // anything, on EITHER menu.
+    for (const req of [gateReq(), gateReq({ stepId: 'approve-plan', stepName: 'Approve plan' })]) {
+      expect(parseGateEscalationOutput({ action: 'recommend', choice: 'revise', rationale: 'x' }, req)).toEqual({
+        action: 'pass',
+        rationale: 'x',
+      });
+    }
+  });
+
+  it('accepts the plain two-way menu on a non-design gate', () => {
+    for (const choice of ['approve', 'reject'] as const) {
       expect(
         parseGateEscalationOutput(
           { action: 'recommend', choice, rationale: 'x' },
@@ -2835,11 +2850,14 @@ describe('buildGateEscalationPrompt', () => {
     expect(p).toContain('Read/Grep/Glob');
   });
 
-  it('renders the OTHER gates’ three-way menu instead', () => {
+  it('renders the OTHER gates’ two-way menu instead', () => {
     const p = buildGateEscalationPrompt(ctx, digestHistory, gateReq({ stepId: 'approve-plan', stepName: 'Approve plan' }));
     expect(p).toContain('"approve"');
     expect(p).toContain('"reject"');
-    expect(p).toContain('"revise"');
+    // No third control exists on a plain gate, and the prompt says so rather
+    // than offering a "revise" the human cannot press.
+    expect(p).not.toContain('"revise"');
+    expect(p).toContain('NO "send it back" control');
     expect(p).not.toContain('"continue"');
   });
 

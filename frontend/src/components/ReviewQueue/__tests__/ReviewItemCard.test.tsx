@@ -932,7 +932,6 @@ describe('ReviewItemCard', () => {
     const cases: Array<[string, string]> = [
       ['approve', 'Approve'],
       ['reject', 'Reject'],
-      ['revise', 'Revise'],
       ['continue', 'Continue, log as findings'],
       ['dismiss', 'Continue without logging'],
     ];
@@ -1055,23 +1054,28 @@ describe('ReviewItemCard', () => {
     expect(isPrimary(screen.getByTestId('decision-continue-no-findings'))).toBe(false);
   });
 
-  it('emphasizes Reject for a reject OR revise recommendation on a plain gate', () => {
-    for (const choice of ['reject', 'revise']) {
-      const { unmount } = render(
-        <ReviewItemCard
-          item={makeItem('decision', {
-            id: `rvw_plain_${choice}`,
-            blocking: true,
-            source: 'gate:human-step:approve-plan',
-            body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
-          })}
-          surface="session"
-        />,
-      );
-      expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(true);
-      expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(false);
-      unmount();
-    }
+  const plainGateItem = (id: string, choice: string): ReviewItem =>
+    makeItem('decision', {
+      id,
+      blocking: true,
+      source: 'gate:human-step:approve-plan',
+      body: `## Supervisor recommendation\n\nRecommended: ${choice} — because\n`,
+    });
+
+  it('emphasizes Reject for a reject recommendation on a plain gate', () => {
+    render(<ReviewItemCard item={plainGateItem('rvw_plain_reject', 'reject')} surface="session" />);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(false);
+  });
+
+  it('renders NO chip and keeps today’s emphasis for a stale `revise` on a plain gate', () => {
+    // CX-3: a plain gate has no Revise control and its Reject ENDS the run, so
+    // `revise` is off the vocabulary — it must not parse, and must not push the
+    // human at the destructive button.
+    render(<ReviewItemCard item={plainGateItem('rvw_plain_revise', 'revise')} surface="session" />);
+    expect(screen.queryByTestId('supervisor-recommendation')).toBeNull();
+    expect(isPrimary(screen.getByTestId('decision-resolve'))).toBe(true);
+    expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(false);
   });
 
   it('the QUEUE discard on an approve-design gate continues without logging — it no longer rejects the run', async () => {

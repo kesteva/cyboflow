@@ -228,7 +228,6 @@ describe('parseSupervisorRecommendation', () => {
   it.each([
     ['approve', 'approve'],
     ['reject', 'reject'],
-    ['revise', 'revise'],
     ['continue', 'continue'],
     ['rerun', 'rerun'],
     ['dismiss', 'dismiss'],
@@ -257,6 +256,10 @@ describe('parseSupervisorRecommendation', () => {
   it('returns null for a malformed section, an unknown choice, or an empty sentence', () => {
     expect(parseSupervisorRecommendation(wrap('just prose'))).toBeNull();
     expect(parseSupervisorRecommendation(wrap('Recommended: maybe — hedging'))).toBeNull();
+    // CX-3: `revise` is no longer a recommendation choice — a body still
+    // carrying one (written before it was retired) parses as nothing, so the
+    // card renders no chip rather than emphasizing Reject.
+    expect(parseSupervisorRecommendation(wrap('Recommended: revise — x'))).toBeNull();
     expect(parseSupervisorRecommendation(wrap('Recommended: approve —'))).toBeNull();
     expect(parseSupervisorRecommendation(null)).toBeNull();
   });
@@ -277,8 +280,8 @@ describe('composeSupervisorRecommendation', () => {
   });
 
   it('round-trips through the parser', () => {
-    const md = composeSupervisorRecommendation('revise', 'AR-2 is real', 'Rationale.');
+    const md = composeSupervisorRecommendation('reject', 'AR-2 is real', 'Rationale.');
     const body = upsertMarkdownSection('Gate body.', SUPERVISOR_RECOMMENDATION_HEADING, md);
-    expect(parseSupervisorRecommendation(body)).toEqual({ choice: 'revise', sentence: 'AR-2 is real' });
+    expect(parseSupervisorRecommendation(body)).toEqual({ choice: 'reject', sentence: 'AR-2 is real' });
   });
 });

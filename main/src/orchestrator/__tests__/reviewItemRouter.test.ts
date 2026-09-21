@@ -1208,7 +1208,7 @@ describe('ReviewItemRouter — annotate', () => {
 
     for (const markdown of [
       'Recommended: approve — first pass',
-      'Recommended: revise — second pass',
+      'Recommended: reject — second pass',
     ]) {
       await router.applyReviewItem(1, {
         op: 'annotate',
@@ -1222,7 +1222,7 @@ describe('ReviewItemRouter — annotate', () => {
     const row = db.prepare('SELECT body FROM review_items WHERE id = ?').get(reviewItemId) as { body: string };
     expect(row.body.match(/## Supervisor recommendation/g)).toHaveLength(1);
     expect(row.body).not.toContain('first pass');
-    expect(parseSupervisorRecommendation(row.body)).toEqual({ choice: 'revise', sentence: 'second pass' });
+    expect(parseSupervisorRecommendation(row.body)).toEqual({ choice: 'reject', sentence: 'second pass' });
     db.close();
   });
 

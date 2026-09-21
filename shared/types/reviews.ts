@@ -661,16 +661,22 @@ export interface ReviewItemChangedEvent {
 export const SUPERVISOR_RECOMMENDATION_HEADING = 'Supervisor recommendation';
 
 /**
- * The choices a supervisor recommendation may name. `approve`/`reject`/`revise`
- * are the three-way human-gate verdicts; `continue`/`rerun`/`dismiss` are the
- * approve-design gate's own menu (continue = approve and log the review's
- * entries as accepted-risk findings, rerun = revise, dismiss = continue WITHOUT
+ * The choices a supervisor recommendation may name. `approve`/`reject` are the
+ * plain human gate's menu — the only two CONTROLS such a gate renders;
+ * `continue`/`rerun`/`dismiss` are the approve-design gate's own menu
+ * (continue = approve and log the review's entries as accepted-risk findings,
+ * rerun = send the design back for another pass, dismiss = continue WITHOUT
  * logging). Non-binding: nothing resolves a gate off this value.
+ *
+ * `revise` is deliberately ABSENT. No plain gate has a Revise control — the card
+ * renders Approve and Reject only, and Reject ends the run — so a `revise`
+ * recommendation could only ever point a human at the button that kills the run.
+ * The resolution grammar's `revise` verdict ({@link GateVerdictWord}) is a
+ * DIFFERENT vocabulary and keeps its meaning.
  */
 export type SupervisorRecommendationChoice =
   | 'approve'
   | 'reject'
-  | 'revise'
   | 'continue'
   | 'rerun'
   | 'dismiss';
@@ -789,9 +795,14 @@ export function readMarkdownSection(body: string | null | undefined, heading: st
  * The machine-readable first line of a supervisor recommendation:
  * `Recommended: <choice> — <one sentence>`. Case-insensitive on the choice; the
  * separator may be an em dash, a hyphen, or a colon.
+ *
+ * `revise` is not in the alternation, so a body carrying a stale
+ * `Recommended: revise — …` (written before the choice was retired) parses as
+ * nothing and the card renders no chip — which is the right degradation: it
+ * would otherwise have emphasized Reject.
  */
 const RECOMMENDED_LINE_RE =
-  /^Recommended:\s*(approve|reject|revise|continue|rerun|dismiss)\s*(?:—|-|:)\s*(.+)$/i;
+  /^Recommended:\s*(approve|reject|continue|rerun|dismiss)\s*(?:—|-|:)\s*(.+)$/i;
 
 /**
  * Parse the supervisor's recommendation out of a review-item body.

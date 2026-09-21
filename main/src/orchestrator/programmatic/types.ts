@@ -649,8 +649,9 @@ export interface BlockingItemsEscalationRequest {
  *
  * `choice` is free-text rather than {@link SupervisorRecommendationChoice}
  * because the menu depends on the item's KIND and the host owns that mapping (a
- * finding is recommended `dismiss`/`continue`, a decision `approve`/`reject`/
- * `revise`); an out-of-menu value is normalized there, never trusted here.
+ * finding is recommended `dismiss`/`continue`, a decision `approve`/`reject`);
+ * an out-of-menu value is dropped there — no recommendation is written — and is
+ * never trusted here.
  */
 export interface BlockingItemDecision {
   reviewItemId: string;

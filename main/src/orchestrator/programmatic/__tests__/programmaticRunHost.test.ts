@@ -1699,24 +1699,46 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
     expect(blockingGate.trace).toEqual(['list', 'park']);
   });
 
-  it('normalizes an out-of-menu choice onto the item kind\'s own menu', async () => {
+  it('writes NO recommendation for an off-menu or absent choice, and logs it', async () => {
+    // CX-3: there is no fallback choice. Every entry on a decision menu points
+    // the human at a consequential button (Reject ENDS the run), so a default
+    // would emphasize one on advice the supervisor never gave.
     const blockingGate = makeBlockingGate([blockingItem(), blockingItem({ id: 'rvw_d1', kind: 'decision', title: 'Approve the plan' })]);
+    const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
+    const info = vi.fn();
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
+      monitor: makeBlockingMonitor([
+        // `approve` is not a finding's choice; the decision entry names none at all.
+        { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'approve', rationale: 'keep it.' },
+        { reviewItemId: 'rvw_d1', action: 'recommend', rationale: 'send it back.' },
+      ]),
+      annotateReviewItem,
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    });
+
+    await host.awaitBlockingReviewItems('r');
+
+    expect(annotateReviewItem).not.toHaveBeenCalled();
+    expect(info.mock.calls.filter((c) => String(c[0]).includes('off-menu recommendation choice'))).toHaveLength(2);
+    expect(blockingGate.trace).toEqual(['list', 'park']);
+  });
+
+  it('annotates a decision item whose choice IS on the menu', async () => {
+    const blockingGate = makeBlockingGate([blockingItem({ id: 'rvw_d1', kind: 'decision', title: 'Approve the plan' })]);
     const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
     const host = new ProgrammaticRunHost({
       runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
       monitor: makeBlockingMonitor([
-        // `approve` is not a finding's choice; `rerun` is not a decision's.
-        { reviewItemId: 'rvw_f1', action: 'recommend', choice: 'approve', rationale: 'keep it.' },
-        { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'rerun', rationale: 'send it back.' },
+        { reviewItemId: 'rvw_d1', action: 'recommend', choice: 'approve', rationale: 'every blocker is closed.' },
       ]),
       annotateReviewItem,
     });
 
     await host.awaitBlockingReviewItems('r');
 
-    const markdowns = annotateReviewItem.mock.calls.map((c) => (c[0] as { markdown: string }).markdown);
-    expect(markdowns[0]).toContain('Recommended: continue');
-    expect(markdowns[1]).toContain('Recommended: revise');
+    const written = annotateReviewItem.mock.calls[0][0] as { markdown: string };
+    expect(written.markdown.split('\n')[0]).toBe('Recommended: approve — every blocker is closed.');
   });
 
   it('NEVER resolves a `decision` item — it is annotated instead', async () => {
@@ -1725,7 +1747,12 @@ describe('ProgrammaticRunHost.awaitBlockingReviewItems — escalation review', (
     const annotateReviewItem = vi.fn().mockResolvedValue(undefined);
     const host = new ProgrammaticRunHost({
       runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), blockingGate,
-      monitor: makeBlockingMonitor([{ reviewItemId: 'rvw_d1', action: 'resolve', rationale: 'the gate is moot.' }]),
+      // The choice rides along because the resolve falls THROUGH to the
+      // recommendation, and a recommendation without an on-menu choice now
+      // writes nothing at all (CX-3) — which would hide what this test asserts.
+      monitor: makeBlockingMonitor([
+        { reviewItemId: 'rvw_d1', action: 'resolve', choice: 'approve', rationale: 'the gate is moot.' },
+      ]),
       resolveReviewItemAsMonitor,
       annotateReviewItem,
     });
