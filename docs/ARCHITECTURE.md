@@ -883,7 +883,7 @@ landings.
   widened by migration `045_arch_design_atype`); `mode` (`template`
   re-derived-on-read vs `canvas` payload-backed), `committed` / `session_only` / `is_new` flags,
   `step_origin`, `source_ref` (soft link to the derived-from entity), `payload_json`, and
-  `reported_at` (migration 141 — the LAST report's instant, re-stamped on every report
+  `reported_at` (migration 143 — the LAST report's instant, re-stamped on every report
   including an identical no-op re-report, unlike `revision`; how a reader tells this round's
   critique from a previous walk's surviving one). `run_id`
   FK→`workflow_runs` ON DELETE CASCADE. All writes go through `ArtifactRouter.apply` (see Entity

@@ -48,11 +48,11 @@ const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
 
 /**
  * When this run's `adversarial-review` artifact was LAST reported, as epoch ms —
- * `artifacts.reported_at` (migration 141), which the ArtifactRouter re-stamps on
+ * `artifacts.reported_at` (migration 143), which the ArtifactRouter re-stamps on
  * every report including an identical no-op re-report.
  *
  * `null` means "age unknown", and every caller must read that as NO CONSTRAINT.
- * It is returned for a pre-141 row, a fixture table without the column, an
+ * It is returned for a pre-143 row, a fixture table without the column, an
  * unparseable value, a missing row, or any throw. The freshness bound can only
  * ever make an artifact read as ABSENT, so an unknown age that suppressed the
  * critique would silently regress runs whose DB simply has not been migrated.

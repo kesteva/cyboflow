@@ -86,10 +86,10 @@ function buildDb(): Database.Database {
   // already added `revision`, and a raw exec of its ALTER would throw the
   // duplicate-column error the ledger runner tolerates but db.exec does not.
   db.exec(readFileSync(join(migDir, '089_interactive_prototype.sql'), 'utf-8'));
-  // artifacts.reported_at (migration 141) — the LAST report's instant, which
+  // artifacts.reported_at (migration 143) — the LAST report's instant, which
   // ArtifactRouter's create path now names in both its INSERT and its enrich
   // UPDATE. Added directly (like the columns above) since this DB hand-picks a
-  // migration subset predating 141; MUST come after every atype-CHECK recreate
+  // migration subset predating 143; MUST come after every atype-CHECK recreate
   // above, since a recreate carries only the columns it names.
   db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   // OFF *after* the migrations (some set PRAGMA foreign_keys=ON) so an idea can

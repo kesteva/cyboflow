@@ -576,7 +576,7 @@ export class WorkflowController {
     // and `StepResultStore.deleteForSteps` purges step_results, but nothing
     // touches `artifacts`. Reading that survivor as this round's verdict arms a
     // phantom design loop, and counts as a "reviewable design surface" for a
-    // surface that no longer exists. `artifacts.reported_at` (migration 141) is
+    // surface that no longer exists. `artifacts.reported_at` (migration 143) is
     // re-stamped on EVERY report — including an identical no-op re-report, which
     // neither `revision` nor the audit log records — so an instant is enough to
     // tell this round's critique from a previous one's.

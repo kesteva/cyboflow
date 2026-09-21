@@ -1,5 +1,5 @@
 /**
- * Integration tests for migration 141_artifacts_reported_at.sql.
+ * Integration tests for migration 143_artifacts_reported_at.sql.
  *
  * The file is two statements over an existing table: a plain
  * `ALTER TABLE artifacts ADD COLUMN reported_at TEXT` and a NULL-guarded backfill
@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseService } from '../database';
 
 const MIG_DIR = join(__dirname, '..', 'migrations');
-const MIGRATION_FILE = '141_artifacts_reported_at.sql';
+const MIGRATION_FILE = '143_artifacts_reported_at.sql';
 
 function readMigration(name: string): string {
   return readFileSync(join(MIG_DIR, name), 'utf-8');
@@ -66,7 +66,7 @@ function migratedDb(): Database.Database {
   return db;
 }
 
-describe('Migration 141: artifacts.reported_at', () => {
+describe('Migration 143: artifacts.reported_at', () => {
   it('(a) adds a NULLABLE reported_at with no DEFAULT', () => {
     const db = migratedDb();
 
@@ -132,7 +132,7 @@ describe('Migration 141: artifacts.reported_at', () => {
   });
 
   it('(e) a fresh DatabaseService.initialize() run applies the migration cleanly', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration141-'));
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration143-'));
     let svc: DatabaseService | undefined;
     try {
       svc = new DatabaseService(join(dir, 'test.db'));
@@ -142,7 +142,7 @@ describe('Migration 141: artifacts.reported_at', () => {
 
       const cols = (db.prepare('PRAGMA table_info(artifacts)').all() as Col[]).map((c) => c.name);
       expect(cols).toContain('reported_at');
-      // 136's recreate runs BEFORE 141, so `revision` must still be there too —
+      // 136's recreate runs BEFORE 143, so `revision` must still be there too —
       // a future recreate that forgets either column re-opens a real hazard.
       expect(cols).toContain('revision');
     } finally {

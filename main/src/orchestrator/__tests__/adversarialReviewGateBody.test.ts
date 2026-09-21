@@ -62,7 +62,7 @@ function seedReview(
 }
 
 /**
- * A PRE-141 fixture: an `artifacts` table with no `reported_at` column at all.
+ * A PRE-143 fixture: an `artifacts` table with no `reported_at` column at all.
  * Both readers must fail-soft to "age unknown" there — the freshness bound can
  * only ever make an artifact read as absent, so a DB that has not been migrated
  * must keep today's behaviour instead of losing its critique.
@@ -200,7 +200,7 @@ describe('readAdversarialReviewReportedAtMs', () => {
     const adapter = dbAdapter(db);
     expect(readAdversarialReviewReportedAtMs(adapter, 'run-null')).toBeNull();
     expect(readAdversarialReviewReportedAtMs(adapter, 'run-missing')).toBeNull();
-    // pre-141 DB: the SELECT itself throws, and that must read as "unknown".
+    // pre-143 DB: the SELECT itself throws, and that must read as "unknown".
     expect(readAdversarialReviewReportedAtMs(dbAdapter(buildLegacyDb()), 'run-1')).toBeNull();
   });
 

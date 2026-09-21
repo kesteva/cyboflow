@@ -123,12 +123,12 @@ function buildDb(): Database.Database {
   // recreate carries only the atypes it names, so this must run last, and the
   // "accepts every atype in the union" loop below now iterates it too.
   db.exec(readFileSync(join(migDir, '136_adversarial_review_atype.sql'), 'utf-8'));
-  // Migration 141 adds artifacts.reported_at — the LAST report's instant, which
+  // Migration 143 adds artifacts.reported_at — the LAST report's instant, which
   // the create path stamps on EVERY report. A plain ALTER TABLE ADD COLUMN, so
   // unlike the CHECK recreates above it is order-independent; listed LAST anyway
   // so the real file is the thing exercised (a hand-written ALTER here could
   // drift from it silently).
-  db.exec(readFileSync(join(migDir, '141_artifacts_reported_at.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '143_artifacts_reported_at.sql'), 'utf-8'));
   return db;
 }
 
@@ -486,7 +486,7 @@ describe('ArtifactRouter', () => {
     expect(events).toHaveLength(0); // no no-op emit
   });
 
-  // ── reported_at (migration 141) ──────────────────────────────────────────
+  // ── reported_at (migration 143) ──────────────────────────────────────────
   // The freshness stamp readers use to tell THIS round's critique from a
   // previous walk's surviving one. Its whole reason for existing is the case
   // `revision` and the audit log cannot see: an identical re-report.

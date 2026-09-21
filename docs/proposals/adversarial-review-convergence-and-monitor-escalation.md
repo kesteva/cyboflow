@@ -131,7 +131,7 @@ whole-run rewind and a Revise loopback — and a previous walk's critique would 
 over a surface that no longer exists. `hasReviewableDesignSurface` now takes an optional
 `{ reviewReportedSinceMs }` bound, threaded from the controller through
 `shouldSkipHumanGate(step, runId, ctx)`; a critique whose `artifacts.reported_at` (migration
-141) predates the bound reads as ABSENT. The bound is the review step's visit start on this
+143) predates the bound reads as ABSENT. The bound is the review step's visit start on this
 walk, the WALK start when that step did not run this walk (e.g. it self-skipped), and NOTHING
 when the review step is in `completedStepIds` (the critique belongs to the surviving
 timeline). Unknown age and absent bound both mean no constraint. Only the critique branch is
@@ -222,7 +222,7 @@ revision prompts), `programmaticRunHost.ts`.
   `readAdversarialReview?(opts?: { reportedSinceMs?: number })`. Because the artifact row is
   one-per-run it outlives its walk, and a reviewer turn that returns no text on the NEXT walk
   would fall back onto the previous walk's blockers — a phantom loop. An artifact last
-  reported (`artifacts.reported_at`, migration 141) before the bound reads as absent. The
+  reported (`artifacts.reported_at`, migration 143) before the bound reads as absent. The
   bound is the review step's visit start on this walk, the walk start when that step did not
   run this walk, and nothing when the review step completed before this walk; absent bound and
   unknown age both mean no constraint. Both controller reads in a visit (the verdict fallback

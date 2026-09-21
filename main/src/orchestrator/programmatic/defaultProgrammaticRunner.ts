@@ -83,7 +83,7 @@ import { hasReviewableDesignSurface } from '../runEntityOwnership';
 // ONE reader for the run's design critique — the gate body, the gate-revision
 // quote and the controller's verdict fallback must never disagree about what the
 // artifact says, and only the gate-body copy knows the `reported_at` freshness
-// rule (migration 141). This module used to keep a byte-identical private copy.
+// rule (migration 143). This module used to keep a byte-identical private copy.
 import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
 
 /**

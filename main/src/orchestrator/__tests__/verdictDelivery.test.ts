@@ -81,10 +81,10 @@ function buildDb(): Database.Database {
   // artifacts.revision (migration 085) — ArtifactRouter bumps it on the verdict
   // enrich-with-deltas; add the additive column onto this pre-085 chain.
   db.exec('ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
-  // artifacts.reported_at (migration 141) — the LAST report's instant, which
+  // artifacts.reported_at (migration 143) — the LAST report's instant, which
   // ArtifactRouter's create path now names in both its INSERT and its enrich
   // UPDATE. Added directly (like the columns above) since this DB hand-picks a
-  // migration subset predating 141; MUST come after every atype-CHECK recreate
+  // migration subset predating 143; MUST come after every atype-CHECK recreate
   // above, since a recreate carries only the columns it names.
   db.exec('ALTER TABLE artifacts ADD COLUMN reported_at TEXT');
   return db;

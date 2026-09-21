@@ -1,4 +1,4 @@
--- Migration 141: artifacts.reported_at — the instant of the LAST report.
+-- Migration 143: artifacts.reported_at — the instant of the LAST report.
 --
 -- WHY. The `adversarial-review` critique is ONE row per run (one-per-(run,
 -- atype), migration 136), so it outlives the walk that produced it. After a
@@ -27,7 +27,7 @@
 -- BACKFILL. Existing rows take `created_at` (best effort: that is the only
 -- instant on record). Readers treat NULL/unparseable as "age unknown" and apply
 -- NO freshness constraint, since this bound can only ever make an artifact read
--- as ABSENT and a pre-141 row must keep today's behaviour.
+-- as ABSENT and a pre-143 row must keep today's behaviour.
 --
 -- FUTURE RECREATES. A later `artifacts` rebuild (the 136 recipe) MUST carry
 -- this column and copy it in the INSERT…SELECT, exactly like `revision` —
