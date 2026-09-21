@@ -294,6 +294,7 @@ that differs is fixed at build time by `build:mac:dev`:
 | Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/dev` |
 | Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Dev-<v>-…` |
 | Windows install dir | `%LOCALAPPDATA%\Programs\Cyboflow` | `%LOCALAPPDATA%\Programs\Cyboflow Dev` |
+| App icon | `main/assets/icon.{icns,ico,png}` (orange accent) | `main/assets/icon-dev.{icns,ico,png}` (blue accent) |
 
 **Why separate apps (not a channel setting):** distinct `appId`/name lets Dev install
 side-by-side with Stable, the way VS Code Insiders does, and each app only ever updates
