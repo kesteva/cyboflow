@@ -414,10 +414,12 @@ a summary held only in your context.
    present, and architecture section when present. **Batch branch:** when a
    combined prototype was built, run this once over that prototype plus all
    approved specs; the batch has no architecture surface.
-   - Compose ONE markdown doc from its `## Result` — a `## Blocking` section and a
-     `## Findings` section, every entry keeping its `#### AR-n — <title>` heading
-     and its Severity / Area / What / Why it matters / Fix fields verbatim, with
-     `None.` under an empty heading — and report it:
+   - Compose ONE markdown doc from its `## Result` — a `## Blocking` section, a
+     `## Findings` section, and a `## Prior entries` section (the subagent's
+     ledger, verbatim; `None.` on a first review), every entry keeping its
+     `#### AR-n — <title>` heading and its Severity / Area / What / Why it
+     matters / Fix fields verbatim, with `None.` under an empty heading — and
+     report it:
      `cyboflow_report_artifact(atype: 'adversarial-review', label: 'Adversarial
      review', payload_json: {"markdown": "<the doc>"})`. That doc is the ONLY
      surface the `approve-design` gate reviews; re-reporting the same atype

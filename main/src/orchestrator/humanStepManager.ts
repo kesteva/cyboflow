@@ -30,6 +30,7 @@ import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import type { DecisionPayload } from '../../../shared/types/reviews';
+import type { HumanGateItemSnapshot } from './programmatic/humanGate';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
@@ -37,6 +38,8 @@ import {
   countPendingBlockingReviewItems,
   countRunPendingFindings,
   hasReviewItemsTable,
+  selectPendingBlockingItemRows,
+  type PendingBlockingItemRow,
 } from './reviewItemListing';
 import {
   APPROVE_DESIGN_STEP_ID,
@@ -59,7 +62,9 @@ const HUMAN_GATE_SOURCE = 'gate:human-step';
  * Provenance prefix stamped on a systemic-pause decision review_item (the
  * canonical constant is `SYSTEMIC_PAUSE_SOURCE` in
  * programmatic/systemicPauseGate.ts — duplicated here as a bare literal to keep
- * this module free of a `programmatic/` import). Cancel-path cleanup
+ * this module free of a RUNTIME `programmatic/` import; the gate-item snapshot
+ * type it now imports from `programmatic/humanGate` is type-only and erases).
+ * Cancel-path cleanup
  * (clearPendingForRun) must dismiss these pause items too, so a canceled run does
  * not strand an orphan "Run paused" decision row in the review queue.
  */
@@ -116,6 +121,11 @@ export class HumanStepManager {
    * If the run is not in 'running' state, the transaction rolls back and NO gate
    * is opened (returns null) — the run is already paused / terminal.
    *
+   * `gateHeader` is the step's human-facing gate header (WorkflowStep.gateHeader)
+   * and titles the item when present — the flow markdown asks the same gate with
+   * that AskUserQuestion header, so both planes show one title for one decision.
+   * Falls back to `stepName` for callers that only have the name.
+   *
    * @returns the minted review-item id, or null when the gate was not opened
    *   (run not running, table absent, or the gate is already open for this step).
    */
@@ -123,6 +133,7 @@ export class HumanStepManager {
     runId: string,
     stepId: string,
     stepName: string,
+    gateHeader?: string,
   ): Promise<string | null> {
     if (!hasReviewItemsTable(this.db)) return null;
 
@@ -187,7 +198,7 @@ export class HumanStepManager {
         const enrichedBody = composePartialSprintGateBody(this.db, runId, stepName);
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
-          title: `Human gate: ${stepName}`,
+          title: `Human gate: ${gateHeader ?? stepName}`,
           body: this.composeGateBody(runId, stepId, enrichedBody),
           source: this.sourceForStep(stepId),
           payload: this.composeGatePayload(runId, stepId),
@@ -274,6 +285,23 @@ export class HumanStepManager {
   hasPendingBlockingItems(runId: string): boolean {
     if (!hasReviewItemsTable(this.db)) return false;
     return countPendingBlockingReviewItems(this.db, runId) > 0;
+  }
+
+  /**
+   * The ROWS behind {@link hasPendingBlockingItems} — same predicate, plus the
+   * bodies — for the supervisor's step-boundary escalation review (item 9). The
+   * gate delegates here, so the queue the supervisor is asked about is by
+   * construction the same queue that is holding the walk.
+   *
+   * Fail-soft to `[]`: a broken read degrades to "no consult" (the run parks as
+   * it always did), never to a thrown step boundary.
+   */
+  listPendingBlockingItems(runId: string): PendingBlockingItemRow[] {
+    try {
+      return selectPendingBlockingItemRows(this.db, runId);
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -412,6 +440,39 @@ export class HumanStepManager {
   }
 
   /**
+   * Read a gate review item back by id: title, body, status, resolution — or null.
+   *
+   * SYNCHRONOUS on purpose (it backs `HumanGateOpener.readGateItem`, which the
+   * programmatic resolver calls on the hot path right after arming itself on the
+   * item) and FAIL-SOFT in every direction: a missing inbox table, a missing row,
+   * an unrecognised status, or any thrown read all yield null, so the resolver
+   * degrades to awaiting the change event rather than aborting a parked run.
+   * Read-only; no transition, and deliberately NOT on the per-run queue — it must
+   * be answerable while an openHumanGate for the same run is in flight.
+   */
+  readGateItem(reviewItemId: string): HumanGateItemSnapshot | null {
+    try {
+      if (!hasReviewItemsTable(this.db)) return null;
+      const row = this.db
+        .prepare('SELECT title, body, status, resolution FROM review_items WHERE id = ?')
+        .get(reviewItemId) as
+        | { title?: string; body?: string | null; status?: string; resolution?: string | null }
+        | undefined;
+      if (!row) return null;
+      const status = row.status;
+      if (status !== 'pending' && status !== 'resolved' && status !== 'dismissed') return null;
+      return {
+        title: row.title ?? '',
+        body: row.body ?? '',
+        status,
+        resolution: row.resolution ?? null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Find the id of an ALREADY-pending blocking `decision` review item for
    * (runId, source), or null. The source-generic form of findPendingGate: any
    * gate that mints a per-source blocking decision item (human gate, systemic
@@ -481,7 +542,7 @@ export class HumanStepManager {
    *
    * Three layers, most specific first:
    *   1. `approve-design` — the adversarial reviewer's counts, blocking titles,
-   *      remaining revision budget, and what each button actually does
+   *      revisions taken so far, and what each button actually does
    *      (adversarialReviewGateBody.ts). Null when the run has no critique.
    *   2. A sprint/ship run's partial-lane summary (`partialSprintGateSummary`),
    *      already composed by the caller and passed in.

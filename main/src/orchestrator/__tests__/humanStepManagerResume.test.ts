@@ -269,3 +269,57 @@ describe('HumanStepManager.clearPendingForRun (systemic-pause cleanup)', () => {
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_sys') as { status: string }).status).toBe('dismissed');
   });
 });
+
+// ---------------------------------------------------------------------------
+// readGateItem — the resolver's post-arming read-back.
+//
+// ReviewQueueHumanGate arms its listener before it knows the item id, so a human
+// who answers in that gap fires the only event for the gate while the filter is
+// still null. This synchronous read is what closes the window, so it has to
+// answer for a resolved/dismissed row and degrade to null (never throw) for
+// everything else.
+// ---------------------------------------------------------------------------
+
+describe('HumanStepManager.readGateItem', () => {
+  it('returns title/body/status/resolution for a pending gate item', () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-g', 'awaiting_review');
+    seedBlockingReviewItem(db, { id: 'rvw_gate', runId: 'run-g', kind: 'decision', source: 'gate:human-step:plan' });
+    db.prepare('UPDATE review_items SET body = ? WHERE id = ?').run('The gate body.', 'rvw_gate');
+
+    expect(mgr.readGateItem('rvw_gate')).toEqual({
+      title: 'item rvw_gate',
+      body: 'The gate body.',
+      status: 'pending',
+      resolution: null,
+    });
+  });
+
+  it('reports a resolved item with its resolution note, and a dismissed one', () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-g', 'awaiting_review');
+    seedBlockingReviewItem(db, { id: 'rvw_ok', runId: 'run-g', kind: 'decision' });
+    seedBlockingReviewItem(db, { id: 'rvw_no', runId: 'run-g', kind: 'decision', status: 'dismissed' });
+    db.prepare(`UPDATE review_items SET status = 'resolved', resolution = ? WHERE id = ?`).run(
+      'revise: only AR-2 matters',
+      'rvw_ok',
+    );
+
+    expect(mgr.readGateItem('rvw_ok')).toMatchObject({ status: 'resolved', resolution: 'revise: only AR-2 matters' });
+    expect(mgr.readGateItem('rvw_no')).toMatchObject({ status: 'dismissed', resolution: null });
+  });
+
+  it('returns null for an unknown id (never throws — the resolver falls back to the event)', () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    expect(mgr.readGateItem('rvw_missing')).toBeNull();
+  });
+
+  it('returns null when the inbox table is absent', () => {
+    const db = createTestDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    expect(mgr.readGateItem('rvw_anything')).toBeNull();
+  });
+});

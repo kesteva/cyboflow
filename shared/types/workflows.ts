@@ -610,6 +610,14 @@ export interface WorkflowStep {
   /** When true the step pauses the run and waits for a human response. */
   human?: boolean;
   /**
+   * Human-facing header for a human gate. The programmatic plane titles the
+   * gate's review-queue item with it (`Human gate: ⟨gateHeader⟩`), and it is
+   * expected to match the AskUserQuestion header the flow markdown asks the
+   * same gate with, so both planes show one title for one decision. Falls back
+   * to `name` when absent.
+   */
+  gateHeader?: string;
+  /**
    * Id of the step within the SAME phase to loop back to on failure.
    * V1 constraint: intra-phase only.
    */
@@ -657,6 +665,22 @@ export interface WorkflowStep {
    * channel-unavailable degradation task-verify's verdict channel takes.
    */
   consumesPriorStepOutput?: boolean;
+  /**
+   * When true, the programmatic host's blocking-review-items checkpoint (see
+   * `ProgrammaticRunHost.awaitBlockingReviewItems`) does NOT park the run
+   * before starting this step, even though a pending BLOCKING review_item
+   * exists. Set on a step that itself resolves the run's pending blocking
+   * items (e.g. `address-review`, reopened via `addressReviewFindings` to
+   * repair a confirmed-catastrophic eval finding).
+   *
+   * Without this, the checkpoint deadlocks: `addressReviewFindings` rewinds
+   * the run to this step SPECIFICALLY BECAUSE a blocking item is pending, but
+   * the walk loop parks `awaiting_review` again before the step's agent ever
+   * runs, since the very item the rewind exists to clear is still open —
+   * the repair step can never start. Absent (the default) preserves today's
+   * behavior for every other step.
+   */
+  consumesBlockingReviewItems?: boolean;
 }
 
 /**
@@ -862,6 +886,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -907,13 +932,15 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             // A `REVIEW: BLOCKING` result re-runs the refine phase from `expand-spec`
-            // AUTOMATICALLY (once — MAX_REVIEW_AUTO_REVISIONS) with the review's
-            // `## Blocking` entries threaded into every re-run step, before the
-            // human sees the design gate; a second BLOCKING falls through to the
-            // gate. Being optional, a review that merely FAILS still skips rather
-            // than taking this edge.
+            // AUTOMATICALLY with the review's `## Blocking` entries threaded into
+            // every re-run step, before the human sees the design gate. Bounded by
+            // MAX_REVIEW_AUTO_REVISIONS (3) for laps a supervisor voted for, or by
+            // MAX_REVIEW_MECHANICAL_REVISIONS (1) when there is no supervisor
+            // verdict; past the bound the round falls through to the gate. Being
+            // optional, a review that merely FAILS still skips rather than taking
+            // this edge.
             loopback: 'expand-spec',
-            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -956,6 +983,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on scope. Approve puts the tasks on the board, retires the decomposed idea(s), and ends the run.',
           },
         ],
@@ -1078,6 +1106,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
@@ -1086,6 +1120,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check before the sprint is sealed.',
           },
         ],
@@ -1166,6 +1201,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve compound',
             desc: 'Final "merge in changes" gate over the applied compound diff — review the committed quick fixes + doc edits and the recommendations doc, then approve to make the branch mergeable or reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1207,6 +1243,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -1252,9 +1289,10 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             // Same automatic revision as Planner: a `REVIEW: BLOCKING` result
-            // re-runs the refine phase from `expand-spec` once, then the gate.
+            // re-runs the refine phase from `expand-spec` — up to 3 laps a
+            // supervisor voted for, 1 with no supervisor verdict — then the gate.
             loopback: 'expand-spec',
-            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -1296,6 +1334,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on scope and select which tasks execute now before they queue for the sprint.',
           },
         ],
@@ -1412,6 +1451,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
@@ -1420,6 +1465,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check; on approve, retire the idea to Decomposed and seal the sprint.',
           },
         ],
@@ -1528,6 +1574,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve setup',
             desc: 'Final "merge in changes" gate over the committed runbook + repo diff and the per-modality proof outcomes (proven, or still an unproven draft with its diagnosis) — approve to make the branch mergeable, reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1613,7 +1660,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             // itself (`ui-prototype`) — the brief is already approved, exactly
             // as the gate's own revise below.
             loopback: 'ui-prototype',
-            desc: 'Stress-test the brief + concept design surfaces; a blocking verdict re-runs the design pass once automatically, remaining critique surfaced (non-blocking) at the design gate.',
+            desc: 'Stress-test the brief + concept design surfaces; a blocking verdict re-runs the design pass automatically (up to 3 supervised laps, 1 with no supervisor); remaining critique surfaces at the design gate.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -1693,6 +1740,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on the whole task plan. Approve puts the tasks on the board, retires the decomposed idea(s) (denied ideas stay on the backlog), and ends the run.',
           },
         ],

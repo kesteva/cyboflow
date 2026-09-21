@@ -349,6 +349,7 @@ function buildResolveDeps(db: DatabaseLike): ResolveReviewItemDeps {
         actor: args.actor,
         reviewItemId: args.reviewItemId,
         ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+        ...(args.resolutionMeta !== undefined ? { resolutionMeta: args.resolutionMeta } : {}),
       }),
     promotePendingDraftsForRun: (runId) => QuestionRouter.getInstance().promotePendingDraftsForRun(runId),
     deleteRunCreatedEntities: (projectId, runId) =>
@@ -810,6 +811,14 @@ export const reviewItemsRouter = router({
          */
         outcome: z.enum(['approve', 'reject', 'revise']).optional(),
         /**
+         * Bracketed qualifier composed into the stored resolution
+         * (`approve[no-findings]`). The enum is the type-parity mirror of
+         * `ResolveReviewItemInput.modifier`; the shared handler still REFUSES it
+         * (invalid_payload) unless it accompanies an 'approve' on the singular
+         * approve-design gate, so a monitor-built input cannot slip past.
+         */
+        modifier: z.enum(['no-findings']).optional(),
+        /**
          * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate —
          * the "Submit decisions" payload, keyed by idea display ref. ONLY consumed
          * for those batch decision gates: the shared handler validates it against
@@ -818,6 +827,15 @@ export const reviewItemsRouter = router({
          * item.
          */
         verdicts: z.record(z.string().min(1), z.enum(['approve', 'deny'])).optional(),
+        /**
+         * TASK-222: the UI surface (`ReviewItemCardSurface` — 'queue' | 'session' —
+         * or another resolving surface's own id) that recorded this verdict.
+         * Meaningful only alongside `outcome`; stamped into the item's
+         * payload_json as `resolvedSurface` so a post-mortem can tell which
+         * button, on which surface, answered the gate. Optional and harmless when
+         * omitted.
+         */
+        surface: z.string().min(1).optional(),
       }),
     )
     .mutation(

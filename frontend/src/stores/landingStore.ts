@@ -431,6 +431,20 @@ export function useAggregatedRuns(): ActiveRunRow[] {
 }
 
 /**
+ * EVERY row the reused {@link useActiveRunsStore} retains — the active rows
+ * PLUS the newest terminal run per parent session that the rail keeps for
+ * history — flattened across projects. The Ready-for-review band reads this
+ * (via `significantFlowRunBySession`) so a session whose flow run just
+ * finished still opens THAT run rather than its interrupted quick chat
+ * (TASK-226); everything else keeps using the active-only
+ * {@link useAggregatedRuns}. Memoized on the stable `runsByProject` slice.
+ */
+export function useAggregatedRetainedRuns(): ActiveRunRow[] {
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  return useMemo(() => Object.values(runsByProject).flat(), [runsByProject]);
+}
+
+/**
  * runId → project_id map built from the aggregated runs, so a consumer holding
  * a runId (e.g. an approval) can resolve which project it belongs to.
  */

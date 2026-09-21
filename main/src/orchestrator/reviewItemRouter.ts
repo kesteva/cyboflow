@@ -39,6 +39,12 @@ import type {
   ReviewItemSeverity,
   ReviewItemStatus,
 } from '../../../shared/types/reviews';
+import {
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  readMarkdownSection,
+  stripMarkdownSection,
+  upsertMarkdownSection,
+} from '../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts), mirroring
@@ -107,10 +113,19 @@ export class ReviewItemError extends Error {
 // Change request shapes
 // ---------------------------------------------------------------------------
 
-/** Actors that may write review items. Mirrors TaskActor. */
+/**
+ * Actors that may write review items. Mirrors TaskActor.
+ *
+ * `monitor` is the run SUPERVISOR accounting for its own autonomous judgement
+ * (today: the review-loop audit finding). It is deliberately distinct from
+ * `orchestrator`, which is a mechanical write the host made on somebody else's
+ * behalf. The column has no CHECK constraint, so the union is the only
+ * enforcement and widening it needs no migration.
+ */
 export type ReviewActor =
   | 'user'
   | 'orchestrator'
+  | 'monitor'
   | `agent:${string}`
   | 'linear'
   | 'plane'
@@ -156,6 +171,17 @@ export interface ReviewItemTriage {
   resolution?: string | null;
   /** The run that triggered this triage, recorded on the entity_events row. */
   runId?: string | null;
+  /**
+   * TASK-222 post-mortem trail: only ever set by a RESOLVE that carried an
+   * explicit `outcome` (reviewItems.resolve). Merged into the decision item's
+   * payload_json (never clobbering the mint-time `gate`/`ideaRefs`/`designRefs`
+   * — see {@link ReviewItemRouter.mergeResolutionMeta}) so a post-mortem can tell
+   * which verdict + surface answered a gate; today's gates mint with
+   * `payload_json: null` (humanStepManager.composeGatePayload), which is exactly
+   * why it was unrecoverable before this. Ignored for a `dismiss` op or for a
+   * non-decision kind.
+   */
+  resolutionMeta?: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null };
 }
 
 /**
@@ -204,12 +230,38 @@ export interface ReviewItemSetSelected {
   runId?: string | null;
 }
 
+/**
+ * Write a machine-authored markdown SECTION into a still-pending item's body
+ * (today: the run supervisor's non-binding recommendation).
+ *
+ * Deliberately NOT a triage op: the item stays `pending`, keeps its status, its
+ * blocking flag and its resolution, and the human's choice is untouched. What
+ * changes is the body the card renders — which is why this is a body upsert
+ * rather than a new column: every surface already renders the body, so an
+ * annotation needs no migration and no IPC shape change.
+ *
+ * `heading` is a closed set (one member today) so a body can never be scribbled
+ * on with arbitrary machine sections.
+ */
+export interface ReviewItemAnnotate {
+  op: 'annotate';
+  actor: ReviewActor;
+  reviewItemId: string;
+  /** The section heading to insert or replace. Closed set. */
+  heading: typeof SUPERVISOR_RECOMMENDATION_HEADING;
+  /** The section's markdown body (the heading line is written by the op). */
+  markdown: string;
+  /** The run that triggered this annotation, recorded on the entity_events row. */
+  runId?: string | null;
+}
+
 export type ReviewItemChange =
   | ReviewItemCreate
   | ReviewItemTriage
   | ReviewItemMutate
   | ReviewItemApprove
-  | ReviewItemSetSelected;
+  | ReviewItemSetSelected
+  | ReviewItemAnnotate;
 
 // ---------------------------------------------------------------------------
 // Internal row shape
@@ -342,7 +394,10 @@ export class ReviewItemRouter {
    * Triage path (resolve/dismiss): resolves the row, sets status + resolved_by +
    * resolution + updated_at, and appends a delta to entity_events — all in ONE
    * transaction. Re-resolving / re-dismissing an already-terminal item is
-   * rejected with code='invalid_status'.
+   * rejected with code='invalid_status'. A resolve carrying `resolutionMeta`
+   * (TASK-222 — only ever set when the caller supplied an explicit gate
+   * `outcome`) also merges `{resolvedOutcome, resolvedSurface}` into the row's
+   * payload_json, never clobbering the mint-time payload.
    *
    * Findings-triage paths (migration 034), each finding-scoped, each atomic:
    *  - mutate (re-tag and/or re-prioritize): untriaged-only. Re-tag merges
@@ -355,6 +410,11 @@ export class ReviewItemRouter {
    *    selected over the explicit id list (only staged findings selectable),
    *    emitting ONE 'selection-changed' event per affected id. Rejects an
    *    unstaged id (invalid_status). Also the orchestrator close-out path.
+   *
+   * Annotate path: upserts a machine-authored markdown section into a PENDING
+   * item's body (any kind). Action 'annotated'; the item is NOT triaged. Rejects
+   * a non-pending item (invalid_status) — a decision the human already made must
+   * never gain a recommendation after the fact.
    *
    * For set-selected the returned id/event is the LAST affected id (the
    * per-id events are all emitted on the project channel).
@@ -383,6 +443,8 @@ export class ReviewItemRouter {
           return this.runApprove(projectId, change);
         case 'set-selected':
           return this.runSetSelected(projectId, change);
+        case 'annotate':
+          return this.runAnnotate(projectId, change);
         default:
           return assertNeverChange(change);
       }
@@ -489,7 +551,27 @@ export class ReviewItemRouter {
     const audience: ReviewItemAudience = change.audience ?? 'human';
     const severity = change.severity ?? null;
     const source = change.source ?? null;
-    const body = change.body ?? null;
+
+    // ----- `## Supervisor recommendation` is reserved to the `annotate` op -----
+    // `create` stores the caller's body verbatim, and its callers are not the
+    // supervisor: a step agent filing a finding through cyboflow_report_finding,
+    // or the orchestrated planner writing its own approve-design body, could
+    // plant the section. The card would then render the "Supervisor recommends"
+    // chip and emphasize a button on advice no supervisor gave, and the gate
+    // consult — which skips an item whose snapshot body already carries the
+    // section — would never ask the real one. Strip it here so `annotate`
+    // remains the single writer. `mutate` never touches bodies, so there is
+    // nothing to guard there.
+    let body = change.body ?? null;
+    if (body !== null && readMarkdownSection(body, SUPERVISOR_RECOMMENDATION_HEADING) !== null) {
+      console.warn(
+        `[ReviewItemRouter] reserved section stripped from a created review item: ` +
+          `heading='${SUPERVISOR_RECOMMENDATION_HEADING}' title='${change.title}' ` +
+          `source='${source ?? 'none'}'`,
+      );
+      body = stripMarkdownSection(body, SUPERVISOR_RECOMMENDATION_HEADING);
+    }
+
     const runId = change.runId ?? null;
     const payloadJson = payload === null ? null : JSON.stringify(payload);
 
@@ -577,13 +659,24 @@ export class ReviewItemRouter {
       const resolvedBy = change.resolvedBy ?? change.actor;
       const resolution = change.resolution ?? null;
 
+      // TASK-222: stamp gate-resolution provenance into payload_json — merge,
+      // never replace, so the gate discriminant / batch refs stamped at mint
+      // time (or the ABSENCE of any payload — most `gate:human-step:*` items mint
+      // with payload_json: null) survive the resolve.
+      let nextPayloadJson = current.payload_json;
+      if (change.op === 'resolve' && change.resolutionMeta && current.kind === 'decision') {
+        nextPayloadJson = JSON.stringify(
+          this.mergeResolutionMeta(current.payload_json, change.resolutionMeta),
+        );
+      }
+
       this.db
         .prepare(
           `UPDATE review_items
-              SET status = ?, resolved_by = ?, resolution = ?, updated_at = ?
+              SET status = ?, resolved_by = ?, resolution = ?, payload_json = ?, updated_at = ?
             WHERE id = ?`,
         )
-        .run(targetStatus, resolvedBy, resolution, now, reviewItemId);
+        .run(targetStatus, resolvedBy, resolution, nextPayloadJson, now, reviewItemId);
 
       const deltas: FieldDelta[] = [{ field: 'status', from: current.status, to: targetStatus }];
       if (resolution !== null) deltas.push({ field: 'resolution', from: current.resolution, to: resolution });
@@ -802,6 +895,65 @@ export class ReviewItemRouter {
   }
 
   // --------------------------------------------------------------------------
+  // Annotate path — machine-authored markdown section inside a pending body
+  // --------------------------------------------------------------------------
+
+  /**
+   * Upsert `change.markdown` into the item's body under `## <change.heading>`.
+   *
+   * PENDING-ONLY, any kind. A recommendation on an item the human already
+   * resolved is worse than no recommendation: the card would show advice about a
+   * decision that is already made, and the body the review queue keeps as the
+   * record of what the human saw would no longer be what they saw. The consult
+   * that races a human answering the gate is EXPECTED (the annotate is fired
+   * fire-and-forget while the gate is open), so `invalid_status` here is a normal
+   * outcome its caller logs at debug, not an error.
+   *
+   * The body rewrite itself is {@link upsertMarkdownSection} — replace in place,
+   * drop duplicates — so annotating twice leaves exactly one section.
+   */
+  private runAnnotate(
+    projectId: number,
+    change: ReviewItemAnnotate,
+  ): { reviewItemId: string; event: { id: number; seq: number } } {
+    const reviewItemId = change.reviewItemId;
+    const now = new Date().toISOString();
+
+    let eventId = 0;
+    let eventSeq = 0;
+
+    const txn = this.db.transaction(() => {
+      const current = this.readRow(projectId, reviewItemId);
+      if (!current) {
+        throw new ReviewItemError(
+          'not_found',
+          `review item ${reviewItemId} not found for project ${projectId}`,
+        );
+      }
+      if (current.status !== 'pending') {
+        throw new ReviewItemError(
+          'invalid_status',
+          `review item ${reviewItemId} is not pending (status='${current.status}') — cannot annotate`,
+        );
+      }
+
+      const nextBody = upsertMarkdownSection(current.body ?? '', change.heading, change.markdown);
+      this.db
+        .prepare(`UPDATE review_items SET body = ?, updated_at = ? WHERE id = ?`)
+        .run(nextBody, now, reviewItemId);
+
+      const deltas: FieldDelta[] = [{ field: 'body', from: current.body, to: nextBody }];
+      const ev = this.insertEvent(reviewItemId, 'annotated', change.actor, change.runId ?? null, deltas, now);
+      eventId = ev.id;
+      eventSeq = ev.seq;
+    });
+    (txn as () => void)();
+
+    this.emitChange(projectId, reviewItemId, 'annotated');
+    return { reviewItemId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  // --------------------------------------------------------------------------
   // payload_json proposedTarget merge helpers (re-tag, siblings preserved)
   // --------------------------------------------------------------------------
 
@@ -835,6 +987,41 @@ export class ReviewItemRouter {
       }
     }
     return { ...base, kind: 'finding', proposedTarget };
+  }
+
+  // --------------------------------------------------------------------------
+  // payload_json resolutionMeta merge helper (TASK-222 gate-resolution provenance)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Merge gate-resolution provenance into a decision item's payload_json WITHOUT
+   * clobbering whatever siblings (`gate`, `ideaRefs`, `designRefs`, …) the gate
+   * minted with. Deliberately typed as a plain object rather than
+   * `DecisionPayload` — most `gate:human-step:*` items mint with
+   * `payload_json: null` (no `gate` discriminant at all, since
+   * humanStepManager.composeGatePayload composes a payload for `approve-ideas`
+   * ONLY), so requiring the full `DecisionPayload` shape here would force
+   * inventing a `gate` value this router cannot actually know.
+   */
+  private mergeResolutionMeta(
+    payloadJson: string | null,
+    meta: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null },
+  ): Record<string, unknown> {
+    let base: Record<string, unknown> = { kind: 'decision' };
+    if (payloadJson) {
+      try {
+        const parsed: unknown = JSON.parse(payloadJson);
+        if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+      } catch {
+        // malformed payload — fall back to the minimal decision marker above
+      }
+    }
+    return {
+      ...base,
+      kind: 'decision',
+      resolvedOutcome: meta.outcome,
+      ...(meta.surface ? { resolvedSurface: meta.surface } : {}),
+    };
   }
 
   // --------------------------------------------------------------------------

@@ -26,6 +26,8 @@
  * stepTransitionBridge.ts.
  */
 import type { DatabaseLike } from './types';
+import { readAdversarialReviewMarkdown } from './adversarialReviewGateBody';
+import { parseAdversarialReviewDoc } from '../../../shared/types/adversarialReview';
 
 /**
  * Distinct entity ids of `entityType` rows the given run CREATED, read from the
@@ -400,16 +402,40 @@ export interface ApproveIdeasBatchRow {
  * (`ui-prototype` / `interactive-prototype`), a project-brief artifact carrying
  * an `## Architecture design` section (launch designs the whole concept BEFORE
  * ideas exist, so the brief holds the architecture until decomposition), OR an
- * owned idea whose body carries that section. Consulted by the programmatic
- * controller's optional approve-design human gate — when the design steps
- * self-skipped, the gate has literally nothing to review and should skip
- * instead of parking the run (2026-08-04, first launch smoke: the run parked
- * at approve-design over an empty surface).
+ * owned idea whose body carries that section, OR a POPULATED `adversarial-review`
+ * artifact. Consulted by the programmatic controller's optional approve-design
+ * human gate — when the design steps self-skipped, the gate has literally
+ * nothing to review and should skip instead of parking the run (2026-08-04,
+ * first launch smoke: the run parked at approve-design over an empty surface).
+ *
+ * The critique is itself a design surface: a reviewer that raised entries has
+ * produced something a human must see, even when no prototype or architecture
+ * exists for it to have reviewed. Runs `bba24c5…` and `e6a1a2d…` skipped this
+ * gate on an empty-surface reading and dropped BLOCKING reviews on the floor.
+ * An EMPTY critique (both sections absent, empty, or `None.`) is still nothing
+ * to review, so it keeps skipping.
  *
  * FAIL-OPEN toward the gate: any thrown query returns true, so a read error
- * opens the human gate rather than silently skipping a review step.
+ * opens the human gate rather than silently skipping a review step. The one
+ * exception is the review read at the end, which is independently fail-soft
+ * (an unreadable payload reads as "no review") and can therefore only ever ADD
+ * a reason to open the gate, never a reason to skip one.
+ *
+ * FRESHNESS (`opts.reviewReportedSinceMs`). The critique is ONE row per run, so
+ * it survives a whole-run rewind and a Revise loopback: on the next walk a
+ * previous walk's critique would open this gate over a design surface that no
+ * longer exists. The bound is the caller's "this round started at" instant — a
+ * critique last reported before it is not a surface. Absent bound, or an unknown
+ * `reported_at` age, ⇒ no constraint (today's behaviour). ONLY the critique
+ * branch is bounded: whether the prototype / arch-design / project-brief / idea
+ * surfaces go stale across walks is a separate, pre-existing question this does
+ * not answer.
  */
-export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boolean {
+export function hasReviewableDesignSurface(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { reviewReportedSinceMs?: number },
+): boolean {
   try {
     const artifactRow = db
       .prepare(
@@ -434,6 +460,19 @@ export function hasReviewableDesignSurface(db: DatabaseLike, runId: string): boo
         .get(ideaId) as { body?: unknown } | undefined;
       if (typeof row?.body === 'string' && row.body.includes('## Architecture design')) return true;
     }
+    // Last resort before skipping: a critique with at least one entry is a
+    // surface in its own right — provided it is THIS round's (see the freshness
+    // note above). `readAdversarialReviewMarkdown` is itself fail-soft (an
+    // unreadable payload reads as "no review"), so this can only ever ADD a
+    // reason to open the gate, never a reason to skip one.
+    const review = parseAdversarialReviewDoc(
+      readAdversarialReviewMarkdown(
+        db,
+        runId,
+        opts?.reviewReportedSinceMs !== undefined ? { reportedSinceMs: opts.reviewReportedSinceMs } : undefined,
+      ),
+    );
+    if (review.blocking.length + review.findings.length > 0) return true;
     return false;
   } catch {
     return true;

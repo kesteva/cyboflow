@@ -12,6 +12,10 @@
  *
  * One artifact per (run_id, atype) in v1: `apply` with op='create' UPSERTS by
  * (runId, atype), so re-deriving a templated artifact (auto-mint) is idempotent.
+ * That path additionally stamps `reported_at` (migration 143) on EVERY report —
+ * including a no-op re-report that writes no audit row — because one row per
+ * (run, atype) outlives a rewind/Revise and readers need to tell a critique
+ * reported during THIS step's turn from a previous walk's leftover.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/* — the DB is injected as the narrow DatabaseLike.
@@ -331,6 +335,16 @@ export interface ArtifactDbRow {
    *  row shape: a test DB (or any pre-078 SELECT *) that has not seeded the
    *  column returns rows without it, so shapeRow reads `undefined` there. */
   revision?: number;
+  /** Instant of the last REPORT — the op='create' insert or its upsert-refresh
+   *  (migration 143). Stamped on EVERY report, even a no-op re-report that
+   *  changes no field; unlike `revision`, which only advances on a real delta,
+   *  and unlike `created_at`, which is the FIRST report. That is what lets a
+   *  reader ask "was this row written during THIS step's turn" and treat a
+   *  previous walk's surviving critique as absent. NOT stamped by the op='update'
+   *  field patches (a tab focus flipping `is_new` is not a report) nor by commit.
+   *  OPTIONAL/nullable on the row shape: pre-143 rows and fixtures without the
+   *  column read as "age unknown". */
+  reported_at?: string | null;
 }
 
 interface FieldDelta {
@@ -811,14 +825,19 @@ export class ArtifactRouter {
         }
         const bumpRevision = deltas.length > 0;
 
+        // `reported_at` is stamped UNCONDITIONALLY — including when
+        // deltas.length === 0. A no-op re-report is exactly the case the column
+        // exists for: it proves the reviewer re-reported the artifact THIS round
+        // even though nothing in it changed, which neither `revision` nor the
+        // entity_events log records (migration 143).
         this.db
           .prepare(
             `UPDATE artifacts
                 SET label = ?, step_origin = ?, mode = ?, payload_json = ?, source_ref = ?,
-                    session_id = COALESCE(?, session_id), is_new = ?${bumpRevision ? ', revision = revision + 1' : ''}
+                    session_id = COALESCE(?, session_id), is_new = ?, reported_at = ?${bumpRevision ? ', revision = revision + 1' : ''}
               WHERE id = ?`,
           )
-          .run(change.label, nextStepOrigin, mode, nextPayload, nextSourceRef, change.sessionId ?? null, nextIsNew, existing.id);
+          .run(change.label, nextStepOrigin, mode, nextPayload, nextSourceRef, change.sessionId ?? null, nextIsNew, now, existing.id);
 
         if (deltas.length === 0) {
           const last = this.db
@@ -846,8 +865,8 @@ export class ArtifactRouter {
         .prepare(
           `INSERT INTO artifacts
              (id, run_id, session_id, atype, label, step_origin, mode, committed, session_only,
-              is_new, payload_json, source_ref, created_at, committed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+              is_new, payload_json, source_ref, created_at, committed_at, reported_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
         )
         .run(
           artifactId,
@@ -862,6 +881,7 @@ export class ArtifactRouter {
           isNew,
           change.payloadJson ?? null,
           change.sourceRef ?? null,
+          now,
           now,
         );
       const ev = this.insertEvent(artifactId, 'created', change.actor, change.runId, [

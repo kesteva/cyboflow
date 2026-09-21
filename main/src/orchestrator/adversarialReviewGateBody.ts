@@ -7,15 +7,13 @@
  * read by nobody, and discarded with the step's turn. Now the critique is a real
  * artifact (`adversarial-review`, migration 136) and this module turns it into the
  * gate's opening text: how many defects were raised, which ones are blocking, how
- * much revision budget is left, and — the part that is genuinely non-obvious —
- * what each button DOES.
+ * many revisions this run has already taken, and — the part that is genuinely
+ * non-obvious — what each button DOES.
  *
  * That last part matters because the two choices are not "yes" and "no". Approve
  * does not discard the findings: it LOGS every one as a non-blocking accepted-risk
  * finding. Revise does not just re-ask: it re-runs the design steps with these
- * findings as feedback, and it is BOUNDED — the sixth one ends the run as
- * `rejected`, which is not a delivered outcome, so the run's findings are swept at
- * session archive. Neither is discoverable from a button label.
+ * findings as feedback. Neither is discoverable from a button label.
  *
  * Pure functions over an injected DatabaseLike: no singletons, no writes, no
  * throwing. `HumanStepManager.openHumanGate` composes the body inside the
@@ -30,7 +28,17 @@ import type { DatabaseLike } from './types';
 import {
   parseAdversarialReviewDoc,
   type AdversarialFinding,
+  type PriorEntry,
 } from '../../../shared/types/adversarialReview';
+import { parseGateResolution } from '../../../shared/types/reviews';
+// The legacy free-text sniff, borrowed rather than re-implemented so this count can
+// never disagree with what the gate readers decided the run actually did (CR-13).
+import { gateDecisionFromResolution } from './gateDecision';
+// The shared parser, NOT `new Date(raw)`: a SQLite-shaped unzoned value is UTC and
+// the platform parser reads it as LOCAL (the repo's recurring timestamp trap).
+// timestampUtils is a dependency-free util, so it keeps this module's
+// standalone-typecheck invariant.
+import { parseTimestamp } from '../utils/timestampUtils';
 
 /** The step id whose gate this module speaks for. */
 export const APPROVE_DESIGN_STEP_ID = 'approve-design';
@@ -39,17 +47,30 @@ export const APPROVE_DESIGN_STEP_ID = 'approve-design';
 const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
 
 /**
- * The controller's per-step revise budget.
+ * When this run's `adversarial-review` artifact was LAST reported, as epoch ms —
+ * `artifacts.reported_at` (migration 143), which the ArtifactRouter re-stamps on
+ * every report including an identical no-op re-report.
  *
- * CANONICAL HOME: `MAX_STEP_LOOPBACKS` in
- * main/src/orchestrator/programmatic/workflowController.ts. Duplicated here as a
- * bare literal deliberately — the same reason humanStepManager.ts keeps its own
- * copy of `SYSTEMIC_PAUSE_SOURCE` — to keep this module (and, transitively, the
- * gate-open path) free of a `programmatic/` import. If that constant ever moves,
- * this copy is wrong in the direction of showing the human a budget larger or
- * smaller than the real one, so keep the two in lockstep.
+ * `null` means "age unknown", and every caller must read that as NO CONSTRAINT.
+ * It is returned for a pre-143 row, a fixture table without the column, an
+ * unparseable value, a missing row, or any throw. The freshness bound can only
+ * ever make an artifact read as ABSENT, so an unknown age that suppressed the
+ * critique would silently regress runs whose DB simply has not been migrated.
  */
-const MAX_GATE_REVISIONS = 5;
+export function readAdversarialReviewReportedAtMs(db: DatabaseLike, runId: string): number | null {
+  try {
+    const row = db
+      .prepare(
+        "SELECT reported_at AS reportedAt FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
+      )
+      .get(runId) as { reportedAt?: string | null } | undefined;
+    if (typeof row?.reportedAt !== 'string' || row.reportedAt.length === 0) return null;
+    const ms = parseTimestamp(row.reportedAt).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The markdown of this run's `adversarial-review` artifact, or undefined when the
@@ -59,9 +80,25 @@ const MAX_GATE_REVISIONS = 5;
  * Reads the run's CURRENT critique, not one pinned at gate-open: the artifact is
  * one-per-run and a post-Revise re-review ENRICHES it, which is exactly what the
  * re-presented gate should be showing.
+ *
+ * FRESHNESS. The row is one-per-run, so it also survives a whole-run rewind or a
+ * Revise loopback — a previous walk's critique is still there for the next walk
+ * to misread as its own. `opts.reportedSinceMs` is the caller's "this round
+ * started at" instant: a critique last reported BEFORE it belongs to a previous
+ * round and reads as ABSENT (`undefined`). An unknown age (see
+ * {@link readAdversarialReviewReportedAtMs}) and an absent `opts` both mean no
+ * constraint — today's behaviour, unchanged.
  */
-export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
+export function readAdversarialReviewMarkdown(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { reportedSinceMs?: number },
+): string | undefined {
   try {
+    if (opts?.reportedSinceMs !== undefined) {
+      const reportedAtMs = readAdversarialReviewReportedAtMs(db, runId);
+      if (reportedAtMs !== null && reportedAtMs < opts.reportedSinceMs) return undefined;
+    }
     const row = db
       .prepare(
         "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
@@ -78,23 +115,38 @@ export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): 
 }
 
 /**
- * How many times this run's `approve-design` gate has ALREADY been resolved.
+ * How many of this run's resolved `approve-design` gates were a REVISE.
  *
- * Every prior resolution of this gate was a Revise: an Approve advances the walk
- * and the gate never re-opens, so a resolved item that is being followed by
- * another gate-open can only have been a revise. Fail-soft — an unreadable count
- * yields 0, which understates the budget used and therefore never shows a scarier
- * number than the truth.
+ * NOT simply "how many times the gate was resolved". A resolved gate is not
+ * necessarily a revise: a REJECT also resolves it (the run ends rejected, and the
+ * monitor's `rewind_to_step` can then bring the walk back to the design steps and
+ * re-open the very same gate), and counting one as a revision tells the human they
+ * have spent a round they never spent. So the verdict is READ rather than assumed.
+ *
+ * Verdict reading is the gate readers' own contract: the anchored prefix first
+ * ({@link parseGateResolution}, so `revise: only AR-2 matters` is a revise and a
+ * note that happens to contain the word 'reject' is not), and only a legacy row —
+ * one the grammar does not recognize at all — falls through to
+ * {@link gateDecisionFromResolution}'s free-text sniff, which still catches the
+ * pre-grammar rows spelled 'please revise'.
+ *
+ * Fail-soft — an unreadable count yields 0, which understates what the run has
+ * done and therefore never shows a scarier number than the truth.
  */
 export function countApproveDesignRevisionsUsed(db: DatabaseLike, runId: string): number {
   try {
-    const row = db
+    const rows = db
       .prepare(
-        `SELECT COUNT(*) AS n FROM review_items
+        `SELECT resolution FROM review_items
           WHERE run_id = ? AND kind = 'decision' AND status = 'resolved' AND source = ?`,
       )
-      .get(runId, APPROVE_DESIGN_GATE_SOURCE) as { n?: number } | undefined;
-    return typeof row?.n === 'number' && row.n > 0 ? row.n : 0;
+      .all(runId, APPROVE_DESIGN_GATE_SOURCE) as { resolution?: string | null }[];
+    return rows.filter((row) => {
+      const parsed = parseGateResolution(row.resolution);
+      return parsed !== null
+        ? parsed.verdict === 'revise'
+        : gateDecisionFromResolution(row.resolution) === 'revise';
+    }).length;
   } catch {
     return 0;
   }
@@ -111,19 +163,76 @@ function renderBlockingLine(entry: AdversarialFinding): string {
 }
 
 /**
- * The revision-budget sentence, or null when nothing has been revised yet (saying
- * "0 of 5 used" on a first visit is noise that implies a countdown nobody started).
+ * The CONVERGENCE lines — the part of the body that answers "is this getting
+ * better?", which the counts alone cannot.
+ *
+ * Two rounds of "3 blocking defects" look identical in the counts even when the
+ * second round fixed all three and found three unrelated ones. The ledger is the
+ * only place that distinction survives, so it is rendered as its own line the
+ * moment there is a ledger to read (a first review has none, and says nothing).
+ *
+ * Deliberately WITHOUT a round number: the only honest sources of one are the
+ * controller's walk-scoped counter, which this module cannot see, and the gate's
+ * resolved-item count, which undercounts an automatic lap. A wrong round number
+ * is worse than none — it would be the one number a reader trusts absolutely.
+ *
+ * `newBlockers` counts the CURRENT blocking entries the ledger does not mention:
+ * an entry the reviewer carried forward is the same defect, whereas an id absent
+ * from the ledger is one this round raised for the first time.
+ */
+function renderConvergence(prior: PriorEntry[], blocking: AdversarialFinding[]): string[] {
+  if (prior.length === 0) return [];
+
+  const priorBlockers = prior.filter(
+    (p) => p.previousSeverity === 'blocker' || p.previousSeverity === 'major',
+  );
+  const resolvedBlockers = priorBlockers.filter((p) => p.status === 'resolved').length;
+  const regressions = prior.filter((p) => p.status === 'resolved-with-regression').length;
+  const setAside = prior.filter((p) => p.status === 'set-aside').length;
+  const priorIds = new Set(prior.map((p) => p.id));
+  const newBlockers = blocking.filter((entry) => !priorIds.has(entry.id)).length;
+
+  const lines = [
+    '',
+    `**Convergence:** ${resolvedBlockers} of ${priorBlockers.length} prior ${pluralize(priorBlockers.length, 'blocker', 'blockers')} resolved, ${regressions} ${pluralize(regressions, 'regression', 'regressions')}, ${newBlockers} new ${pluralize(newBlockers, 'blocker', 'blockers')}, ${setAside} set aside.`,
+  ];
+
+  const open = prior.filter(
+    (p) => p.status === 'unresolved' || p.status === 'resolved-with-regression',
+  );
+  if (open.length > 0) {
+    // Plain text, not a `<details>` block: the review item's body is rendered as a
+    // React text child (ReviewItemCard's `whitespace-pre-wrap` <p>), so any HTML
+    // here would reach the human as literal `<details>` / `<summary>` tags. Use the
+    // same `**Label:**` + list idiom the Blocking section below already uses.
+    lines.push(
+      '',
+      '**Unresolved or regressed:**',
+      ...open.map((p) => `- ${p.id} — ${p.status}${p.note !== undefined ? ` — ${p.note}` : ''}`),
+    );
+  }
+  return lines;
+}
+
+/**
+ * The revisions-so-far sentence, or null when nothing has been revised yet (saying
+ * "0 revisions so far" on a first visit is noise that implies a countdown nobody
+ * started).
+ *
+ * A COUNT, NOT A BUDGET, and deliberately without a deadline. This used to render
+ * "n of 5 used — this is the last one", which was wrong in both directions. The
+ * enforced bound is the controller's per-walk `MAX_STEP_LOOPBACKS`, which lives in
+ * memory, is scoped to ONE walk, and RESETS on a rewind; the number here is
+ * derived from durable review-item rows that survive every rewind. So the two
+ * disagree by construction (live evidence: a gate reading "5 of 5 used" while the
+ * controller's counter stood at 4), and this side can only ever OVER-count.
+ * Over-counting a fact — "you have revised three times" — is harmless; over-counting
+ * a deadline tells a human their next Revise will end the run as `rejected` when it
+ * will not. Hence no total, no remaining, no warning.
  */
 function renderBudget(used: number): string | null {
   if (used <= 0) return null;
-  const remaining = Math.max(0, MAX_GATE_REVISIONS - used);
-  if (remaining === 0) {
-    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used — this is the last one.** Choosing Revise again ends this run as \`rejected\` rather than looping back, and a rejected run is not a delivered outcome, so the findings it filed are swept when the session is archived.`;
-  }
-  if (remaining === 1) {
-    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.** One revision remains; after it, a further Revise ends the run as \`rejected\`.`;
-  }
-  return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.**`;
+  return `**Revisions so far this run: ${used}.**`;
 }
 
 /**
@@ -139,7 +248,7 @@ export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string
   const markdown = readAdversarialReviewMarkdown(db, runId);
   if (markdown === undefined) return null;
 
-  const { blocking, findings } = parseAdversarialReviewDoc(markdown);
+  const { blocking, findings, prior } = parseAdversarialReviewDoc(markdown);
   const lines: string[] = [];
 
   if (blocking.length === 0 && findings.length === 0) {
@@ -154,6 +263,8 @@ export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string
     }
     lines.push(`The adversarial reviewer raised ${parts.join(' and ')}. Full detail is in the Adversarial review tab.`);
   }
+
+  lines.push(...renderConvergence(prior, blocking));
 
   if (blocking.length > 0) {
     lines.push('', '**Blocking:**', ...blocking.map(renderBlockingLine));

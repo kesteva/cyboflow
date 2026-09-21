@@ -114,4 +114,17 @@ describe('readApproveRunbookResolution', () => {
     expect(readApproveRunbookResolution(dbAdapter(db), 'run-other')).toBeUndefined();
     expect(readApproveRunbookResolution(dbAdapter(new Database(':memory:')), 'run-1')).toBeUndefined();
   });
+
+  it('returns only the NOTE when the row carries the verdict prefix', () => {
+    // A row written by composeGateResolution: the verdict is structural and
+    // carries no trimming signal, so only the qualification is handed to `prove`.
+    // A bare verdict therefore has nothing to hand over at all.
+    const db = reviewDb();
+    insert(db, 'r1', 'run-note', 'resolved', 'approve: only web');
+    insert(db, 'r2', 'run-bare', 'resolved', 'approve');
+    insert(db, 'r3', 'run-mod', 'resolved', 'approve[no-findings]');
+    expect(readApproveRunbookResolution(dbAdapter(db), 'run-note')).toBe('only web');
+    expect(readApproveRunbookResolution(dbAdapter(db), 'run-bare')).toBeUndefined();
+    expect(readApproveRunbookResolution(dbAdapter(db), 'run-mod')).toBeUndefined();
+  });
 });

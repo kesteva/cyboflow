@@ -307,8 +307,10 @@ export class API {
     /**
      * Did this session's work land? `delivered` = a run carries a delivery stamp
      * (our merge / create-PR path ran); `landed` = git says the branch has
-     * nothing left to give main (the agent merged it in chat). Either turns
-     * Dismiss into a Mark-complete choice.
+     * nothing left to give main (the agent merged it in chat); `completedNoCode`
+     * = a completed Planner/Launch run whose "delivery" is backlog rows, not
+     * code (zero own commits). Any of the three turns Dismiss into a
+     * Mark-complete choice.
      */
     async getDeliveryState(sessionId: string) {
       return trpc.cyboflow.sessionGit.getDeliveryState.query({ sessionId });

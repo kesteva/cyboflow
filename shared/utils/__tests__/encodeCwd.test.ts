@@ -30,8 +30,12 @@ describe('encodeCwd', () => {
     expect(encodeCwd('/tmp/项目')).toBe('-tmp---');
   });
 
-  it('preserves ASCII letters, digits, and underscores', () => {
-    expect(encodeCwd('/a_b/C9')).toBe('-a_b-C9');
+  it('preserves ASCII letters and digits only — an underscore maps to a hyphen like any other separator', () => {
+    expect(encodeCwd('/a_b/C9')).toBe('-a-b-C9');
+    // Live on-disk (Claude Code 2.1.278, 2026-09-21): a `_` data dir encodes dashed.
+    expect(encodeCwd('/Users/x/.cyboflow_smoke295/proj/worktrees/grand-hill-20260921')).toBe(
+      '-Users-x--cyboflow-smoke295-proj-worktrees-grand-hill-20260921',
+    );
   });
 
   it('documents the #19972 collision caveat in a comment block', () => {

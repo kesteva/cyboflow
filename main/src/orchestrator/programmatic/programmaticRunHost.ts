@@ -29,24 +29,38 @@
 import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
+import type { AdversarialFinding } from '../../../../shared/types/adversarialReview';
 import type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
   BuildBreakGroup,
   ControllerHost,
   ControllerStepContext,
   FanOutDriver,
   HumanGateDecision,
   LaneRescueOutcome,
+  EscalationReviewItemSummary,
+  GateEscalationDecision,
   LaneTriageFailure,
+  ReviewLoopDecision,
+  ReviewLoopRequest,
+  SetAsideFindingInput,
   StepReport,
   SystemicPauseVerdict,
   TriageDecision,
   VerificationPosture,
   VisualVerifyGate,
 } from './types';
-import type { HumanGateResolver } from './humanGate';
-import type { BlockingItemsResolver } from './blockingItemsGate';
+import type { HumanGateOpenedSnapshot, HumanGateResolver } from './humanGate';
+import type { BlockingItemsResolver, PendingBlockingItem } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
+import {
+  SUPERVISOR_RECOMMENDATION_HEADING,
+  composeSupervisorRecommendation,
+  readMarkdownSection,
+} from '../../../../shared/types/reviews';
+import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
 import { buildBreakGroupKey } from './buildBreakDetector';
@@ -62,6 +76,125 @@ export const LANE_TRIAGE_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_LANE_TRIAGE';
 /** True when the operator has disabled autonomous lane rescue for this process. */
 function laneTriageDisabled(): boolean {
   return process.env[LANE_TRIAGE_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * Rollback lever for the SUPERVISED adversarial-review loop (sibling of
+ * LANE_TRIAGE_KILL_SWITCH_ENV). With it set to '1' the host never consults the
+ * monitor about a blocking review round, so the controller falls back to its
+ * MECHANICAL revision budget — i.e. exactly the one-lap behaviour that shipped
+ * before this seam existed. No query cost, no findings, no chat.
+ */
+export const REVIEW_LOOP_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_REVIEW_LOOP_TRIAGE';
+
+/** True when the operator has disabled the supervised review loop for this process. */
+function reviewLoopTriageDisabled(): boolean {
+  return process.env[REVIEW_LOOP_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * Rollback lever for the SUPERVISOR'S ESCALATION REVIEW — the recommendation it
+ * attaches to an open human gate (this item) and, from item 9, to a run parked
+ * on blocking findings. With it set to '1' no gate is ever consulted about and
+ * no review item is ever annotated, so every card renders exactly as it did
+ * before the seam existed. No query cost, no writes, no chat.
+ */
+export const ESCALATION_REVIEW_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_ESCALATION_REVIEW';
+
+/** True when the operator has disabled the supervisor's escalation review. */
+function escalationReviewDisabled(): boolean {
+  return process.env[ESCALATION_REVIEW_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * Most review-queue rows folded into ONE escalation consult.
+ *
+ * The list is context, not the decision: a run that filed sixty findings would
+ * otherwise push the gate body, the deliverables and the timeline out of the
+ * model's attention with rows it does not need to read individually. Newest
+ * first, so what survives the cap is what the run did most recently.
+ */
+export const ESCALATION_REVIEW_ITEM_CAP = 30;
+
+/**
+ * Most blocking findings the supervisor may RESOLVE on one pass over a step
+ * boundary (in-memory, per host instance = per walk).
+ *
+ * Small on purpose. A boundary that hands back four autonomous resolutions is
+ * already an unusual run; one that hands back twenty is a supervisor clearing
+ * its own defect queue, which is the exact failure this seam has to be unable to
+ * produce. Past the cap a `resolve` is downgraded to a `recommend`, so nothing is
+ * lost — the item keeps blocking and the human sees the advice.
+ */
+export const MONITOR_WALK_RESOLVE_CAP = 4;
+
+/**
+ * Most blocking findings the supervisor may resolve across the WHOLE run,
+ * counted from the `escalation-resolve` audit findings already committed for it.
+ *
+ * The walk cap alone is defeated by a restart or a rewind: both mint a fresh
+ * host with a zeroed counter, so a run that crash-looped could resolve four
+ * items per attempt forever. This one is read from the database before each
+ * resolve, so the budget survives everything that resets process state.
+ */
+export const MONITOR_RUN_RESOLVE_CAP = 8;
+
+/** Grouping category for the supervisor's autonomous-resolve audit findings. */
+const ESCALATION_RESOLVE_FINDING_CATEGORY = 'escalation-resolve';
+
+/** The recommendation menu for a blocking FINDING — keep it, or drop it. */
+const FINDING_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = ['continue', 'dismiss'];
+
+/**
+ * The recommendation menu for any other blocking item (a decision gate, a pause)
+ * — the two CONTROLS such an item's card renders, and nothing else.
+ */
+const DECISION_RECOMMENDATION_CHOICES: readonly SupervisorRecommendationChoice[] = ['approve', 'reject'];
+
+/**
+ * Normalize the supervisor's free-text `choice` onto the menu this item's KIND
+ * actually offers. An absent or off-menu choice returns `undefined` — there is
+ * NO default.
+ *
+ * A default is exactly what this must not have. Every entry on a decision menu
+ * points the human at a consequential button (Reject ends the run), so falling
+ * back to one would emphasize a control on advice the supervisor never gave.
+ * The honest degradation is silence: the caller writes no recommendation and the
+ * item renders exactly as it does today.
+ */
+function normalizeBlockingChoice(
+  kind: ReviewItemKind,
+  choice: string | undefined,
+): SupervisorRecommendationChoice | undefined {
+  const menu = kind === 'finding' ? FINDING_RECOMMENDATION_CHOICES : DECISION_RECOMMENDATION_CHOICES;
+  return menu.find((c) => c === choice?.trim().toLowerCase());
+}
+
+/** The `ReviewItemError.code` a refusal carries when the human answered first. */
+const INVALID_STATUS_CODE = 'invalid_status';
+
+/** True for the EXPECTED refusal: the human resolved the gate mid-consult. */
+function isInvalidStatusRefusal(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === INVALID_STATUS_CODE
+  );
+}
+
+/**
+ * The first sentence of a rationale — what the card renders next to the button.
+ *
+ * Sentence-splitting on `.`/`!`/`?` + whitespace is deliberately crude: the
+ * FULL rationale is written underneath either way, so a bad split costs a
+ * slightly long headline, never any meaning. A rationale with no terminator at
+ * all is used whole.
+ */
+export function firstSentence(text: string): string {
+  const trimmed = text.trim();
+  const m = /^(.+?[.!?])(\s|$)/s.exec(trimmed);
+  return (m ? m[1] : trimmed).trim();
 }
 
 /**
@@ -84,6 +217,11 @@ export interface LaneTriageAdjustResult {
   reason?: string;
 }
 
+/** Grouping category for the supervisor's review-loop audit findings in the review queue. */
+const REVIEW_LOOP_FINDING_CATEGORY = 'review-loop';
+/** Grouping category for the supervisor's triage-retry audit findings in the review queue. */
+const TRIAGE_RETRY_FINDING_CATEGORY = 'triage-retry';
+
 /** Longest before/after body excerpt rendered into the audit finding. */
 const FINDING_BODY_EXCERPT = 1200;
 
@@ -92,6 +230,48 @@ function excerptBody(body: string | undefined): string {
   const text = (body ?? '').trim();
   if (text.length === 0) return '_(empty)_';
   return text.length <= FINDING_BODY_EXCERPT ? text : `${text.slice(0, FINDING_BODY_EXCERPT)}\n\n…(truncated)`;
+}
+
+/**
+ * Re-derive the decision the host can actually HONOUR after one or more
+ * set-aside findings failed to file.
+ *
+ * "Set aside" is only defensible because the finding exists. An id whose
+ * finding never landed would otherwise vanish from the run entirely: the
+ * re-run is told it is "already filed as findings", the next reviewer lists it
+ * under `### Prior entries` as set-aside, `ControllerEscalation.setAsideIds`
+ * tells the gate it was filed — and the human gate itself files only the
+ * CURRENT round's `## Blocking` / `## Findings` entries. So a failed id leaves
+ * the set-aside list, and — if it was BLOCKING this round — is appended to the
+ * lap's must-fix set instead, so the lap still has to close it. A failed
+ * ADVISORY id needs no such rescue: it is still in the review the re-run reads,
+ * still advisory.
+ *
+ * Returns the decision UNCHANGED (same reference) when nothing failed.
+ */
+function withoutFailedSetAsides(
+  req: ReviewLoopRequest,
+  decision: ReviewLoopDecision,
+  failed: ReadonlySet<string>,
+): ReviewLoopDecision {
+  if (failed.size === 0) return decision;
+  if (decision.verdict === 'stop') {
+    return { ...decision, setAside: decision.setAside.filter((entry) => !failed.has(entry.id)) };
+  }
+  const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
+  // Existing order preserved; rescued ids append at the end.
+  const address = [...decision.steering.address];
+  for (const { id } of decision.steering.setAside) {
+    if (failed.has(id) && blockingIds.has(id) && !address.includes(id)) address.push(id);
+  }
+  return {
+    ...decision,
+    steering: {
+      ...decision.steering,
+      address,
+      setAside: decision.steering.setAside.filter((entry) => !failed.has(entry.id)),
+    },
+  };
 }
 
 /**
@@ -135,6 +315,16 @@ export interface ProgrammaticRunHostArgs {
    * supervisor-role redesign, 2026-07-05 — no config opt-in).
    */
   monitor?: MonitorSession;
+  /**
+   * ONE-SHOT retry-guidance setter (`RunDirectives.retryGuidance`), injected by
+   * the runner that owns the run's directives. Called by `triageFailure` when the
+   * supervisor's verdict is 'retry' WITH guidance, so the step's next spawn is
+   * told what to do differently instead of repeating the attempt its own retry
+   * budget already made. Absent (tests / a host built without a runner) ⇒ the
+   * retry still happens, just unguided — logged at warn, never a failure: a
+   * dropped hint must never be worse than the pre-seam behaviour.
+   */
+  setRetryGuidance?: (stepId: string, text: string) => void;
   /**
    * Inject a synthetic event into the run's unified stream (monitor-unify seam).
    * Used to render the monitor's triage rationale as an assistant turn in the Chat
@@ -191,8 +381,12 @@ export interface ProgrammaticRunHostArgs {
    * (ControllerHost.shouldSkipHumanGate, run-bound by the runner). Returns a
    * skip reason when the gate's reviewable surface is absent, null to open the
    * gate. Absent ⇒ every gate opens.
+   *
+   * The second arg carries the controller's `reviewReportedSinceMs` freshness
+   * bound: a critique artifact reported before it is a previous walk's and does
+   * not count as a surface. Passed straight through — this host adds nothing.
    */
-  humanGateSkip?: (step: WorkflowStep) => string | null;
+  humanGateSkip?: (step: WorkflowStep, ctx?: { reviewReportedSinceMs?: number }) => string | null;
   /**
    * Read-back of the free text a human typed when resolving one of this run's
    * gates (ControllerHost.readGateResolutionNote, run-bound by the runner). The
@@ -203,6 +397,21 @@ export interface ProgrammaticRunHostArgs {
    * Absent ⇒ a revision carries the gate id alone.
    */
   readGateResolutionNote?: (stepId: string) => string | undefined;
+  /**
+   * Read-back of this run's CURRENT adversarial-review artifact markdown
+   * (ControllerHost.readAdversarialReview, run-bound by the runner) — the same
+   * reader the revision prompt uses. The controller consults it when a review
+   * step's captured text carries no verdict of its own, because the artifact is
+   * the durable channel and the chat text can simply be missing. Injected rather
+   * than read inline because this host holds no DB handle. MUST be fail-soft
+   * (return undefined, never throw). Absent ⇒ the controller reads only the
+   * reviewer's final text.
+   *
+   * `opts.reportedSinceMs` is the controller's freshness bound — an artifact
+   * last reported before it is a previous walk's and reads as absent. Passed
+   * straight through; this host neither reads nor invents the instant.
+   */
+  readAdversarialReview?: (opts?: { reportedSinceMs?: number }) => string | undefined;
   /**
    * LANE-TRIAGE task reader. Resolves the ref / title / CURRENT body for a
    * fan-out item so `triageLaneFailure` can ENRICH the controller's bare
@@ -235,6 +444,99 @@ export interface ProgrammaticRunHostArgs {
    * throwing/absent sink never blocks the rescue it was supposed to audit.
    */
   fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
+  /**
+   * SUPERVISOR-AUDIT sink. Files the NON-BLOCKING record of ONE review-loop
+   * consult — the verdict, its rationale, and the steering the re-run will be
+   * given — so an autonomous decision to spend (or not spend) another design
+   * lap is visible in the review queue before the human reaches the gate. Bound
+   * by the composition root to the SAME ReviewItemRouter seam the lane-triage
+   * audit uses, with actor `monitor`. Fail-soft at the call site: a throwing or
+   * absent sink never costs the decision it was supposed to record.
+   */
+  fileMonitorFinding?: (input: { title: string; body: string; category?: string }) => Promise<void>;
+  /**
+   * SET-ASIDE sink. Files one non-blocking finding per adversarial-review entry
+   * the supervisor set aside, IMMEDIATELY — which is what makes setting an entry
+   * aside safe: the entry leaves the lap but not the run. Composed to match the
+   * approve-design gate's accepted-risk findings exactly (same title shape, same
+   * category, same severity mapping) so `filedAdversarialIds` dedupes it there
+   * rather than filing it twice. Fail-soft at the call site.
+   */
+  fileSetAsideFinding?: (input: SetAsideFindingInput) => Promise<void>;
+  /**
+   * GATE-OPEN hook. Fired (fire-and-forget, never awaited by the resolver) once a
+   * human gate is live and this host has armed on it, with the gate item's real
+   * title + body. The supervisor's escalation consult binds here: it is the first
+   * instant the question the human is being asked actually exists, because the
+   * gate body is composed inside the gate-open transaction.
+   *
+   * MUST be fail-soft — a rejection is logged and swallowed by the resolver, and
+   * nothing here may delay or reject the gate promise. Absent => no hook fires
+   * (today's behaviour).
+   */
+  onGateOpened?: (
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    snapshot: HumanGateOpenedSnapshot,
+  ) => Promise<void>;
+  /**
+   * ESCALATION-REVIEW reader: this run's review-queue rows as the gate consult
+   * should see them — its PENDING items plus every `monitor`-sourced one
+   * whatever its status, newest first, capped at
+   * {@link ESCALATION_REVIEW_ITEM_CAP} rows.
+   *
+   * This is how the supervisor's own autonomous history (set-aside entries, lane
+   * rescues, loop-stop audits) reaches the person reviewing the gate — CR-9. The
+   * `monitor`-sourced arm ignores status on purpose: an audit finding somebody
+   * already triaged still describes an action this run took unattended.
+   * Run-bound by the composition root; MUST be fail-soft. Absent ⇒ the consult
+   * runs with an empty list.
+   */
+  listRunReviewItems?: (runId: string) => Promise<EscalationReviewItemSummary[]>;
+  /**
+   * ESCALATION-REVIEW writer: upsert the supervisor's recommendation section
+   * into a still-pending review item's body, through the `ReviewItemRouter`
+   * `annotate` op (the only sanctioned path — see the chokepoint rule).
+   *
+   * REJECTS rather than throws for the expected race: the gate is annotated
+   * fire-and-forget while it is open, so a human who answers first leaves the
+   * router refusing with `invalid_status`. The caller logs that at debug and
+   * anything else at warn. Absent ⇒ a recommendation is logged only.
+   */
+  annotateReviewItem?: (input: { reviewItemId: string; markdown: string }) => Promise<void>;
+  /**
+   * REVIEW-WRITE BARRIER (CR-3): resolve once every review-item write already
+   * enqueued for this project has committed
+   * (`ReviewItemRouter.awaitProjectWritesSettled`).
+   *
+   * Awaited at EVERY step boundary, before any read of the blocking queue —
+   * including the plain no-consult path. The MCP `report_finding` reply lands
+   * before its create drains the router's per-project queue, so a boundary that
+   * read `review_items` directly could march straight past the blocking finding
+   * the step it just finished had filed. That is a pre-existing race; this is
+   * where it is closed. Fail-soft: absent or throwing ⇒ the boundary proceeds
+   * unbarriered, exactly as it did before.
+   */
+  awaitReviewWritesSettled?: (projectId: number) => Promise<void>;
+  /**
+   * AUTONOMOUS-RESOLVE sink: close one blocking FINDING as the supervisor,
+   * through the `ReviewItemRouter` `resolve` op with actor `monitor`.
+   *
+   * The only host seam that can clear a human-audience blocking item without a
+   * human, which is why it is paired with two caps and an audit finding on every
+   * use. Absent ⇒ a `resolve` verdict is downgraded to a recommendation (the
+   * item keeps blocking) rather than dropped.
+   */
+  resolveReviewItemAsMonitor?: (input: { reviewItemId: string; resolution: string }) => Promise<void>;
+  /**
+   * DURABLE RESOLVE COUNTER: how many `escalation-resolve` audit findings this
+   * run already carries. Read before EACH autonomous resolve so
+   * {@link MONITOR_RUN_RESOLVE_CAP} survives restarts and rewinds, which both
+   * mint a fresh host with a zeroed in-memory counter. Absent ⇒ only the walk
+   * cap applies; throwing ⇒ the resolve is downgraded (a budget that cannot be
+   * read is treated as spent, never as free).
+   */
+  countMonitorResolves?: (runId: string) => Promise<number>;
   /**
    * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
    * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
@@ -290,6 +592,19 @@ function fenceSafeReason(reason: string): string {
 }
 
 export class ProgrammaticRunHost implements ControllerHost {
+  /**
+   * Review items the supervisor has already answered on THIS walk. A run that
+   * parks, is unparked by a human, and reaches the next boundary must not pay
+   * for a second opinion on the items it was already asked about — and above
+   * all must not get a second chance to `resolve` one it passed on. Per host
+   * instance, i.e. per walk: a restart deliberately starts fresh, because the
+   * durable cap is what bounds the run as a whole.
+   */
+  private readonly reviewedBlockingIds = new Set<string>();
+
+  /** Autonomous resolves spent on this walk — see {@link MONITOR_WALK_RESOLVE_CAP}. */
+  private walkResolveCount = 0;
+
   constructor(private readonly args: ProgrammaticRunHostArgs) {}
 
   reportStep(stepId: string, status: WorkflowStepReportStatus): void {
@@ -307,16 +622,187 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   async requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision> {
+    // The gate-open hook: the host's OWN escalation review by default, and
+    // `args.onGateOpened` as an explicit override (which is how tests observe
+    // the seam without a monitor). Nothing is passed at all when neither exists,
+    // because the resolver's `onOpened` is optional and an always-present no-op
+    // would make "is anybody listening" untestable here.
+    const hook =
+      this.args.onGateOpened ??
+      (this.args.monitor?.reviewGateEscalation
+        ? (s: WorkflowStep, c: ControllerStepContext, snap: HumanGateOpenedSnapshot) =>
+            this.reviewGateEscalation(s, c, snap)
+        : undefined);
     return this.args.gate.resolve({
       runId: this.args.runId,
       projectId: this.args.projectId,
       step,
       signal: ctx.signal,
+      ...(hook ? { onOpened: (snapshot: HumanGateOpenedSnapshot) => hook(step, ctx, snapshot) } : {}),
     });
   }
 
-  shouldSkipHumanGate(step: WorkflowStep): string | null {
-    return this.args.humanGateSkip?.(step) ?? null;
+  /**
+   * ESCALATION-REVIEW seam — consult the supervisor about an OPEN human gate and
+   * annotate its review item with a non-binding recommendation.
+   *
+   * Bound as the gate resolver's `onOpened` hook (see `requestHumanGate`), which
+   * fires FIRE-AND-FORGET: this method is never awaited by the gate promise, and
+   * the human may answer while it is still running. That race is the designed
+   * outcome, not a bug — the annotate is then refused `invalid_status` and the
+   * human's verdict stands untouched.
+   *
+   * Order of business, each arm short-circuiting to today's behaviour (a card
+   * with no recommendation):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_ESCALATION_REVIEW=1`) ⇒ return. No
+   *      consult, no chat (a rollback lever should be silent) — just a log.
+   *   2. No monitor, or one with no `reviewGateEscalation` ⇒ return.
+   *   3. ALREADY ANNOTATED ⇒ return. A RESUMED gate whose body already carries
+   *      the section keeps the recommendation the human has been looking at;
+   *      re-consulting would spend a query to overwrite advice with advice
+   *      (CR-5). A resumed gate WITHOUT the section still gets its consult —
+   *      that is a gate whose first consult never landed.
+   *   4. Consult, then annotate on a `recommend`. A `pass` writes nothing: an
+   *      empty "no recommendation" section would be noise in a body the human
+   *      reads to decide.
+   *
+   * NEVER THROWS, at any depth: the resolver logs and swallows a rejection, but
+   * relying on that would make every failure here look like a gate-hook bug.
+   */
+  async reviewGateEscalation(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    snapshot: HumanGateOpenedSnapshot,
+  ): Promise<void> {
+    try {
+      if (escalationReviewDisabled()) {
+        this.args.logger?.info('[ProgrammaticRunHost] escalation review disabled by kill switch', {
+          runId: this.args.runId,
+          stepId: step.id,
+        });
+        return;
+      }
+      const monitor = this.args.monitor;
+      if (!monitor?.reviewGateEscalation) return;
+      if (readMarkdownSection(snapshot.body, SUPERVISOR_RECOMMENDATION_HEADING) !== null) {
+        this.args.logger?.info('[ProgrammaticRunHost] gate already carries a recommendation; not re-consulting', {
+          runId: this.args.runId,
+          stepId: step.id,
+          reviewItemId: snapshot.reviewItemId,
+          resumed: snapshot.resumed,
+        });
+        return;
+      }
+
+      const reviewItems = await this.readEscalationReviewItems();
+      const decision = await monitor.reviewGateEscalation(
+        {
+          kind: 'gate',
+          stepId: step.id,
+          stepName: step.name,
+          reviewItemId: snapshot.reviewItemId,
+          title: snapshot.title,
+          body: snapshot.body,
+          ...(ctx.escalation ? { escalation: ctx.escalation } : {}),
+          reviewItems,
+        },
+        ctx.signal,
+      );
+      if (decision.action !== 'recommend') return;
+
+      await this.annotateGateRecommendation(step, snapshot.reviewItemId, decision);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] gate escalation review failed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId: snapshot.reviewItemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * The run's review-queue summaries for a gate consult. Fail-soft twice over
+   * (absent reader and throwing reader both yield []): the recommendation is an
+   * enrichment, and a consult with a thinner picture beats no consult.
+   */
+  private async readEscalationReviewItems(): Promise<EscalationReviewItemSummary[]> {
+    try {
+      return (await this.args.listRunReviewItems?.(this.args.runId)) ?? [];
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] run review-item read failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Write the recommendation onto the gate item through the injected `annotate`
+   * sink.
+   *
+   * `invalid_status` is the EXPECTED outcome of the race this whole hook runs
+   * inside — the human answered while the consult was in flight — so it is a
+   * debug line, not a warning: the decision is already made and the advice is
+   * correctly discarded. Every other failure is a real one and warns.
+   */
+  private async annotateGateRecommendation(
+    step: WorkflowStep,
+    reviewItemId: string,
+    decision: Extract<GateEscalationDecision, { action: 'recommend' }>,
+  ): Promise<void> {
+    const sink = this.args.annotateReviewItem;
+    if (!sink) {
+      this.args.logger?.info('[ProgrammaticRunHost] no annotate sink; recommendation logged only', {
+        runId: this.args.runId,
+        stepId: step.id,
+        choice: decision.choice,
+        rationale: decision.rationale,
+      });
+      return;
+    }
+    // A ONE-SENTENCE rationale is already the whole headline, so passing it as
+    // the tail too would print it twice under the heading. The tail is dropped
+    // only when it is character-for-character the head; a longer rationale keeps
+    // its full text under the machine-readable line.
+    const head = firstSentence(decision.rationale);
+    const tail = decision.rationale.trim();
+    try {
+      await sink({
+        reviewItemId,
+        markdown: composeSupervisorRecommendation(decision.choice, head, tail === head ? undefined : tail),
+      });
+      this.args.logger?.info('[ProgrammaticRunHost] gate recommendation annotated', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId,
+        choice: decision.choice,
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        this.args.logger?.debug('[ProgrammaticRunHost] gate resolved before the recommendation landed', {
+          runId: this.args.runId,
+          stepId: step.id,
+          reviewItemId,
+        });
+        return;
+      }
+      this.args.logger?.warn('[ProgrammaticRunHost] gate recommendation not annotated (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        reviewItemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  shouldSkipHumanGate(
+    step: WorkflowStep,
+    _runId?: string,
+    ctx?: { reviewReportedSinceMs?: number },
+  ): string | null {
+    return this.args.humanGateSkip?.(step, ctx) ?? null;
   }
 
   /**
@@ -339,13 +825,387 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   /**
+   * This run's current adversarial-review artifact markdown, for the controller's
+   * loopback verdict. Fail-soft twice over, for the same reason as the gate note:
+   * an absent reader and a throwing one both yield undefined, because degrading to
+   * the reviewer's chat text is survivable while a thrown read would abort a walk
+   * that is mid-review.
+   */
+  readAdversarialReview(opts?: { reportedSinceMs?: number }): string | undefined {
+    try {
+      return this.args.readAdversarialReview?.(opts);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] adversarial-review artifact read failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Step-boundary checkpoint: park the run while a pending BLOCKING review_item
    * exists (e.g. a blocking finding), then resume. Delegates to the injected
    * blockingGate; a run built without one proceeds immediately (fast no-op).
    */
   async awaitBlockingReviewItems(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'> {
-    if (!this.args.blockingGate) return 'proceed';
-    return this.args.blockingGate.awaitClear({ runId, projectId: this.args.projectId, signal });
+    const gate = this.args.blockingGate;
+    if (!gate) return 'proceed';
+    // (1) WRITE BARRIER FIRST, always — before the consult's read AND before
+    // awaitClear's own fast-path read. See `awaitReviewWritesSettled`: without
+    // it a boundary can march past the very finding the step just filed.
+    await this.awaitReviewWritesSettled();
+    // (2) The supervisor's escalation review. Never throws, never parks, and
+    // never gates: whatever it does or fails to do, awaitClear still decides.
+    await this.reviewBlockingItems(gate, runId, signal);
+    return gate.awaitClear({ runId, projectId: this.args.projectId, signal });
+  }
+
+  /**
+   * Await the review-item write barrier, fail-soft.
+   *
+   * An absent or throwing barrier degrades to the PRE-BARRIER behaviour (read
+   * whatever has committed so far), which is survivable; letting it reject would
+   * abort a walk over a queue-drain hiccup, which is not.
+   */
+  private async awaitReviewWritesSettled(): Promise<void> {
+    try {
+      await this.args.awaitReviewWritesSettled?.(this.args.projectId);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review write barrier failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * ESCALATION-REVIEW seam at a STEP BOUNDARY — consult the supervisor about the
+   * blocking items that are about to park the run, and apply its per-item
+   * verdicts.
+   *
+   * The gate sibling (`reviewGateEscalation`) may only ANNOTATE. This one may
+   * also RESOLVE, because a blocking finding is a claim the run itself filed and
+   * may itself have already closed — but only a `finding`, only within
+   * {@link MONITOR_WALK_RESOLVE_CAP} and {@link MONITOR_RUN_RESOLVE_CAP}, and
+   * only with an audit finding recording what was closed and why.
+   *
+   * Order of business, each arm short-circuiting to today's behaviour (the run
+   * parks for a human):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_ESCALATION_REVIEW=1`) ⇒ return without
+   *      even reading the queue. A rollback lever should cost nothing.
+   *   2. No monitor, or one with no `reviewBlockingItems` ⇒ return.
+   *   3. Nothing pending, or nothing NOT ALREADY REVIEWED ON THIS WALK ⇒ return.
+   *      The second half is what stops a run that parks, is unparked, and parks
+   *      again from re-litigating the same items.
+   *   4. Consult, mark every item reviewed, then apply the verdicts one by one.
+   *      An ABORT observed between the consult and the applies discards the
+   *      whole batch and marks nothing — see the comment at that check.
+   *
+   * NEVER THROWS and never delays the park beyond its own consult: the caller
+   * awaits it only so the applies land before `awaitClear` reads the queue (a
+   * resolve that arrived later would park the run and then unpark it, which
+   * looks like a flicker to the human).
+   */
+  private async reviewBlockingItems(
+    gate: BlockingItemsResolver,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      if (escalationReviewDisabled()) {
+        this.args.logger?.info('[ProgrammaticRunHost] blocking-items review disabled by kill switch', { runId });
+        return;
+      }
+      const monitor = this.args.monitor;
+      if (!monitor?.reviewBlockingItems) return;
+
+      const pending = gate.listPendingBlockingItems?.(runId) ?? [];
+      const fresh = pending.filter((i) => !this.reviewedBlockingIds.has(i.id));
+      if (fresh.length === 0) return;
+
+      const req: BlockingItemsEscalationRequest = { kind: 'blocking-items', items: fresh };
+      const decisions = await monitor.reviewBlockingItems(req, signal);
+      // Canceled WHILE the consult was in flight (same guard as
+      // `adviseReviewLoop`): the walk this verdict belongs to no longer exists,
+      // so applying it would resolve blocking findings and file audit rows for a
+      // run that is gone — and `clearPendingForRun` dismisses only `decision`
+      // rows, so those findings would still be pending and still resolvable.
+      // The ids are deliberately NOT marked reviewed either: a resumed run's
+      // next boundary is entitled to a first look at items nobody answered.
+      if (signal?.aborted === true) {
+        this.args.logger?.info('[ProgrammaticRunHost] blocking-items verdicts discarded; the run was canceled mid-consult', {
+          runId,
+          items: fresh.length,
+        });
+        return;
+      }
+      // Mark BEFORE applying: an item the supervisor was shown has had its one
+      // look, whether or not the apply below succeeds. Re-asking on the next
+      // boundary would spend another query to reach the same verdict — and,
+      // worse, would give a passed-on item a second chance at a resolve.
+      for (const item of fresh) this.reviewedBlockingIds.add(item.id);
+
+      const byId = new Map(fresh.map((i) => [i.id, i]));
+      for (const decision of decisions) {
+        const item = byId.get(decision.reviewItemId);
+        if (item === undefined) continue;
+        await this.applyBlockingItemDecision(runId, item, decision);
+      }
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] blocking-items review failed (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Apply ONE per-item verdict. Each call is independently try/caught, so a
+   * refused resolve or a broken annotate degrades that item alone — never the
+   * rest of the batch, and never the park that follows.
+   */
+  private async applyBlockingItemDecision(
+    runId: string,
+    item: PendingBlockingItem,
+    decision: BlockingItemDecision,
+  ): Promise<void> {
+    try {
+      if (decision.action === 'pass') return;
+      // A `resolve` survives only for a FINDING, with a resolve sink wired and
+      // budget left. Every other case falls through to the recommendation —
+      // which is the honest degradation: the supervisor's reasoning still
+      // reaches the human, and the item keeps blocking.
+      if (
+        decision.action === 'resolve' &&
+        item.kind === 'finding' &&
+        this.args.resolveReviewItemAsMonitor !== undefined &&
+        (await this.canSpendResolve(runId))
+      ) {
+        // A resolve whose audit record did not land never happened — fall
+        // through to the recommendation like any other refused resolve.
+        if (await this.resolveBlockingFinding(runId, item, decision.rationale)) return;
+      }
+      // A downgraded `resolve` names no `choice` — the supervisor answered
+      // "close it", not "recommend X" — so on a FINDING it is written as
+      // `continue`, which is that menu's keep-it-blocking control and therefore
+      // exactly what a refused resolve leaves behind. There is no equivalent on
+      // a decision menu (both its entries END or ADVANCE the run), so a decision
+      // that names no choice is left alone by {@link annotateBlockingItem}.
+      // Keyed on the NORMALIZED choice, not the raw field: a refused resolve
+      // that named something off the finding menu must land on the same
+      // keep-it-blocking control, not silently write nothing.
+      const forAnnotate: BlockingItemDecision =
+        decision.action === 'resolve' &&
+        item.kind === 'finding' &&
+        normalizeBlockingChoice(item.kind, decision.choice) === undefined
+          ? { ...decision, choice: 'continue' }
+          : decision;
+      await this.annotateBlockingItem(runId, item, forAnnotate);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] blocking-item verdict not applied (fail-soft)', {
+        runId,
+        reviewItemId: item.id,
+        action: decision.action,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Both resolve budgets, checked in the cheap-then-durable order.
+   *
+   * A durable read that THROWS counts as spent, not as free: the whole point of
+   * {@link MONITOR_RUN_RESOLVE_CAP} is that a run cannot resolve its way past a
+   * human, and a budget nobody can read is exactly when that guarantee matters.
+   */
+  private async canSpendResolve(runId: string): Promise<boolean> {
+    if (this.walkResolveCount >= MONITOR_WALK_RESOLVE_CAP) {
+      this.args.logger?.info('[ProgrammaticRunHost] walk resolve cap reached; downgrading to a recommendation', {
+        runId,
+        cap: MONITOR_WALK_RESOLVE_CAP,
+      });
+      return false;
+    }
+    const counter = this.args.countMonitorResolves;
+    if (counter === undefined) return true;
+    try {
+      const spent = await counter(runId);
+      if (spent >= MONITOR_RUN_RESOLVE_CAP) {
+        this.args.logger?.info('[ProgrammaticRunHost] run resolve cap reached; downgrading to a recommendation', {
+          runId,
+          spent,
+          cap: MONITOR_RUN_RESOLVE_CAP,
+        });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] resolve budget unreadable; downgrading to a recommendation', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * File the audit record, THEN close one blocking finding as the supervisor.
+   * Returns whether the item was actually resolved, so a caller can fall back to
+   * a recommendation when it was not.
+   *
+   * The order is load-bearing. {@link MONITOR_RUN_RESOLVE_CAP} is enforced by
+   * counting the `escalation-resolve` audit findings already committed for the
+   * run, so a resolve that landed WITHOUT its note is a resolve the durable cap
+   * will never see — an audit sink that is missing or broken would quietly hand
+   * the run an unbounded budget. Filing first inverts that: the only failure mode
+   * left is a note without its resolve, which costs the run one unit of budget it
+   * never spent and leaves the item blocking for the human. That is the safe
+   * direction.
+   *
+   * The walk counter is still incremented on the RESOLVE landing, not on the
+   * audit finding: only a resolve that actually unblocks the run may spend walk
+   * budget. That is also why the record is worded as an INTENT ("is resolving",
+   * filed before the resolve) rather than an accomplished fact: the resolve it
+   * precedes may still be refused `invalid_status` by a human who answered
+   * first, and a note that claimed the close would then be a lie in the queue.
+   */
+  private async resolveBlockingFinding(
+    runId: string,
+    item: PendingBlockingItem,
+    rationale: string,
+  ): Promise<boolean> {
+    const audited = await this.fileMonitorAuditFinding(
+      `Supervisor resolve — ${item.title}`,
+      [
+        'The run supervisor is resolving this blocking finding on its own authority; this record is filed ' +
+          'before the resolve and counts against its resolve budget whether or not the resolve lands (a human ' +
+          "who answers first wins — the item's own resolver shows who closed it).",
+        '',
+        rationale,
+        '',
+        `Item: \`${item.id}\` — ${item.title}`,
+      ].join('\n'),
+      ESCALATION_RESOLVE_FINDING_CATEGORY,
+    );
+    if (!audited) {
+      this.args.logger?.warn(
+        '[ProgrammaticRunHost] supervisor resolve abandoned: no audit record, recommending instead',
+        { runId, reviewItemId: item.id },
+      );
+      return false;
+    }
+    try {
+      await this.args.resolveReviewItemAsMonitor?.({
+        reviewItemId: item.id,
+        resolution: `resolved by supervisor: ${rationale}`,
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        // The DESIGNED race, not a failure: a human triaged the item while the
+        // consult was in flight and their answer wins. Info, not warn — and no
+        // walk budget is spent, because nothing was closed. The caller falls
+        // through to the recommendation, whose own annotate absorbs the same
+        // refusal at debug if the item is closed for good.
+        this.args.logger?.info('[ProgrammaticRunHost] blocking finding triaged before the supervisor resolve landed', {
+          runId,
+          reviewItemId: item.id,
+        });
+        return false;
+      }
+      throw err;
+    }
+    this.walkResolveCount += 1;
+    this.args.logger?.info('[ProgrammaticRunHost] blocking finding resolved by the supervisor', {
+      runId,
+      reviewItemId: item.id,
+      walkSpent: this.walkResolveCount,
+    });
+    return true;
+  }
+
+  /**
+   * File one non-blocking `monitor`-sourced audit finding. NEVER throws; returns
+   * whether the note actually landed.
+   *
+   * The paper trail for an action the human never confirmed — and, for the
+   * `escalation-resolve` category, the ledger {@link MONITOR_RUN_RESOLVE_CAP} is
+   * counted from. A caller whose action must stay inside that cap therefore has
+   * to check the return value and ABANDON the action when the note did not land;
+   * see {@link resolveBlockingFinding}.
+   */
+  private async fileMonitorAuditFinding(title: string, body: string, category: string): Promise<boolean> {
+    if (!this.args.fileMonitorFinding) return false;
+    try {
+      await this.args.fileMonitorFinding({ title, body, category });
+      return true;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] supervisor audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        title,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Write the supervisor's recommendation onto a still-blocking item.
+   *
+   * A `choice` the item's menu does not offer — or none at all — writes NOTHING
+   * and is treated as a `pass` for that item. There is no fallback choice to
+   * pick: see {@link normalizeBlockingChoice} for why guessing one would point
+   * the human at a button nobody recommended.
+   *
+   * Shares the `invalid_status` treatment with the gate path: a human who
+   * triaged the item while the consult was in flight is the DESIGNED outcome of
+   * a consult that runs beside an open queue, so it is a debug line, not a
+   * warning.
+   */
+  private async annotateBlockingItem(
+    runId: string,
+    item: PendingBlockingItem,
+    decision: BlockingItemDecision,
+  ): Promise<void> {
+    const sink = this.args.annotateReviewItem;
+    const choice = normalizeBlockingChoice(item.kind, decision.choice);
+    if (choice === undefined) {
+      this.args.logger?.info('[ProgrammaticRunHost] off-menu recommendation choice; item left as it is', {
+        runId,
+        reviewItemId: item.id,
+        kind: item.kind,
+        choice: decision.choice,
+      });
+      return;
+    }
+    if (!sink) {
+      this.args.logger?.info('[ProgrammaticRunHost] no annotate sink; blocking-item recommendation logged only', {
+        runId,
+        reviewItemId: item.id,
+        choice,
+        rationale: decision.rationale,
+      });
+      return;
+    }
+    // Same head/tail rule as the gate annotate: a one-sentence rationale IS the
+    // headline, so repeating it underneath would print it twice.
+    const head = firstSentence(decision.rationale);
+    const tail = decision.rationale.trim();
+    try {
+      await sink({
+        reviewItemId: item.id,
+        markdown: composeSupervisorRecommendation(choice, head, tail === head ? undefined : tail),
+      });
+    } catch (err) {
+      if (isInvalidStatusRefusal(err)) {
+        this.args.logger?.debug('[ProgrammaticRunHost] blocking item triaged before the recommendation landed', {
+          runId,
+          reviewItemId: item.id,
+        });
+        return;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -409,40 +1269,166 @@ export class ProgrammaticRunHost implements ControllerHost {
    * Fail-soft: a throwing monitor/inject must never strand the run — default to
    * 'escalate' (DefaultMonitorSession itself already fails-soft to 'escalate', so
    * this catch is a belt-and-braces guard).
+   *
+   * Two things the seam now also carries:
+   *   - a 'retry' verdict's GUIDANCE is STAGED for the step's next spawn (the
+   *     one-shot `RunDirectives.retryGuidance` channel) and quoted into the chat
+   *     note, so a supervised retry actually differs from the attempts the step's
+   *     own budget already spent. A host with no setter wired still retries —
+   *     unguided, logged at warn.
+   *   - an OPTIONAL step's 'escalate'/'fail' is phrased as SKIPPING. The
+   *     controller never opens a gate for an optional step (item 7D consults this
+   *     seam before skipping one), so "escalated to the review queue" would
+   *     promise the user a gate that is never going to appear.
+   *
+   * `opts.retryAvailable === false` short-circuits the whole method to
+   * 'escalate' WITHOUT a consult: see the comment on that branch.
    */
   async triageFailure(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    opts?: { retryAvailable: boolean },
   ): Promise<TriageDecision> {
+    const optional = step.optional === true;
+    // What an unusable/absent verdict MEANS for this step, in the user's terms.
+    const escalationOutcome = optional
+      ? 'skipping the optional step'
+      : 'escalated to the review queue for your decision';
+    // The controller cannot honour a 'retry' any more: it would discard the
+    // verdict and fail the run. Consulting anyway would spend a query to produce
+    // a retry this method then narrates as if it had happened — guidance staged
+    // on a one-shot channel that outlives the walk, a chat note saying "retry",
+    // and an audit finding claiming the step was re-driven. Skip the consult and
+    // escalate, which is what the run is about to do regardless. (Today only the
+    // REQUIRED-step caller passes `opts`; the optional wording is here so the
+    // note stays true if the optional path ever does too.)
+    if (opts?.retryAvailable === false) {
+      this.args.logger?.info('[ProgrammaticRunHost] triage skipped: no retry budget left; escalating to human', {
+        runId: this.args.runId,
+        stepId: step.id,
+      });
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries and its retry budget — ${escalationOutcome}.`);
+      return 'escalate';
+    }
     if (!this.args.monitor) {
-      this.injectMonitorTurn(
-        `Step **${step.name}** exhausted its retries — escalated to the review queue for your decision.`,
-      );
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
     }
     try {
-      const { decision, rationale } = await this.args.monitor.triage(step, error, ctx.signal);
+      const { decision, rationale, guidance } = await this.args.monitor.triage(step, error, ctx.signal);
       if (decision === 'fail') {
         // The supervisor recommends ending the run, but ending it is the HUMAN's
-        // call — downgrade to an escalation carrying the recommendation.
+        // call — downgrade to an escalation carrying the recommendation. For an
+        // optional step there is no run to end and no gate to open: it is a skip.
         this.injectMonitorTurn(
-          `Triage — ${step.name}: the supervisor recommends ending the run, escalated to the review queue for your decision. ${rationale}`,
+          optional
+            ? `Triage — ${step.name}: the supervisor judged this optional step not worth another attempt — skipping the optional step. ${rationale}`
+            : `Triage — ${step.name}: the supervisor recommends ending the run, escalated to the review queue for your decision. ${rationale}`,
         );
         return 'escalate';
       }
-      this.injectMonitorTurn(`Triage — ${step.name}: ${decision}. ${rationale}`);
-      return decision;
+      if (decision === 'escalate') {
+        // Non-optional wording is unchanged from the pre-guidance seam; only an
+        // OPTIONAL step needs re-phrasing, because nothing is escalated there.
+        this.injectMonitorTurn(
+          optional
+            ? `Triage — ${step.name}: skipping the optional step. ${rationale}`
+            : `Triage — ${step.name}: escalate. ${rationale}`,
+        );
+        return 'escalate';
+      }
+      // 'retry' — stage the supervisor's guidance for the next spawn before the
+      // controller re-drives the step, and quote it in the chat so the user sees
+      // what the retry was bought with. Fail-soft: a missing or throwing setter
+      // costs the guidance, never the retry.
+      const staged = this.stageRetryGuidance(step, guidance);
+      this.injectMonitorTurn(
+        staged !== undefined
+          ? `Triage — ${step.name}: retry. ${rationale}\n\nGuidance for the retry: ${staged}`
+          : `Triage — ${step.name}: retry. ${rationale}`,
+      );
+      // The audit record the charter promises ("every autonomous action is
+      // recorded in the run's review queue"): a supervised retry spends a step
+      // turn on the supervisor's say-so, so it gets the same non-blocking paper
+      // trail a lane rescue or a review-loop verdict gets. Fail-soft — the retry
+      // is already decided, and losing its record must not lose the retry.
+      await this.fileTriageRetryAudit(step, rationale, staged);
+      return 'retry';
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] monitor.triage failed; escalating to human', {
         runId: this.args.runId,
         stepId: step.id,
         error: err instanceof Error ? err.message : String(err),
       });
-      this.injectMonitorTurn(
-        `Step **${step.name}** exhausted its retries — escalated to the review queue for your decision.`,
-      );
+      this.injectMonitorTurn(`Step **${step.name}** exhausted its retries — ${escalationOutcome}.`);
       return 'escalate';
+    }
+  }
+
+  /**
+   * File the NON-BLOCKING audit record for one supervised triage retry (source
+   * `monitor`, category `triage-retry`), so the human reaches the next gate
+   * knowing a step was re-driven autonomously and with what instruction. Absent
+   * sink ⇒ nothing filed (the chat note still carries the decision).
+   */
+  private async fileTriageRetryAudit(
+    step: WorkflowStep,
+    rationale: string,
+    guidance: string | undefined,
+  ): Promise<void> {
+    if (!this.args.fileMonitorFinding) return;
+    try {
+      await this.args.fileMonitorFinding({
+        title: `Triage retry — ${step.name}`,
+        body: [
+          `The run supervisor re-drove \`${step.id}\` after it exhausted its automatic retries` +
+            `${step.optional === true ? ' (an optional step that would otherwise have been skipped)' : ''}.`,
+          '',
+          `- Rationale: ${rationale}`,
+          guidance !== undefined
+            ? `- Guidance handed to the retry (this attempt only): ${guidance}`
+            : '- No guidance was staged for the retry.',
+        ].join('\n'),
+        category: TRIAGE_RETRY_FINDING_CATEGORY,
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] triage-retry audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Stage a triage 'retry' verdict's guidance on the one-shot channel and return
+   * what was actually staged (undefined ⇒ nothing was, so the chat note must not
+   * promise guidance the re-run will never see). Never throws: the guidance is an
+   * improvement on the retry, not a precondition for it, so a host built without
+   * the setter — or one whose setter throws — logs and lets the unguided retry
+   * proceed exactly as it did before this channel existed.
+   */
+  private stageRetryGuidance(step: WorkflowStep, guidance: string | undefined): string | undefined {
+    const text = (guidance ?? '').trim();
+    if (text.length === 0) return undefined;
+    if (!this.args.setRetryGuidance) {
+      this.args.logger?.warn('[ProgrammaticRunHost] retry guidance dropped (no setter wired)', {
+        runId: this.args.runId,
+        stepId: step.id,
+      });
+      return undefined;
+    }
+    try {
+      this.args.setRetryGuidance(step.id, text);
+      return text;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] retry guidance dropped (setter failed)', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
     }
   }
 
@@ -631,6 +1617,209 @@ export class ProgrammaticRunHost implements ControllerHost {
       );
       return systemic ? { kind: 'systemic', error: message } : { kind: 'give_up' };
     }
+  }
+
+  /**
+   * REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling. Consulted on
+   * every blocking adversarial-review round for which automatic laps remain,
+   * BEFORE the controller decides whether to take one. Resolves the executable
+   * verdict only, so the controller never learns what a monitor or a finding is.
+   *
+   * Order of business, each arm short-circuiting to the pre-seam behaviour (the
+   * controller's MECHANICAL revision budget):
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_REVIEW_LOOP_TRIAGE=1`) ⇒ undefined. No
+   *      consult, no chat turn (a rollback lever should be silent) — just a log.
+   *   2. No monitor, or a monitor with no `adviseReviewLoop` (the many faked
+   *      sessions across the suite) ⇒ undefined.
+   *   3. Consult `monitor.adviseReviewLoop`. It OWNS its chat rendering (the
+   *      blocking announcement + the verdict turn), so this method injects NO
+   *      turn of its own — a host turn here would double-render.
+   *   4. RECORD, before returning: one finding per SET-ASIDE entry, and one
+   *      audit finding for the consult. The set-asides are what make the verdict
+   *      safe to execute unattended — an entry the supervisor drops from the lap
+   *      must still reach the human — so they are filed on BOTH arms (a `stop`
+   *      can set entries aside too), each fail-soft and awaited, and they go
+   *      FIRST: an id whose finding did not land cannot travel as set-aside, so
+   *      the decision is re-derived (`withoutFailedSetAsides`) and it is the
+   *      ADJUSTED one that is audited and returned.
+   *
+   * Fail-soft overall: `DefaultMonitorSession.adviseReviewLoop` already never
+   * rejects, so the try/catch is belt-and-braces. An ABORTED run also resolves
+   * undefined — a canceled walk has no lap to take — and records NOTHING, which
+   * is why the abort is re-checked between the consult and step 4.
+   */
+  async adviseReviewLoop(
+    req: ReviewLoopRequest,
+    ctx: ControllerStepContext,
+  ): Promise<ReviewLoopDecision | undefined> {
+    if (reviewLoopTriageDisabled()) {
+      this.args.logger?.info('[ProgrammaticRunHost] review-loop triage disabled by kill switch; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+      });
+      return undefined;
+    }
+    const monitor = this.args.monitor;
+    if (!monitor?.adviseReviewLoop) {
+      this.args.logger?.info('[ProgrammaticRunHost] no review-loop-capable monitor; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+      });
+      return undefined;
+    }
+    try {
+      const decision = await monitor.adviseReviewLoop(req, ctx.signal);
+      if (decision === undefined) return undefined;
+      // Canceled WHILE the consult was in flight: the controller discards the
+      // verdict, so recording it would leave the queue asserting a lap that
+      // never happened and set-aside entries nothing ever set aside.
+      if (ctx.signal?.aborted === true) {
+        this.args.logger?.info('[ProgrammaticRunHost] review-loop verdict discarded; the run was canceled mid-consult', {
+          runId: this.args.runId,
+          stepId: req.stepId,
+          round: req.round,
+        });
+        return undefined;
+      }
+      const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
+      const failed = await this.fileSetAsideFindings(req, setAside, decision.verdict);
+      // The audit must describe what the host HONOURED, not what the supervisor
+      // asked for: an entry whose finding never landed is not set aside.
+      const honoured = withoutFailedSetAsides(req, decision, failed);
+      await this.fileReviewLoopAudit(req, honoured, failed);
+      return honoured;
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review-loop consult failed; using the mechanical budget', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        round: req.round,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * File the NON-BLOCKING audit record for one review-loop consult.
+   *
+   * The decision is autonomous and unconfirmed — it spends design turns, or ends
+   * the automatic loop early — so it needs the same paper trail a lane rescue
+   * gets: the verdict, the rationale a human will weigh at the gate, and the
+   * exact steering the re-run is about to be handed. Fail-soft: the decision is
+   * already made, and losing its paper trail must not lose the decision.
+   */
+  private async fileReviewLoopAudit(
+    req: ReviewLoopRequest,
+    decision: ReviewLoopDecision,
+    failedSetAsides: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
+    if (!this.args.fileMonitorFinding) return;
+    try {
+      const setAside = decision.verdict === 'loop' ? decision.steering.setAside : decision.setAside;
+      const lines = [
+        `The run supervisor reviewed round ${req.round} of \`${req.stepId}\` (${req.parsed.blocking.length} blocking entr` +
+          `${req.parsed.blocking.length === 1 ? 'y' : 'ies'}) and voted **${decision.verdict}**.`,
+        '',
+        `- Automatic revisions used: ${req.lapsUsed} of ${req.maxLaps}`,
+        `- Rationale: ${decision.rationale}`,
+      ];
+      if (decision.verdict === 'loop') {
+        lines.push(
+          `- Re-running from \`${req.loopbackStepId}\`, addressing: ${decision.steering.address.join(', ')}`,
+        );
+        if (decision.steering.guidance !== undefined) {
+          lines.push('', '## Guidance threaded into the re-run', '', decision.steering.guidance.trim());
+        }
+      } else {
+        lines.push('- No further automatic revision — the surviving entries go to the human design gate.');
+      }
+      if (setAside.length > 0) {
+        lines.push(
+          '',
+          '## Set aside for this round',
+          '',
+          ...setAside.map((entry) => `- ${entry.id}: ${entry.reason}`),
+          '',
+          'Each is filed as its own non-blocking finding — set aside for the lap, not dropped from the run.',
+        );
+      }
+      // The one durable place the failure can be read: the backend log is not
+      // the review queue. Same predicate as `fileSetAsideFindings`' warn, so the
+      // two records can never disagree about what happened to an id.
+      if (failedSetAsides.size > 0) {
+        const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
+        lines.push(
+          '',
+          `- Set-aside findings that could not be filed: ${[...failedSetAsides]
+            .map((id) =>
+              `${id} (${decision.verdict === 'loop' && blockingIds.has(id) ? 'kept in the lap' : 'dropped from the set-aside list'})`,
+            )
+            .join(', ')}`,
+        );
+      }
+      await this.args.fileMonitorFinding({
+        title: `Review loop — ${req.stepId} round ${req.round}: ${decision.verdict}`,
+        body: lines.join('\n'),
+        category: REVIEW_LOOP_FINDING_CATEGORY,
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] review-loop audit finding not filed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: req.stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * File one non-blocking finding per set-aside entry, NOW.
+   *
+   * "Set aside" is only defensible because of this call: the entry leaves the
+   * lap the moment the supervisor says so, and the finding is the only thing
+   * that keeps it in the run. Each entry is filed independently — one entry the
+   * queue refuses must not cost the others their record — and the whole thing is
+   * fail-soft, because the verdict is already decided.
+   *
+   * Returns the ids whose sink call THREW — the entries that therefore have no
+   * finding and must not travel as set-aside (see `withoutFailedSetAsides`).
+   * An id the supervisor named but the round's review does not carry is dropped
+   * silently and is NOT a failure: `parseReviewLoopOutput` already validated
+   * against the round's ids, so reaching here means the entry genuinely does
+   * not exist.
+   */
+  private async fileSetAsideFindings(
+    req: ReviewLoopRequest,
+    setAside: readonly { id: string; reason: string }[],
+    verdict: ReviewLoopDecision['verdict'],
+  ): Promise<Set<string>> {
+    const failed = new Set<string>();
+    const sink = this.args.fileSetAsideFinding;
+    if (!sink || setAside.length === 0) return failed;
+    const byId = new Map<string, AdversarialFinding>();
+    for (const entry of [...req.parsed.blocking, ...req.parsed.findings]) byId.set(entry.id, entry);
+    const blockingIds = new Set(req.parsed.blocking.map((entry) => entry.id));
+    for (const { id, reason } of setAside) {
+      const entry = byId.get(id);
+      if (entry === undefined) continue;
+      try {
+        await sink({ entry, reason, round: req.round });
+      } catch (err) {
+        failed.add(id);
+        this.args.logger?.warn('[ProgrammaticRunHost] set-aside finding not filed (fail-soft)', {
+          runId: this.args.runId,
+          stepId: req.stepId,
+          arId: id,
+          adjustment:
+            verdict === 'loop' && blockingIds.has(id)
+              ? 'kept in the lap'
+              : 'dropped from the set-aside list',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return failed;
   }
 
   /**

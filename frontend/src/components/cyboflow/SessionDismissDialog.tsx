@@ -12,7 +12,7 @@ import { useErrorStore } from '../../stores/errorStore';
 // wedged one must not leave the dialog stuck on a spinner forever.
 const PROBE_TIMEOUT_MS = 3000;
 
-type ProbeState = 'loading' | 'delivered' | 'plain';
+type ProbeState = 'loading' | 'delivered' | 'completedNoCode' | 'plain';
 
 interface SessionDismissDialogProps {
   isOpen: boolean;
@@ -24,7 +24,7 @@ interface SessionDismissDialogProps {
 }
 
 export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: SessionDismissDialogProps) {
-  // Tri-state, NOT boolean: 'loading' is not a cosmetic spinner — it is what
+  // Four-state, NOT boolean: 'loading' is not a cosmetic spinner — it is what
   // stops a fast click from taking the destructive path before we actually
   // know whether this session's work already landed. If we rendered the
   // plain ConfirmDialog (enabled Dismiss button) while the probe is still in
@@ -32,9 +32,10 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
   // exactly the findings this whole flow exists to preserve — the probe's
   // subprocess chain is plausibly 200-800ms on a real repo, so that window is
   // real, not theoretical. Only a DEFINITE delivered/landed=true unlocks the
-  // three-way choice; a resolved-false probe, a rejected probe, OR the
-  // watchdog below all land on 'plain' — the existing ConfirmDialog,
-  // unchanged.
+  // 'delivered' three-way choice; 'completedNoCode' unlocks the SAME choice
+  // with different copy for a DB-only run (Planner/Launch) that produced no
+  // commits; a resolved-false probe, a rejected probe, OR the watchdog below
+  // all land on 'plain' — the existing ConfirmDialog, unchanged.
   const [probeState, setProbeState] = useState<ProbeState>('loading');
   const [isStamping, setIsStamping] = useState(false);
 
@@ -58,6 +59,8 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
         clearTimeout(watchdog);
         if (result.success && result.data && (result.data.delivered || result.data.landed)) {
           setProbeState('delivered');
+        } else if (result.success && result.data && result.data.completedNoCode) {
+          setProbeState('completedNoCode');
         } else {
           setProbeState('plain');
         }
@@ -175,6 +178,43 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
             This session's changes already appear to be in the main branch. Mark complete keeps
             the findings its runs produced — they describe code that is now in the tree. Dismiss
             anyway discards those findings along with the session.
+          </p>
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+            <Button variant="ghost" onClick={onClose} disabled={isStamping}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleDismissAnyway}
+              disabled={isStamping}
+            >
+              Dismiss anyway
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleMarkComplete()}
+              loading={isStamping}
+              loadingText="Marking complete..."
+            >
+              Mark complete
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  if (probeState === 'completedNoCode') {
+    return (
+      <Modal isOpen={isOpen} onClose={onClose} size="sm">
+        <div className="p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <CheckCircle2 className="w-6 h-6 text-status-success flex-shrink-0" />
+            <h3 className="text-lg font-medium text-text-primary">This session's run already completed</h3>
+          </div>
+          <p className="text-text-secondary leading-relaxed mb-6">
+            This session's run completed without changing the repository — its work lives in the
+            backlog. Mark complete keeps its findings; Dismiss anyway discards them.
           </p>
           <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
             <Button variant="ghost" onClick={onClose} disabled={isStamping}>

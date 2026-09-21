@@ -24,7 +24,17 @@ const COLLAPSED_ROW_COUNT = 3;
 
 /** One row of the section — a rested quick session or a drained flow run. */
 export type ReadyRow =
-  | { kind: 'quick'; id: string; row: QuickSessionRow }
+  | {
+      kind: 'quick';
+      id: string;
+      row: QuickSessionRow;
+      /**
+       * TASK-226: the session's finished FLOW run, when it hosted one (see
+       * `significantFlowRunBySession`). Drives the status label — the run that
+       * finished, not the chat it interrupted, is what the row describes.
+       */
+      flowRun?: ActiveRunRow;
+    }
   | { kind: 'run'; id: string; run: ActiveRunRow };
 
 interface RowFacts {
@@ -53,7 +63,7 @@ function readFacts(entry: ReadyRow, nowMs: number): RowFacts {
   }
 
   const row = entry.row;
-  const ready = describeReadyState(row);
+  const ready = describeReadyState(row, entry.flowRun);
   // The dot/label tone mirrors describeReadyState, with "behind base" pulled out
   // as amber: it is the one neutral-toned state that needs an action before merge.
   const tone: RowFacts['statusTone'] =
@@ -197,7 +207,7 @@ function ExpandedRow({
         <div className="text-[10px] text-text-tertiary">{facts.gitFacts}</div>
       )}
       <div className="flex items-center gap-2">
-        {canAccept && <PrimaryButton onClick={onMerge}>Merge to main</PrimaryButton>}
+        {canAccept && <PrimaryButton onClick={onMerge}>Merge</PrimaryButton>}
         <SecondaryButton onClick={onOpen}>Open session</SecondaryButton>
         {canAccept && (
           <GhostButton className="ml-auto" onClick={onDismiss}>
