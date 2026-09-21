@@ -198,7 +198,7 @@ from plugin state files:
    whole review — "here's what to act on, here's what I discarded" — the human
    reads at the gate (see "Recommendations doc" below).
 4. **approve-learnings** → **human gate, inline.** STOP here. Present the gate
-   with **AskUserQuestion** (header `Approve`, options Approve all / Pick subset /
+   with **AskUserQuestion** (header `Approve learnings`, options Approve all / Pick subset /
    Reject) and point the user at the **`compound-recommendations` artifact tab**
    for the full list — keep the option previews short (a bucket-count summary),
    not a dump of every learning. `cyboflow_report_step` each transition so the run

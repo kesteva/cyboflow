@@ -610,6 +610,14 @@ export interface WorkflowStep {
   /** When true the step pauses the run and waits for a human response. */
   human?: boolean;
   /**
+   * Human-facing header for a human gate. The programmatic plane titles the
+   * gate's review-queue item with it (`Human gate: ⟨gateHeader⟩`), and it is
+   * expected to match the AskUserQuestion header the flow markdown asks the
+   * same gate with, so both planes show one title for one decision. Falls back
+   * to `name` when absent.
+   */
+  gateHeader?: string;
+  /**
    * Id of the step within the SAME phase to loop back to on failure.
    * V1 constraint: intra-phase only.
    */
@@ -878,6 +886,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -972,6 +981,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on scope. Approve puts the tasks on the board, retires the decomposed idea(s), and ends the run.',
           },
         ],
@@ -1108,6 +1118,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check before the sprint is sealed.',
           },
         ],
@@ -1188,6 +1199,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve compound',
             desc: 'Final "merge in changes" gate over the applied compound diff — review the committed quick fixes + doc edits and the recommendations doc, then approve to make the branch mergeable or reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1229,6 +1241,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -1318,6 +1331,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on scope and select which tasks execute now before they queue for the sprint.',
           },
         ],
@@ -1448,6 +1462,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check; on approve, retire the idea to Decomposed and seal the sprint.',
           },
         ],
@@ -1556,6 +1571,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve setup',
             desc: 'Final "merge in changes" gate over the committed runbook + repo diff and the per-modality proof outcomes (proven, or still an unproven draft with its diagnosis) — approve to make the branch mergeable, reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1721,6 +1737,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on the whole task plan. Approve puts the tasks on the board, retires the decomposed idea(s) (denied ideas stay on the backlog), and ends the run.',
           },
         ],

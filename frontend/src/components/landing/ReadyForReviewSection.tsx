@@ -207,7 +207,7 @@ function ExpandedRow({
         <div className="text-[10px] text-text-tertiary">{facts.gitFacts}</div>
       )}
       <div className="flex items-center gap-2">
-        {canAccept && <PrimaryButton onClick={onMerge}>Merge to main</PrimaryButton>}
+        {canAccept && <PrimaryButton onClick={onMerge}>Merge</PrimaryButton>}
         <SecondaryButton onClick={onOpen}>Open session</SecondaryButton>
         {canAccept && (
           <GhostButton className="ml-auto" onClick={onDismiss}>

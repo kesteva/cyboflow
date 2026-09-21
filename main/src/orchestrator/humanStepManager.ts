@@ -116,6 +116,11 @@ export class HumanStepManager {
    * If the run is not in 'running' state, the transaction rolls back and NO gate
    * is opened (returns null) — the run is already paused / terminal.
    *
+   * `gateHeader` is the step's human-facing gate header (WorkflowStep.gateHeader)
+   * and titles the item when present — the flow markdown asks the same gate with
+   * that AskUserQuestion header, so both planes show one title for one decision.
+   * Falls back to `stepName` for callers that only have the name.
+   *
    * @returns the minted review-item id, or null when the gate was not opened
    *   (run not running, table absent, or the gate is already open for this step).
    */
@@ -123,6 +128,7 @@ export class HumanStepManager {
     runId: string,
     stepId: string,
     stepName: string,
+    gateHeader?: string,
   ): Promise<string | null> {
     if (!hasReviewItemsTable(this.db)) return null;
 
@@ -187,7 +193,7 @@ export class HumanStepManager {
         const enrichedBody = composePartialSprintGateBody(this.db, runId, stepName);
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
-          title: `Human gate: ${stepName}`,
+          title: `Human gate: ${gateHeader ?? stepName}`,
           body: this.composeGateBody(runId, stepId, enrichedBody),
           source: this.sourceForStep(stepId),
           payload: this.composeGatePayload(runId, stepId),

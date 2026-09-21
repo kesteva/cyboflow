@@ -2760,8 +2760,8 @@ async function initializeServices(): Promise<boolean> {
       // GateSideEffects.apply is idempotent and never throws, so awaiting it here
       // can never hang a run at a gate the human already answered.
       {
-        openHumanGate: (runId, stepId, stepName) =>
-          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName),
+        openHumanGate: (runId, stepId, stepName, gateHeader) =>
+          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName, gateHeader),
         findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
         maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
         onGateResolved: (args) =>
