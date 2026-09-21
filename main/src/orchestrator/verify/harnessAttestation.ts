@@ -37,6 +37,7 @@
  * outer catch maps to a fail-open `skipped` — i.e. the lane would ADVANCE on the
  * exact case this module exists to block).
  */
+import { join, sep } from 'node:path';
 import type { LoggerLike } from '../types';
 import type { AttestationSpec } from '../../../../shared/types/visualVerification';
 import { compileTitleMatcher } from './driver/driverCore';
@@ -77,11 +78,208 @@ export interface HarnessAttestationDeps {
    */
   listNativeWindows: (app: string) => Promise<string[]>;
   /**
+   * Read a UTF-8 file. REJECTS when it is absent or unreadable — the
+   * `bundle-identity` channel reads the driver's own `mobile-install.json`
+   * through this, and "absent" is a meaningful answer there (nothing was ever
+   * installed), not an error to swallow at this seam.
+   *
+   * OPTIONAL like the three mobile deps below it: a deployment that never wired
+   * them cannot probe `bundle-identity`, and the arm answers `verified:false`
+   * rather than throwing. Unverified is always the safe reading here.
+   */
+  readTextFile?: (absPath: string) => Promise<string>;
+  /** Resolve an absolute path through every symlink. REJECTS when it does not exist. */
+  realpath?: (absPath: string) => Promise<string>;
+  /** sha256, hex, of a file's bytes. REJECTS when the file cannot be read. */
+  sha256File?: (absPath: string) => Promise<string>;
+  /**
+   * Run one Apple CLI (`xcrun simctl get_app_container …`) and return its exit
+   * code + streams. Resolves for a NON-ZERO exit as well — the arm reads the
+   * code itself, because "the container is not there" and "the probe broke" are
+   * different verdicts and only the first is evidence.
+   */
+  exec?: (
+    command: string,
+    args: readonly string[],
+    timeoutMs: number,
+  ) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+  /**
    * The inter-attempt delay. Injected ONLY so the unit suite does not spend real
    * seconds proving the retry loop; production always uses the real timer.
    */
   sleep?: (ms: number) => Promise<void>;
   logger?: LoggerLike;
+}
+
+/**
+ * The simulator context ONE `bundle-identity` probe needs. Supplied by the
+ * runner for a `mobile` request and absent for every other modality, which is
+ * why the arm treats "no context" as an unproven identity rather than a
+ * programming error: an attestation that cannot be performed is a failed
+ * attestation (see this module's header).
+ */
+export interface MobileAttestationContext {
+  /** `VERIFY_ARTIFACTS_DIR` — where `mobile-install` wrote its record. */
+  artifactsDir: string;
+  /** `VERIFY_DERIVED_DATA` — the confinement root the staged product must resolve under. */
+  derivedDataDir: string;
+  /** The UDID of the device created for this request alone. */
+  simUdid: string;
+}
+
+/** The record `mobile-install` writes; re-declared structurally so this module imports no driver code. */
+interface MobileInstallRecordShape {
+  builtPath: string;
+  installedPath: string;
+  builtSha256: string;
+  installedSha256: string;
+  bundleId: string;
+  executable: string;
+}
+
+/** The file `mobile-install` writes under `VERIFY_ARTIFACTS_DIR`. */
+export const MOBILE_INSTALL_RECORD_FILE = 'mobile-install.json';
+
+/** Per-`simctl` deadline for the container lookup. */
+export const MOBILE_ATTEST_EXEC_TIMEOUT_MS = 30_000;
+
+/**
+ * The two-part residual §9.2 requires on every `bundle-identity` verdict,
+ * verified or not. Exported so the runner's tests and any future health-panel
+ * copy key on ONE string rather than re-spelling a guarantee.
+ */
+export const BUNDLE_IDENTITY_RESIDUAL =
+  'staged-artifact identity; does not prove compilation from the snapshot, nor that the screenshots were of this app in the foreground';
+
+/** The detail a `bundle-identity` probe answers with when the driver never installed anything. */
+export const BUNDLE_IDENTITY_NO_RECORD_DETAIL =
+  'nothing was installed through the driver — mobile-install never ran';
+
+function isRecordShape(value: unknown): value is MobileInstallRecordShape {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.builtPath === 'string' &&
+    typeof v.installedPath === 'string' &&
+    typeof v.builtSha256 === 'string' &&
+    typeof v.installedSha256 === 'string' &&
+    typeof v.bundleId === 'string' &&
+    typeof v.executable === 'string'
+  );
+}
+
+/** Is `child` the confinement root itself, or genuinely inside it? */
+function isUnder(child: string, root: string): boolean {
+  return child === root || child.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/**
+ * The `bundle-identity` probe (§9): is the app installed on the leased
+ * simulator byte-identical to the exactly-one product staged under THIS
+ * request's private DerivedData, and does it carry the declared bundle id?
+ *
+ * WHAT IT TRUSTS AND WHAT IT RE-DERIVES. The driver's `mobile-install.json` is
+ * agent-adjacent — it sits under `VERIFY_ARTIFACTS_DIR` — so it is read as a
+ * CLAIM, exactly like `.driver/serve.pid` in the serve-identity binding. Three
+ * things are checked against it rather than taken from it: the staged product
+ * must still realpath-resolve UNDER `$VERIFY_DERIVED_DATA` (a symlink or `..`
+ * escape is how a prebuilt bundle outside the request dir would otherwise be
+ * reachable), the installed container is located by asking `simctl` rather than
+ * by reading `installedPath`, and the installed executable is RE-HASHED here.
+ * A forged record can therefore only make this probe FAIL, never pass.
+ *
+ * The executable ONLY is hashed — never `Info.plist` — per §9.1: the byte
+ * preservation `simctl install` gives was proven for the Mach-O, and folding in
+ * a plist adds a normalization failure mode for no identity gain.
+ */
+async function probeBundleIdentity(
+  spec: Extract<AttestationSpec, { kind: 'bundle-identity' }>,
+  mobile: MobileAttestationContext | undefined,
+  deps: HarnessAttestationDeps,
+): Promise<{ verified: boolean; detail: string }> {
+  const fail = (detail: string): { verified: boolean; detail: string } => ({
+    verified: false,
+    detail: `bundle-identity: ${detail} (${BUNDLE_IDENTITY_RESIDUAL})`,
+  });
+  const { readTextFile, realpath, sha256File, exec } = deps;
+  if (mobile === undefined || !readTextFile || !realpath || !sha256File || !exec) {
+    return fail(
+      'the harness holds no simulator context for this request, so there is no installed app to interrogate',
+    );
+  }
+
+  const recordPath = join(mobile.artifactsDir, MOBILE_INSTALL_RECORD_FILE);
+  let record: MobileInstallRecordShape;
+  try {
+    const parsed: unknown = JSON.parse(await readTextFile(recordPath));
+    if (!isRecordShape(parsed)) return fail(`${BUNDLE_IDENTITY_NO_RECORD_DETAIL} (${recordPath} is not a v1 install record)`);
+    record = parsed;
+  } catch {
+    return fail(`${BUNDLE_IDENTITY_NO_RECORD_DETAIL} (${recordPath})`);
+  }
+
+  if (record.bundleId !== spec.bundleId) {
+    return fail(
+      `the driver installed "${record.bundleId}" but this task declared "${spec.bundleId}" — the app on the device is not the one being verified`,
+    );
+  }
+
+  // Confinement, re-derived. Both sides go through realpath so a symlink
+  // ANYWHERE in the intermediate path is caught, not just a linked leaf.
+  let builtReal: string;
+  let rootReal: string;
+  try {
+    builtReal = await realpath(record.builtPath);
+    rootReal = await realpath(mobile.derivedDataDir);
+  } catch (err) {
+    return fail(
+      `the staged product ${record.builtPath} is gone — it must still be present under ${mobile.derivedDataDir} for its identity to mean anything: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!isUnder(builtReal, rootReal)) {
+    return fail(
+      `the staged product escapes this request's DerivedData: ${record.builtPath} resolves to ${builtReal}, which is outside ${rootReal}`,
+    );
+  }
+
+  const container = await exec(
+    'xcrun',
+    ['simctl', 'get_app_container', mobile.simUdid, spec.bundleId, 'app'],
+    MOBILE_ATTEST_EXEC_TIMEOUT_MS,
+  );
+  const installedPath = container.stdout.trim();
+  if (container.code !== 0 || installedPath.length === 0) {
+    return fail(
+      `simctl get_app_container exited ${String(container.code)} with no container for "${spec.bundleId}" on ${mobile.simUdid}: ${truncate(container.stderr.trim() || container.stdout.trim())}`,
+    );
+  }
+
+  let liveSha: string;
+  const liveExecutable = join(installedPath, record.executable);
+  try {
+    liveSha = await sha256File(liveExecutable);
+  } catch (err) {
+    return fail(
+      `could not re-hash the installed executable ${liveExecutable}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const where = `staged ${builtReal} → installed ${installedPath} (${record.executable})`;
+  if (record.builtSha256 !== record.installedSha256) {
+    return fail(
+      `the driver's own record disagrees with itself — ${where}: staged sha256 ${record.builtSha256}, recorded installed sha256 ${record.installedSha256}`,
+    );
+  }
+  if (liveSha !== record.builtSha256) {
+    return fail(
+      `the app on the device is NOT the product staged for this request — ${where}: staged sha256 ${record.builtSha256}, live installed sha256 ${liveSha}`,
+    );
+  }
+
+  return {
+    verified: true,
+    detail: `bundle-identity: ${where} — sha256 ${liveSha} agrees on all three readings (staged, recorded, re-hashed live) for "${spec.bundleId}" (${BUNDLE_IDENTITY_RESIDUAL})`,
+  };
 }
 
 /**
@@ -99,6 +297,30 @@ export const HARNESS_ATTEST_RETRY_DELAY_MS = 1_000;
 
 /** Per-probe deadline — mirrors driverCore's `ATTEST_HTTP_TIMEOUT_MS`. */
 export const HARNESS_ATTEST_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Everything ONE attestation needs. `driverPort` is nullable because a `mobile`
+ * request is leased no ports at all: the two CDP-mediated channels answer
+ * `verified:false` with a plain reason rather than dialling port `0`, which is
+ * the honest reading — a task that declared a channel its own shape cannot
+ * support has an unproven identity, not a broken probe.
+ */
+export interface HarnessAttestationArgs {
+  verifyPort: number | null;
+  driverPort: number | null;
+  nonce: string;
+  /** Present only for a `mobile` request — the `bundle-identity` channel's whole world. */
+  mobile?: MobileAttestationContext;
+  deps: HarnessAttestationDeps;
+}
+
+/** The verdict a CDP-mediated channel gets when this request holds no driver port. */
+function noDriverPort(kind: 'dom-marker' | 'cdp-token'): { verified: boolean; detail: string } {
+  return {
+    verified: false,
+    detail: `${kind}: no driver port was leased for this request, so there is no DevTools endpoint to evaluate against — the task declared a channel its own shape cannot support`,
+  };
+}
 
 /** Bound a value echoed into a detail so a huge evaluate() result cannot bloat the terminal message. */
 function truncate(value: string, max = 200): string {
@@ -133,7 +355,7 @@ function domMarkerExpression(selector: string): string {
  */
 async function probeOnce(
   spec: AttestationSpec,
-  args: { verifyPort: number | null; driverPort: number; nonce: string; deps: HarnessAttestationDeps },
+  args: HarnessAttestationArgs,
 ): Promise<{ verified: boolean; detail: string }> {
   const { verifyPort, driverPort, nonce, deps } = args;
   switch (spec.kind) {
@@ -161,6 +383,7 @@ async function probeOnce(
       return { verified: true, detail: `http-endpoint ${url} returned this request's nonce` };
     }
     case 'dom-marker': {
+      if (driverPort === null) return noDriverPort('dom-marker');
       const value = await deps.cdpEvaluate(
         driverPort,
         domMarkerExpression(spec.selector),
@@ -175,6 +398,7 @@ async function probeOnce(
       return { verified: true, detail: `dom-marker "${spec.selector}" carries this request's nonce` };
     }
     case 'cdp-token': {
+      if (driverPort === null) return noDriverPort('cdp-token');
       const actual = await deps.cdpEvaluate(driverPort, spec.expression, HARNESS_ATTEST_PROBE_TIMEOUT_MS);
       if (actual !== spec.expected) {
         return {
@@ -199,6 +423,8 @@ async function probeOnce(
         detail: `window-identity (weakest channel): matched window title "${truncate(matched)}"`,
       };
     }
+    case 'bundle-identity':
+      return probeBundleIdentity(spec, args.mobile, deps);
   }
 }
 
@@ -220,7 +446,7 @@ async function probeOnce(
  */
 export async function performHarnessAttestation(
   spec: AttestationSpec,
-  args: { verifyPort: number | null; driverPort: number; nonce: string; deps: HarnessAttestationDeps },
+  args: HarnessAttestationArgs,
 ): Promise<HarnessAttestationResult> {
   if (spec.kind === 'file-identity') {
     return {

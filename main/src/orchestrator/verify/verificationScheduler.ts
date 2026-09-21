@@ -28,1403 +28,151 @@
  * a task already on that concurrency:1 queue, so enqueuing there self-deadlocks).
  */
 import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
-import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
-import { emitSeamError } from '../telemetrySink';
-import { classifyErrorPattern, unclassifiedErrorTags } from '../programmatic/systemicError';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
-  CaptureContext,
-  CaptureOrigin,
   DeliverableVerifyConfig,
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationBackendRegistry,
-  VerificationFailureClass,
-  VerificationFailureEvidence,
   VerificationModality,
-  VerificationReportV1,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationType,
-  VerdictV1,
   VerifyChainEntry,
   VisualBackend,
   VisualBackendId,
-  VlmJudge,
 } from '../../../../shared/types/visualVerification';
 import {
-  REQUEST_STATUS,
   VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
   isVerificationModality,
-  parseVerificationTaskV1,
   resolveTaskModality,
   runbookBootstrapKillSwitchEngaged,
 } from '../../../../shared/types/visualVerification';
-import type {
-  VerificationAgentRunnerLike,
-  VerificationAgentRequest,
-  VerificationAgentRunResult,
-} from './verificationAgentRunner';
-import type { AgentPreflightResult } from './preflight';
-import { classifyVerificationFailure } from './failureClassifier';
-import type { VerifyCapabilityStore } from './capabilityStore';
-import type { VerifyRunbookStore, VerifyRunbookStatusDetail } from './runbookStore';
-import {
-  declineForRunbookStatus,
-  taskDerivesEnvironment,
-  type BootstrapDecision,
-  type BootstrapDeclineReason,
-} from './bootstrapEligibility';
+import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
+import { type BootstrapDecision, type BootstrapDeclineReason } from './bootstrapEligibility';
 import { runbookBootstrapPreflight } from './runbookBootstrapPreflight';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
+import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
+import {
+  AGENT_REQUEST_TIMEOUT_CEILING_MS,
+  BATCH_MUTEX_MAX_QUEUED_HOLDERS,
+  DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_SSIM_MATCH_THRESHOLD,
+  HEALTH_CHECK_MEMO_TTL_MS,
+} from './verificationSchedulerContracts';
 import type {
-  VerifyRunbookModality,
-  VerifyRunbookModalityEntry,
-} from '../../../../shared/types/verifyRunbook';
+  DevServerContextResolver,
+  OnVerdict,
+  ProvenRunbookRevision,
+  VerificationSchedulerDeps,
+} from './verificationSchedulerContracts';
+import {
+  ResourceLeasePool,
+  sprintVerifyBatchLease,
+  verifyPortLease,
+  verifySimLease,
+} from './verificationLeases';
+import type { LeaseHandle } from './verificationLeases';
+import {
+  AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
+  AWAIT_TERMINAL_POLL_INTERVAL_MS,
+  AWAIT_TERMINAL_TIMEOUT_MESSAGE,
+  isRequestStatus,
+  isTerminalRequestStatus,
+  orderAgentDrainRows,
+  parseRequestInput,
+  parseVerdictFeedback,
+} from './verificationRequestRows';
+import type {
+  AwaitTerminalOutcome,
+  VerificationRequestRow,
+  VerificationRequestSummary,
+} from './verificationRequestRows';
+import { TerminalDelivery } from './terminalDelivery';
+import { CapturePipeline } from './capturePipeline';
+import { AgentEngine } from './agentEngine';
 
 // Re-exported for existing consumers — the type moved to shared so the
 // screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
 // shared->main import.
 export type { CaptureOrigin } from '../../../../shared/types/visualVerification';
 
-// ---------------------------------------------------------------------------
-// Verification terminal events
-//
-// A per-run EventEmitter the scheduler fires ONCE when a request reaches a
-// terminal status (passed/failed/low_confidence/skipped/timeout) — AFTER the
-// onVerdict delivery has run (so any lane write the merge-gate performed is
-// already visible to a subscriber). The PROGRAMMATIC visual merge-gate
-// (programmatic/visualVerifyGate.ts) subscribes to this to un-park a lane that is
-// awaiting its async verdict; it is the wake signal that covers EVERY terminal
-// status uniformly — including skipped/timeout (which the merge-gate ADVANCES per
-// R4, and a non-sprint run leaves as a lane-less no-op). Mirrors
-// sprintLaneEvents (sprintLaneStore.ts): a module-level emitter + a per-run channel.
-// ---------------------------------------------------------------------------
-
-/** Module-level emitter for verification terminal events, keyed by run channel. */
-export const verificationEvents = new EventEmitter();
-
-/** The per-run channel a VerificationTerminalEvent is emitted on. */
-export function verificationChannel(runId: string): string {
-  return `verify-run-${runId}`;
-}
-
-/** The payload emitted on `verificationChannel(runId)` when a request settles. */
-export interface VerificationTerminalEvent {
-  runId: string;
-  requestId: string;
-  projectId: number;
-  status: RequestStatus;
-  type: VerificationType;
-  /** The lane this request was attributed to (deliverable_json.taskRef), if any. */
-  taskRef?: string;
-}
 
 // ---------------------------------------------------------------------------
-// Lease names
-//
-// The ResourceLeasePool emulates N ports / N simulators by holding N DISTINCT
-// named count-1 leases over the shared `mutex` and probing for a free one. A
-// single-display capture is one count-1 lease ('verify:screen'). Reusing the SAME
-// `mutex` singleton is why 'verify:screen' composes app-wide with the
-// PanelManager / WorktreeManager holders that already lock named resources there.
+// Re-exports (issue #19 step 5). The scheduler's contracts, lease vocabulary,
+// skip reasons, and row helpers now live in sibling modules; everything that was
+// exported from here still is, so importers and tests are unchanged.
 // ---------------------------------------------------------------------------
 
-/** The single-display capture lease (Peekaboo / native-desktop). Count-1. */
-export const VERIFY_SCREEN_LEASE = 'verify:screen';
-
-// ---------------------------------------------------------------------------
-// Phase-0 gate vocabulary (docs/proposals/verification-setup-flow.md §3.2/§3.3)
-// ---------------------------------------------------------------------------
-
-/**
- * Modalities the AGENT engine has no executable path for, with the reason a
- * human sees on the skip (§3.3). Until phase 1 ships the roster these land here
- * with an explicit statement instead of today's deploy-and-fail-organically: the
- * agent path never consults `verify_type` (dispatch keys solely on the run's
- * chain stamp) and `VerificationAgentRequest` carries no type field, so a
- * `native-desktop` / `mobile-flow` request is otherwise deployed as if it were a
- * web check and burns the full deadline before failing incomprehensibly.
- *
- * A modality ABSENT from this map is supported. Typed as a partial record so
- * adding a member to the shared union makes this a compile-visible decision.
- *
- * `native-screen` is now CONDITIONALLY unsupported: its entry is the answer for
- * a deployment with NO {@link VerificationSchedulerDeps.nativeCaptureProbe}
- * wired (the phase-0 posture — an unprobed host cannot be assumed capable), and
- * the probe overrides it when it answers true. `mobile` is unconditional.
- */
-const UNSUPPORTED_MODALITY_REASONS: Partial<Record<VerificationModality, string>> = {
-  'native-screen': 'native-screen capture/drive not yet wired on the agent path (proposal §4)',
-  mobile: 'deferred — pending Xcode MCP',
-};
-
-/**
- * The detail a `native-screen` skip carries when a capability probe WAS wired
- * and answered FALSE — i.e. this host was asked and said no. The skip is
- * structurally identical to the probe-less one above (same
- * `unsupported modality '<m>': <detail>` shape, same `markUnsupported` ledger
- * write, same `env` failure class, same evidence row); only the DETAIL differs,
- * and it differs on purpose: "not yet wired" is a statement about cyboflow that
- * a user can do nothing about, whereas the grant pair is the one native-screen
- * failure a human can actually fix (grant Screen Recording + Accessibility, or
- * install the binary). The probe (`peekabooBackend.healthCheck`) collapses
- * binary-absent and grant-declined into a single boolean by design — it never
- * throws and never distinguishes — so this names both halves rather than
- * guessing which one bit.
- */
-const NATIVE_CAPTURE_UNAVAILABLE_DETAIL =
-  'this host cannot capture the screen — the peekaboo binary is missing, or one of the two required macOS TCC grants (Screen Recording + Accessibility) is not held';
-
-/**
- * The §3.2 degrade-path skip reason. Exported because verdictDelivery matches on
- * it to attach the setup CTA to the non-blocking finding — this is the ONE skip
- * reason a human can act on directly, and phase 2 will turn that CTA into a real
- * launch affordance for the verification-setup flow.
- */
-export const VERIFY_NO_RUNBOOK_REASON =
-  'no proven verification runbook for this project (run verification setup)';
-
-/**
- * The §3.2 skip reason for §4's PRE-MERGE case: a runbook IS proven for this
- * project, this branch just does not carry the portable file yet.
- *
- * A separate string because the remedy is the opposite of the one above.
- * `VERIFY_NO_RUNBOOK_REASON` tells a human to run verification setup; doing that
- * HERE would derive a fresh runbook and UPSERT it over the proven singleton
- * record every other branch depends on (runbookStore's `registerDraft`),
- * breaking verification for the projects that configured it properly. The right
- * action is to merge the branch that already carries it.
- *
- * MOSTLY UNREACHABLE SINCE F10. The store's `statusDetail` no longer answers
- * `'proven-file-absent-here'` for a genuinely absent file — the record, not the
- * file, is what a proof executes, so the portable-hash conjunct is skipped and
- * the branch is judged on its project inputs. Kept because the mapping is still
- * total over {@link VerifyRunbookStatusDetail} and an injected/stubbed resolver
- * may still produce that reason.
- */
-export const VERIFY_RUNBOOK_ELSEWHERE_REASON =
-  'a proven verification runbook exists for this project but is not in this branch';
-
-/**
- * The §3.2 skip reason for a runbook that WAS proven and has since drifted —
- * its own content, the project inputs it builds through, or the host. Since F4
- * (docs/proposals/visual-verification-brittleness-fixes.md) the read that
- * produces this LEAVES THE RECORD INTACT and merely refuses: the drift is
- * recomputed on every gate/badge read, so it can go away on its own (the inputs
- * come back) or be cleared by a re-prove that re-stamps the provenance. What it
- * needs is re-proving, never re-deriving.
- */
-export const VERIFY_RUNBOOK_DRIFTED_REASON =
-  "this project's proven verification runbook no longer matches its inputs";
-// ONE STRING FOR BOTH DRIFTS, deliberately (F4 fix round). The store tells
-// provenance drift (`'drifted'`) from content drift (`'content-drifted'`)
-// because their REMEDIES differ — the first is re-proven automatically, the
-// second must be re-registered — but to a REQUEST they are the same fact, and
-// forking the skip text here would fork `runbookDeclineForSkipReason` below,
-// which reverse-maps the persisted string. `bootstrapEligibility` holds the
-// distinction; the gate stays coarse.
-
-/**
- * The §3.2 skip reason when the runbook record could not be READ at all (a
- * pre-096 DB, a SQL error, an input hash that would not compute). Distinct from
- * "none exists" on purpose: the store fails soft to `'absent'`, and reporting
- * that as "never set up" would send a human to re-run a setup flow that already
- * succeeded.
- */
-export const VERIFY_RUNBOOK_UNREADABLE_REASON =
-  'the verification runbook record for this project could not be read';
-
-/**
- * The skip reason for a runbook decline — the forward direction of
- * {@link runbookDeclineForSkipReason}.
- *
- * `null` (the status is bootstrappable: nothing derived, a draft, or a file this
- * host never proved) and `'already-proven'` both fall through to the ORIGINAL
- * reason string, so every pre-existing consumer and every existing test keeps
- * matching exactly what it matched before. Only the three genuinely different
- * situations get their own text. `'already-proven'` is unreachable from the gate
- * (a proven status returns before this) and is mapped rather than thrown on so a
- * future caller cannot turn a classification into a crash.
- */
-function skipReasonForRunbookDecline(decline: BootstrapDeclineReason | null): string {
-  switch (decline) {
-    case 'proof-belongs-elsewhere':
-      return VERIFY_RUNBOOK_ELSEWHERE_REASON;
-    case 'stale-proof':
-      return VERIFY_RUNBOOK_DRIFTED_REASON;
-    case 'unobservable':
-      return VERIFY_RUNBOOK_UNREADABLE_REASON;
-    default:
-      return VERIFY_NO_RUNBOOK_REASON;
-  }
-}
-
-/**
- * Reverse-map a persisted `error_message` back to the situation that produced
- * it, so a consumer holding only the string (verdictDelivery, building the
- * human-facing finding) can attach the RIGHT remedy. `null` for anything that is
- * not a runbook-shaped skip.
- */
-export function runbookDeclineForSkipReason(
-  errorMessage: string | null,
-): BootstrapDeclineReason | null {
-  switch (errorMessage) {
-    case VERIFY_RUNBOOK_ELSEWHERE_REASON:
-      return 'proof-belongs-elsewhere';
-    case VERIFY_RUNBOOK_DRIFTED_REASON:
-      return 'stale-proof';
-    case VERIFY_RUNBOOK_UNREADABLE_REASON:
-      return 'unobservable';
-    default:
-      return null;
-  }
-}
-
-/**
- * The prefix stamped on a terminal the §3.1 GATE-INTEGRITY guard blocked — a
- * DEPLOYED session whose skip nothing corroborated (see
- * {@link VerificationScheduler.isUnprovenAdvancingSkip}). Exported so tests and
- * any future health-panel grouping can key on the exact string rather than
- * re-deriving it; the original runner message is appended after it, because the
- * conversion changes the STATUS and must never destroy the evidence.
- */
-export const VERIFY_UNPROVEN_SKIP_BLOCKED = 'unverified result blocked (§3.1 gate integrity)';
-
-/**
- * SUPERSEDED by the {@link verifyAgentSlot} pool (§4 footnote ¹). This was the
- * single count-1 lease that serialized EVERY agent verification app-wide
- * regardless of modality; the roster's concurrency column ("parallel, port
- * lease" for `web`/`cdp-app`, "exclusive" only for `native-screen`) is exactly
- * what that lease made unimplementable. Kept EXPORTED and unused-by-the-drain
- * on purpose: the name is a stable identifier a still-running older client (or
- * an external holder on the shared mutex) may be holding, and deleting it would
- * silently turn such a hold into a no-op rather than a compile error. Nothing in
- * the scheduler acquires it any more — see {@link verifyAgentSlot}.
- *
- * @deprecated Use {@link verifyAgentSlot} — the bounded N-slot pool.
- */
-export const VERIFY_AGENT_LEASE = 'verify:agent';
-
-/**
- * Build the lease name for agent-deployment slot `index` (§4 footnote ¹ — the
- * budgeted scheduler work item). The bounded web/cdp pool is emulated the same
- * way the port pool is: N DISTINCT count-1 leases over the SHARED mutex, probed
- * in order by `tryAcquireOneOf`, so two requests in ONE drain pass take slot 0
- * and slot 1 and run concurrently while the (N+1)th finds every slot held and
- * stays 'queued' — the lane never blocks, exactly as before.
- *
- * Slot COUNT comes from `ResolvedVisualVerifyConfig.agentSlots` (default 2) and
- * is deliberately DECOUPLED from `SPRINT_BATCH_CAP` (§5.4): a verification slot
- * is a full SDK deploy competing with the user's own dev work for host
- * CPU/network, so it must be sizeable independently of how many sprint lanes
- * fan out. `native-screen` requests draw a slot from this pool too — they are
- * agent deployments like any other — and ADDITIONALLY serialize on the separate
- * count-1 {@link VERIFY_SCREEN_LEASE}; `agentSlots` governs only how many agent
- * deployments may be in flight, never how many may touch the one screen.
- */
-export function verifyAgentSlot(index: number): string {
-  return `verify:agent:${index}`;
-}
-
-/** Build the per-port lease name for one dev-server port. */
-export function verifyPortLease(port: number): string {
-  return `verify:port:${port}`;
-}
-
-/** Build the per-simulator lease name for one device udid. */
-export function verifySimLease(udid: string): string {
-  return `verify:sim:${udid}`;
-}
-
-/**
- * Build the batch worktree-sync mutex name for one sprint batch (L4 / locked
- * decision #5). Acquired AFTER the dev-server/port lease and BEFORE backend
- * capture for any verification operating on a batched run; a count-1
- * serialization point per batchId over the SAME shared `mutex` as the
- * port/screen leases. It prevents a verification reading a half-committed shared
- * sprint worktree: while this is held, the next capture on the same batchId
- * WAITS (it does not start while another lane's verification is mid-capture).
- * A non-batch run (null/empty batch_id) acquires nothing — single-run captures
- * are byte-identical to before this layer.
- */
-export function sprintVerifyBatchLease(batchId: string): string {
-  return `sprint-verify-${batchId}`;
-}
-
-// ---------------------------------------------------------------------------
-// ResourceLeasePool — N-slot leasing over the count-1 `mutex`
-// ---------------------------------------------------------------------------
-
-/** A held lease; call release() exactly once (the scheduler does so in finally). */
-export interface LeaseHandle {
-  /** The concrete lease name acquired (e.g. 'verify:port:5173'), or null for the no-lease slot. */
-  readonly name: string | null;
-  release(): void;
-}
-
-/** A lease that needs NO scarce resource (rung 0 / rung 1 sans dev server / judge). */
-const NO_LEASE: LeaseHandle = { name: null, release: () => {} };
-
-/**
- * ResourceLeasePool — built OVER the shared count-1 `mutex` (utils/mutex.ts). It
- * does NOT add a second locking primitive; it composes the existing one. A
- * "logical" pool of N ports / N sims is emulated as N distinct count-1 leases:
- * tryAcquireOneOf() probes the candidate names in order and grabs the first whose
- * mutex slot is free (mutex.isLocked === false), returning a LeaseHandle that
- * releases exactly that name.
- *
- * Crucially this is NON-BLOCKING by design — if every candidate is held it returns
- * null IMMEDIATELY (it does NOT await mutex.acquire's spin-until-timeout). The
- * scheduler then LEAVES the request 'queued' and retries next drain, so a busy
- * pool never stalls the drain loop or the lane.
- *
- * Concurrency note: the scheduler drains serially (one request leased per
- * iteration before the next isLocked probe) so the check-then-acquire window is
- * not a race within the scheduler. The mutex itself is the source of truth across
- * the rest of the app.
- */
-export class ResourceLeasePool {
-  constructor(private readonly mutex: Mutex = globalMutex) {}
-
-  /**
-   * QUARANTINED lease names (redesign §5.4 step 6): a lease whose underlying
-   * resource (a leaked verification port) would NOT free at teardown. The mutex
-   * slot is kept HELD (the retained `release` is stored, never called at
-   * quarantine time) so the next acquisition can never hand out a still-dirty
-   * port; each entry carries a `probeFree` re-check that `tryAcquireOneOf` runs
-   * before considering the slot, freeing it once the resource is genuinely free.
-   */
-  private readonly quarantined = new Map<
-    string,
-    { probeFree: () => Promise<boolean>; reason: string; release: () => void }
-  >();
-
-  /**
-   * Quarantine a held lease instead of releasing it (§5.4 step 6). The mutex slot
-   * stays HELD — `handle.release()` is retained, not called — so a leaked port can
-   * never collide with the next verification. `probeFree` is re-run on a later
-   * acquisition attempt for this exact name; when it reports the resource free the
-   * slot is released and re-enters normal rotation. A no-lease handle is a no-op.
-   */
-  quarantine(handle: LeaseHandle, probeFree: () => Promise<boolean>, reason: string): void {
-    if (handle.name === null) return;
-    this.quarantined.set(handle.name, { probeFree, reason, release: handle.release });
-  }
-
-  /** True when `name` is currently held in quarantine (test/observability helper). */
-  isQuarantined(name: string): boolean {
-    return this.quarantined.has(name);
-  }
-
-  /**
-   * The underlying count-1 mutex this pool composes over. Exposed so the
-   * scheduler can take a BLOCKING count-1 lock (the batch worktree-sync mutex,
-   * `sprint-verify-<batchId>`) on the SAME mutex instance the port/screen leases
-   * use, so all named locks compose app-wide. Distinct from tryAcquire* (which is
-   * non-blocking): the batch mutex is a serialization point where the second
-   * concurrent capture WAITS for the first to release, not a pool that leaves a
-   * request queued.
-   */
-  get sharedMutex(): Mutex {
-    return this.mutex;
-  }
-
-  /** A lease that needs no scarce resource. Always "available". */
-  noLease(): LeaseHandle {
-    return NO_LEASE;
-  }
-
-  /**
-   * Probe `candidates` in order; acquire the FIRST whose count-1 mutex slot is
-   * free and return its handle, else return null immediately (pool exhausted).
-   * Acquire is awaited but resolves instantly because we only call it on a slot
-   * isLocked() already reported free.
-   */
-  async tryAcquireOneOf(candidates: readonly string[]): Promise<LeaseHandle | null> {
-    for (const name of candidates) {
-      // A quarantined slot (§5.4 step 6) is re-probed before it can be handed out:
-      // if its resource freed, release the held quarantine (which frees the mutex
-      // slot) and fall through to the normal acquire; otherwise skip this candidate.
-      const q = this.quarantined.get(name);
-      if (q) {
-        if (await q.probeFree()) {
-          this.quarantined.delete(name);
-          q.release();
-        } else {
-          continue;
-        }
-      }
-      if (!this.mutex.isLocked(name)) {
-        const release = await this.mutex.acquire(name);
-        let released = false;
-        return {
-          name,
-          release: () => {
-            if (released) return;
-            released = true;
-            release();
-          },
-        };
-      }
-    }
-    return null;
-  }
-
-  /** Probe + acquire a SINGLE count-1 lease by exact name; null if held. */
-  async tryAcquire(name: string): Promise<LeaseHandle | null> {
-    return this.tryAcquireOneOf([name]);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Abort-bounded await (R1 #1a — the scheduler must NEVER hang on a collaborator
-// that ignores its abort signal)
-//
-// The per-request deadline `.abort()`s the shared controller, but a backend/judge
-// that does not honour the signal (e.g. an offscreen renderer wedged on a GPU
-// stall) may never settle its capture promise. Awaiting that promise raw would
-// hang runChosen forever → drain()'s Promise.allSettled never resolves → `draining`
-// stays true → every future request across all runs strands 'queued'. raceWithAbort
-// closes that hole at the SCHEDULER: it rejects with a distinguishable AbortRaceError
-// THE MOMENT the signal aborts, even if the underlying promise never settles. The
-// orphaned promise is intentionally DETACHED (its eventual settle/reject is logged,
-// not awaited). The backend-side cleanup (CapturePageBackend destroys its window on
-// abort) is the complementary fix that prevents a leaked wedged window; this race is
-// the hard guarantee that the loop itself can never wedge.
-// ---------------------------------------------------------------------------
-
-/**
- * The distinguishable rejection raceWithAbort throws when the signal aborts before
- * the raced promise settles. runChosen's catch keys timeout-vs-failed off
- * `signal.aborted` (not this identity), but the named class keeps the abort path
- * greppable in logs + assertable in tests.
- */
-export class AbortRaceError extends Error {
-  constructor(label: string) {
-    super(`aborted while awaiting ${label}`);
-    this.name = 'AbortRaceError';
-  }
-}
-
-/**
- * Await `promise`, but reject with an AbortRaceError the instant `signal` aborts —
- * even if `promise` never settles (an abort-unaware collaborator). When the abort
- * wins, the underlying promise is DETACHED: its later settle/reject is logged at
- * debug (so a leaked orphan is observable) and dropped. When the promise wins, its
- * value/error propagates and the abort listener is removed. Orchestrator-local (no
- * electron/service import) so the scheduler stays standalone-typecheck-clean.
- */
-export function raceWithAbort<T>(
-  promise: Promise<T>,
-  signal: AbortSignal,
-  label: string,
-  logger?: LoggerLike,
-): Promise<T> {
-  if (signal.aborted) {
-    return Promise.reject(new AbortRaceError(label));
-  }
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const onAbort = (): void => {
-      if (settled) return;
-      settled = true;
-      reject(new AbortRaceError(label));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        if (settled) {
-          logger?.debug('[VerificationScheduler] detached work settled after abort', { label });
-          return;
-        }
-        settled = true;
-        resolve(value);
-      },
-      (err: unknown) => {
-        signal.removeEventListener('abort', onAbort);
-        if (settled) {
-          logger?.debug('[VerificationScheduler] detached work rejected after abort', {
-            label,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return;
-        }
-        settled = true;
-        reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Dev-server provider seam (S2 — scheduler-owned dev server)
-//
-// The scheduler OWNS the dev server (locked decision #1): for a deliverable whose
-// `.cyboflow/verify.json` recipe has a `start` command it stands the deliverable
-// up on the leased `verify:port:<p>`, threads the resulting baseUrl into capture,
-// and tears it down after. The concrete spawner (DevServerManager) lives under
-// main/src/services/* (it imports node:child_process); the scheduler knows ONLY
-// this narrow injected interface — it never imports the service (orchestrator->
-// services is forbidden; the service imports + implements these types, a
-// services->orchestrator import, which is allowed). Mirrors how CapturePageBackend
-// + VlmJudge are injected at index.ts.
-// ---------------------------------------------------------------------------
-
-/** The args the scheduler passes the provider to stand a deliverable up. */
-export interface DevServerSpawnArgs {
-  /** The deliverable's verify.json recipe (build/start/readyWhen/url). */
-  config: DeliverableVerifyConfig;
-  /** The leased port (parsed from the verify:port:<p> lease name). */
-  port: number;
-  /** The run's project worktree cwd the build/start commands run in. */
-  cwd: string;
-  /** Per-request abort — interrupts an in-flight build/start/readiness wait. */
-  signal: AbortSignal;
-}
-
-/**
- * A live dev server the scheduler must tear down after capture. `baseUrl` is what
- * the scheduler rewrites into ctx.input.url (the backend stays stateless — URL
- * threading is the scheduler's job). `release()` performs the graceful-then-forced
- * teardown of the process tree; the scheduler calls it exactly once, in the SAME
- * finally that releases the port lease.
- */
-export interface DevServerHandle {
-  baseUrl: string;
-  release(): Promise<void>;
-}
-
-/**
- * The narrow spawner interface injected into the scheduler. `spawn` stands the
- * deliverable up on the leased port and resolves a DevServerHandle once it is
- * ready; it rejects (after tearing down whatever it spawned) on build/spawn/
- * readiness failure or abort. The scheduler imports this TYPE only — the concrete
- * DevServerManager (a service) implements it and is wired in at index.ts.
- */
-export interface DevServerProvider {
-  spawn(args: DevServerSpawnArgs): Promise<DevServerHandle>;
-}
-
-/**
- * Resolves the dev-server spawn context for a request: the project worktree `cwd`
- * the commands run in + the matching `deliverable` recipe from the run's
- * `.cyboflow/verify.json`. INJECTED as a plain async function (wired at index.ts
- * over loadVerifyConfig + the project path) so the scheduler stays fs/electron/
- * service-free — the closure does all the fs work. Returns null when there is no
- * verify.json, no matching deliverable, or no resolvable worktree (the scheduler
- * then skips the dev-server spawn and captures the static url/htmlPath unchanged —
- * MVP Rung-0 behavior preserved).
- */
-export type DevServerContextResolver = (args: {
-  runId: string;
-  projectId: number;
-  input: VerificationRequestInput;
-}) => Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null>;
-
-// ---------------------------------------------------------------------------
-// Static-server provider seam (S9 — scheduler-owned static file server)
-//
-// The zero-config `htmlPath` promise: a request that points at a BUILT html file
-// (no dev server, no verify.json `start`) must still render correctly. Loading it
-// over `file://` (the pre-S9 CapturePage path) silently blanks any bundler output —
-// Chromium treats file:// as an opaque origin and CORS-blocks every
-// `<script type="module">`. S9 fixes the class: the scheduler stands the file's
-// static root up on an ephemeral loopback HTTP server and threads the resulting
-// URL into capture, exactly like the S2 dev server (URL threading is the
-// scheduler's job; the backend stays stateless). The OS assigns the port
-// (127.0.0.1:0) so NO `verify:port` lease is needed — that pool exists to
-// interpolate `${PORT}` into user start commands; an OS-assigned port never
-// collides — keeping rung-0 captures fully parallel. The concrete server (a
-// service, node:http) is injected at index.ts; the scheduler imports only these
-// TYPES (standalone-typecheck invariant), mirroring DevServerProvider.
-// ---------------------------------------------------------------------------
-
-/** The args the scheduler passes the provider to stand a static deliverable up. */
-export interface StaticServerSpawnArgs {
-  /** Absolute path of the html entry file (already worktree-resolved + verified). */
-  absoluteHtmlPath: string;
-  /**
-   * Absolute directory the server confines itself to. Defaults upstream to
-   * dirname(absoluteHtmlPath); a verify.json deliverable may widen it via its
-   * explicit `staticRoot` for layouts whose assets live above the html's dir.
-   */
-  staticRoot: string;
-  /** Per-request abort — interrupts an in-flight listen/spawn cleanly. */
-  signal: AbortSignal;
-}
-
-/**
- * A live static server the scheduler must tear down after capture. `baseUrl` is
- * the full tokenized URL OF THE HTML ENTRY (not the bare origin) — the scheduler
- * rewrites it into ctx.input.url verbatim. `release()` closes the listener and
- * force-destroys open sockets; the scheduler calls it exactly once, in the SAME
- * finally that releases the S2 dev server.
- */
-export interface StaticServerHandle {
-  baseUrl: string;
-  release(): Promise<void>;
-}
-
-/**
- * The narrow static-server spawner interface injected into the scheduler. `spawn`
- * binds 127.0.0.1:0 and resolves once listening; it rejects (after closing
- * whatever it opened) on bind failure or abort. The concrete StaticServerManager
- * (a service) implements it and is wired in at index.ts.
- */
-export interface StaticServerProvider {
-  spawn(args: StaticServerSpawnArgs): Promise<StaticServerHandle>;
-}
-
-/**
- * Resolves a request's static-serve context: the ABSOLUTE html path (a relative
- * request htmlPath resolves against the run's WORKTREE first, project root on
- * fallback — never the Electron process cwd) + the confining static root
- * (explicit verify.json `staticRoot` when the matched deliverable declares one,
- * else dirname(html)). INJECTED as a plain async function (wired at index.ts over
- * the DB path lookup + fs existence checks) so the scheduler stays fs/electron/
- * service-free. Returns null when the html file cannot be resolved/found — the
- * scheduler then skips the static server and the request captures its raw
- * url/htmlPath unchanged (pre-S9 behavior preserved, fail-soft).
- */
-export type StaticHtmlContextResolver = (args: {
-  runId: string;
-  projectId: number;
-  /** The request's raw (possibly relative) htmlPath. */
-  htmlPath: string;
-  /** Explicit static root from the matched verify.json deliverable, if any. */
-  staticRoot?: string;
-}) => Promise<{ absoluteHtmlPath: string; staticRoot: string } | null>;
-
-/**
- * The `extra` payload runChosen hands markTerminal(AndDeliver) for one terminal
- * write. `backend` / `verdict` / `error` are the load-bearing fields markTerminal
- * persists (+ the seam-error tags). `captureOrigin` (Codex finding 9, type in
- * shared/types/visualVerification.ts) and `diagnostics` (Codex finding 7) are
- * PURELY ADDITIVE human-facing provenance: markTerminal does NOT persist them —
- * markTerminalAndDeliver forwards them through deliver() into the onVerdict hook,
- * whose concrete delivery (verdictDelivery.ts) renders them on the review-item
- * finding body + the screenshots artifact payload. NOTHING derives pass/fail from
- * them (diagnostics are page-controlled text and never reach the VlmJudge).
- */
-export interface TerminalExtra {
-  backend?: VisualBackendId;
-  verdict?: VerdictV1;
-  error?: string;
-  captureOrigin?: CaptureOrigin;
-  diagnostics?: string[];
-  /**
-   * The verification AGENT's normalized report (redesign §5.4/§5.6). Persisted to
-   * `verification_requests.report_json` in the SAME status-guarded terminal write as
-   * the status + verdict (markTerminal), so the report commits atomically with the
-   * terminal transition. Absent on the legacy capture/judge path (report_json stays
-   * NULL there). The delivery-outbox `delivery_state` marker is a later slice — not
-   * written here.
-   */
-  report?: VerificationReportV1;
-  /**
-   * The §3.1 conservative classifier's verdict for a terminal FAILURE
-   * (docs/proposals/verification-setup-flow.md), persisted to migration 095's
-   * `failure_class`. Absent on a pass and on every legacy-path terminal (the
-   * column stays NULL, exactly as for a pre-095 row).
-   */
-  failureClass?: VerificationFailureClass;
-  /**
-   * The harness-derived evidence the {@link TerminalExtra.failureClass} verdict
-   * rests on, persisted to `failure_evidence_json`. §3.1's auditable invariant:
-   * an `'env'` verdict — the only class that converts a lane-blocking FAIL into
-   * an advancing SKIP — must always point at a harness source here, never at
-   * model prose, so a misclassification is inspectable after the fact rather
-   * than being an unfalsifiable label.
-   */
-  failureEvidence?: VerificationFailureEvidence[];
-  /**
-   * The §3.5 pre-deploy preflight result, persisted to `preflight_json`. Written
-   * on EVERY agent terminal (not just failures) so the phase-3 health panel can
-   * distinguish "the host was fine and the check still failed" from "the host
-   * could never have run it".
-   */
-  preflight?: AgentPreflightResult;
-}
-
-// ---------------------------------------------------------------------------
-// Golden-baseline pre-diff seam (S5 — SSIM gates the VLM)
-//
-// The DETERMINISTIC-FIRST order (decision #3) inserts an SSIM pre-diff between the
-// backend deterministic verdict and the paid VLM: if a request's baselineKey
-// resolves to an accepted baseline PNG, the scheduler compares the freshly-captured
-// PNG(s) to it; a near-pixel match (>= threshold) is a CHEAP deterministic PASS
-// (verdictSource:'ssim_match') with NO vision call. Below threshold the request
-// falls through to the VLM, now passing the resolved baselinePath (previously
-// always undefined).
-//
-// Resolution is INJECTED as a plain async function (wired at index.ts over the
-// FsBaselineStore + comparePngFiles + the project path) so the scheduler stays
-// fs/electron/service-free — the closure does ALL fs + image-decode work. It is
-// invoked ONCE per request from input.baselineKey; absent injection / no
-// baselineKey / no accepted baseline ⇒ null (intent-only judging = pre-S5 behavior).
-// ---------------------------------------------------------------------------
-
-/** The pre-diff outcome for a request whose baselineKey resolved to a baseline. */
-export interface BaselinePreDiffResult {
-  /**
-   * The resolved baseline PNG path (the first viewport's accepted baseline) the
-   * scheduler threads into the VlmJudge's baselinePath arg when the pre-diff did
-   * NOT match — so the judge still compares against the golden image. Absent when
-   * no baseline file exists for any captured viewport.
-   */
-  baselinePath?: string;
-  /** The MIN similarity score across the compared viewports (0..1; 1 = identical). */
-  ssimScore: number;
-  /** True when ssimScore >= the baseline-match threshold (a cheap deterministic PASS). */
-  match: boolean;
-}
-
-/**
- * Resolve + compare a request's captured PNG(s) against its golden baseline. INJECTED
- * (wired at index.ts) so the scheduler does no fs / image decoding. Given the request
- * + the captured fileNames (relative to artifactsDir), it resolves the baseline PNGs
- * for input.baselineKey under the project root and returns the comparison, or null
- * when there is nothing to compare (no injection / no baselineKey / no accepted
- * baseline for any captured viewport) — in which case the scheduler runs the VLM with
- * no baselinePath, exactly as before S5.
- */
-export type BaselinePreDiffResolver = (args: {
-  projectId: number;
-  runId: string;
-  input: VerificationRequestInput;
-  artifactsDir: string;
-  fileNames: string[];
-}) => Promise<BaselinePreDiffResult | null>;
-
-// ---------------------------------------------------------------------------
-// Injected collaborators + optional verdict side-effect hook
-// ---------------------------------------------------------------------------
-
-/**
- * The optional verdict-delivery callback. For THIS slice (P5) the real
- * side-effects (ArtifactRouter enrich + ReviewItemRouter finding +
- * SprintLaneStore advance/loopback) are STUBBED behind this hook — P8 wires the
- * concrete one. The scheduler never imports the routers (standalone-typecheck
- * invariant); it only calls back with the terminal outcome. `verdict` is present
- * only for a judged outcome (passed/failed/low_confidence); skipped/timeout pass
- * undefined.
- */
-export type OnVerdict = (args: {
-  requestId: string;
-  runId: string;
-  projectId: number;
-  type: VerificationType;
-  status: RequestStatus;
-  verdict?: VerdictV1;
-  fileNames: string[];
-  /**
-   * The original request input (parsed from deliverable_json) — carries
-   * `taskRef` for the merge-gate driver's verdict→lane attribution (P8b). Present
-   * for every delivered outcome whose row parsed; an unparseable-deliverable skip
-   * passes undefined (there is no lane to attribute and nothing to enrich).
-   */
-  input?: VerificationRequestInput;
-  /**
-   * HUMAN-FACING capture provenance (S9 / Codex finding 9): how the deliverable
-   * was stood up for this attempt. Present for every runChosen terminal; the
-   * processRow skip paths (no capture attempted) pass undefined.
-   */
-  captureOrigin?: CaptureOrigin;
-  /**
-   * UNTRUSTED capture diagnostics (S9 / Codex finding 7): capped page-console
-   * lines + capture-side notes (file:// breadcrumb, fold truncation). Page code
-   * controls this text — the delivery renders it on human surfaces (review-item
-   * finding body / screenshots payload) ONLY; it must never feed a judge or
-   * derive pass/fail.
-   */
-  diagnostics?: string[];
-}) => void | boolean | Promise<void | boolean>;
-// ^ Return contract (§5.6 amended, adversarial-review fix 2026-07-23): an
-// explicit `false` means at least one REQUIRED delivery consumer (artifact
-// merge / merge-gate lane write / finding creation) failed — the scheduler
-// then leaves the row `delivery_state='pending'` for replay instead of
-// stamping 'delivered'. `void`/`true` (and legacy hooks that return nothing)
-// count as fully delivered.
-
-/**
- * The default per-request deadline (5 minutes). When a capture+judge attempt runs
- * longer than this the scheduler `signal.abort()`s the in-flight work and marks the
- * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
- */
-export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Delivery-retry backoff (§5.6 amended): when a delivery leaves a terminal row
- * `pending` (a required consumer failed), an in-process sweep re-runs
- * replayPendingDeliveries after this base delay, doubling per consecutive failed
- * sweep up to the cap — so recovery from a transient router/DB error does not
- * have to wait for the next boot. Reset to the base once a sweep fully drains.
- */
-export const DELIVERY_RETRY_BASE_MS = 60 * 1000;
-export const DELIVERY_RETRY_MAX_MS = 15 * 60 * 1000;
-
-/**
- * Default per-request deadline for an AGENT-engine row (redesign §5.4 step 6): 10
- * minutes — an agent deployment builds, serves, drives, and judges, so it needs far
- * longer than a single capture. It is also the FLOOR: since F2 a composed
- * `task.timeoutMs` may only RAISE the deadline (the ceiling below still caps any
- * value) — see {@link VerificationScheduler.agentDeadlineMs}. Applied through the
- * SAME per-request abort/raceWithAbort machinery as the legacy deadline.
- */
-export const DEFAULT_AGENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
-
-/** Hard ceiling on an agent row's deadline — a task-supplied `timeoutMs` can never exceed this. */
-export const AGENT_REQUEST_TIMEOUT_CEILING_MS = 20 * 60 * 1000;
-
-/**
- * How long a backend's `healthCheck()` result is memoized (R2 #2). The health probe
- * is the SECOND selection gate (after registry presence): an unregistered OR
- * unhealthy backend is treated identically (dropped from the candidate chain). To
- * avoid re-probing every backend on every drain — a peekaboo TCC probe or a chromium
- * install check is not free — the scheduler caches each backend's result for this
- * TTL, keyed by backend id. A later-granted TCC / freshly-installed chromium is
- * picked up once the TTL expires and the next drain re-probes. Exported so the
- * regression test can drive the memo boundary with an injected clock.
- */
-export const HEALTH_CHECK_MEMO_TTL_MS = 60 * 1000;
-
-/**
- * The default SSIM baseline-match threshold (S5). A captured PNG scoring at or above
- * this against its accepted baseline is a cheap deterministic PASS that SKIPS the
- * paid VLM (verdictSource:'ssim_match'); below it the request falls through to the
- * vision judge with the resolved baselinePath. Mirrors pixelDiff's default so the
- * gate is consistent whether the resolver or the scheduler applies it.
- */
-export const DEFAULT_SSIM_MATCH_THRESHOLD = 0.98;
-
-/**
- * How many concurrent batched holders a waiter on `sprint-verify-<batchId>` may
- * legitimately queue behind. The batch mutex is a count-1 serialization point, so a
- * waiter can stack behind several already-held captures (rung-0 null-lease captures
- * truly run concurrently — see runChosen / drain Promise.allSettled). Each holder may
- * legitimately hold for up to requestTimeoutMs (its own capture+judge deadline), so
- * the waiter's acquire timeout must be sized as requestTimeoutMs * this factor — NOT
- * the Mutex 30s default, which would spuriously throw 'Mutex timeout' and mark the
- * second concurrent batched capture 'failed' instead of serializing it (the EXACT
- * guarantee S5 exists to provide). Chosen larger than any realistic per-batch lane
- * fan-out so a genuinely serialized waiter waits rather than fails.
- */
-export const BATCH_MUTEX_MAX_QUEUED_HOLDERS = 16;
-
-/** The dependency bag VerificationScheduler.initialize takes. */
-export interface VerificationSchedulerDeps {
-  db: DatabaseLike;
-  /** Capture backends present on this host (absent = host-dep unavailable). */
-  backends: VerificationBackendRegistry;
-  /** The orthogonal Rung-4 vision judge. */
-  judge: VlmJudge;
-  /** Resolves a run's $CYBOFLOW_RUN_ARTIFACTS_DIR (injected from index.ts). */
-  artifactsDirResolver: (runId: string) => string;
-  logger?: LoggerLike;
-  /** Resolved visualVerify config (port/sim pools, threshold). Defaults applied. */
-  config?: ResolvedVisualVerifyConfig;
-  /**
-   * The LIVE config, re-read per call. `config` above is resolved once at boot,
-   * which is right for the judge threshold and the port pools (a run must not
-   * change shape underneath itself) and wrong for a user-facing toggle: a switch
-   * flipped in Settings is expected to bind the next run, not the next launch.
-   * That mattered most in the OFF direction — unchecking "let runs set up
-   * verification themselves" mid-incident left the next lane still committing.
-   */
-  liveConfig?: () => ResolvedVisualVerifyConfig;
-  /** Verdict-delivery side-effect hook (P8 wires the real one; stubbed here). */
-  onVerdict?: OnVerdict;
-  /** Shared lease pool override (tests). Defaults to a pool over the global mutex. */
-  leasePool?: ResourceLeasePool;
-  /**
-   * The scheduler-owned dev-server spawner (S2). When present AND a request's
-   * resolved deliverable recipe has a `start` command, the scheduler spawns a dev
-   * server on the leased port, threads its baseUrl into capture, and tears it down
-   * after. Absent (or no `start`) ⇒ the static url/htmlPath capture path is
-   * unchanged (MVP Rung-0 behavior). The concrete DevServerManager (a service) is
-   * injected at index.ts; the scheduler never imports it.
-   */
-  devServerProvider?: DevServerProvider;
-  /**
-   * Resolves a request's dev-server spawn context (project worktree cwd + the
-   * matching verify.json deliverable recipe). Injected as a plain async function so
-   * the scheduler stays fs/electron/service-free — the closure (wired at index.ts)
-   * does the loadVerifyConfig + project-path fs work. Absent ⇒ no dev server is
-   * ever spawned (static capture path preserved).
-   */
-  devServerContextResolver?: DevServerContextResolver;
-  /**
-   * The scheduler-owned static file server (S9). When present AND a request has an
-   * htmlPath but no url and no dev-server recipe, the scheduler serves the html's
-   * static root on an ephemeral loopback port (no lease — the OS assigns the port),
-   * threads the tokenized entry URL into capture, and tears it down after. Absent ⇒
-   * the raw htmlPath capture path is unchanged (pre-S9 file:// behavior). The
-   * concrete StaticServerManager (a service) is injected at index.ts.
-   */
-  staticServerProvider?: StaticServerProvider;
-  /**
-   * Resolves a request's static-serve context (worktree-resolved absolute html path
-   * + confining static root). Injected as a plain async function so the scheduler
-   * stays fs/electron/service-free — the closure (wired at index.ts) does the DB
-   * path lookup + fs work. Absent ⇒ no static server is ever spawned.
-   */
-  staticHtmlContextResolver?: StaticHtmlContextResolver;
-  /**
-   * Per-request capture+judge deadline in ms. On expiry the in-flight attempt is
-   * `signal.abort()`ed and the row is marked 'timeout' (lease released). Defaults
-   * to DEFAULT_REQUEST_TIMEOUT_MS (5 min). Tests pass a small value to exercise it.
-   */
-  requestTimeoutMs?: number;
-  /**
-   * S5 — the golden-baseline SSIM pre-diff resolver. When present AND a request's
-   * baselineKey resolves to an accepted baseline PNG, the scheduler compares the
-   * freshly-captured PNG(s) before spending a vision call: a near-pixel match is a
-   * cheap deterministic PASS (verdictSource:'ssim_match', NO VLM call); below the
-   * match threshold the request falls through to the VLM with the resolved
-   * baselinePath. Absent ⇒ intent-only judging (pre-S5 behavior, baselinePath
-   * undefined). The concrete resolver (fs + image decode) is wired at index.ts; the
-   * scheduler imports only this TYPE (standalone-typecheck invariant).
-   */
-  baselinePreDiff?: BaselinePreDiffResolver;
-  /**
-   * S5 — the SSIM baseline-match threshold (0..1). A pre-diff similarity at or above
-   * this short-circuits the VLM with an 'ssim_match' PASS. Defaults to
-   * DEFAULT_SSIM_MATCH_THRESHOLD. (The resolver itself returns `match`, but the
-   * scheduler stamps the threshold-derived PASS, so it owns the gate.)
-   */
-  baselineMatchThreshold?: number;
-  /**
-   * Injectable monotonic clock (ms) for the healthCheck memo TTL (R2 #2). Defaults
-   * to `Date.now`. Tests pass a controllable clock to exercise the memo boundary
-   * (two drains within the TTL probe once; after expiry the next drain re-probes)
-   * without a real 60s wait.
-   */
-  now?: () => number;
-  /**
-   * The verification-AGENT engine (redesign §5.4). When a run's stamped
-   * `verify_chain` is `['agent']`, the scheduler routes its requests to THIS runner
-   * (snapshot build → deploy the workflow-defined agent → validate → mutation-check
-   * → teardown) instead of the capture-backend + VLM waterfall. Absent ⇒ an
-   * agent-stamped row resolves 'skipped' (fail-open) — an old binary / a deployment
-   * wired without the runner never wedges. Injected at index.ts; the scheduler
-   * imports only the TYPE (standalone-typecheck invariant).
-   */
-  agentRunner?: VerificationAgentRunnerLike;
-  /**
-   * Per-request deadline for an agent row (default {@link DEFAULT_AGENT_REQUEST_TIMEOUT_MS},
-   * capped by {@link AGENT_REQUEST_TIMEOUT_CEILING_MS}). Tests pass a small value.
-   */
-  agentRequestTimeoutMs?: number;
-  /** Ceiling on an agent row's deadline (default {@link AGENT_REQUEST_TIMEOUT_CEILING_MS}). */
-  agentRequestCeilingMs?: number;
-  /**
-   * Probe whether a leased verification PORT is genuinely free (§5.4 step 6). Used
-   * at agent teardown to decide release-vs-quarantine, and re-run by the pool before
-   * a later acquisition of a quarantined slot. Returns true when the port is free.
-   * Default: always-free (so a deployment without a real net probe releases normally
-   * and never quarantines — safe in tests). The real net-connect probe is wired at
-   * index.ts. Injected as a plain function so the scheduler stays net/service-free.
-   */
-  portFreeProbe?: (port: number) => Promise<boolean>;
-  /**
-   * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time
-   * (redesign §5.6). A row whose `enqueued_at` is older than this at drain time —
-   * i.e. it never acquired a lease within the window — is terminalized 'skipped'
-   * (fail-open, concrete lease reason) through the normal delivery path so a
-   * merge-gate lane parked at awaiting-verify is never wedged behind a starved
-   * request. Defaults to config.queuedAgeCeilingMs (15 min). Tests pass a small
-   * value to exercise the boundary.
-   */
-  queuedAgeCeilingMs?: number;
-  /**
-   * §5.8 legacy kill-switch check — whether `CYBOFLOW_VERIFY_LEGACY` is active,
-   * read ONCE per `runRecovery()` pass (never inline `process.env`, and never
-   * re-read per row) so the boot terminalization below is deterministic within a
-   * single pass. INJECTED as a plain function (mirrors `now`/`portFreeProbe`) so
-   * tests can flip the posture without mutating global env; defaults to the same
-   * `process.env.CYBOFLOW_VERIFY_LEGACY === '1'` check `workflowRegistry.ts` uses
-   * to stamp NEW runs onto the legacy chain — this dep is the missing BOOT half of
-   * that rollback contract (existing in-flight AGENT-chain rows get terminalized
-   * too, not just future runs redirected).
-   */
-  legacyKillSwitch?: () => boolean;
-  /**
-   * The §3.3/§3.4 per-(project, modality) capability ledger — the `unsupported`
-   * mark and the K-consecutive-env-failure circuit breaker
-   * (docs/proposals/verification-setup-flow.md). Consulted BEFORE any lease is
-   * acquired (a suppressed modality never deploys) and fed AFTER every terminal
-   * (an env-class failure counts toward the breaker; a pass or a
-   * deliverable-attributed failure resets it). Absent ⇒ no suppression is ever
-   * active and no outcome is recorded — byte-identical to the pre-phase-0
-   * behavior, which is what every legacy test and any pre-095 DB gets.
-   */
-  capabilityStore?: VerifyCapabilityStore;
-  /**
-   * §3.2 degrade path — whether this (project, modality) has a PROVEN
-   * verification runbook. The phase-2 setup flow ("derive → prove → persist")
-   * owns the real store; until it lands the default answers `'absent'` for every
-   * project, which is the honest answer: no project has ever proven one, because
-   * the concept does not exist yet.
-   *
-   * CONTRACT for the phase-2 replacement: `'proven'` means a runbook was
-   * test-executed end-to-end through the real verification path on THIS host;
-   * `'unproven-draft'` means one was derived but never proved (treated exactly
-   * like `'absent'` by the gate — a merely-written config is precisely what the
-   * failed `.cyboflow/verify.json` model already proved insufficient, §1);
-   * `'absent'` means none exists.
-   *
-   * ASYNC (phase 2): the real answer is a CONJUNCTION re-checked on every read —
-   * a freshly computed project input-hash must match the stored one, so must the
-   * host fingerprint, and IF the probe path carries a portable file at all it
-   * must parse and hash to the record's hash (§5.3 "Any component changing
-   * demotes"). That last conjunct is conditional since F10: the record, not the
-   * file, is what a proof executes, so a tree that simply has not merged the
-   * export yet skips it and is judged on the other two — while a file that IS
-   * there and disagrees is content drift and still refuses. Two of the three are
-   * filesystem work, so the thunk cannot be synchronous without either blocking
-   * the drain on IO or answering from a cache that is exactly what drift
-   * detection must not rely on.
-   *
-   * `probePath` is the TREE to check, and the gate passes the REQUESTING RUN's
-   * worktree (lane-runbook-bootstrap.md §3). It used to pass nothing, and the
-   * thunk probed the project root — while the enqueue-side injection
-   * ({@link VerificationScheduler.resolveProvenRunbook}) had always probed the
-   * run's worktree. The two therefore described DIFFERENT TREES, and a runbook a
-   * run commits to its own branch stayed invisible to the gate until that branch
-   * merged: every request in that run kept skipping with a setup CTA even though
-   * the tree it would execute in carried a proven runbook. Omitting `probePath`
-   * still falls back to the project root, which is what the project-level health
-   * badge wants.
-   */
-  runbookStatus?: (
-    projectId: number,
-    modality: VerificationModality,
-    probePath?: string,
-  ) => Promise<VerifyRunbookStatusDetail>;
-  /**
-   * The machine-local runbook record store (§5.2 seam 1 + §5.3), injected as the
-   * concrete class exactly like {@link VerificationSchedulerDeps.capabilityStore}
-   * — the scheduler needs three of its verbs and splitting them into three
-   * thunks would only obscure that they are all views of ONE record:
-   *
-   *  - `status` + `getCurrent` back {@link VerificationScheduler.resolveProvenRunbook},
-   *    the ENQUEUE-time pinned injection both enqueue entry points call (§5.2
-   *    seam 3);
-   *  - `markProven` is the ENGINE-ENFORCED proof flip (§5.3): a `setup_proof`
-   *    request that actually PASSED through the real verification path is the
-   *    only thing that may turn a draft into a proven runbook — deliberately
-   *    not something the setup agent can accomplish by asserting it.
-   *
-   * ABSENT ⇒ no request is ever pinned and no proof is ever recorded, which is
-   * byte-identical to the pre-phase-2 behavior (and what every legacy test and
-   * any pre-096 DB gets).
-   */
-  runbookStore?: VerifyRunbookStore;
-  /**
-   * Files the ONE non-blocking finding the §3.4 circuit breaker raises when it
-   * trips. INJECTED rather than imported, for the standalone-typecheck
-   * invariant: the concrete implementation is verdictDelivery's
-   * `createCapabilityBreakerFinding`, which owns the ReviewItemRouter chokepoint
-   * — this module never touches a router. Absent ⇒ the breaker still suppresses,
-   * it just does so silently.
-   */
-  capabilityFinding?: CapabilityBreakerFindingFn;
-  /**
-   * §4 roster — whether this host can capture the screen at all, the ONE gate
-   * that decides whether a `native-screen` request is deployable. The intended
-   * (and index.ts-wired) implementation is the retired capture backend's
-   * `peekabooBackend.healthCheck()`: binary-on-PATH AND both macOS TCC grants,
-   * never-throws, exactly as §4 "Driver additions for native-screen" prescribes
-   * ("the retired peekabooBackend.healthCheck() (both-grants probe,
-   * never-throws) is reused as the live grant probe").
-   *
-   * ABSENT ⇒ the phase-0 behavior is preserved verbatim: every `native-screen`
-   * request is skipped as unsupported without asking. That default is the honest
-   * one — an unprobed host is not evidence of a capable host, and the whole
-   * point of §3 is to stop deploying on hope. Answering TRUE lets the request
-   * proceed as an OBSERVE-ONLY verification; nothing here makes it drivable
-   * (the runner's behavior coercion and the driver's refusal enforce that —
-   * §4 fn.²).
-   *
-   * Injected as a plain thunk (mirrors `portFreeProbe`/`now`) so this module
-   * keeps the standalone-typecheck invariant and never imports a service.
-   */
-  nativeCaptureProbe?: () => Promise<boolean>;
-  /**
-   * The ACTING half of the lane runbook bootstrap
-   * (docs/proposals/lane-runbook-bootstrap.md §12 steps 3–8): derive, commit,
-   * register, and prove a runbook for a lane whose verification would otherwise
-   * be skipped.
-   *
-   * Injected as one closure rather than as its several collaborators because the
-   * scheduler has no business holding a git binary, an SDK query, or a
-   * filesystem — index.ts assembles those and hands down a single
-   * `(args) => outcome` seam. Absent (every unit test, and any deployment where
-   * the toggle can never be on) ⇒ the preflight still computes and logs its
-   * decision and nothing acts on it, which is byte-identical to phase 2.
-   */
-  runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
-}
-
-/**
- * §3.2 runbook state for one (project, modality). `'unproven-draft'` is
- * deliberately NOT a pass: the proposal's whole thesis is that a written config
- * nobody proved is what already failed once (§1, the `.cyboflow/verify.json`
- * era) — only `'proven'` opens the gate.
- */
-export type RunbookStatus = 'proven' | 'unproven-draft' | 'absent';
-
-/**
- * One PROVEN runbook revision, resolved at enqueue time by
- * {@link VerificationScheduler.resolveProvenRunbook} — the content to merge into
- * the composed task plus the two values that become the request row's PIN
- * (migration 096 `runbook_hash` / `runbook_local_version`).
- *
- * `hash` and `version` travel together on purpose: the hash content-addresses
- * the COMMITTED half (so the runner can resolve the exact revision from a
- * snapshot whose tree predates the file entirely) while the version is the
- * MACHINE-LOCAL record's CAS token (so a registration that swapped the record
- * underneath an in-flight request is diagnosable rather than silent).
- */
-export interface ProvenRunbookRevision {
-  hash: string;
-  version: number;
-  entry: VerifyRunbookModalityEntry;
-}
-
-/** The §3.4 circuit-breaker notice seam — see {@link VerificationSchedulerDeps.capabilityFinding}. */
-export type CapabilityBreakerFindingFn = (args: {
-  projectId: number;
-  runId: string;
-  modality: VerificationModality;
-  /** The env-failure reason that tripped the breaker (the last terminal's evidence). */
-  reason: string;
-}) => void | Promise<void>;
-
-// ---------------------------------------------------------------------------
-// Row shape
-// ---------------------------------------------------------------------------
-
-/** A queued/leased/running verification_requests row, as the drain SELECT reads it. */
-interface VerificationRequestRow {
-  id: string;
-  run_id: string;
-  project_id: number;
-  status: string;
-  verify_type: string;
-  deliverable_json: string;
-  chain_json: string | null;
-  current_backend: string | null;
-  attempt: number;
-  /** ISO enqueue time — the anchor for the queued-age deadline (§5.6). */
-  enqueued_at: string;
-}
-
-// ---------------------------------------------------------------------------
-// Drain priority (§5.4 groundwork — "setup runs at lower priority")
-// ---------------------------------------------------------------------------
-
-/**
- * How long a `setup_proof` row may sit behind lane traffic before it is
- * PROMOTED to lane priority. Five minutes is the anti-starvation half of §5.4's
- * "setup proofs run at lower priority": without it a project with continuous
- * lane traffic could never prove a runbook — and it is precisely the projects
- * with the most lane traffic that most need one. Sized well under the 15-minute
- * `queuedAgeCeilingMs` so a promoted proof still has a real window to lease
- * before the age ceiling would terminalize it.
- */
-export const SETUP_PROOF_PROMOTION_MS = 5 * 60 * 1000;
-
-/** The two fields drain ordering keys on, plus the migration-095 setup-proof flag. */
-export interface AgentDrainOrderRow {
-  id: string;
-  /** ISO enqueue time — the promotion clock's anchor. */
-  enqueued_at: string;
-  /**
-   * Migration-095 `setup_proof`, read through the scheduler's DEFENSIVE
-   * per-row query (fail-soft `false` on a pre-095 DB), never through the drain
-   * SELECT — see {@link orderAgentDrainRows}.
-   */
-  setupProof: boolean;
-}
-
-/**
- * Order one drain pass's queued rows into the §5.4 priority classes. PURE (no
- * DB, no clock of its own — `nowMs` is passed in) so the policy is unit-testable
- * on its own, which is the whole reason it is a free function rather than a
- * private method.
- *
- * TWO classes, not a general priority queue:
- *   0. LANE requests (`setup_proof = 0`) — a live sprint lane is parked at
- *      awaiting-verify behind each one.
- *   1. SETUP-PROOF requests (`setup_proof = 1`) — nobody is blocked on them;
- *      §5.4 says they must not out-contend live lanes.
- * …with one exception: a setup proof older than {@link SETUP_PROOF_PROMOTION_MS}
- * is promoted INTO class 0 (anti-starvation).
- *
- * WHY NOT IN SQL. The drain SELECT is deliberately left untouched: it must keep
- * working against a pre-095 DB that has no `setup_proof` column at all, and an
- * `ORDER BY setup_proof` there would throw for every legacy row rather than
- * degrade. Ordering in JS off a fail-soft per-row read means a legacy row simply
- * reports `setupProof: false`, lands in class 0, and drains in the exact FIFO
- * order it always did.
- *
- * STABILITY. Within a class the caller's order is preserved verbatim (the
- * comparator falls back to the original index), so the SQL's
- * `ORDER BY enqueued_at, id` remains the FIFO source of truth and this helper
- * only ever moves rows BETWEEN classes.
- *
- * A starved setup proof is not silently lost either way: the §5.6 queued-age
- * ceiling still expires it through the normal delivery path, so the worst case
- * of a mis-sized pool is a visible 'skipped' with a concrete reason, never a row
- * that sits forever. Pool sizing itself stays decoupled from `SPRINT_BATCH_CAP`
- * (see {@link verifyAgentSlot}).
- */
-export function orderAgentDrainRows<T extends AgentDrainOrderRow>(
-  rows: readonly T[],
-  nowMs: number,
-): T[] {
-  const priorityClass = (row: T): 0 | 1 => {
-    if (!row.setupProof) return 0;
-    const enqueuedMs = Date.parse(row.enqueued_at);
-    // An unparseable enqueued_at cannot be aged, so it is NOT promoted — the same
-    // conservative posture expireOverAgeQueued takes with the same column (a
-    // clock/parse glitch must not silently reprioritize the backlog).
-    if (!Number.isFinite(enqueuedMs)) return 1;
-    return nowMs - enqueuedMs >= SETUP_PROOF_PROMOTION_MS ? 0 : 1;
-  };
-  return rows
-    .map((row, index) => ({ row, index, cls: priorityClass(row) }))
-    .sort((a, b) => (a.cls !== b.cls ? a.cls - b.cls : a.index - b.index))
-    .map((entry) => entry.row);
-}
-
-// ---------------------------------------------------------------------------
-// The synchronous proof primitive (§5.2 seam 2)
-// ---------------------------------------------------------------------------
-
-/**
- * The three statuses a request can hold while it is still ALIVE — the exact set
- * `markTerminal`'s guarded UPDATE keys on (`status IN ('queued','leased',
- * 'running')`). Everything else in {@link RequestStatus} is terminal by
- * construction, so deriving "terminal" from THIS set (rather than re-listing the
- * five terminal states) means a future status added to the union cannot be
- * silently treated as terminal by one site and non-terminal by the other.
- */
-export const NON_TERMINAL_REQUEST_STATUSES: readonly RequestStatus[] = [
-  'queued',
-  'leased',
-  'running',
-] as const;
-
-/** Whether a request has settled (passed/failed/low_confidence/skipped/timeout). */
-export function isTerminalRequestStatus(status: RequestStatus): boolean {
-  return !NON_TERMINAL_REQUEST_STATUSES.includes(status);
-}
-
-/** Narrow a raw `status` column value to the CHECK-constrained union. */
-function isRequestStatus(value: unknown): value is RequestStatus {
-  return typeof value === 'string' && (REQUEST_STATUS as readonly string[]).includes(value);
-}
-
-/**
- * Pull `feedback` out of a persisted `verdict_json`. Fail-soft to `null` in every
- * degenerate case (column NULL on a skip/timeout, unparseable text, a verdict
- * without prose) — a caller blocking on a proof needs the STATUS to be right far
- * more than it needs the prose, and a parse hiccup must never turn a settled
- * verdict into an exception thrown at the awaiting flow.
- */
-function parseVerdictFeedback(verdictJson: unknown): string | null {
-  if (typeof verdictJson !== 'string' || verdictJson.length === 0) return null;
-  try {
-    const parsed: unknown = JSON.parse(verdictJson);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const feedback = (parsed as { feedback?: unknown }).feedback;
-    return typeof feedback === 'string' && feedback.length > 0 ? feedback : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The snapshot {@link VerificationScheduler.awaitTerminal} resolves with — the
- * four things a caller blocking on a verdict actually needs to decide what to do
- * next, and nothing more (the screenshots artifact + the review-queue finding
- * already carry the rest through the ordinary delivery path).
- *
- * `failureClass` is the §3.1 attribution — `'env'` / `'deliverable'` /
- * `'ambiguous'` — and it is what makes a FAILED proof actionable: it tells the
- * setup flow whether to fix an isolation lever, fix the commands, or narrow the
- * task. Typed as a plain `string | null` rather than the
- * {@link VerificationFailureClass} union deliberately: it is read back off a DB
- * column, and a value written by a NEWER binary (or hand-edited) must surface
- * verbatim to the human rather than be narrowed away to `null` here.
- */
-export interface AwaitTerminalOutcome {
-  status: RequestStatus;
-  errorMessage: string | null;
-  failureClass: string | null;
-  /** `verdict_json.feedback` — the judge's prose, when the outcome was judged. */
-  feedback: string | null;
-}
-
-/**
- * One row of {@link VerificationScheduler.listRequestsForRun} — the COLD-READ
- * counterpart to {@link AwaitTerminalOutcome}. `awaitTerminal` answers "what
- * happened to the id I am holding"; this answers "what verifications does this
- * run have", which is the only question left once a context compaction has
- * taken the ids away.
- *
- * `screenshotFiles` is deliberately PER-REQUEST and nullable, not the run's
- * artifact file list: the `screenshots` artifact permanently UNIONS filenames
- * across every delivery on the run, so reporting it per row would attribute an
- * earlier turn's PNGs to this request. `null` means "this engine persisted no
- * exact per-request list" (the legacy capture path writes no `report_json`) —
- * distinct from `[]`, which means the agent ran and captured nothing.
- */
-export interface VerificationRequestSummary {
-  id: string;
-  status: RequestStatus;
-  verifyType: string | null;
-  attempt: number;
-  errorMessage: string | null;
-  failureClass: string | null;
-  feedback: string | null;
-  enqueuedAt: string | null;
-  endedAt: string | null;
-  /**
-   * The git sha the snapshot worktree was built at. Read together with
-   * `dirtyWorktree` from the enqueue reply: a verdict certifies THIS sha, not
-   * necessarily what the user is looking at.
-   */
-  snapshotSha: string | null;
-  screenshotFiles: string[] | null;
-}
-
-/** How often {@link VerificationScheduler.awaitTerminal} re-reads the row. */
-export const AWAIT_TERMINAL_POLL_INTERVAL_MS = 1000;
-
-/**
- * The `errorMessage` an {@link VerificationScheduler.awaitTerminal} deadline
- * returns, alongside the request's CURRENT (still non-terminal) status. It is
- * deliberately NOT a `'timeout'` status: the request itself has not timed out —
- * it is still queued or running and will terminalize on its own schedule — only
- * this caller stopped waiting. Reporting it as a request timeout would make the
- * setup flow diagnose a deadline it never hit.
- */
-export const AWAIT_TERMINAL_TIMEOUT_MESSAGE = 'await timeout';
-
-/**
- * The `errorMessage` returned when the request id resolves to nothing at all
- * (never enqueued, or unreadable). Paired with a `'skipped'` status because that
- * is this scheduler's established "no verdict, and that is not a failure" state
- * — the caller must not read it as a pass, and must not loop back on it either.
- */
-export const AWAIT_TERMINAL_NOT_FOUND_MESSAGE = 'request not found';
+export {
+  verificationEvents,
+  verificationChannel,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DELIVERY_RETRY_BASE_MS,
+  DELIVERY_RETRY_MAX_MS,
+  DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
+  AGENT_REQUEST_TIMEOUT_CEILING_MS,
+  HEALTH_CHECK_MEMO_TTL_MS,
+  DEFAULT_SSIM_MATCH_THRESHOLD,
+  BATCH_MUTEX_MAX_QUEUED_HOLDERS,
+} from './verificationSchedulerContracts';
+export type {
+  VerificationTerminalEvent,
+  DevServerSpawnArgs,
+  DevServerHandle,
+  DevServerProvider,
+  DevServerContextResolver,
+  StaticServerSpawnArgs,
+  StaticServerHandle,
+  StaticServerProvider,
+  StaticHtmlContextResolver,
+  TerminalExtra,
+  BaselinePreDiffResult,
+  BaselinePreDiffResolver,
+  OnVerdict,
+  VerificationSchedulerDeps,
+  RunbookStatus,
+  ProvenRunbookRevision,
+  CapabilityBreakerFindingFn,
+} from './verificationSchedulerContracts';
+export {
+  VERIFY_SCREEN_LEASE,
+  VERIFY_AGENT_LEASE,
+  verifyAgentSlot,
+  verifyPortLease,
+  verifySimLease,
+  sprintVerifyBatchLease,
+  ResourceLeasePool,
+  AbortRaceError,
+  raceWithAbort,
+} from './verificationLeases';
+export type {
+  LeaseHandle,
+} from './verificationLeases';
+export {
+  VERIFY_NO_RUNBOOK_REASON,
+  VERIFY_RUNBOOK_ELSEWHERE_REASON,
+  VERIFY_RUNBOOK_DRIFTED_REASON,
+  VERIFY_RUNBOOK_UNREADABLE_REASON,
+  runbookDeclineForSkipReason,
+  VERIFY_UNPROVEN_SKIP_BLOCKED,
+} from './verificationSkipReasons';
+export {
+  SETUP_PROOF_PROMOTION_MS,
+  orderAgentDrainRows,
+  NON_TERMINAL_REQUEST_STATUSES,
+  isTerminalRequestStatus,
+  AWAIT_TERMINAL_POLL_INTERVAL_MS,
+  AWAIT_TERMINAL_TIMEOUT_MESSAGE,
+  AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
+} from './verificationRequestRows';
+export type {
+  AgentDrainOrderRow,
+  AwaitTerminalOutcome,
+  VerificationRequestSummary,
+} from './verificationRequestRows';
 
 // ---------------------------------------------------------------------------
 // VerificationScheduler
@@ -1435,7 +183,6 @@ export class VerificationScheduler {
 
   private readonly db: DatabaseLike;
   private readonly backends: VerificationBackendRegistry;
-  private readonly judge: VlmJudge;
   private readonly artifactsDirResolver: (runId: string) => string;
   private readonly logger?: LoggerLike;
   private readonly config: ResolvedVisualVerifyConfig;
@@ -1443,28 +190,16 @@ export class VerificationScheduler {
   private readonly onVerdict?: OnVerdict;
   private readonly leasePool: ResourceLeasePool;
   private readonly requestTimeoutMs: number;
-  private readonly devServerProvider?: DevServerProvider;
   private readonly devServerContextResolver?: DevServerContextResolver;
-  private readonly staticServerProvider?: StaticServerProvider;
-  private readonly staticHtmlContextResolver?: StaticHtmlContextResolver;
-  private readonly baselinePreDiff?: BaselinePreDiffResolver;
-  private readonly baselineMatchThreshold: number;
   private readonly now: () => number;
-  private readonly agentRunner?: VerificationAgentRunnerLike;
-  private readonly agentRequestTimeoutMs: number;
-  private readonly agentRequestCeilingMs: number;
-  private readonly portFreeProbe: (port: number) => Promise<boolean>;
   private readonly queuedAgeCeilingMs: number;
   private readonly legacyKillSwitch: () => boolean;
-  private readonly capabilityStore?: VerifyCapabilityStore;
   private readonly runbookStatus: (
     projectId: number,
     modality: VerificationModality,
     probePath?: string,
   ) => Promise<VerifyRunbookStatusDetail>;
   private readonly runbookStore?: VerifyRunbookStore;
-  private readonly capabilityFinding?: CapabilityBreakerFindingFn;
-  private readonly nativeCaptureProbe?: () => Promise<boolean>;
   private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
@@ -1478,14 +213,31 @@ export class VerificationScheduler {
   private queuedAgeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * In-process delivery-retry sweep (§5.6 amended): armed when a delivery leaves a
-   * terminal row `pending` (a required consumer failed); fires
-   * replayPendingDeliveries after a backoff so recovery does not wait for the next
-   * boot. One timer at a time, `unref`ed like queuedAgeTimer.
+   * Terminal write + verdict delivery (§5.6 delivery outbox), including the
+   * in-process delivery-retry sweep — owned by {@link TerminalDelivery}
+   * (terminalDelivery.ts, issue #19 step 6), so the scheduler itself holds no
+   * delivery state. Constructed over the same db / logger / onVerdict.
    */
-  private deliveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Current retry backoff — doubles per consecutive failed sweep, reset on a full drain. */
-  private deliveryRetryDelayMs = DELIVERY_RETRY_BASE_MS;
+  private readonly delivery: TerminalDelivery;
+
+  /**
+   * The legacy capture engine — dev/static server spawn → backend capture →
+   * deterministic / SSIM / VLM verdict → terminal delivery — owned by
+   * {@link CapturePipeline} (capturePipeline.ts, issue #19 step 7). It shares this
+   * scheduler's inFlight registry and delivery, and is handed the drain/agent
+   * helpers it needs (batch mutex, budget, port parsing) as closures.
+   */
+  private readonly capture: CapturePipeline;
+
+  /**
+   * The verification-AGENT engine (redesign §5.4/§5.7) — the phase-0 gates, the
+   * slot lease + SDK deployment, terminal settlement, runbook-proof and
+   * capability-ledger write-back — owned by {@link AgentEngine} (agentEngine.ts,
+   * issue #19 step 8). Like the capture pipeline it shares this scheduler's
+   * inFlight registry, delivery, lease pool, and the row/path helpers it is
+   * handed as closures; the drain dispatches an agent-stamped row to it.
+   */
+  private readonly agent: AgentEngine;
 
   /**
    * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
@@ -1512,28 +264,18 @@ export class VerificationScheduler {
   constructor(deps: VerificationSchedulerDeps) {
     this.db = deps.db;
     this.backends = deps.backends;
-    this.judge = deps.judge;
     this.artifactsDirResolver = deps.artifactsDirResolver;
     this.logger = deps.logger;
     this.config = deps.config ?? VISUAL_VERIFY_DEFAULTS;
     this.liveConfig = deps.liveConfig ?? null;
     this.onVerdict = deps.onVerdict;
+    this.delivery = new TerminalDelivery({ db: this.db, logger: this.logger, onVerdict: this.onVerdict });
     this.leasePool = deps.leasePool ?? new ResourceLeasePool();
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    this.devServerProvider = deps.devServerProvider;
     this.devServerContextResolver = deps.devServerContextResolver;
-    this.staticServerProvider = deps.staticServerProvider;
-    this.staticHtmlContextResolver = deps.staticHtmlContextResolver;
-    this.baselinePreDiff = deps.baselinePreDiff;
-    this.baselineMatchThreshold = deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD;
     this.now = deps.now ?? (() => Date.now());
-    this.agentRunner = deps.agentRunner;
-    this.agentRequestTimeoutMs = deps.agentRequestTimeoutMs ?? DEFAULT_AGENT_REQUEST_TIMEOUT_MS;
-    this.agentRequestCeilingMs = deps.agentRequestCeilingMs ?? AGENT_REQUEST_TIMEOUT_CEILING_MS;
-    this.portFreeProbe = deps.portFreeProbe ?? (async () => true);
     this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
     this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
-    this.capabilityStore = deps.capabilityStore;
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
@@ -1542,11 +284,54 @@ export class VerificationScheduler {
       // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
       (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
-    this.capabilityFinding = deps.capabilityFinding;
-    // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
-    // probe ran", which the gate reads as unsupported (phase-0 behavior).
-    this.nativeCaptureProbe = deps.nativeCaptureProbe;
     this.runbookBootstrap = deps.runbookBootstrap;
+    this.capture = new CapturePipeline({
+      judge: deps.judge,
+      logger: this.logger,
+      config: this.config,
+      artifactsDirResolver: this.artifactsDirResolver,
+      requestTimeoutMs: this.requestTimeoutMs,
+      baselineMatchThreshold: deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD,
+      devServerProvider: deps.devServerProvider,
+      staticServerProvider: deps.staticServerProvider,
+      staticHtmlContextResolver: deps.staticHtmlContextResolver,
+      baselinePreDiff: deps.baselinePreDiff,
+      delivery: this.delivery,
+      inFlight: this.inFlight,
+      portFromLease: (name) => this.portFromLease(name),
+      inputDeclaresDevServer: (input) => this.inputDeclaresDevServer(input),
+      acquireBatchMutex: (runId) => this.acquireBatchMutex(runId),
+      isProjectBudgetExhausted: (projectId) => this.isProjectBudgetExhausted(projectId),
+      incrementJudgeCallsUsed: (id) => this.incrementJudgeCallsUsed(id),
+    });
+    this.agent = new AgentEngine({
+      db: this.db,
+      logger: this.logger,
+      config: this.config,
+      leasePool: this.leasePool,
+      artifactsDirResolver: this.artifactsDirResolver,
+      agentRunner: deps.agentRunner,
+      agentRequestTimeoutMs: deps.agentRequestTimeoutMs ?? DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
+      agentRequestCeilingMs: deps.agentRequestCeilingMs ?? AGENT_REQUEST_TIMEOUT_CEILING_MS,
+      portFreeProbe: deps.portFreeProbe ?? (async () => true),
+      capabilityStore: deps.capabilityStore,
+      capabilityFinding: deps.capabilityFinding,
+      // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
+      // probe ran", which the gate reads as unsupported (phase-0 behavior).
+      nativeCaptureProbe: deps.nativeCaptureProbe,
+      mobileToolchainProbe: deps.mobileToolchainProbe,
+      runbookStatus: this.runbookStatus,
+      runbookStore: this.runbookStore,
+      delivery: this.delivery,
+      inFlight: this.inFlight,
+      agentGateColumnsForRow: (id) => this.agentGateColumnsForRow(id),
+      worktreePathForRun: (runId) => this.worktreePathForRun(runId),
+      projectPathFor: (projectId) => this.projectPathFor(projectId),
+      acquireBatchMutex: (runId) => this.acquireBatchMutex(runId),
+      isProjectBudgetExhausted: (projectId) => this.isProjectBudgetExhausted(projectId),
+      incrementJudgeCallsUsed: (id) => this.incrementJudgeCallsUsed(id),
+      portFromLease: (name) => this.portFromLease(name),
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -1629,8 +414,8 @@ export class VerificationScheduler {
     for (const row of rows) {
       // Parse the input so the delivery can attribute the lane (deliverable_json →
       // taskRef); an unparseable row still recovers to 'timeout' with no attribution.
-      const input = this.parseInput(row.deliverable_json) ?? undefined;
-      await this.markTerminalAndDeliver(
+      const input = parseRequestInput(row.deliverable_json) ?? undefined;
+      await this.delivery.markTerminalAndDeliver(
         row,
         'timeout',
         { error: 'orphaned by process restart' },
@@ -1660,7 +445,7 @@ export class VerificationScheduler {
     // idempotent deliver() path, then stamped 'delivered'. Legacy rows (NULL
     // delivery_state — pre-078 or terminalized by an old binary) are self-excluded
     // by the WHERE clause and never replayed.
-    const replayed = await this.replayPendingDeliveries();
+    const replayed = await this.delivery.replayPendingDeliveries();
 
     // Wake the drain once so any REMAINING (non-stale) queued rows are processed and
     // the queued-age fallback timer is armed for them (runRecovery runs before any
@@ -1698,8 +483,8 @@ export class VerificationScheduler {
     let terminalized = 0;
     for (const row of rows) {
       if (!this.isAgentEngineRequest(row)) continue;
-      const input = this.parseInput(row.deliverable_json) ?? undefined;
-      await this.markTerminalAndDeliver(
+      const input = parseRequestInput(row.deliverable_json) ?? undefined;
+      await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         { error: 'agent engine disabled (CYBOFLOW_VERIFY_LEGACY)', captureOrigin: 'agent' },
@@ -2326,9 +1111,9 @@ export class VerificationScheduler {
       if (!Number.isFinite(enqueuedMs)) continue;
       const ageMs = nowMs - enqueuedMs;
       if (ageMs < this.queuedAgeCeilingMs) continue;
-      const input = this.parseInput(row.deliverable_json) ?? undefined;
+      const input = parseRequestInput(row.deliverable_json) ?? undefined;
       const ageMin = Math.round(ageMs / 60000);
-      await this.markTerminalAndDeliver(
+      await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         {
@@ -2414,9 +1199,9 @@ export class VerificationScheduler {
    */
   private async processRow(row: VerificationRequestRow): Promise<{ work: Promise<void> | null }> {
     const type = row.verify_type as VerificationType;
-    const parsed = this.parseInput(row.deliverable_json);
+    const parsed = parseRequestInput(row.deliverable_json);
     if (!parsed) {
-      await this.markTerminalAndDeliver(
+      await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         { error: 'unparseable deliverable_json' },
@@ -2435,7 +1220,7 @@ export class VerificationScheduler {
     // its request's chain_json is always the empty intersection. A legacy stamp
     // (or an unreadable one — fail-soft) falls through byte-identically.
     if (this.isAgentEngineRequest(row)) {
-      return this.processAgentRow(row, parsed);
+      return this.agent.processAgentRow(row, parsed);
     }
 
     // ROOT-CAUSE FIX (S8): hydrate the request input from the run's verify.json
@@ -2464,7 +1249,7 @@ export class VerificationScheduler {
       // backend — a missing precondition. SKIP, never fail (a missing TCC grant /
       // uninstalled chromium / static-only chain for a startable deliverable must
       // not wedge a sprint with a blocking finding + merge-gate loopbacks).
-      await this.markTerminalAndDeliver(
+      await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         { error: skipReason ?? 'no usable backend' },
@@ -2517,11 +1302,14 @@ export class VerificationScheduler {
       return { work: null };
     }
     this.markRunning(row.id, chosen.id);
-    return { work: this.runChosen(row, type, input, chosen, lease, resolved) };
+    return { work: this.capture.runChosen(row, type, input, chosen, lease, resolved) };
   }
 
   // --------------------------------------------------------------------------
-  // Verification-AGENT engine (redesign §5.4/§5.7)
+  // Verification-AGENT engine (redesign §5.4/§5.7) — the dispatch predicates and
+  // the row/path readers the engine shares with the drain and the runbook
+  // bootstrap. The engine itself (gates → slot lease → deploy → settle) is
+  // AgentEngine in agentEngine.ts (issue #19 step 8).
   // --------------------------------------------------------------------------
 
   /**
@@ -2607,18 +1395,6 @@ export class VerificationScheduler {
     }
   }
 
-  /** Read the request's `task_json` / `snapshot_sha` (migration 078); fail-soft to nulls. */
-  private agentColumnsForRow(id: string): { taskJson: string | null; snapshotSha: string | null } {
-    try {
-      const row = this.db
-        .prepare('SELECT task_json, snapshot_sha FROM verification_requests WHERE id = ?')
-        .get(id) as { task_json: string | null; snapshot_sha: string | null } | undefined;
-      return { taskJson: row?.task_json ?? null, snapshotSha: row?.snapshot_sha ?? null };
-    } catch {
-      return { taskJson: null, snapshotSha: null };
-    }
-  }
-
   /**
    * The migration-095 gate columns, read in their OWN defensive query rather
    * than folded into {@link agentColumnsForRow}: on a pre-095 DB the widened
@@ -2662,55 +1438,6 @@ export class VerificationScheduler {
         return { modality: null, setupProof: false, bootstrapProof: false };
       }
     }
-  }
-
-  /**
-   * The migration-096 PIN columns for one row, in their OWN defensive query for
-   * the same reason {@link agentGateColumnsForRow} is separate: a pre-096 DB
-   * makes the widened SELECT throw, and folding these into an existing query
-   * would take `task_json` or the gate flags down with them. Fail-soft answer is
-   * "no pin", which is what every legacy row genuinely is.
-   */
-  private runbookPinForRow(id: string): { hash: string | null; version: number | null } {
-    try {
-      const row = this.db
-        .prepare('SELECT runbook_hash, runbook_local_version FROM verification_requests WHERE id = ?')
-        .get(id) as { runbook_hash: unknown; runbook_local_version: unknown } | undefined;
-      const hash = typeof row?.runbook_hash === 'string' && row.runbook_hash.length > 0 ? row.runbook_hash : null;
-      const version = typeof row?.runbook_local_version === 'number' ? row.runbook_local_version : null;
-      return { hash, version };
-    } catch {
-      return { hash: null, version: null };
-    }
-  }
-
-  /**
-   * The capability ledger's THIRD key component for one request:
-   * `verify_capability_state` is keyed `(project_id, modality, runbook_hash)`
-   * (migration 095), and this resolves the `runbook_hash` half from the row's
-   * own §5.2 pin.
-   *
-   * WHY THE HASH IS PART OF THE KEY AT ALL, stated once here for every ledger
-   * call site (the gates' `getActiveSuppression`/`markUnsupported`, and
-   * `recordCapabilityOutcome`'s `recordEnvFailure`/`recordHealthyOutcome`). The
-   * ledger's claims are all of the form "standing this project's `web`
-   * deliverable up FAILS ON THIS HOST" — and what "standing it up" MEANS is the
-   * runbook's build/serve commands. A revision whose dev script was broken
-   * earns three env failures and a 24h suppression; the fix is a new revision
-   * with different commands, re-derived and re-proven. Keying the counter on
-   * (project, modality) ALONE would let the dead revision's failures suppress
-   * the fixed one for the rest of the TTL — the ledger would be punishing a
-   * project for commands nothing runs any more, and phase 2's whole
-   * derive→prove→persist loop would be unable to clear it.
-   *
-   * `''` — migration 095's column default — is the genuinely-UNPINNED bucket:
-   * degenerate pre-live requests that derive no environment, and every legacy
-   * row from before 096. It is a real key, not a fallback for "we could not be
-   * bothered to look": those requests share a capability story precisely
-   * because none of them runs project-authored commands.
-   */
-  private capabilityRunbookKey(requestId: string): string {
-    return this.runbookPinForRow(requestId).hash ?? '';
   }
 
   /** The project's checkout path (`projects.path`); null when unknown/unreadable. */
@@ -2955,1118 +1682,6 @@ export class VerificationScheduler {
       });
       return { kind: 'not-attempted', reason: 'unobservable' };
     }
-  }
-
-  /**
-   * The composed task the agent runs: the persisted `task_json` when present + valid
-   * (dual-format contract §5.2), else a DEGENERATE task synthesized from the legacy
-   * input (a bare-intent request) — `summary = intent`, no build/behaviors, `target`
-   * carried from any url/htmlPath. This is why an 'agent'-stamped run enqueued the
-   * old way (intent only) still deploys the agent rather than erroring.
-   */
-  private taskForAgentRow(id: string, input: VerificationRequestInput): VerificationTaskV1 {
-    const { taskJson } = this.agentColumnsForRow(id);
-    if (taskJson) {
-      try {
-        const parsed = parseVerificationTaskV1(JSON.parse(taskJson));
-        if (parsed.ok) return parsed.task;
-        this.logger?.debug('[VerificationScheduler] task_json failed validation; using degenerate task', {
-          requestId: id,
-          error: parsed.error,
-        });
-      } catch (err) {
-        this.logger?.debug('[VerificationScheduler] task_json parse threw; using degenerate task', {
-          requestId: id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    const target: { url?: string; htmlPath?: string } = {};
-    if (typeof input.url === 'string' && input.url.trim().length > 0) target.url = input.url;
-    if (typeof input.htmlPath === 'string' && input.htmlPath.trim().length > 0) target.htmlPath = input.htmlPath;
-    return {
-      version: 1,
-      summary: input.intent,
-      behaviors: [],
-      ...(input.taskRef ? { taskRef: input.taskRef } : {}),
-      ...(Object.keys(target).length > 0 ? { target } : {}),
-      ...(input.viewports ? { viewports: input.viewports } : {}),
-    };
-  }
-
-  /**
-   * True when the task implies the agent must BIND a dev/preview server on the leased
-   * port (VERIFY_PORT rides only then). A `serve.cmd` means the agent stands one up;
-   * a localhost `target.url` names an already-running server it points at (no bind).
-   */
-  private taskImpliesServer(task: VerificationTaskV1): boolean {
-    if (task.serve && typeof task.serve.cmd === 'string' && task.serve.cmd.trim().length > 0) {
-      return true;
-    }
-    const url = task.target?.url;
-    return typeof url === 'string' && /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0)([:/]|$)/i.test(url.trim());
-  }
-
-  /**
-   * The unsupported-modality DETAIL for `modality`, or `null` when the agent
-   * engine can run it on this host. Split out of {@link evaluateAgentGates}
-   * because `native-screen` alone is answered by a host PROBE rather than by a
-   * static table (§4), and folding an await into the gate's precedence chain
-   * would obscure that only ONE of the three gates does I/O.
-   *
-   * `mobile` and any future table entry are unconditional. `native-screen`:
-   * no probe wired ⇒ the table's phase-0 detail (unprobed is not capable);
-   * probe true ⇒ null (proceed, observe-only); probe false or throwing ⇒
-   * {@link NATIVE_CAPTURE_UNAVAILABLE_DETAIL}.
-   */
-  private async unsupportedModalityDetail(modality: VerificationModality): Promise<string | null> {
-    const tableDetail = UNSUPPORTED_MODALITY_REASONS[modality];
-    if (tableDetail === undefined) return null;
-    if (modality !== 'native-screen' || !this.nativeCaptureProbe) return tableDetail;
-    try {
-      const capable = await this.nativeCaptureProbe();
-      return capable ? null : NATIVE_CAPTURE_UNAVAILABLE_DETAIL;
-    } catch (err) {
-      // The injected probe's contract is never-throws; a throw is a broken probe,
-      // and a broken probe must FAIL CLOSED — native-screen is the one modality
-      // whose deployment moves the user's real screen.
-      this.logger?.warn('[VerificationScheduler] native capture probe threw; treating host as incapable', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return NATIVE_CAPTURE_UNAVAILABLE_DETAIL;
-    }
-  }
-
-  /**
-   * The three PRE-LEASE gates of phase 0
-   * (docs/proposals/verification-setup-flow.md §3.2/§3.3/§3.4), evaluated in
-   * precedence order. Returns the skip REASON when the request must not run, or
-   * `null` to let it proceed. It never MUTATES the request row (it reads the
-   * capability ledger, the injected runbook-status thunk, and — for
-   * `native-screen` only — the injected host-capability probe; the sole write is
-   * the ledger's `markUnsupported`).
-   *
-   *  1. UNSUPPORTED MODALITY (§3.3/§4). `mobile` has no executable path on the
-   *     agent engine — the agent path never consults `verify_type` at all
-   *     (dispatch keys solely on the run's chain stamp), so a `mobile-flow`
-   *     request would otherwise be deployed and left to fail organically ten
-   *     minutes later with an unhelpful message. This states the fact up front
-   *     AND records it in the ledger, so the next request for the same
-   *     (project, modality) short-circuits at gate 2 without even re-deriving it.
-   *
-   *     `native-screen` is no longer a HARD skip: phase 1 gave it an executable
-   *     observe-only path (driver `native-screenshot`/`attest window`, the
-   *     runner's drive-unsupported coercion), so the question became a HOST
-   *     question — can this machine capture the screen at all — and it is
-   *     answered by the injected {@link VerificationSchedulerDeps.nativeCaptureProbe}
-   *     (§4: the retired `peekabooBackend.healthCheck()` both-grants probe).
-   *     True ⇒ proceed; false ⇒ the same unsupported skip carrying the
-   *     actionable grant-pair detail; ABSENT ⇒ the phase-0 answer unchanged
-   *     (unprobed is not capable). A probe that throws is treated as false —
-   *     the contract says never-throws, and a broken probe must not fail OPEN
-   *     onto the user's live screen.
-   *
-   *     This gate is why the method is async: the probe is I/O (it shells the
-   *     peekaboo binary), and it must run BEFORE any lease is taken so a
-   *     capability-less host never holds the screen lease even momentarily.
-   *
-   *  2. ACTIVE SUPPRESSION (§3.3/§3.4). The ledger says this (project, modality)
-   *     is `'unsupported'` or breaker-`'suppressed'` AND the mark has not
-   *     self-refreshed (TTL / host-generation — see VerifyCapabilityStore).
-   *
-   *  3. DEGRADE PATH (§3.2). The request needs an ENVIRONMENT derived for it —
-   *     it has a build step or a serve step — and there is no PROVEN runbook for
-   *     the modality IN THE TREE THIS REQUEST WOULD EXECUTE IN (the run's
-   *     worktree; see the probe-path note on
-   *     {@link VerificationSchedulerDeps.runbookStatus}). This deliberately
-   *     RETIRES per-run guessing for
-   *     build/serve tasks: §1's whole diagnosis is that the agent engine "guesses
-   *     per-run with no memory and guesses wrong every time" (0-for-5 in
-   *     production; wrong serve form, colliding singletons, wrong ABI, blown
-   *     deadline), so continuing to guess buys nothing but a burned deadline and
-   *     a lane charged for someone else's port. A DEGENERATE task — a bare
-   *     pre-live `target` with no build and no serve — is exempt: pointing a
-   *     driver at an already-live URL derives no environment at all, and it is
-   *     the ONLY shape that has ever actually passed in production. A
-   *     `setup_proof` row is exempt too (§3.6): proving the runbook is how a
-   *     project stops being unproven, so gating it would deadlock the bootstrap.
-   */
-  private async evaluateAgentGates(
-    row: VerificationRequestRow,
-    task: VerificationTaskV1,
-    modality: VerificationModality,
-    setupProof: boolean,
-    /** This row's ledger key — see {@link capabilityRunbookKey}. */
-    runbookHash: string,
-    /**
-     * Migration 107 — a LANE-DRIVEN bootstrap proof. Exempt from gate (3) on the
-     * identical §3.6 reasoning that exempts `setupProof`: this request exists to
-     * PROVE the runbook whose absence gate (3) is complaining about, so gating it
-     * is a bootstrap deadlock. It is exempt from NOTHING ELSE — gates (1) and (2)
-     * still bind (an unsupported modality and an active suppression are facts
-     * about the host and the ledger, not about whether a runbook exists), and the
-     * budget still charges it.
-     */
-    bootstrapProof: boolean,
-  ): Promise<string | null> {
-    // (1) Modalities with no executable path on the agent engine (§3.3), plus the
-    // probe-conditional native-screen lane (§4).
-    const unsupportedDetail = await this.unsupportedModalityDetail(modality);
-    if (unsupportedDetail !== null) {
-      const reason = `unsupported modality '${modality}': ${unsupportedDetail}`;
-      this.capabilityStore?.markUnsupported(row.project_id, modality, reason, runbookHash);
-      return reason;
-    }
-
-    // (2) An ACTIVE ledger suppression (§3.3 self-refreshing mark / §3.4 breaker).
-    const suppression =
-      this.capabilityStore?.getActiveSuppression(row.project_id, modality, runbookHash) ?? null;
-    if (suppression !== null) {
-      return `verification suppressed for ${modality}: ${suppression.reason}`;
-    }
-
-    // (3) The §3.2 degrade path.
-    if (setupProof || bootstrapProof) return null;
-    // ONE definition of "derives an environment", shared with the bootstrap
-    // preflight — see bootstrapEligibility.ts for why they must not be two.
-    if (!taskDerivesEnvironment(task)) return null;
-    // Probe the tree this request would actually execute in — the run's
-    // worktree, the SAME ladder resolveProvenRunbook uses, so the gate and the
-    // enqueue-time injection can no longer disagree about which tree they are
-    // describing. `undefined` (a run with no worktree row, or an unreadable one)
-    // lets the thunk fall back to the project root, which is the old behavior.
-    const probePath = this.worktreePathForRun(row.run_id) ?? undefined;
-    const runbook = await this.runbookStatus(row.project_id, modality, probePath);
-    if (runbook.status === 'proven') return null;
-    // NOT all "no proven runbook" are the same situation, and the remedies are
-    // mutually exclusive (§4): telling a human to run setup on a branch that is
-    // merely missing the file would overwrite the proven record every other
-    // branch shares. Classify with the SAME function the preflight declines by.
-    return skipReasonForRunbookDecline(declineForRunbookStatus(runbook));
-  }
-
-  /**
-   * Agent-engine sibling of processRow (§5.4/§4). Acquires, in order: ONE
-   * {@link verifyAgentSlot} from the bounded pool, the count-1
-   * {@link VERIFY_SCREEN_LEASE} when (and only when) the row's modality is
-   * `native-screen`, and one pooled port (always — the bundled driver needs a
-   * CDP port even for a non-serving task; VERIFY_PORT is exported only when the
-   * task implies a server). Then transitions the row leased→running and detaches
-   * the deployment work. Leaves the row 'queued' (LANE never blocks) when ANY of
-   * those is held, and resolves 'skipped' (fail-open) when the runner is not
-   * configured.
-   *
-   * LEASE ORDER IS DELIBERATE: slot → screen → port, cheapest-to-reacquire last,
-   * with every earlier lease released on a later miss. The screen lease sits
-   * INSIDE the slot so a native-screen request can never hold the one screen
-   * while waiting for a deployment slot; and because the pool probes are
-   * non-blocking, an unlucky interleaving costs a requeue, never a deadlock.
-   *
-   * SIMPLIFICATION worth naming: the PORT lease is taken for EVERY modality,
-   * `native-screen` included, even though a native app is not served over a
-   * leased port. `VERIFY_DRIVER_PORT` is part of the runner's env contract
-   * unconditionally (verificationAgentRunner exports it on every deploy), so
-   * making the port lease modality-conditional would mean either handing the
-   * driver an unleased port or forking that contract — both worse than one
-   * extra pooled port held by a native run. The cost is bounded: the port pool
-   * (5 by default) is larger than the agent pool (2 by default), so a
-   * native-screen run can never starve a web run of ports.
-   */
-  private async processAgentRow(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-  ): Promise<{ work: Promise<void> | null }> {
-    if (!this.agentRunner) {
-      await this.markTerminalAndDeliver(
-        row,
-        'skipped',
-        { error: 'verification agent engine not configured', captureOrigin: 'agent' },
-        undefined,
-        [],
-        input,
-      );
-      return { work: null };
-    }
-
-    const task = this.taskForAgentRow(row.id, input);
-
-    // (0) The phase-0 PRE-LEASE gates (docs/proposals/verification-setup-flow.md
-    // §3.2/§3.3/§3.4). Each resolves the row terminal 'skipped' with a concrete
-    // reason + `failure_class='env'`, BEFORE any lease, budget, snapshot, or SDK
-    // deploy is touched — an honest "this could not run, here is exactly why"
-    // instead of the deploy-and-fail-organically the agent path does today.
-    const gate = this.agentGateColumnsForRow(row.id);
-    const modality =
-      gate.modality ?? resolveTaskModality(row.verify_type as VerificationType, task);
-    const gateSkip = await this.evaluateAgentGates(
-      row,
-      task,
-      modality,
-      gate.setupProof,
-      this.capabilityRunbookKey(row.id),
-      gate.bootstrapProof,
-    );
-    if (gateSkip !== null) {
-      await this.markTerminalAndDeliver(
-        row,
-        'skipped',
-        {
-          error: gateSkip,
-          captureOrigin: 'agent',
-          failureClass: 'env',
-          failureEvidence: [{ source: 'runner', check: 'pre-lease-gate', detail: gateSkip }],
-        },
-        undefined,
-        [],
-        input,
-      );
-      return { work: null };
-    }
-
-    const servesPort = this.taskImpliesServer(task);
-
-    // (1) ONE agent-deployment slot from the bounded pool (§4 fn.¹). Every slot
-    // held ⇒ leave 'queued' (retry next drain) — the lane is never held.
-    const agentLease = await this.leasePool.tryAcquireOneOf(this.agentSlotNames());
-    if (!agentLease) {
-      this.logger?.debug('[VerificationScheduler] no free agent slot; leaving queued', {
-        requestId: row.id,
-        slots: this.agentSlotCount(),
-      });
-      return { work: null };
-    }
-    // (2) SCREEN EXCLUSIVITY (§4). A native-screen deployment observes the one
-    // real display, so it additionally takes the count-1 screen lease — the SAME
-    // named lease the legacy Peekaboo backend uses, over the SAME shared mutex,
-    // so a native agent run and a legacy native capture can never overlap either.
-    // Non-native modalities take nothing here and stay fully parallel.
-    let screenLease: LeaseHandle | null = null;
-    if (modality === 'native-screen') {
-      screenLease = await this.leasePool.tryAcquire(VERIFY_SCREEN_LEASE);
-      if (!screenLease) {
-        agentLease.release();
-        this.logger?.debug('[VerificationScheduler] screen lease held; leaving native-screen row queued', {
-          requestId: row.id,
-        });
-        return { work: null };
-      }
-    }
-    // (3) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP).
-    const portLease = await this.leasePool.tryAcquireOneOf(
-      this.config.devServerPorts.map(verifyPortLease),
-    );
-    if (!portLease) {
-      screenLease?.release();
-      agentLease.release();
-      this.logger?.debug('[VerificationScheduler] no free verify port; leaving queued', { requestId: row.id });
-      return { work: null };
-    }
-    const leasedPort = this.portFromLease(portLease.name);
-    if (leasedPort === null) {
-      portLease.release();
-      screenLease?.release();
-      agentLease.release();
-      await this.markTerminalAndDeliver(
-        row,
-        'skipped',
-        { error: 'could not resolve leased verify port', captureOrigin: 'agent' },
-        undefined,
-        [],
-        input,
-      );
-      return { work: null };
-    }
-
-    // Cancel-safe transition (mirrors processRow's markLeased guard): a cancel sweep
-    // during the lease awaits above makes this a 0-change no-op → release + skip.
-    const leasedChanges = this.markAgentLeased(row.id);
-    if (leasedChanges === 0) {
-      portLease.release();
-      screenLease?.release();
-      agentLease.release();
-      this.logger?.debug('[VerificationScheduler] agent row no longer queued at lease time; releasing', {
-        requestId: row.id,
-      });
-      return { work: null };
-    }
-    this.markAgentRunning(row.id);
-
-    const { snapshotSha } = this.agentColumnsForRow(row.id);
-    return {
-      work: this.runAgentChosen(
-        row,
-        input,
-        task,
-        agentLease,
-        screenLease,
-        portLease,
-        leasedPort,
-        servesPort,
-        snapshotSha,
-        modality,
-        gate.setupProof,
-        gate.bootstrapProof,
-      ),
-    };
-  }
-
-  /**
-   * The configured agent-slot count, floored at 1. A persisted `agentSlots` of 0
-   * (or a negative) would otherwise make {@link agentSlotNames} empty, and an
-   * empty candidate list makes `tryAcquireOneOf` return null FOREVER: every agent
-   * request would sit 'queued' until the §5.6 age ceiling swept it — a silent,
-   * whole-feature outage from one bad config value. ConfigManager does not clamp
-   * this, so the clamp lives here, at the single point of use.
-   */
-  private agentSlotCount(): number {
-    return Math.max(1, Math.floor(this.config.agentSlots));
-  }
-
-  /** The bounded agent-slot pool's candidate lease names, probed in index order. */
-  private agentSlotNames(): string[] {
-    return Array.from({ length: this.agentSlotCount() }, (_, i) => verifyAgentSlot(i));
-  }
-
-  /** queued → leased for an agent row (no VisualBackendId; current_backend left untouched). */
-  private markAgentLeased(id: string): number {
-    return this.db
-      .prepare(
-        `UPDATE verification_requests SET status = 'leased', leased_at = ? WHERE id = ? AND status = 'queued'`,
-      )
-      .run(new Date().toISOString(), id).changes;
-  }
-
-  /** leased → running for an agent row. */
-  private markAgentRunning(id: string): number {
-    return this.db
-      .prepare(`UPDATE verification_requests SET status = 'running' WHERE id = ? AND status = 'leased'`)
-      .run(id).changes;
-  }
-
-  /**
-   * The agent row's effective deadline: the composed `task.timeoutMs` (when
-   * positive) FLOORED at the configured default and capped by the ceiling.
-   *
-   * F2 (RC5, docs/proposals/visual-verification-brittleness-fixes.md) added the
-   * floor. The outer `timeoutMs` used to be able to LOWER the deadline without
-   * limit, while being documented on no composer-facing surface (only the
-   * nested `serve.readyWhen.timeoutMs` is) — so a task-verify composer that
-   * guessed `180000` had vr_addb4401 killed at 180s mid-attestation with the
-   * build passed and the app already booted; the identical task at `1200000`
-   * passed in 7m18s. 2 of the 7 all-time timeouts are that. A composer may now
-   * only ever RAISE the deadline toward the ceiling; it can never take it below
-   * the default the harness knows a real build → serve → drive → attest cycle
-   * needs. Tests inject a small `agentRequestTimeoutMs`, so the floor is that
-   * INJECTED default, not the 10-minute production constant.
-   */
-  private agentDeadlineMs(task: VerificationTaskV1): number {
-    const requested =
-      typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : this.agentRequestTimeoutMs;
-    return Math.min(this.agentRequestCeilingMs, Math.max(this.agentRequestTimeoutMs, requested));
-  }
-
-  /**
-   * The DETACHED agent-deployment work for a row already leased + 'running'. Acquires
-   * the same batch worktree-sync mutex the legacy path uses, enforces the per-run
-   * agent-deployment budget (reusing the judge-call counter), deploys the runner
-   * under the per-request deadline via the EXISTING raceWithAbort machinery, and
-   * persists the mapped verdict + `report_json` in one terminal write. Releases the
-   * agent + batch leases in finally, and RELEASES-OR-QUARANTINES the port lease based
-   * on a teardown port probe (§5.4 step 6). Outcome→status is the runner's (§5.7);
-   * an abort/deadline is a 'timeout', an unexpected throw a fail-open 'skipped'.
-   *
-   * PHASE 0 (docs/proposals/verification-setup-flow.md) adds three things here,
-   * all AROUND the unchanged deploy: the budget is bypassed + never charged for a
-   * `setup_proof` row and is charged only for a runner result that actually
-   * DEPLOYED (§3.6); the terminal is run through the conservative §3.1 classifier
-   * and persisted with its evidence; and the (project, modality) capability
-   * ledger is fed the classified outcome (§3.4 breaker).
-   */
-  private async runAgentChosen(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-    task: VerificationTaskV1,
-    agentLease: LeaseHandle,
-    /** The count-1 screen lease for a `native-screen` row; null for every other modality (§4). */
-    screenLease: LeaseHandle | null,
-    portLease: LeaseHandle,
-    leasedPort: number,
-    servesPort: boolean,
-    snapshotSha: string | null,
-    modality: VerificationModality,
-    setupProof: boolean,
-    /**
-     * Migration 107 — a lane-driven bootstrap proof. Kept SEPARATE from
-     * `setupProof` rather than folded into one "isProof" boolean, because the two
-     * differ on exactly the axes this method spends: `setupProof` bypasses the
-     * project budget and the judge-call charge, and `bootstrapProof` does NOT.
-     * They agree only on the runner's pin expectations (both legitimately execute
-     * an unproven draft) and on proof eligibility at settle time.
-     */
-    bootstrapProof: boolean,
-  ): Promise<void> {
-    const controller = new AbortController();
-    this.inFlight.set(row.id, controller);
-
-    let timedOut = false;
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      this.logger?.warn('[VerificationScheduler] agent request timed out — aborting', {
-        requestId: row.id,
-        timeoutMs: this.agentDeadlineMs(task),
-      });
-      controller.abort();
-    }, this.agentDeadlineMs(task));
-    if (typeof deadline === 'object' && deadline !== null && 'unref' in deadline) {
-      (deadline as { unref: () => void }).unref();
-    }
-
-    let batchLease: LeaseHandle | null = null;
-    try {
-      // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
-      // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
-      // §3.6: a SETUP/PROOF run BYPASSES the gate entirely — the budget counts
-      // ordinary lane traffic, and a proof run silently fail-opening to 'skipped'
-      // because lane traffic spent the budget first would make the phase-2 setup
-      // flow unable to prove anything on exactly the projects that need it most.
-      if (!setupProof && this.isProjectBudgetExhausted(row.project_id)) {
-        await this.markTerminalAndDeliver(
-          row,
-          'skipped',
-          { error: 'per-project visual-verify budget exhausted', captureOrigin: 'agent' },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // The batch worktree-sync mutex (blocking) — serialize per batch exactly as the
-      // legacy path. Released in the SAME finally as the other leases.
-      batchLease = await this.acquireBatchMutex(row.run_id);
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { error: timedOut ? 'request timed out' : 'aborted', captureOrigin: 'agent' },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      const worktreePath = this.worktreePathForRun(row.run_id);
-      if (!worktreePath) {
-        await this.markTerminalAndDeliver(
-          row,
-          'skipped',
-          { error: 'run worktree path unavailable', captureOrigin: 'agent' },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // §5.2 seam 3 — the pin stamped at enqueue, handed to the runner so it can
-      // resolve THAT revision by hash and reject any mismatch before it
-      // provisions anything. Read here rather than in processAgentRow so a
-      // recovery/replay path that re-enters this method always re-reads the
-      // authoritative row value.
-      const pin = this.runbookPinForRow(row.id);
-
-      const req: VerificationAgentRequest = {
-        runId: row.run_id,
-        requestId: row.id,
-        projectId: row.project_id,
-        task,
-        runWorktreePath: worktreePath,
-        snapshotSha,
-        ...(pin.hash !== null ? { runbookHash: pin.hash } : {}),
-        ...(pin.version !== null ? { runbookLocalVersion: pin.version } : {}),
-        // §5.3 — which half of the runner's pin check applies. A proof run may
-        // legitimately execute an 'unproven-draft' record (proving it is the
-        // point) but must pin to the EXACT version it was enqueued against;
-        // ordinary traffic is the mirror image. Only the scheduler holds this
-        // bit (the `setup_proof` / `bootstrap_proof` columns), so it must be
-        // handed over rather than guessed from the task.
-        //
-        // A BOOTSTRAP proof takes the same half: it was composed from a draft the
-        // controller registered moments earlier, so demanding a 'proven' record
-        // would reject the very thing it exists to prove. The runner's flag is
-        // therefore "is this a proof run", not "is this the setup flow".
-        ...(setupProof || bootstrapProof ? { setupProof: true } : {}),
-        artifactsDir: this.artifactsDirResolver(row.run_id),
-        verifyPort: servesPort ? leasedPort : null,
-        verifyDriverPort: leasedPort + 1,
-        // Thread the effective deadline into the query boundary so its internal
-        // deadline matches this method's abort timer — a task-supplied timeoutMs
-        // above the query default is honored instead of silently cut to 10 min.
-        timeoutMs: this.agentDeadlineMs(task),
-        // §4 — the SAME modality the pre-lease gates and the screen-lease decision
-        // used, handed to the runner rather than re-derived there. Only the
-        // scheduler can know it (it owns `verify_type` and the stamped column,
-        // neither of which the runner sees), and a second derivation from the task
-        // shape alone could disagree with the one that just decided whether this
-        // request may touch the screen at all.
-        modality,
-        signal: controller.signal,
-      };
-
-      // ABORT-BOUNDED (R1 #1a): a runner that never settles can no more hang the
-      // drain than a hung capture — race it against the deadline/cancel signal.
-      const result = await raceWithAbort(
-        this.agentRunner!.run(req),
-        controller.signal,
-        'agent',
-        this.logger,
-      );
-
-      // §3.6 BUDGET ORDERING CHANGE (was: a pre-deploy increment mirroring the
-      // VLM path). The counter is now bumped AFTER the runner returns and ONLY
-      // when a session was actually deployed, because the §3.5 preflight
-      // deliberately returns without deploying — charging it would spend a
-      // project's lifetime budget on requests that never cost a token, and on a
-      // misconfigured host that is EVERY request until the budget silently
-      // fail-opens the whole project to 'skipped'. A `setup_proof` row is never
-      // counted at all (it bypassed the gate above; counting it would let proof
-      // runs exhaust the lane budget). The accepted cost of the reorder: a crash
-      // in the window between the deploy and this line undercounts by one —
-      // strictly better than charging for undeployed work.
-      if (result.deployed && !setupProof) {
-        this.incrementJudgeCallsUsed(row.id);
-      }
-
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          {
-            error: timedOut ? 'request timed out' : 'aborted',
-            captureOrigin: 'agent',
-            ...(result.preflight ? { preflight: result.preflight } : {}),
-          },
-          undefined,
-          result.fileNames,
-          input,
-        );
-        return;
-      }
-
-      await this.settleAgentTerminal(
-        row,
-        input,
-        result,
-        modality,
-        setupProof,
-        snapshotSha,
-        bootstrapProof,
-      );
-    } catch (err) {
-      const aborted = controller.signal.aborted;
-      controller.abort();
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger?.error('[VerificationScheduler] agent deployment error', {
-        requestId: row.id,
-        aborted,
-        error: message,
-      });
-      // §3.6 companion to the deployed-conditional increment above, for the one
-      // path that never yields a `result`: a DEADLINE expiry (raceWithAbort
-      // rejects, so the runner's own `deployed` flag is unobservable). The
-      // deadline is minutes long while the §3.5 preflight settles in well under a
-      // second, so by the time `timedOut` fires the runner was past its pre-deploy
-      // gate and an SDK session was (almost certainly) spent — charge it, exactly
-      // as the old pre-deploy increment did. A NON-deadline abort (a cancelForRun
-      // sweep) stays uncharged: it can fire at any point, including before the
-      // deploy, and an unknowable charge should favor the project's budget.
-      if (timedOut && !setupProof) {
-        this.incrementJudgeCallsUsed(row.id);
-      }
-      await this.markTerminalAndDeliver(
-        row,
-        aborted ? 'timeout' : 'skipped',
-        { error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message, captureOrigin: 'agent' },
-        undefined,
-        [],
-        input,
-      );
-    } finally {
-      clearTimeout(deadline);
-      this.inFlight.delete(row.id);
-      if (batchLease) {
-        batchLease.release();
-      }
-      await this.releaseOrQuarantinePort(portLease, leasedPort);
-      // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
-      // port (which a leaked dev server can keep genuinely occupied past
-      // teardown), the display is not a resource this deployment can leave dirty
-      // — the observe-only native path spawns no long-lived screen owner. Held
-      // for the whole deployment, released here in the same chain as the rest.
-      screenLease?.release();
-      agentLease.release();
-    }
-  }
-
-  /**
-   * Settle ONE agent runner result: classify it (§3.1), write the terminal with
-   * its classification + evidence + preflight, then feed the (project, modality)
-   * capability ledger (§3.4).
-   *
-   * THE CONVERSION AND ITS ONE GUARD RAIL. A `'failed'` whose classification is
-   * `'env'` is CONVERTED to `'skipped'`, because a merge-gate FAIL charges the
-   * lane's implement-retry budget and sends an agent to "fix" working code
-   * because a port was taken. The conversion is safe ONLY because
-   * `classifyVerificationFailure` reaches `'env'` exclusively on HARNESS-derived
-   * evidence — a failed preflight check, a squatter port probe, instance-lock
-   * contention. It never converts on model prose: a `build_failed` the agent
-   * wrote with no harness corroboration stays `'ambiguous'` and stays BLOCKING.
-   * That asymmetry is the whole §3.1 argument — `skipped` ADVANCES the lane
-   * (mergeGateLaneAdvance), so a deliverable defect misclassified as env ships
-   * broken code silently, while a false `'ambiguous'` is merely annoying.
-   *
-   * THE MIRROR CONVERSION, AND WHY IT IS HERE AND NOWHERE ELSE. The rule above
-   * has a dual that used to go unenforced: a `'skipped'` that came back from a
-   * session which ACTUALLY DEPLOYED and whose failure nothing could attribute
-   * (`'ambiguous'`) is a lane ADVANCING on a verification that produced no
-   * verdict — the same silent-ship hazard as a misclassified `'env'`, arriving
-   * from the other direction. Such a result is converted to `'failed'` (see
-   * {@link isUnprovenAdvancingSkip} for the two carve-outs). This is the ONE
-   * chokepoint for that invariant: every agent terminal in the engine funnels
-   * through this method, so a future runner path that forgets the rule is caught
-   * without scattering the same check across every return site. The runner still
-   * maps its own statuses honestly at source — this is a backstop, and a warn
-   * log fires whenever it has anything to do.
-   *
-   * LEDGER FEEDBACK runs AFTER the terminal write (never before — the write is
-   * cancel-guarded and is the load-bearing act): an env-class terminal counts
-   * toward the §3.4 breaker; a pass or a DELIVERABLE-attributed failure is a
-   * healthy outcome that resets it (the environment demonstrably worked — it
-   * built, served, drove, and judged); `'ambiguous'` and every timeout touch
-   * NEITHER, because a signal we could not attribute must not silently suppress a
-   * modality (nor silently clear a real suppression).
-   *
-   * PHASE 2 adds the ENGINE-ENFORCED PROOF (§5.3) at the end: a `setup_proof`
-   * request that reached `'passed'` while carrying a pin is the ONLY transition
-   * into a `'proven'` runbook. See {@link recordRunbookProof}.
-   */
-  private async settleAgentTerminal(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-    result: VerificationAgentRunResult,
-    modality: VerificationModality,
-    setupProof: boolean,
-    snapshotSha: string | null,
-    /** Migration 107 — see {@link VerificationScheduler.processAgentRow}. */
-    bootstrapProof: boolean = false,
-  ): Promise<void> {
-    const isTerminalFailure =
-      result.status === 'failed' || result.status === 'timeout' || result.status === 'skipped';
-    const classified = isTerminalFailure
-      ? classifyVerificationFailure({
-          preflight: result.preflight ?? null,
-          runnerStatus: result.status,
-          reportOutcome: result.report?.outcome ?? null,
-          provisionMode: result.provisionMode ?? null,
-          // A future harness seam (§3.1): no instance-lock detector exists yet.
-          instanceLockContention: false,
-          // §5.2 seam 3, now LIVE: the runner rejected execution because the
-          // pinned runbook revision could not be resolved, or resolved to
-          // content the composed task no longer matches. Harness-derived by
-          // construction (a hash lookup + a structural compare, never model
-          // prose), which is what makes it eligible for the `'env'` class — and
-          // env-class is what keeps it off the lane's retry budget.
-          runbookMismatch: result.runbookMismatch === true,
-        })
-      : null;
-
-    const converted = result.status === 'failed' && classified?.failureClass === 'env';
-    // The MIRROR conversion (§3.1 gate integrity), evaluated only when the
-    // env conversion did not fire — the two are mutually exclusive by
-    // construction (one keys on 'failed'+env, the other on 'skipped'+ambiguous)
-    // and stating it here keeps that a fact rather than an accident.
-    const blocked = !converted && this.isUnprovenAdvancingSkip(result, classified?.failureClass ?? null);
-    const status: RequestStatus = converted ? 'skipped' : blocked ? 'failed' : result.status;
-    const evidenceDetail = classified?.evidence.map((e) => e.detail).join('; ') ?? '';
-    const errorMessage = converted
-      ? `environment failure (harness-verified), not the deliverable: ${evidenceDetail}`
-      : blocked
-        ? `${VERIFY_UNPROVEN_SKIP_BLOCKED}: ${result.errorMessage ?? 'the deployed session produced no corroborated verdict'}`
-        : result.errorMessage;
-    if (converted) {
-      this.logger?.warn('[VerificationScheduler] env-class failure converted to skip (§3.1)', {
-        requestId: row.id,
-        modality,
-        evidence: evidenceDetail,
-      });
-    }
-    if (blocked) {
-      // Expected to be RARE — the runner maps its own statuses accurately at
-      // source, so reaching here means either a runner path that regressed or a
-      // new one that never considered the merge gate. Logged at warn with the
-      // whole shape of the result so the answer to "which path did this" is in
-      // the log rather than in a bisect.
-      this.logger?.warn(
-        '[VerificationScheduler] deployed-but-unverified skip blocked from advancing the lane (§3.1)',
-        {
-          requestId: row.id,
-          modality,
-          provisionMode: result.provisionMode ?? null,
-          reportOutcome: result.report?.outcome ?? null,
-          runnerError: result.errorMessage ?? null,
-        },
-      );
-    }
-
-    // §5.3 — the proof flip runs BEFORE the terminal write, and the ordering is
-    // load-bearing rather than incidental.
-    //
-    // IT USED TO RUN AFTER, on the reasoning that a proof-recording failure must
-    // never change a verdict already committed. That reasoning still holds and is
-    // preserved by the try/catch below — but the ordering it produced was a race.
-    // `awaitTerminal` polls the request ROW, and the row went terminal here,
-    // before `deliver()` — a whole pipeline of real IO — and only then did the
-    // record flip. A bootstrap waiting on its own proof could therefore observe
-    // `passed`, return "proven", and have the lane's very next enqueue read the
-    // record as still an unproven draft and skip the verification anyway: the
-    // exact outcome the bootstrap spent an agent, a budget charge, two commits
-    // and up to fifteen minutes to avoid.
-    //
-    // Flipping first makes "the row is terminal" mean "the record has already
-    // been decided", which is what every reader assumed it meant.
-    if ((setupProof || bootstrapProof) && status === 'passed') {
-      try {
-        await this.recordRunbookProof(row, modality, result, snapshotSha);
-      } catch (err) {
-        // Swallowed deliberately: the verdict below is the load-bearing act, and
-        // a proof-recording failure may not prevent it from being written.
-        this.logger?.warn('[VerificationScheduler] recording the runbook proof threw; the verdict still stands', {
-          requestId: row.id,
-          modality,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    await this.markTerminalAndDeliver(
-      row,
-      status,
-      {
-        captureOrigin: 'agent',
-        ...(result.verdict ? { verdict: result.verdict } : {}),
-        ...(result.report ? { report: result.report } : {}),
-        ...(errorMessage ? { error: errorMessage } : {}),
-        ...(classified
-          ? { failureClass: classified.failureClass, failureEvidence: classified.evidence }
-          : {}),
-        ...(result.preflight ? { preflight: result.preflight } : {}),
-      },
-      result.verdict,
-      result.fileNames,
-      input,
-    );
-
-    await this.recordCapabilityOutcome(
-      row,
-      modality,
-      result,
-      classified?.failureClass ?? null,
-      evidenceDetail,
-      this.capabilityRunbookKey(row.id),
-    );
-  }
-
-  /**
-   * §3.1 GATE INTEGRITY — is this an advancing skip that NOTHING corroborated?
-   * True for a result that (a) actually DEPLOYED an SDK session, (b) came back
-   * `'skipped'`, and (c) classified `'ambiguous'`; the caller converts those to
-   * a blocking `'failed'`.
-   *
-   * The three conditions together describe the one dangerous shape: a session
-   * ran, produced no attributable failure, and would nonetheless ADVANCE the
-   * lane at the merge gate (mergeGateLaneAdvance). Every SAFE skip is excluded
-   * by construction rather than by exception — a pre-deploy skip is
-   * `deployed:false` (preflight, pin rejection, unresolvable agent, failed
-   * provisioning), and a harness-corroborated one classifies `'env'`, which the
-   * classifier only ever reaches on harness-derived evidence.
-   *
-   * TWO CARVE-OUTS, both documented rather than inferred:
-   *
-   *  1. A CONNECT-LEVEL TRANSPORT failure
-   *     ({@link VerificationAgentRunResult.transportFailure}) — the SDK layer
-   *     threw and the session had accumulated NO transcript, so the agent never
-   *     got a turn. Blocking would turn every API outage into a lane-blocking
-   *     FAIL that loops implement agents against code the harness never
-   *     examined. The runner narrows the flag to that empty-session shape on
-   *     purpose (round-3 finding 4): "our code raised it" was not enough, since
-   *     an agent holding `Bash` can kill its own SDK process, and every
-   *     MID-SESSION transport failure is now mapped to a blocking `'failed'` at
-   *     source rather than arriving here wearing this flag.
-   *  2. The §5.7 UNATTRIBUTABLE FALLBACK — a `build_failed`/`launch_failed`
-   *     reported while provisioning ran in the DIRTY live worktree. That skip is
-   *     the proposal's explicit carve-out: in a worktree carrying every sibling
-   *     lane's half-finished edits, a build failure genuinely cannot be charged
-   *     to this lane's deliverable, so it fails open on purpose. The pairing is
-   *     load-bearing — the same outcomes in SNAPSHOT mode are a blocking
-   *     `'failed'` (mapReportToResult) and must stay one.
-   */
-  private isUnprovenAdvancingSkip(
-    result: VerificationAgentRunResult,
-    failureClass: VerificationFailureClass | null,
-  ): boolean {
-    if (!result.deployed || result.status !== 'skipped' || failureClass !== 'ambiguous') return false;
-    if (result.transportFailure === true) return false;
-    const outcome = result.report?.outcome;
-    if (
-      result.provisionMode === 'fallback' &&
-      (outcome === 'build_failed' || outcome === 'launch_failed')
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * The §5.3 ENGINE-ENFORCED PROOF: flip the pinned machine-local runbook record
-   * to `'proven'` because a `setup_proof` request just PASSED through the real
-   * verification path — detached snapshot, prepared deps, real boot, real
-   * screenshot, real attestation floor.
-   *
-   * THE WHOLE POINT IS THAT THE AGENT CANNOT DO THIS. §1's diagnosis of the
-   * `.cyboflow/verify.json` era is that a config which is merely WRITTEN earns
-   * nothing; §5's answer is "derive → PROVE by running → persist". If the setup
-   * flow could call `markProven` itself, "proven" would decay back into "an
-   * agent said so" — the exact failure mode being fixed. So the only caller is
-   * here, on the engine's own terminal path, gated on a status the engine
-   * computed.
-   *
-   * The proof provenance recorded is §5.3's list: the sha actually verified, the
-   * portable hash and local version that were pinned, a compact preflight
-   * summary (what the host looked like when it passed), the timestamp, and the
-   * request id that produced it — enough for a human reading a later demotion to
-   * see what changed.
-   *
-   * A PROOF FROM THE DIRTY FALLBACK PROVES NOTHING EITHER (round-3 finding 2).
-   * A NULL `snapshot_sha` means the sha capture failed and the runner executed
-   * in the live shared worktree — every sibling lane's half-finished edits
-   * included. §5.3 is explicit that "proof runs in the verifier's environment
-   * class (detached snapshot + prepared deps) ... a proof obtained in
-   * environment X asserted about environment Y is not a proof", and the
-   * provenance blob has nowhere to record a sha that does not exist. Promotion
-   * is refused and the record stays a draft: the setup flow re-proves once a sha
-   * can be captured, which is a bad day rather than a runbook wearing a green
-   * badge it never earned.
-   *
-   * A REQUEST WITHOUT A PIN PROVES NOTHING. A setup-proof run that carried no
-   * `runbook_hash` verified *something*, but nothing content-addressed, so there
-   * is no record it could be attesting to; it is logged and dropped.
-   *
-   * CAS FAILURE IS A WARN, NEVER A VERDICT CHANGE. `markProven` matches on BOTH
-   * the hash and the version, so a `registerDraft` that landed between this
-   * run's enqueue and its terminal rejects the flip — correctly: the proof
-   * attests to content the record no longer holds. The verification itself still
-   * passed and is written as such; only the promotion is declined, and the setup
-   * flow re-proves against the newer revision.
-   *
-   * PROMOTION ALSO RE-STAMPS THE PROVENANCE (F4 —
-   * docs/proposals/visual-verification-brittleness-fixes.md). The record's
-   * `input_hash` / `host_fingerprint_json` are the baseline the drift check
-   * compares every later read against, and until now only `registerDraft` ever
-   * wrote them — so a proof taken in one tree, or on a host that has moved since
-   * the draft was written, was born already drifted. This path now observes both
-   * over the requesting run's worktree (else the project root — the same ladder
-   * the enqueue gate probes) and hands them to `markProven`. `portable_hash` is
-   * deliberately NOT re-stamped (Codex #1): it is the content address every pin
-   * resolves through. See the inline comment at the call for the failure
-   * handling — a probe that throws degrades to the old status-only flip.
-   */
-  private async recordRunbookProof(
-    row: VerificationRequestRow,
-    modality: VerificationModality,
-    result: VerificationAgentRunResult,
-    snapshotSha: string | null,
-  ): Promise<void> {
-    const store = this.runbookStore;
-    if (!store) return;
-    if (snapshotSha === null) {
-      this.logger?.warn(
-        '[VerificationScheduler] setup proof refused: it ran in the dirty-worktree fallback (§5.3), so the record stays a draft',
-        {
-          requestId: row.id,
-          projectId: row.project_id,
-          modality,
-          provisionMode: result.provisionMode ?? null,
-        },
-      );
-      return;
-    }
-    const pin = this.runbookPinForRow(row.id);
-    if (pin.hash === null || pin.version === null) {
-      this.logger?.debug('[VerificationScheduler] setup-proof passed without a runbook pin; nothing to prove', {
-        requestId: row.id,
-        modality,
-      });
-      return;
-    }
-    try {
-      const proofJson = JSON.stringify({
-        sha: snapshotSha,
-        portableHash: pin.hash,
-        localVersion: pin.version,
-        preflight: result.preflight
-          ? {
-              ok: result.preflight.ok,
-              checks: result.preflight.checks.map((check) => ({ id: check.id, ok: check.ok })),
-            }
-          : null,
-        verifiedAt: new Date().toISOString(),
-        requestId: row.id,
-      });
-      // F4 / Codex #1 — RE-STAMP THE PROVENANCE THE DRIFT CHECK COMPARES TO.
-      // The record's `input_hash` / `host_fingerprint_json` were written by
-      // `registerDraft`, over whatever tree and host were current when the DRAFT
-      // was written — for the setup flow, a flow worktree; for a record that has
-      // sat a while, a host that has since taken an Electron/playwright bump.
-      // The proof was obtained HERE, so the record should describe HERE. The
-      // probe path is deliberately the SAME ladder the enqueue gate probes
-      // (see resolveProvenRunbook): the requesting run's worktree, else the
-      // project root — stamping values from a tree the gate never reads would
-      // guarantee a drift on the very next request. NEVER `portable_hash`
-      // (Codex #1): it is the content address of `portable_json` and the target
-      // of every pin, and the snapshot this proof executed in is already
-      // disposed. Both CAS predicates are untouched inside `markProven`, and so
-      // is a stored `input_hash` when the probe could not observe this tree at
-      // all (F4 fix round): `markProven` re-stamps field by field, so a `null`
-      // input hash from a worktree that has already been cleaned up is DROPPED
-      // rather than written — writing it would make the promotion read as
-      // drifted on its very next check.
-      const probePath = this.worktreePathForRun(row.run_id) ?? this.projectPathFor(row.project_id);
-      let fresh: { inputHash: string | null; hostFingerprint: string } | undefined;
-      if (probePath !== null) {
-        try {
-          fresh = await store.freshProvenance(probePath);
-        } catch (err) {
-          // A provenance probe that blew up must never cost a proof its
-          // promotion: fall through to the status-only flip, which is exactly
-          // the pre-F4 behavior.
-          this.logger?.warn(
-            '[VerificationScheduler] fresh provenance probe failed; promoting without a re-stamp',
-            {
-              requestId: row.id,
-              projectId: row.project_id,
-              modality,
-              probePath,
-              error: err instanceof Error ? err.message : String(err),
-            },
-          );
-        }
-      }
-      const outcome = store.markProven(row.project_id, modality, pin.hash, pin.version, proofJson, fresh);
-      if (outcome.ok) {
-        this.logger?.info('[VerificationScheduler] setup proof recorded — runbook is now proven', {
-          requestId: row.id,
-          projectId: row.project_id,
-          modality,
-          runbookHash: pin.hash,
-          runbookLocalVersion: pin.version,
-          // Which of the flips happened, so a later drift is diagnosable: a
-          // probe that threw re-stamps nothing, and one that could not read the
-          // tree still re-stamps the host half (`markProven` drops a null input
-          // hash rather than writing it over the stored baseline).
-          provenanceRestamped: fresh !== undefined,
-          inputHashObserved: fresh !== undefined ? fresh.inputHash !== null : null,
-          probePath,
-        });
-        return;
-      }
-      this.logger?.warn('[VerificationScheduler] setup proof could not be recorded (verdict unaffected)', {
-        requestId: row.id,
-        projectId: row.project_id,
-        modality,
-        runbookHash: pin.hash,
-        runbookLocalVersion: pin.version,
-        error: outcome.error,
-      });
-    } catch (err) {
-      this.logger?.warn('[VerificationScheduler] setup-proof recording threw (fail-soft)', {
-        requestId: row.id,
-        modality,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  /**
-   * The §3.4 circuit-breaker feed. K consecutive env-class failures for a
-   * (project, modality) auto-demote it to skip; the trip files ONE non-blocking
-   * finding through the injected seam so a human learns the modality went quiet
-   * instead of discovering it months later in the request table. Fail-soft
-   * throughout — a ledger or finding hiccup must never change a verdict that is
-   * already committed.
-   */
-  private async recordCapabilityOutcome(
-    row: VerificationRequestRow,
-    modality: VerificationModality,
-    result: VerificationAgentRunResult,
-    failureClass: VerificationFailureClass | null,
-    evidenceDetail: string,
-    /** This row's ledger key — see {@link capabilityRunbookKey}. */
-    runbookHash: string,
-  ): Promise<void> {
-    const store = this.capabilityStore;
-    if (!store) return;
-    try {
-      if (failureClass === 'env') {
-        const reason = evidenceDetail.length > 0 ? evidenceDetail : (result.errorMessage ?? 'environment failure');
-        const { tripped } = store.recordEnvFailure(row.project_id, modality, reason, runbookHash);
-        if (tripped && this.capabilityFinding) {
-          await this.capabilityFinding({
-            projectId: row.project_id,
-            runId: row.run_id,
-            modality,
-            reason,
-          });
-        }
-        return;
-      }
-      if (result.status === 'passed' || (result.status === 'failed' && failureClass === 'deliverable')) {
-        store.recordHealthyOutcome(row.project_id, modality, runbookHash);
-      }
-    } catch (err) {
-      this.logger?.warn('[VerificationScheduler] capability-ledger feedback failed (fail-soft)', {
-        requestId: row.id,
-        modality,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  /**
-   * Release the agent's port lease, OR quarantine it when the leased port or its
-   * driver CDP sidecar (leasedPort+1) will not free (a leaked dev server / browser,
-   * §5.4 step 6). Quarantining HOLDS the lease with a re-probe so a leaked port can
-   * never collide with the next deployment. With the default always-free probe (no
-   * real net probe injected) this always releases — safe in tests.
-   */
-  private async releaseOrQuarantinePort(portLease: LeaseHandle, leasedPort: number): Promise<void> {
-    const probeBothFree = async (): Promise<boolean> =>
-      (await this.portFreeProbe(leasedPort)) && (await this.portFreeProbe(leasedPort + 1));
-    let free: boolean;
-    try {
-      free = await probeBothFree();
-    } catch {
-      free = true; // a probe failure must never wedge teardown — release rather than leak the slot forever.
-    }
-    if (free) {
-      portLease.release();
-      return;
-    }
-    this.logger?.warn('[VerificationScheduler] verify port did not free after agent teardown; quarantining', {
-      leasedPort,
-      lease: portLease.name,
-    });
-    this.leasePool.quarantine(portLease, probeBothFree, `agent left port ${leasedPort} bound`);
   }
 
   /**
@@ -4366,595 +1981,6 @@ export class VerificationScheduler {
   }
 
   /**
-   * The DETACHED capture work for a row whose lease is already held + status is
-   * already 'running' (processRow did both synchronously). Runs capture → judge →
-   * terminal verdict, releasing the lease in finally. A capture that fails (ok:false
-   * or no PNG) is recorded as 'failed' for THIS slice (full fall-forward to the next
-   * rung is L2+); a judge verdict drives passed/failed/low_confidence. The
-   * per-request abort signal is plumbed to backend + judge for timeout / cancel.
-   *
-   * Before capture it may stand a scheduler-owned server up and thread its URL into
-   * ctx.input.url — the S2 dev server for a startable deliverable (leased port) OR,
-   * when none is spawned, the S9 ephemeral static server for a built htmlPath (the
-   * file:// ES-module-block fix). The two are mutually exclusive (a startable
-   * deliverable is S2's job) and BOTH are released in the SAME finally as the lease.
-   *
-   * Because the lease is held until this promise's finally, two SCREEN-lease rows
-   * cannot run concurrently (the second couldn't acquire the lease in processRow),
-   * while two NULL-lease rows both reach here and run in parallel.
-   */
-  private async runChosen(
-    row: VerificationRequestRow,
-    type: VerificationType,
-    input: VerificationRequestInput,
-    backend: VisualBackend,
-    lease: LeaseHandle,
-    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
-  ): Promise<void> {
-    const controller = new AbortController();
-    // Register the controller so cancelForRun(runId) + the per-request timeout can
-    // reach in and `.abort()` THIS live capture/judge. Deleted in the finally.
-    this.inFlight.set(row.id, controller);
-
-    // Per-request deadline: on expiry abort the in-flight signal. The catch below
-    // (or the abort-aware capture/judge) then unwinds; `timedOut` distinguishes a
-    // deadline abort (→ 'timeout') from a genuine capture/judge throw (→ 'failed').
-    let timedOut = false;
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      this.logger?.warn('[VerificationScheduler] request timed out — aborting', {
-        requestId: row.id,
-        backend: backend.id,
-        timeoutMs: this.requestTimeoutMs,
-      });
-      controller.abort();
-    }, this.requestTimeoutMs);
-    // Do not let the timer keep the event loop / process alive on its own.
-    if (typeof deadline === 'object' && deadline !== null && 'unref' in deadline) {
-      (deadline as { unref: () => void }).unref();
-    }
-
-    let fileNames: string[] = [];
-    // The scheduler-owned dev server (S2) for this request, if one is spawned. Held
-    // for the WHOLE capture lifetime and released in the SAME finally as the lease.
-    let devServerHandle: DevServerHandle | null = null;
-    // The scheduler-owned static server (S9) for this request, if one is spawned. Held
-    // for the WHOLE capture lifetime and released in the SAME finally as the dev
-    // server. Null when no static server is stood up (a dev server was, or the request
-    // is not a bare-htmlPath deliverable) → the raw url/htmlPath capture runs unchanged.
-    let staticServerHandle: StaticServerHandle | null = null;
-    // The batch worktree-sync mutex (L4) for a batched run, if this run carries a
-    // batch_id. Held across capture+judge and released in the SAME finally as the
-    // other leases. Null for a non-batch run (nothing acquired → nothing to release).
-    let batchLease: LeaseHandle | null = null;
-    // HUMAN-FACING capture provenance (Codex finding 9), stamped onto every terminal
-    // payload. Computed ONCE per attempt and REFINED as each server spawns: it starts
-    // as the best-known origin (a running url the agent passed, else the raw file://
-    // htmlPath), is promoted to 'dev-server' if S2 stands one up, else to
-    // 'static-server' if S9 does. This progressive form is what lets the abort checks
-    // BEFORE the S9 spawn stamp the best-known origin (dev-server/url/file) without
-    // restructuring the flow, and keeps it in scope for the catch block below.
-    const originalUrlPresent = typeof input.url === 'string' && input.url.trim().length > 0;
-    let captureOrigin: CaptureOrigin = originalUrlPresent ? 'url' : 'file';
-
-    try {
-      // S2 — stand a dev server up on the leased port when the deliverable recipe
-      // has a `start` command. BEFORE building CaptureContext so the spawned baseUrl
-      // can be threaded into ctx.input.url. A null handle (no provider / no start /
-      // lease is not a port lease) leaves the static url/htmlPath capture unchanged.
-      devServerHandle = await this.maybeSpawnDevServer(row, lease, resolvedContext, controller.signal);
-      if (devServerHandle) {
-        captureOrigin = 'dev-server';
-      }
-      // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
-      // 'timeout', releasing both the dev server (in finally) and the lease. (The S9
-      // static server has not been attempted yet, so captureOrigin here is at most
-      // dev-server/url/file — the best-known origin at this point.)
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // S9 — when NO dev server was stood up, stand an ephemeral loopback static file
-      // server up for a bare-htmlPath deliverable (the file:// ES-module-block fix).
-      // Mutually exclusive with the dev server: a startable deliverable is S2's job, so
-      // we only consider a static serve when devServerHandle is null. Its baseUrl is
-      // threaded into ctx.input.url exactly like the dev server; released in the SAME
-      // finally. A null handle (no static deps / no htmlPath / a running url / resolve
-      // or spawn failed) leaves the raw url/htmlPath capture unchanged (pre-S9 behavior).
-      staticServerHandle = devServerHandle
-        ? null
-        : await this.maybeSpawnStaticServer(row, input, resolvedContext, controller.signal);
-      if (staticServerHandle) {
-        captureOrigin = 'static-server';
-      }
-      // A timeout/cancel that fired DURING static-server spawn: stop here, mark
-      // 'timeout', releasing both the static server (in finally) and the lease.
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // L4 batch worktree-sync mutex (locked decision #5): AFTER the dev-server/
-      // port lease, BEFORE capture. For a batched run this BLOCKS until any other
-      // verification on the same batchId releases, so a capture never reads a
-      // half-committed shared sprint worktree relative to a concurrent lane's
-      // verification. A non-batch run acquires nothing (byte-identical to before).
-      batchLease = await this.acquireBatchMutex(row.run_id);
-      // A timeout/cancel that fired WHILE we waited on the batch mutex: stop here,
-      // mark 'timeout'; the batch mutex (now held) is released in finally.
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // Thread the scheduler-owned server's URL into the capture input: the S2 dev
-      // server wins, else the S9 static server, else the raw url/htmlPath is captured.
-      const captureInput: VerificationRequestInput = devServerHandle
-        ? { ...input, url: devServerHandle.baseUrl }
-        : staticServerHandle
-          ? { ...input, url: staticServerHandle.baseUrl }
-          : input;
-      const ctx: CaptureContext = {
-        requestId: row.id,
-        runId: row.run_id,
-        artifactsDir: this.artifactsDirResolver(row.run_id),
-        type,
-        input: captureInput,
-      };
-
-      // ABORT-BOUNDED (R1 #1a): race the capture against the deadline/cancel signal
-      // so an abort-unaware backend that never settles can NEVER hang the drain. On
-      // abort raceWithAbort rejects (→ catch, marked 'timeout'); the orphaned capture
-      // is detached (its late settle is logged). The backend-side window teardown
-      // (CapturePageBackend) prevents the leaked wedged renderer.
-      const capture = await raceWithAbort(
-        backend.capture(ctx, controller.signal),
-        controller.signal,
-        'capture',
-        this.logger,
-      );
-      // A timeout/cancel that fired DURING capture: stop here, mark 'timeout',
-      // regardless of what the (now-aborted) capture nominally returned.
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      // UNTRUSTED capture diagnostics (Codex finding 7): error-level page console
-      // lines + capture-side notes the backend surfaced. Capped defensively (page code
-      // controls this text) and attached to the HUMAN-facing terminal payloads only —
-      // the capture-failure and judged-outcome ones below. They MUST NOT reach the
-      // VlmJudge inputs (prompt-injection surface); the judge call stays byte-identical.
-      const cappedDiagnostics =
-        Array.isArray(capture.diagnostics) && capture.diagnostics.length > 0
-          ? this.capDiagnostics(capture.diagnostics)
-          : undefined;
-
-      if (!capture.ok || capture.fileNames.length === 0) {
-        await this.markTerminalAndDeliver(
-          row,
-          'failed',
-          {
-            backend: backend.id,
-            error: capture.error ?? 'capture produced no images',
-            captureOrigin,
-            ...(cappedDiagnostics ? { diagnostics: cappedDiagnostics } : {}),
-          },
-          undefined,
-          [],
-          input,
-        );
-        return;
-      }
-
-      fileNames = capture.fileNames;
-
-      // DETERMINISTIC-FIRST ORDER (decision #3, composing with S3 + S5):
-      //
-      //  (1) BACKEND DETERMINISTIC VERDICT — a backend that reached a verdict WITHOUT
-      //      a vision call (the Rung-1 Playwright backend's a11y/assertion gate) sets
-      //      captureResult.deterministicVerdict. When present, USE it and SKIP the
-      //      rest. A null verdict is treated as absent (no deterministic signal). The
-      //      skip is conservative by construction: a deterministic PASS only on
-      //      all-pass explicit assertions, a deterministic FAIL always unambiguous.
-      //
-      //  (2) SSIM PRE-DIFF (S5) — if no backend verdict AND the request's baselineKey
-      //      resolves to an accepted baseline PNG, compare the captured PNG(s) before
-      //      spending a vision call. A near-pixel match (>= baselineMatchThreshold) is
-      //      a CHEAP deterministic PASS (verdictSource:'ssim_match', NO VLM call).
-      //      Otherwise fall through to the VLM with the resolved baselinePath.
-      //
-      //  (3) BUDGET / VLM — if no deterministic + no SSIM match, run the VLM, passing
-      //      the resolved baselinePath. The per-project VERIFICATION budget (the SAME
-      //      counter runAgentChosen checks for an agent deployment, §5.8) is enforced
-      //      HERE (before the call): exhausted ⇒ a non-blocking low_confidence verdict
-      //      (the SAME human-review finding path, never a FAIL / fabricated pass) with
-      //      NO vision call. A real VLM call increments this request's judge_calls_used
-      //      (the budget aggregation + cost-telemetry counter).
-      //
-      // The baseline PNGs are resolved ONCE per request here (from input.baselineKey).
-      let verdict: VerdictV1;
-      if (capture.deterministicVerdict != null) {
-        verdict = capture.deterministicVerdict;
-      } else {
-        const preDiff = await this.resolveBaselinePreDiff(row, input, ctx, fileNames);
-        if (controller.signal.aborted) {
-          await this.markTerminalAndDeliver(
-            row,
-            'timeout',
-            { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-            undefined,
-            fileNames,
-            input,
-          );
-          return;
-        }
-        if (preDiff?.match) {
-          // SSIM short-circuit: a cheap deterministic PASS, NO vision call.
-          verdict = {
-            status: 'pass',
-            confidence: 1,
-            issues: [],
-            feedback: `matched golden baseline (SSIM ${preDiff.ssimScore.toFixed(4)} ≥ ${this.baselineMatchThreshold})`,
-            judgedFileNames: fileNames,
-            baselineUsed: true,
-            model: 'ssim-prediff',
-            verdictSource: 'ssim_match',
-            ssimScore: preDiff.ssimScore,
-          };
-        } else if (this.isProjectBudgetExhausted(row.project_id)) {
-          // BUDGET-EXHAUSTION: route to the SAME non-blocking low_confidence finding
-          // path — never a FAIL, never a fabricated pass, and NO vision call spent.
-          verdict = {
-            status: 'low_confidence',
-            confidence: 0,
-            issues: [],
-            feedback: 'per-project visual-judge budget exhausted; needs human visual review',
-            judgedFileNames: fileNames,
-            baselineUsed: !!preDiff?.baselinePath,
-            model: 'budget-exhausted',
-            verdictSource: 'vlm_verdict',
-          };
-        } else {
-          // A real vision call: count it against the budget BEFORE judging (the
-          // counter UPDATE is this request's OWN row — consistent with markTerminal,
-          // within the no-direct-router-table-write rule).
-          this.incrementJudgeCallsUsed(row.id);
-          // ABORT-BOUNDED (R1 #1a): a hung vision call can no more wedge the drain
-          // than a hung capture — race it against the deadline/cancel signal.
-          const vlmVerdict = await raceWithAbort(
-            this.judge.judge(
-              {
-                intent: input.intent,
-                artifactsDir: ctx.artifactsDir,
-                fileNames,
-                type,
-                ...(preDiff?.baselinePath ? { baselinePath: preDiff.baselinePath } : {}),
-              },
-              controller.signal,
-            ),
-            controller.signal,
-            'judge',
-            this.logger,
-          );
-          // Stamp provenance: a VLM-produced verdict is 'vlm_verdict' (+ the SSIM
-          // score when a baseline was compared but did not match, for telemetry).
-          verdict = {
-            ...vlmVerdict,
-            verdictSource: 'vlm_verdict',
-            ...(preDiff ? { ssimScore: preDiff.ssimScore } : {}),
-          };
-        }
-      }
-
-      // A timeout/cancel that fired DURING judging: mark 'timeout', drop the verdict.
-      if (controller.signal.aborted) {
-        await this.markTerminalAndDeliver(
-          row,
-          'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
-          undefined,
-          fileNames,
-          input,
-        );
-        return;
-      }
-
-      const status = this.statusFromVerdict(verdict);
-      await this.markTerminalAndDeliver(
-        row,
-        status,
-        {
-          backend: backend.id,
-          verdict,
-          captureOrigin,
-          ...(cappedDiagnostics ? { diagnostics: cappedDiagnostics } : {}),
-        },
-        verdict,
-        fileNames,
-        input,
-      );
-    } catch (err) {
-      // An abort-aware backend/judge that THROWS on abort (vs. returning) lands
-      // here. If the signal was aborted (deadline or cancel) it is a 'timeout', not
-      // a 'failed' — a genuine capture/judge error keeps 'failed'.
-      const aborted = controller.signal.aborted;
-      controller.abort();
-      const message = err instanceof Error ? err.message : String(err);
-      const status: RequestStatus = aborted ? 'timeout' : 'failed';
-      this.logger?.error('[VerificationScheduler] capture/judge error', {
-        requestId: row.id,
-        backend: backend.id,
-        aborted,
-        error: message,
-      });
-      await this.markTerminalAndDeliver(
-        row,
-        status,
-        {
-          backend: backend.id,
-          error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message,
-          captureOrigin,
-        },
-        undefined,
-        fileNames,
-        input,
-      );
-    } finally {
-      clearTimeout(deadline);
-      this.inFlight.delete(row.id);
-      // Tear the dev server down BEFORE releasing the port lease — release() kills
-      // the process tree that was holding the leased port. Guard on null (no dev
-      // server was spawned). Fail-soft: a teardown error must never leave the lease
-      // un-released, so it is logged, not propagated.
-      if (devServerHandle) {
-        try {
-          await devServerHandle.release();
-        } catch (err) {
-          this.logger?.error('[VerificationScheduler] dev-server teardown threw', {
-            requestId: row.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // Tear the S9 static server down (closes the listener + force-destroys open
-      // sockets). Guarded on null (none spawned). Fail-soft in the SAME shape as the
-      // dev-server teardown: a release() throw is logged, never propagated, so it can
-      // never leave the port/screen lease un-released below.
-      if (staticServerHandle) {
-        try {
-          await staticServerHandle.release();
-        } catch (err) {
-          this.logger?.error('[VerificationScheduler] static-server teardown threw', {
-            requestId: row.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // Release the L4 batch worktree-sync mutex (independent named mutex — reverse
-      // order vs. the port lease is not required). Guarded on null: a non-batch run
-      // acquired nothing, so there is nothing to release.
-      if (batchLease) {
-        batchLease.release();
-      }
-      lease.release();
-    }
-  }
-
-  /**
-   * Stand a scheduler-owned dev server up for this request when its resolved
-   * deliverable recipe has a `start` command (S2 / locked decision #1). Returns the
-   * live DevServerHandle (the caller threads handle.baseUrl into ctx.input.url and
-   * release()s it in finally), or null when no dev server is spawned:
-   *   - no provider injected (static-capture deployment), OR
-   *   - the held lease is NOT a port lease (rung 0 / null lease — nothing to run on), OR
-   *   - no verify.json / no matching deliverable / no `start` command, OR
-   *   - the worktree cwd could not be resolved.
-   * In every null case the static url/htmlPath capture path is preserved unchanged.
-   *
-   * S8 — the verify.json deliverable was already resolved ONCE in processRow (used to
-   * hydrate `input` BEFORE lease selection) and is THREADED in here as
-   * `resolvedContext`, so verify.json is loaded a single time per request (no second
-   * devServerContextResolver call). A null resolvedContext is the same fail-soft
-   * "no dev server" path as before.
-   *
-   * A spawn FAILURE (build/start/readiness reject) propagates so runChosen marks the
-   * request failed/timeout (the provider has already torn down what it spawned).
-   */
-  private async maybeSpawnDevServer(
-    row: VerificationRequestRow,
-    lease: LeaseHandle,
-    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
-    signal: AbortSignal,
-  ): Promise<DevServerHandle | null> {
-    if (!this.devServerProvider) {
-      return null;
-    }
-    // A dev server is bound to a leased PORT. A rung-0 / null lease (no port) cannot
-    // host one — the request is a static url/htmlPath capture.
-    const port = this.portFromLease(lease.name);
-    if (port === null) {
-      return null;
-    }
-
-    if (!resolvedContext) {
-      return null;
-    }
-    const { cwd, deliverable } = resolvedContext;
-    if (!deliverable.start || deliverable.start.trim().length === 0) {
-      // No start command — nothing to stand up; capture the static target as-is.
-      return null;
-    }
-
-    this.logger?.debug('[VerificationScheduler] spawning dev server', {
-      requestId: row.id,
-      port,
-      deliverable: deliverable.id,
-    });
-    return this.devServerProvider.spawn({ config: deliverable, port, cwd, signal });
-  }
-
-  /**
-   * Stand a scheduler-owned STATIC file server up for this request when it targets a
-   * BUILT html file with no running url and no dev-server recipe (S9 / the file://
-   * ES-module-block fix). Returns the live StaticServerHandle (the caller threads
-   * handle.baseUrl into ctx.input.url and release()s it in the SAME finally as the S2
-   * dev server), or null when no static server is stood up — and in EVERY null case
-   * the request captures its raw url/htmlPath UNCHANGED (pre-S9 file:// behavior), so
-   * a non-static request is byte-identical to before this layer:
-   *   - EITHER dep absent (staticServerProvider / staticHtmlContextResolver): a
-   *     deployment wired without the S9 seam — the static-capture path is preserved.
-   *   - the request carries no htmlPath (empty after trim): there is nothing to serve.
-   *   - the request already declares a running `url`: the agent pointed at a live
-   *     server, so we capture that url directly and NEVER shadow it with a static serve.
-   *   - the request declares a dev server (non-empty `start`): a STARTABLE deliverable
-   *     is S2's job (maybeSpawnDevServer stands it up on a leased port); statically
-   *     serving the UNBUILT source html would be wrong. inputDeclaresDevServer is the
-   *     SAME signal the dev-server selection gate keys off, so the two seams are
-   *     mutually exclusive by construction (runChosen also skips S9 when a dev server
-   *     was already spawned).
-   *   - the resolver returns null / THROWS: the html could not be worktree-resolved or
-   *     does not exist. Fail-soft (debug log) to the raw-htmlPath capture — the rung-0
-   *     backend's own file:// module-block diagnostic breadcrumb explains the resulting
-   *     blank styled shell to a human.
-   *   - the provider.spawn THROWS (bind failure / abort mid-listen): warn + return
-   *     null. A static-serve failure must NEVER wedge the request — capturing the raw
-   *     htmlPath (blank though it may render) is strictly better than a fabricated FAIL,
-   *     and the same file:// diagnostic breadcrumb covers the confusion.
-   *
-   * The confining static root rides `resolvedContext` (the matched verify.json
-   * deliverable's explicit `staticRoot`, when it declares one) rather than the request
-   * input — staticRoot is a serve-time concern, not an input field. The resolver
-   * defaults it to dirname(html) when absent.
-   */
-  private async maybeSpawnStaticServer(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
-    signal: AbortSignal,
-  ): Promise<StaticServerHandle | null> {
-    if (!this.staticServerProvider || !this.staticHtmlContextResolver) {
-      return null;
-    }
-    const htmlPath = input.htmlPath?.trim() ?? '';
-    if (htmlPath.length === 0) {
-      return null;
-    }
-    // A running url the agent passed is captured directly — never shadowed by a static
-    // serve of a build output.
-    if (typeof input.url === 'string' && input.url.trim().length > 0) {
-      return null;
-    }
-    // A startable deliverable is the dev-server seam's job (S2), not ours.
-    if (this.inputDeclaresDevServer(input)) {
-      return null;
-    }
-
-    // Resolve the absolute html path + confining static root (fs work lives in the
-    // injected closure). A throw is the same fail-soft "no static server" path as a
-    // null return — the raw htmlPath capture runs unchanged.
-    let context: { absoluteHtmlPath: string; staticRoot: string } | null;
-    try {
-      context = await this.staticHtmlContextResolver({
-        runId: row.run_id,
-        projectId: row.project_id,
-        htmlPath,
-        staticRoot: resolvedContext?.deliverable?.staticRoot,
-      });
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] static html context resolve threw; capturing raw htmlPath', {
-        requestId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-    if (!context) {
-      this.logger?.debug('[VerificationScheduler] no static html context; capturing raw htmlPath', {
-        requestId: row.id,
-      });
-      return null;
-    }
-
-    // Stand the server up. A bind/abort failure fail-softs to the raw htmlPath capture
-    // (never a request FAIL) — the rung-0 file:// diagnostic breadcrumb covers it.
-    try {
-      this.logger?.debug('[VerificationScheduler] spawning static server', {
-        requestId: row.id,
-        absoluteHtmlPath: context.absoluteHtmlPath,
-        staticRoot: context.staticRoot,
-      });
-      return await this.staticServerProvider.spawn({
-        absoluteHtmlPath: context.absoluteHtmlPath,
-        staticRoot: context.staticRoot,
-        signal,
-      });
-    } catch (err) {
-      this.logger?.warn('[VerificationScheduler] static server spawn threw; capturing raw htmlPath (fail-soft)', {
-        requestId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  }
-
-  /**
-   * Bound UNTRUSTED capture diagnostics (Codex finding 7) before they ride a terminal
-   * payload to the human surfaces: cap at 10 entries AND 2000 total chars. Entries are
-   * taken in order; the entry that would overflow the char budget is TRUNCATED to the
-   * remaining budget and every entry after it is DROPPED. Page code controls this text
-   * (prompt-injection surface), so it is defensively bounded here and NEVER threaded
-   * into VlmJudge inputs — it is metadata for the result payload / review item only.
-   */
-  private capDiagnostics(diagnostics: string[]): string[] {
-    const MAX_ENTRIES = 10;
-    const MAX_TOTAL_CHARS = 2000;
-    const capped: string[] = [];
-    let total = 0;
-    for (const entry of diagnostics.slice(0, MAX_ENTRIES)) {
-      const remaining = MAX_TOTAL_CHARS - total;
-      if (remaining <= 0) break;
-      if (entry.length <= remaining) {
-        capped.push(entry);
-        total += entry.length;
-      } else {
-        // The overflowing entry is truncated to fit the budget; the rest are dropped.
-        capped.push(entry.slice(0, remaining));
-        break;
-      }
-    }
-    return capped;
-  }
-
-  /**
    * Read the run's `workflow_runs.batch_id` via the injected DatabaseLike. Returns
    * the trimmed non-empty batch id, or null for a non-batch run / when the column
    * or table is unavailable (e.g. a minimal test DB with only
@@ -5025,42 +2051,6 @@ export class VerificationScheduler {
   }
 
   /**
-   * S5 — resolve + run the golden-baseline SSIM pre-diff for a request, or null when
-   * there is nothing to compare (no resolver injected / no baselineKey / no accepted
-   * baseline for any captured viewport). Fail-soft: a resolver throw degrades to null
-   * (run the VLM with no baseline) rather than wedging the drain. The `match` flag is
-   * re-derived against THIS scheduler's threshold so the gate is owned here even if a
-   * resolver reports its own.
-   */
-  private async resolveBaselinePreDiff(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-    ctx: CaptureContext,
-    fileNames: string[],
-  ): Promise<BaselinePreDiffResult | null> {
-    if (!this.baselinePreDiff) return null;
-    if (!input.baselineKey || input.baselineKey.trim().length === 0) return null;
-    try {
-      const result = await this.baselinePreDiff({
-        projectId: row.project_id,
-        runId: row.run_id,
-        input,
-        artifactsDir: ctx.artifactsDir,
-        fileNames,
-      });
-      if (!result) return null;
-      // Own the gate: re-derive `match` against this scheduler's threshold.
-      return { ...result, match: result.ssimScore >= this.baselineMatchThreshold };
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] baseline pre-diff failed; running VLM', {
-        requestId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  }
-
-  /**
    * S5 — has this project reached its per-project verification budget cap? Reads
    * projects.visual_verify_budget_calls (NULL = unlimited) + the cumulative
    * SUM(verification_requests.judge_calls_used) for the project via the injected
@@ -5128,17 +2118,6 @@ export class VerificationScheduler {
     if (!name || !name.startsWith('verify:port:')) return null;
     const port = Number.parseInt(name.slice('verify:port:'.length), 10);
     return Number.isInteger(port) ? port : null;
-  }
-
-  /**
-   * Map a judge VerdictV1 to a terminal request status, applying the confidence
-   * floor: a 'pass'/'fail' below vlmConfidenceThreshold is demoted to
-   * 'low_confidence' (a human review_item, never an auto-loop / fabricated verdict).
-   */
-  private statusFromVerdict(verdict: VerdictV1): RequestStatus {
-    if (verdict.status === 'low_confidence') return 'low_confidence';
-    if (verdict.confidence < this.config.vlmConfidenceThreshold) return 'low_confidence';
-    return verdict.status === 'pass' ? 'passed' : 'failed';
   }
 
   // --------------------------------------------------------------------------
@@ -5230,461 +2209,9 @@ export class VerificationScheduler {
       .run(backend, id).changes;
   }
 
-  /**
-   * Write a terminal status (passed/failed/low_confidence/skipped/timeout) +
-   * verdict_json / error_message / ended_at. attempt is bumped so a re-judged
-   * request reflects its fall-forward count.
-   *
-   * CANCEL-SAFE (R1 #3b): the write is guarded to a NON-TERMINAL current status
-   * (`status IN ('queued','leased','running')`). If a cancelForRun / timeout sweep
-   * already made the row terminal (e.g. 'timeout') it WON the race — the guard
-   * changes 0 rows so we do NOT clobber the canceled status. Returns the .changes so
-   * markTerminalAndDeliver can suppress delivery when the write lost the race.
-   * (The non-terminal set — a superset of the leased/running the running path sees —
-   * is required because this same writer performs the queued→skipped transition for
-   * the processRow skip paths, which must still succeed on a live 'queued' row.)
-   */
-  private markTerminal(
-    id: string,
-    status: RequestStatus,
-    extra: TerminalExtra = {},
-  ): number {
-    // The migration-095 classification columns are written in the SAME guarded
-    // write as the status, so a health-panel audit can never observe a terminal
-    // row whose verdict and its evidence disagree. FAIL-SOFT (mirrors
-    // agentColumnsForRow): a pre-095 DB — every minimal test fixture, and any
-    // binary rolled back below the migration — throws on `prepare`, BEFORE any
-    // row is touched, so falling through to the legacy write below is safe and
-    // byte-identical to the pre-phase-0 behavior.
-    const hasClassification =
-      extra.failureClass !== undefined ||
-      extra.failureEvidence !== undefined ||
-      extra.preflight !== undefined;
-    if (hasClassification) {
-      try {
-        return this.markTerminalWithClassification(id, status, extra);
-      } catch (err) {
-        this.logger?.debug('[VerificationScheduler] classification columns unavailable; writing legacy terminal', {
-          requestId: id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    return this.db
-      .prepare(
-        `UPDATE verification_requests
-            SET status = ?,
-                current_backend = COALESCE(?, current_backend),
-                verdict_json = ?,
-                report_json = COALESCE(?, report_json),
-                error_message = ?,
-                delivery_state = 'pending',
-                attempt = attempt + 1,
-                ended_at = ?
-          WHERE id = ? AND status IN ('queued', 'leased', 'running')`,
-      )
-      .run(
-        status,
-        extra.backend ?? null,
-        extra.verdict ? JSON.stringify(extra.verdict) : null,
-        // report_json (redesign §5.6): committed atomically with the terminal
-        // status. COALESCE(NULL, report_json) leaves the legacy path's report_json
-        // untouched (always NULL there); an agent row writes its normalized report.
-        extra.report ? JSON.stringify(extra.report) : null,
-        extra.error ?? null,
-        new Date().toISOString(),
-        id,
-      ).changes;
-  }
-
-  /**
-   * The migration-095 widening of {@link markTerminal}: the identical guarded
-   * UPDATE plus `failure_class` / `failure_evidence_json` / `preflight_json`
-   * (docs/proposals/verification-setup-flow.md §3.1 — "The classifier's inputs
-   * and verdict are persisted on the request row so the health panel can show the
-   * env/deliverable/ambiguous histogram and misclassification can be audited").
-   * Throws on a pre-095 DB; {@link markTerminal} owns that fallback.
-   */
-  private markTerminalWithClassification(id: string, status: RequestStatus, extra: TerminalExtra): number {
-    return this.db
-      .prepare(
-        `UPDATE verification_requests
-            SET status = ?,
-                current_backend = COALESCE(?, current_backend),
-                verdict_json = ?,
-                report_json = COALESCE(?, report_json),
-                error_message = ?,
-                failure_class = ?,
-                failure_evidence_json = ?,
-                preflight_json = ?,
-                delivery_state = 'pending',
-                attempt = attempt + 1,
-                ended_at = ?
-          WHERE id = ? AND status IN ('queued', 'leased', 'running')`,
-      )
-      .run(
-        status,
-        extra.backend ?? null,
-        extra.verdict ? JSON.stringify(extra.verdict) : null,
-        extra.report ? JSON.stringify(extra.report) : null,
-        extra.error ?? null,
-        extra.failureClass ?? null,
-        extra.failureEvidence ? JSON.stringify(extra.failureEvidence) : null,
-        extra.preflight ? JSON.stringify(extra.preflight) : null,
-        new Date().toISOString(),
-        id,
-      ).changes;
-  }
-
-  /**
-   * Delivery-outbox stamp (§5.6): flip `delivery_state` to 'delivered' AFTER all
-   * three verdict-delivery consumers (artifact / lane / finding) have SUCCEEDED —
-   * written only by markTerminalAndDeliver + the replay sweeps, and only when
-   * deliver() reported success. markTerminal stamps 'pending' atomically with the
-   * terminal status, so both a crash in the window between the two AND a failed
-   * consumer leave 'pending' for replay to pick up. A legacy/pre-078 row
-   * (delivery_state NULL) never reaches here. Best-effort — a failed flip merely
-   * re-delivers once more (idempotently) at the next sweep/boot.
-   */
-  private markDelivered(id: string): void {
-    try {
-      this.db.prepare(`UPDATE verification_requests SET delivery_state = 'delivered' WHERE id = ?`).run(id);
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] delivery_state=delivered stamp failed (fail-soft)', {
-        requestId: id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  /**
-   * Write a terminal status AND fire verdict delivery — but ONLY when the
-   * status-guarded markTerminal actually transitioned the row (changes === 1). A
-   * 0-change write means a cancel/timeout sweep already made the row terminal and
-   * WON the race: we must NOT overwrite it and must NOT deliver — no artifact
-   * enrich, no ReviewItemRouter finding, no SprintLaneStore merge-gate write, no
-   * terminal event — for a canceled run (R1 #3b). This is the SINGLE chokepoint
-   * pairing the guarded write with delivery so every runChosen / skip exit is
-   * cancel-safe by construction.
-   */
-  private async markTerminalAndDeliver(
-    row: VerificationRequestRow,
-    status: RequestStatus,
-    extra: TerminalExtra,
-    verdict: VerdictV1 | undefined,
-    fileNames: string[],
-    input?: VerificationRequestInput,
-  ): Promise<void> {
-    const changes = this.markTerminal(row.id, status, extra);
-    if (changes === 0) {
-      this.logger?.debug('[VerificationScheduler] terminal write lost race to cancel/timeout; skipping delivery', {
-        requestId: row.id,
-        attemptedStatus: status,
-      });
-      return;
-    }
-    // Report a verification that genuinely FAILED or TIMED OUT. Deliberately NOT
-    // 'skipped': a skip is this scheduler's by-design non-failure for a missing
-    // precondition (no usable/healthy backend, missing TCC grant, uninstalled
-    // chromium, static-only chain, unparseable input) — and on a host without a
-    // provisioned visual-verify backend (the documented common case) EVERY request
-    // skips, which would flood Sentry with non-errors under a seam named
-    // 'verify-request-failed' and bury real signal. Passed / low_confidence are
-    // valid verdicts, also not errors. Only after the guarded write won
-    // (changes === 1) so a cancel-race never double-reports.
-    if (status === 'failed' || status === 'timeout') {
-      // extra.error (a capture/judge error) may include a URL or path, so it is
-      // NOT put in the exception message — only the bounded errorClass, derived
-      // from it, plus the bounded requestStatus/verifyType/backend tags.
-      const verifyErrorClass = classifyErrorPattern(extra.error);
-      emitSeamError('verify-request-failed', new Error(`verify ${status} (${verifyErrorClass})`), {
-        requestStatus: status,
-        verifyType: row.verify_type,
-        ...(extra.backend ? { backend: extra.backend } : {}),
-        errorClass: verifyErrorClass,
-        // An UNCLASSIFIED verify failure is otherwise blind: the message is
-        // withheld above and `other`/`unknown` says nothing about which failure
-        // it was. The shape+digest split it without shipping the text — the last
-        // `other`-emitting seam to be wired for this (cf. stepResultStore,
-        // monitorQuery, claudeCodeManager).
-        ...unclassifiedErrorTags(verifyErrorClass, extra.error),
-      });
-    }
-    const deliveredOk = await this.deliver(row, status, verdict, fileNames, input, extra);
-    // §5.6 delivery-outbox (amended, adversarial-review fix 2026-07-23): flip the
-    // 'pending' stamp markTerminal wrote to 'delivered' ONLY when every required
-    // consumer succeeded. A crash before this line leaves the row
-    // terminal-but-'pending' for the boot replay — and now a swallowed consumer
-    // error does too: the row stays 'pending' and an in-process retry sweep
-    // re-delivers it (idempotently) without waiting for a reboot.
-    if (deliveredOk) {
-      this.markDelivered(row.id);
-    } else {
-      this.logger?.warn('[VerificationScheduler] delivery incomplete; leaving row pending for retry', {
-        requestId: row.id,
-        status,
-      });
-      this.armDeliveryRetryTimer();
-    }
-  }
-
-  /**
-   * §5.6 delivery-outbox replay: re-deliver every TERMINAL row still marked
-   * `delivery_state='pending'` (a crash struck after markTerminal committed the
-   * status but before/within the three verdict deliveries, OR a required consumer
-   * failed on a prior attempt), stamping 'delivered' only for rows whose delivery
-   * fully succeeds; the rest stay pending and re-arm the in-process retry sweep.
-   * Runs at boot from runRecovery AND from armDeliveryRetryTimer's backoff sweep.
-   * Reconstructs the deliver() args from the
-   * persisted columns; the load-bearing consumers (artifact merge keyed by
-   * (taskRef, requestId), the requestAttempt-guarded lane advance, the
-   * requestId-correlated finding) are all idempotent, so a double replay is a
-   * no-op. Legacy/pre-078 rows have NULL delivery_state and are self-excluded.
-   * fileNames / captureOrigin are best-effort (the agent path's captureOrigin is
-   * always 'agent'; diagnostics are not persisted and are omitted on replay).
-   */
-  private async replayPendingDeliveries(): Promise<number> {
-    let rows: Array<{
-      id: string;
-      run_id: string;
-      project_id: number;
-      status: string;
-      verify_type: string;
-      deliverable_json: string;
-      verdict_json: string | null;
-      report_json: string | null;
-    }>;
-    try {
-      rows = this.db
-        .prepare(
-          `SELECT id, run_id, project_id, status, verify_type, deliverable_json, verdict_json, report_json
-             FROM verification_requests
-            WHERE delivery_state = 'pending'
-              AND status IN ('passed', 'failed', 'low_confidence', 'skipped', 'timeout')
-            ORDER BY enqueued_at ASC, id ASC`,
-        )
-        .all() as typeof rows;
-    } catch (err) {
-      // A minimal DB lacking delivery_state (pre-078) has nothing to replay.
-      this.logger?.debug('[VerificationScheduler] delivery-outbox replay query failed (fail-soft)', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return 0;
-    }
-
-    let replayed = 0;
-    let stillFailing = 0;
-    for (const row of rows) {
-      const input = this.parseInput(row.deliverable_json) ?? undefined;
-      const verdict = this.parseVerdict(row.verdict_json);
-      const fileNames = this.deriveReplayFileNames(row.report_json, verdict);
-      // A persisted report_json means the agent engine produced this terminal —
-      // its capture origin is always 'agent' (§5.9); the legacy path leaves it
-      // undefined on replay (diagnostics are not persisted either).
-      const extra: TerminalExtra = row.report_json ? { captureOrigin: 'agent' } : {};
-      const deliverRow: VerificationRequestRow = {
-        id: row.id,
-        run_id: row.run_id,
-        project_id: row.project_id,
-        status: row.status,
-        verify_type: row.verify_type,
-        deliverable_json: row.deliverable_json,
-        chain_json: null,
-        current_backend: null,
-        attempt: 0,
-        enqueued_at: '',
-      };
-      const ok = await this.deliver(deliverRow, row.status as RequestStatus, verdict, fileNames, input, extra);
-      if (ok) {
-        this.markDelivered(row.id);
-        replayed += 1;
-      } else {
-        stillFailing += 1;
-      }
-    }
-    if (replayed > 0) {
-      this.logger?.info('[VerificationScheduler] replayed pending verdict deliveries', { replayed });
-    }
-    if (stillFailing > 0) {
-      // A consumer failed again — keep the rows pending and re-arm the sweep with
-      // the doubled backoff. A permanently failing row retries at the capped
-      // cadence (cheap idempotent DB writes) and is still picked up at next boot.
-      this.logger?.warn('[VerificationScheduler] deliveries still failing; retry sweep re-armed', {
-        stillFailing,
-        nextDelayMs: this.deliveryRetryDelayMs,
-      });
-      this.armDeliveryRetryTimer();
-    } else {
-      this.deliveryRetryDelayMs = DELIVERY_RETRY_BASE_MS;
-    }
-    return replayed;
-  }
-
-  /**
-   * Arm the in-process delivery-retry sweep (§5.6 amended). One timer at a time;
-   * each arming consumes the current backoff and doubles it (capped) so a
-   * persistently failing consumer cannot hot-loop. `unref`ed so it never keeps the
-   * process alive; the sweep itself is replayPendingDeliveries, whose consumers
-   * are idempotent by requestId.
-   */
-  private armDeliveryRetryTimer(): void {
-    if (this.deliveryRetryTimer !== null) return;
-    const delay = this.deliveryRetryDelayMs;
-    this.deliveryRetryDelayMs = Math.min(this.deliveryRetryDelayMs * 2, DELIVERY_RETRY_MAX_MS);
-    const timer = setTimeout(() => {
-      this.deliveryRetryTimer = null;
-      void this.replayPendingDeliveries().catch((err: unknown) => {
-        this.logger?.warn('[VerificationScheduler] delivery-retry sweep failed (fail-soft)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    }, delay);
-    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
-      (timer as { unref: () => void }).unref();
-    }
-    this.deliveryRetryTimer = timer;
-  }
-
-  /** Parse a persisted verdict_json into a VerdictV1; undefined on NULL/malformed. */
-  private parseVerdict(verdictJson: string | null): VerdictV1 | undefined {
-    if (typeof verdictJson !== 'string' || verdictJson.length === 0) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(verdictJson);
-      return parsed !== null && typeof parsed === 'object' ? (parsed as VerdictV1) : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Best-effort fileNames for a replayed delivery: the agent report's screenshot
-   * basenames when a report_json is present, else the verdict's judgedFileNames,
-   * else empty. Only feeds the artifact merge's fileNames union + the label — the
-   * load-bearing report entry is composed by verdictDelivery from report_json.
-   */
-  private deriveReplayFileNames(reportJson: string | null, verdict: VerdictV1 | undefined): string[] {
-    if (typeof reportJson === 'string' && reportJson.length > 0) {
-      try {
-        const parsed: unknown = JSON.parse(reportJson);
-        if (parsed !== null && typeof parsed === 'object') {
-          const shots = (parsed as { screenshots?: unknown }).screenshots;
-          if (Array.isArray(shots)) {
-            const names = shots
-              .map((s) => (s !== null && typeof s === 'object' ? (s as { fileName?: unknown }).fileName : undefined))
-              .filter((n): n is string => typeof n === 'string' && n.length > 0);
-            if (names.length > 0) return names;
-          }
-        }
-      } catch {
-        // fall through to verdict-derived names
-      }
-    }
-    return verdict?.judgedFileNames ?? [];
-  }
-
-  // --------------------------------------------------------------------------
-  // Verdict delivery (stubbed hook — P8 wires the real routers)
-  // --------------------------------------------------------------------------
-
-  /**
-   * Fire the injected onVerdict hook (if any). The real side-effects
-   * (ArtifactRouter enrich + ReviewItemRouter finding + SprintLaneStore
-   * advance/loopback) live behind this callback (verdictDelivery.ts). Fail-soft:
-   * a throwing hook is logged, never propagated (it must not wedge the drain loop
-   * or leave the lease unreleased — release already ran in runChosen's finally
-   * before deliver here is reached for the judged path, and the skip/parse paths
-   * hold no lease).
-   *
-   * Returns TRUE when the hook fully delivered (or none is wired), FALSE when it
-   * threw or explicitly returned `false` (a required consumer failed) — the
-   * caller then leaves the outbox row 'pending' for replay (§5.6 amended). The
-   * terminal event fires REGARDLESS of the hook outcome and never affects the
-   * return value: it is a wake signal for in-process listeners, not a durable
-   * consumer, and a parked lane must always be woken.
-   */
-  private async deliver(
-    row: VerificationRequestRow,
-    status: RequestStatus,
-    verdict: VerdictV1 | undefined,
-    fileNames: string[],
-    input?: VerificationRequestInput,
-    extra?: TerminalExtra,
-  ): Promise<boolean> {
-    let deliveredOk = true;
-    if (this.onVerdict) {
-      try {
-        const hookResult = await this.onVerdict({
-          requestId: row.id,
-          runId: row.run_id,
-          projectId: row.project_id,
-          type: row.verify_type as VerificationType,
-          status,
-          verdict,
-          fileNames,
-          input,
-          // S9 human-facing provenance: forwarded (not persisted by markTerminal)
-          // so verdictDelivery can render origin + capped page diagnostics on the
-          // review-item finding body + screenshots payload.
-          ...(extra?.captureOrigin ? { captureOrigin: extra.captureOrigin } : {}),
-          ...(extra?.diagnostics && extra.diagnostics.length > 0
-            ? { diagnostics: extra.diagnostics }
-            : {}),
-        });
-        if (hookResult === false) deliveredOk = false;
-      } catch (err) {
-        deliveredOk = false;
-        this.logger?.error('[VerificationScheduler] onVerdict hook threw', {
-          requestId: row.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // Fire the terminal event LAST — after onVerdict (so any merge-gate lane write
-    // is already visible) and REGARDLESS of whether a hook is wired. This is the
-    // wake signal the programmatic visual merge-gate awaits to un-park a lane. It
-    // fires for EVERY terminal status (incl. skipped/timeout — which the merge-gate
-    // now ADVANCES per R4) so a parked programmatic lane can never hang. Fail-soft:
-    // a throwing listener must never wedge the drain loop.
-    try {
-      const event: VerificationTerminalEvent = {
-        runId: row.run_id,
-        requestId: row.id,
-        projectId: row.project_id,
-        status,
-        type: row.verify_type as VerificationType,
-        ...(input?.taskRef ? { taskRef: input.taskRef } : {}),
-      };
-      verificationEvents.emit(verificationChannel(row.run_id), event);
-    } catch (err) {
-      this.logger?.error('[VerificationScheduler] terminal event emit threw', {
-        requestId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return deliveredOk;
-  }
-
   // --------------------------------------------------------------------------
   // Parsing helpers
   // --------------------------------------------------------------------------
-
-  /** Parse deliverable_json into a VerificationRequestInput; null on malformed JSON / shape. */
-  private parseInput(json: string): VerificationRequestInput | null {
-    try {
-      const parsed: unknown = JSON.parse(json);
-      if (
-        parsed !== null &&
-        typeof parsed === 'object' &&
-        typeof (parsed as { intent?: unknown }).intent === 'string'
-      ) {
-        return parsed as VerificationRequestInput;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
 
   /** Parse chain_json into a VisualBackendId[]; empty array on null / malformed. */
   private parseChain(json: string | null): VisualBackendId[] {
@@ -5700,3 +2227,4 @@ export class VerificationScheduler {
     }
   }
 }
+

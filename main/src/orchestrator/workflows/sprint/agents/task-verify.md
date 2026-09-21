@@ -120,6 +120,20 @@ shape of `serve`/`target`/`attestation` below:
   attempting it or guessing. Behaviors that are purely observational (does
   the tray icon render, does the dialog show the right text) don't need
   `requiresDrive` and are exercised normally.
+- **`mobile`** — an iOS app the verifier runs on a simulator. Declare it ONLY
+  when the repo shows the evidence: an `.xcodeproj` / `.xcworkspace` / a
+  `Package.swift` with an iOS app target. Set `"modality": "mobile"`, give the
+  task an `app` block `{ "platform": "ios-simulator", "bundleId": "...",
+  "scheme": "...", "productGlob": "..." }` and **no `serve`** — the app runs
+  under the simulator's launchd, there is no port and nothing to attach to.
+  `build` is the single `xcodebuild build …` line (recipe below); install and
+  launch are the harness's, not yours. Target elements by their accessibility
+  label or identifier, never by CSS selector. Set `"requiresDrive": true`
+  honestly, per behavior: observing the launch screen or a screen reached via a
+  URL scheme does not require drive; tapping, typing or swiping does. Driving
+  is probe-gated on the host, so a drive-requiring behavior is reported
+  `not_testable (drive-unsupported)` where it is unavailable — still emit it,
+  never silently drop it.
 
 `modality` is the authoritative declaration — set it whenever you know the
 deliverable is a desktop/Electron app (`cdp-app`) or a browser surface (`web`).
@@ -131,8 +145,8 @@ it never creates one. If you declare `cdp-app` without an `attach` serve (or
 `web` alongside one) and the project has no proven runbook for what you
 declared, the harness uses what your own `serve` describes instead.
 
-Pick exactly ONE of the two recipes below — the section you emit still has
-exactly one heading and one json fence, never both forms at once.
+Pick exactly ONE of the recipes below — the section you emit still has
+exactly one heading and one json fence, never two forms at once.
 
 **Web deliverable recipe:**
 
@@ -192,12 +206,44 @@ and guarantees it never collides with the user's own running instance, a sibling
 verification run, or this lane's previous attempt (`$VERIFY_ARTIFACTS_DIR` is
 per-RUN and reused across attempts — screenshots go there, state does not).
 
+**iOS-simulator recipe (`mobile`):**
+
+````markdown
+## Visual verification task
+```json
+{
+  "version": 1,
+  "taskRef": "TASK-021",
+  "summary": "Onboarding screen shows the new Skip control",
+  "modality": "mobile",
+  "build": ["xcodebuild build -scheme MyApp -configuration Debug -sdk iphonesimulator -destination \"id=$VERIFY_SIM_UDID\" -derivedDataPath \"$VERIFY_DERIVED_DATA\" -clonedSourcePackagesDirPath \"$VERIFY_DERIVED_DATA/SourcePackages\" -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO"],
+  "app": { "platform": "ios-simulator", "bundleId": "com.example.MyApp", "scheme": "MyApp", "productGlob": "Build/Products/Debug-iphonesimulator/*.app" },
+  "attestation": { "kind": "bundle-identity", "bundleId": "com.example.MyApp" },
+  "behaviors": [
+    { "id": "b1", "description": "Skip control renders on onboarding",
+      "steps": ["observe the launch screen"],
+      "expected": "a button with accessibility label 'Skip' is visible above the fold" }
+  ]
+}
+```
+````
+
+Notes on the mobile recipe: `build` is ONE `xcodebuild build` line and nothing
+else — installing and launching are harness-owned driver commands the verifier
+runs, never build steps you compose. There is no `serve` and no `target`: the
+simulator, its UDID and the DerivedData path are leased per request and reach
+the verifier as `$VERIFY_SIM_UDID` / `$VERIFY_DERIVED_DATA`, so reference those
+names and never a hardcoded device, path or port. `app.bundleId` and
+`attestation.bundleId` must be the SAME string; `productGlob` is relative to
+`$VERIFY_DERIVED_DATA` and must resolve to exactly one `.app`.
+
 Field rules:
 
 - `version` (required): literally `1`. `summary` (required): one sentence naming
   the deliverable under verification. `taskRef`: this task's ref, so the verdict
   drives the right lane.
-- `modality` (recommended): `"web"` | `"cdp-app"` | `"native-screen"` — pick it
+- `modality` (recommended): `"web"` | `"cdp-app"` | `"native-screen"` |
+  `"mobile"` — pick it
   per the guidance above. Omit only when genuinely unsure; the harness then
   falls back to `serve.attach` and, failing that, to the project's proven
   runbook — but stating it explicitly is what PINS the surface, and it catches a
@@ -236,6 +282,11 @@ Field rules:
   in an app-hosted web-view exposing CDP. A non-web surface with no debuggable
   web-view at all is `native-screen` (still Form A, see `requiresDrive` above)
   or Form B — never a forced attach.
+- `app` (required for `mobile`, absent otherwise): `{ "platform":
+  "ios-simulator", "bundleId": "...", "scheme": "...", "productGlob": "..." }` —
+  it names the deliverable the harness installs and launches. A mobile task
+  carrying a `serve` instead of an `app` block resolves to the wrong modality
+  and is rejected.
 - `attestation` (recommended whenever the deliverable supports one): declares
   the identity channel this proof relies on — the verifier proves the surface
   it drove IS this task's deliverable, never a stale process or the user's own
@@ -244,7 +295,10 @@ Field rules:
   "cdp-token", "expression": "...", "expected": "..." }` for `cdp-app`/attach
   mode (the only channel that works when the driver never navigates, so there
   is no HTTP status to check); `{ "kind": "file-identity" }` is implicit for a
-  bare `target.htmlPath` and does not need to be spelled out. Compose one
+  bare `target.htmlPath` and does not need to be spelled out; `{ "kind":
+  "bundle-identity", "bundleId": "..." }` for `mobile`, where the harness
+  itself hashes the installed app against the product staged for this request
+  (echo `app.bundleId` exactly). Compose one
   whenever the deliverable can support it — a pass with no attestation is
   capped at `low_confidence`. A bare `target.url` task (no `build`, no
   `serve`, no `htmlPath`) has no channel available at all and cannot attest —
@@ -255,9 +309,9 @@ Field rules:
   (navigate/click/type); `expected` is what must be observably true in the
   rendered UI for a pass. List only behaviors observable in the UI — the code
   criteria you already verified do not belong here. Set `"requiresDrive":
-  true` on a behavior only when it needs a click/type to exercise it
-  (`native-screen` above); leave it unset on every other modality, where
-  driving is unconditionally available.
+  true` on a behavior only when it needs a click/type/tap to exercise it
+  (`native-screen` and `mobile` above); leave it unset on `web` and `cdp-app`,
+  where driving is unconditionally available.
 - `viewports`: optional `[{ "width": 1280, "height": 800 }]` for responsive
   checks.
 
@@ -277,8 +331,9 @@ VISUAL-VERIFICATION: NOT-APPLICABLE — backend-only change, no rendered UI
 
 The controller resolves ONE verification posture for the whole run, once, before
 any lane is dispatched — not per lane. When no modality can serve this project
-(the run is stamped for the deferred mobile modality, or for `native-desktop`
-with no proven `native-screen` runbook), it files a single
+(the run is stamped for a verification type this project has no proven runbook
+for — `mobile-flow` without a proven `mobile` runbook, `native-desktop` without
+a proven `native-screen` one), it files a single
 `No verifiable modality for this project` finding for the run, skips the
 enqueue for every lane, and SUPPRESSES the per-lane
 `Visual verification did not run for …` findings that would otherwise repeat

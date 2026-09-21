@@ -84,7 +84,7 @@ describe('buildWorkflowMeta', () => {
     // Pin the actual built-in shape so a regression in this helper OR a change
     // to the definitions is caught loudly.
     expect(PLANNER_PHASES).toBe(2);
-    expect(PLANNER_STEPS).toBe(11);
+    expect(PLANNER_STEPS).toBe(10);
     expect(SPRINT_PHASES).toBe(3);
     expect(SPRINT_STEPS).toBe(6);
 

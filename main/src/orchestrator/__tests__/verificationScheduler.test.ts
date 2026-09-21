@@ -33,6 +33,7 @@ import type {
   VisualBackendId,
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
 
 const MIG_DIR = join(__dirname, '..', '..', 'database', 'migrations');
 const THROUGH_078 = [
@@ -418,6 +419,10 @@ describe('VerificationScheduler', () => {
         simulatorDevices: [],
         queuedAgeCeilingMs: 15 * 60 * 1000,
         agentSlots: 2,
+        mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+        mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+        mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+        mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
         autoBootstrapRunbook: false,
       },
       leasePool: new ResourceLeasePool(new Mutex()),

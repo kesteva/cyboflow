@@ -50,6 +50,10 @@ What to establish, and where each answer comes from:
   - a single-instance lock, and **what key it is keyed on** — a lock keyed on
     something the runbook cannot override defeats a per-request data dir entirely,
     and that exact mistake is one of the recorded historical failures.
+- **An iOS app target.** An `.xcodeproj`, an `.xcworkspace`, or a
+  `Package.swift` declaring one. That is the only evidence that makes `mobile`
+  declarable; read its schemes and build settings with the read-only
+  `xcodebuild` queries below, never a build.
 - **Identity signals.** Anything a verifier could read back to prove the surface
   it is looking at is THIS build: a build-stamped global, a version endpoint, a
   `data-*` attribute on the root element, a distinctive window title.
@@ -72,7 +76,14 @@ What to establish, and where each answer comes from:
   screen has no executable path today. Behaviors here must be observational, and
   any behavior that genuinely needs a click must be flagged as drive-requiring so
   it is reported untestable rather than attempted or quietly dropped.
-- **`mobile`** — deferred. Never declare it.
+- **`mobile`** — an iOS app, built with Apple's command-line toolchain
+  (`xcodebuild`) and run on a simulator the harness leases per request. No Xcode
+  MCP and no third-party tool is required. Capture always works; tapping and
+  typing are an OPTIONAL, probe-gated rung, so a behavior that genuinely needs a
+  tap must be flagged drive-requiring and is reported untestable where drive is
+  unavailable — exactly as on `native-screen`. Declare it on evidence only: an
+  `.xcodeproj` / `.xcworkspace` / a `Package.swift` with an iOS app target. Its
+  entry has **no `serve`** — see the mobile shape below.
 
 A desktop project usually declares TWO: `cdp-app` for its web-view content and
 `native-screen` for its OS chrome. Say which behaviors belong to which; each
@@ -90,16 +101,19 @@ problem, so it is not a shape you may improvise. This is the whole schema:
 ```ts
 {
   version: 1,                      // the literal 1 — not "1", not 1.0
-  modalities: {                    // at least one key; ONLY these three exist
+  modalities: {                    // at least one key; ONLY these four exist
     "web"?:           ModalityEntry,
     "cdp-app"?:       ModalityEntry,
     "native-screen"?: ModalityEntry,
+    "mobile"?:        ModalityEntry,
   },
   levers?: {                       // lever NAMES, never values
     portEnv?: string,              // env var the serve cmd reads the leased port from
     nonceEnv?: string,             // env var the build/serve reads this request's nonce from
     dataDirEnv?: string,           // env var that redirects the app's state dir
     cdpPortFlag?: string,          // CLI flag pinning the app's CDP port
+    simUdidEnv?: string,           // env var the build reads the leased simulator UDID from
+    derivedDataEnv?: string,       // env var the build reads the per-request DerivedData root from
     notes?: string,
   },
 }
@@ -111,7 +125,13 @@ ModalityEntry = {
     attach?: "cdp",                // ONLY this literal; omit for a classic web serve
     readyWhen?: { urlPath?: string, timeoutMs?: number },
   },
-  attestation: AttestationSpec,    // REQUIRED — see the five kinds below
+  app?: {                          // REQUIRED for `mobile`, forbidden elsewhere
+    platform: "ios-simulator",     // ONLY this literal
+    bundleId: string,              // must equal attestation.bundleId
+    scheme: string,
+    productGlob?: string,          // relative to $VERIFY_DERIVED_DATA; no `..`, no leading `/`
+  },
+  attestation: AttestationSpec,    // REQUIRED — see the six kinds below
   notes?: string,                  // free-text derivation notes for a human reader
   viewports?: Array<{ width: number, height: number, label?: string }>,
 }
@@ -145,6 +165,37 @@ proven on one run and failed on the next on that guess alone, and the bad
 direction marks a runbook proven that only works when the agent embellishes it.
 Names the harness already owns (`VERIFY_*`) and names that configure execution
 (`PATH`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`) are refused.
+
+**The mobile entry is the one that does not serve anything.** It carries **no
+`serve`** — the app runs under the simulator's own launchd, so there is no port,
+no URL and nothing to attach to — and instead an `app` block plus a
+`bundle-identity` attestation whose `bundleId` is the SAME string as
+`app.bundleId` (a mismatch is a registration error, not a warning). Its `build`
+is ONE line:
+
+```
+xcodebuild build -scheme <scheme> -configuration Debug -sdk iphonesimulator \
+  -destination "id=$VERIFY_SIM_UDID" -derivedDataPath "$VERIFY_DERIVED_DATA" \
+  -clonedSourcePackagesDirPath "$VERIFY_DERIVED_DATA/SourcePackages" \
+  -skipPackagePluginValidation -skipMacroValidation \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+```
+
+`$VERIFY_SIM_UDID` and `$VERIFY_DERIVED_DATA` are placeholders exactly like
+`${PORT}`: the simulator and the DerivedData root are leased per request, so a
+device name, a UDID or an absolute path in the committed file is the same
+mistake as a hardcoded port. Installing and launching are NOT build steps — the
+harness owns both, and a runbook never mentions `simctl`. `simUdidEnv` and
+`derivedDataEnv` are the two mobile levers, and like the others they name env
+vars the project's own tooling reads, never values.
+
+Discover the three facts you need READ-ONLY, building nothing: `xcodebuild
+-list -json` gives the scheme names, and `xcodebuild -showBuildSettings -json
+-scheme <s> -sdk iphonesimulator` gives `PRODUCT_BUNDLE_IDENTIFIER` (the
+`bundleId`) and `FULL_PRODUCT_NAME` (which fixes `productGlob`, relative to
+`$VERIFY_DERIVED_DATA` — typically
+`Build/Products/Debug-iphonesimulator/*.app`). Never run a real build to find
+them, and never infer a bundle id from the target's name.
 
 A worked example — a static site with no build step and no route it can add:
 
@@ -182,7 +233,7 @@ not pass. There is no low-confidence escape hatch. "The port answered" is not
 identity: it may be a stale dev server from an unrelated worktree, or the user's
 own running app.
 
-**There are exactly five attestation kinds. You may not invent a sixth**, and a
+**There are exactly six attestation kinds. You may not invent a seventh**, and a
 `kind` outside this list is rejected by the validator, so an invented one is a
 failed draft rather than a creative one:
 
@@ -193,6 +244,7 @@ failed draft rather than a creative one:
 | `cdp-token` | `expression: string`, `expected: string` | `cdp-app` | `Runtime.evaluate(expression)` over the CDP session equals `expected`, an immutable build-stamped global. The ONLY channel that works in attach mode, where the driver never navigates. |
 | `window-identity` | `titlePattern: string`, `app: string` | `native-screen` | The application named by `app` has an OS window whose title matches. `app` is required — there is no host-wide window listing, and "some window on this machine matches" would not be an identity check. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
 | `file-identity` | *(none)* | degenerate pre-live `htmlPath` | Identity BY CONSTRUCTION: the runner itself writes and owns the path it opens. No live process, nothing to race. |
+| `bundle-identity` | `bundleId: string` | `mobile` | After the session the harness re-hashes the executable inside the installed app container and requires it to be byte-identical to the exactly-one product staged under this request's DerivedData, carrying that `CFBundleIdentifier`. Must equal `app.bundleId`. It proves the identity of what was STAGED, not who compiled it — the agent runs `xcodebuild` itself through Bash, exactly as it runs a web build — so record that limit rather than calling it build provenance. |
 
 Literal shapes (`urlPath` / `selector` / `expression` are always whatever the
 project ACTUALLY exposes — these are shapes, not fixed values):
@@ -200,7 +252,8 @@ project ACTUALLY exposes — these are shapes, not fixed values):
 `{"kind":"dom-marker","selector":"[data-verify-build]"}`,
 `{"kind":"cdp-token","expression":"window.__BUILD_SHA__","expected":"<the literal this build bakes in>"}`,
 `{"kind":"window-identity","titlePattern":"Cyboflow — .*","app":"Cyboflow"}`,
-`{"kind":"file-identity"}`.
+`{"kind":"file-identity"}`,
+`{"kind":"bundle-identity","bundleId":"com.example.MyApp"}`.
 
 **`file-identity` is NOT the escape hatch for "this is just static files."** It
 covers only the degenerate path where the runner opens a file it wrote itself. A

@@ -364,9 +364,10 @@ rather than N unrelated lane failures.
 is dispatched, the controller resolves whether ANY verification modality can serve
 this run. Three answers: the visual verifier is switched OFF (nothing is filed and
 nothing changes); a modality is available (every lane enqueues and parks at the
-merge gate as usual); or NO modality can serve the run — the run is stamped for the
-deferred mobile modality, or for `native-desktop` with no proven `native-screen`
-runbook. In that last case exactly ONE
+merge gate as usual); or NO modality can serve the run — it is stamped for a
+verification type this project has no proven runbook for (`mobile-flow` with no
+proven `mobile` runbook, `native-desktop` with no proven `native-screen`
+runbook). In that last case exactly ONE
 `No verifiable modality for this project` finding is filed for the whole run, every
 lane skips the enqueue without parking, and the per-lane
 `Visual verification did not run for …` findings are suppressed, because filing one

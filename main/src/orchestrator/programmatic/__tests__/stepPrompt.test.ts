@@ -1005,6 +1005,10 @@ describe('composeStepPrompt', () => {
     expect(prove).toContain('git add -f .cyboflow/verify-runbook.json');
     expect(prove).toContain('git cat-file -e HEAD:.cyboflow/verify-runbook.json');
     expect(prove).toContain('runbook/sha mismatch');
+    // B4: a mobile proof task carries an `app` block in place of `serve`;
+    // composing one without it resolves the wrong modality at the authorization
+    // check and the setup-proof request is rejected.
+    expect(prove).toContain('its serve form OR its `app` block (mobile)');
     expect(prove).toContain('setup_proof: true');
     expect(prove).toContain('Never mark a runbook proven');
     // F10 (docs/proposals/visual-verification-brittleness-fixes.md): the DB

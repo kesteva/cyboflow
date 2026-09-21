@@ -16,6 +16,7 @@
  * against a fake db without the orchestrator layering rule being violated.
  */
 import { isSessionSummarySupported } from '../../../shared/types/sessionSummary';
+import { hashAskText } from './sessionAskHash';
 import type { DatabaseLike, PreparedStatement } from './types';
 import type { QuickSessionRow, QuickSessionState } from '../../../shared/types/quickSessions';
 
@@ -92,6 +93,16 @@ export interface QuickSessionCandidateRow {
   summary_state: string | null;
   /** session_summaries.waiting_on, via LEFT JOIN — raw, re-validated by {@link normalizeWaitingOn}. */
   waiting_on: string | null;
+  /**
+   * session_summaries.ask_dismissed_hash, via LEFT JOIN (migration 140,
+   * TASK-225) — the sha256 hex digest of whatever `waiting_on` text the user
+   * last dismissed for this session, or null if never dismissed. Compared
+   * against a hash of the CURRENT `waiting_on` in {@link toQuickSessionRow}'s
+   * read-time suppression filter: a match means the summarizer repeated the
+   * exact question the user already cleared, so it stays hidden rather than
+   * resurfacing.
+   */
+  ask_dismissed_hash: string | null;
 }
 
 /**
@@ -114,7 +125,8 @@ const SELECT_COLS = `
   CASE WHEN s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at)
        THEN 1 ELSE 0 END AS unviewed,
   s.exit_code, s.agent_provider, s.substrate, s.worktree_name,
-  ss.summary AS summary, ss.state AS summary_state, ss.waiting_on AS waiting_on
+  ss.summary AS summary, ss.state AS summary_state, ss.waiting_on AS waiting_on,
+  ss.ask_dismissed_hash AS ask_dismissed_hash
 `;
 
 const SUMMARIES_JOIN = `LEFT JOIN session_summaries ss ON ss.session_id = s.id`;
@@ -135,15 +147,42 @@ export function deriveQuickSessionState(
 }
 
 /**
+ * TASK-225 read-time suppression: true when the row's CURRENT `needs_input`
+ * ask is the exact text the user already dismissed (migration 140). Only
+ * meaningful for a `needs_input` row with actual `waiting_on` text and a
+ * stored dismissal hash — a live `blocked` row (a real pending gate) is never
+ * suppressed by this, since dismissing clears session_summaries but cannot
+ * clear an in-flight AskUserQuestion/permission gate.
+ */
+function isAskDismissed(
+  summaryState: 'working' | 'complete' | 'needs_input' | null,
+  waitingOn: string | null,
+  askDismissedHash: string | null,
+): boolean {
+  return (
+    summaryState === 'needs_input' &&
+    waitingOn !== null &&
+    askDismissedHash !== null &&
+    hashAskText(waitingOn) === askDismissedHash
+  );
+}
+
+/**
  * Map a candidate row + blocked set to a board row. `idleSince` is set only for
  * idle rows, and comes from `idle_since_iso` (the real rest boundary), NOT from
- * `updated_at` — see the field docs on {@link QuickSessionCandidateRow}.
+ * `updated_at` — see the field docs on {@link QuickSessionCandidateRow}. A
+ * `needs_input` row whose `waiting_on` hashes to the session's dismissed hash
+ * (migration 140) reads its `summaryState`/`waitingOn` back as null — see
+ * {@link isAskDismissed}.
  */
 export function toQuickSessionRow(
   row: QuickSessionCandidateRow,
   blockedRunIds: ReadonlySet<string>,
 ): QuickSessionRow {
   const state = deriveQuickSessionState(row, blockedRunIds);
+  const rawSummaryState = normalizeSummaryState(row.summary_state);
+  const rawWaitingOn = normalizeWaitingOn(row.waiting_on);
+  const suppressed = isAskDismissed(rawSummaryState, rawWaitingOn, row.ask_dismissed_hash);
   return {
     sessionId: row.id,
     name: row.name,
@@ -157,8 +196,8 @@ export function toQuickSessionRow(
     rawStatus: row.status,
     exitCode: row.exit_code,
     summary: row.summary,
-    summaryState: normalizeSummaryState(row.summary_state),
-    waitingOn: normalizeWaitingOn(row.waiting_on),
+    summaryState: suppressed ? null : rawSummaryState,
+    waitingOn: suppressed ? null : rawWaitingOn,
     // The SAME predicate the summarizer's own eligibility gate reads
     // (shared/types/sessionSummary.ts) — a row must never render "unsupported"
     // over a summary the scheduler was willing to produce.

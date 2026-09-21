@@ -126,6 +126,12 @@ export const sessionsRouter = router({
       return requireOps(ctx.sessionOps).markViewed(input);
     }),
 
+  dismissAsk: protectedProcedure
+    .input(sessionInput)
+    .mutation(async ({ ctx, input }): Promise<{ success: true } | SessionOpsError> => {
+      return requireOps(ctx.sessionOps).dismissAsk(input);
+    }),
+
   rename: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1), newName: z.string().min(1) }))
     .mutation(async ({ ctx, input }): Promise<{ success: true; data: RenamedSessionRow } | SessionOpsError> => {

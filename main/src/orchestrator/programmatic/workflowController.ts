@@ -739,7 +739,14 @@ export class WorkflowController {
         // item(s) clearing, then resumes — so the pipeline can't march past a defect
         // the human must clear. Absent host seam (tests / non-programmatic) ⇒ no
         // parking (fast no-op). A cancel while parked ends the walk 'canceled'.
-        if (this.host.awaitBlockingReviewItems) {
+        //
+        // `consumesBlockingReviewItems` (e.g. `address-review`) is exempt: that step
+        // IS the resolution path for a pending blocking item — most concretely,
+        // `addressReviewFindings` rewinds a run to this step SPECIFICALLY because a
+        // confirmed-catastrophic eval finding is pending. Applying this checkpoint to
+        // it would re-park the run before its agent ever ran, since the very item the
+        // rewind exists to clear is still open — deadlocking the repair path.
+        if (this.host.awaitBlockingReviewItems && !step.consumesBlockingReviewItems) {
           const gate = await this.host.awaitBlockingReviewItems(runId, signal);
           if (gate === 'canceled' || signal?.aborted) {
             return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);

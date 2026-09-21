@@ -144,7 +144,7 @@ describe('ReadyForReviewSection', () => {
     expect(screen.queryByTestId('rq-ready-expanded')).not.toBeInTheDocument();
     await user.click(screen.getByTestId('rq-ready-row'));
     const expanded = screen.getByTestId('rq-ready-expanded');
-    expect(within(expanded).getByText('Merge to main')).toBeInTheDocument();
+    expect(within(expanded).getByText('Merge')).toBeInTheDocument();
     expect(within(expanded).getByText('Open session')).toBeInTheDocument();
     expect(within(expanded).getByText('Dismiss session')).toBeInTheDocument();
   });
@@ -167,7 +167,7 @@ describe('ReadyForReviewSection', () => {
 
     await user.click(screen.getByTestId('rq-ready-row'));
     const expanded = screen.getByTestId('rq-ready-expanded');
-    expect(within(expanded).queryByText('Merge to main')).not.toBeInTheDocument();
+    expect(within(expanded).queryByText('Merge')).not.toBeInTheDocument();
     expect(within(expanded).queryByText('Dismiss session')).not.toBeInTheDocument();
     expect(within(expanded).getByText('Open session')).toBeInTheDocument();
   });
@@ -197,7 +197,7 @@ describe('ReadyForReviewSection', () => {
     // A run row's expanded state has no Merge/Dismiss — Open is the only action.
     await user.click(screen.getByTestId('rq-ready-row'));
     const expanded = screen.getByTestId('rq-ready-expanded');
-    expect(within(expanded).queryByText('Merge to main')).not.toBeInTheDocument();
+    expect(within(expanded).queryByText('Merge')).not.toBeInTheDocument();
     expect(within(expanded).queryByText('Dismiss session')).not.toBeInTheDocument();
   });
 });

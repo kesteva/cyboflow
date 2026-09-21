@@ -30,7 +30,16 @@
  *     full action set on every surface: "Open in session" has no destination, and
  *     collapsing anyway would leave Dismiss as the only exit.
  *   - The default pair's discard half routes a DECISION through
- *     resolve(outcome:'reject'), not dismiss — see defaultEscalationActions.
+ *     resolve(outcome: gateDeclineOutcome(item)), not dismiss — see
+ *     defaultEscalationActions. gateDeclineOutcome is the centralized gate ->
+ *     verdict mapping (TASK-222): 'reject' for a plain gate, but 'revise' for a
+ *     gate that declares an intra-phase loopback (today: only `approve-design`),
+ *     so a Dismiss click can never silently downgrade a revise-capable gate into
+ *     a run-ending reject.
+ *   - `approve-design` specifically is checked BEFORE `usesDefaultActions`
+ *     collapses to the default pair at all (see the `decision` case below), so it
+ *     renders its own Approve/Revise pair on every surface instead of ever
+ *     reaching "Open in session" + Dismiss.
  *
  * Branches that DO carry options — permission, the recovery gate's recovered
  * answers, the idea-size guard's two mutations, approve-ideas, the
@@ -44,6 +53,18 @@
  *                    Promote-to-task (relabelled 'Accept → task'); 'docs'/'prompt'
  *                    surface an 'Accept' that resolves with 'triaged:accepted-<target>'
  *                    (the human applies the edit). No hint = today's exact actions.
+ *                    EXCEPT for an eval-sourced finding (source LIKE
+ *                    'agent:eval%' — TASK-277): a post-hoc jury flag on a run
+ *                    still parked at its human-review gate is a different kind
+ *                    of thing than an agent's inline observation, so it gets
+ *                    its own triage set instead — Address review findings
+ *                    (rewinds the run to `address-review`, disabled with a
+ *                    tooltip when the run already completed or the flow has
+ *                    no such step) / Log as findings (resolves
+ *                    'triaged:logged', no task minted) / Dismiss. Promote to
+ *                    task never appears for these. The ad-hoc quick-session
+ *                    verdict summary is a sub-case that drops Address
+ *                    entirely (its run has no address-review step at all).
  *   - permission   — a real-time PreToolUse/approval gate (blocking). Reuses the
  *                    APPROVAL resolution path: Approve / Reject route to
  *                    cyboflow.approvals.approve / reject via the folded approvalId.
@@ -75,7 +96,13 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
-import { IDLE_REVIEW_SOURCE_PREFIX, parseSupervisorRecommendation } from '../../../../shared/types/reviews';
+import {
+  IDLE_REVIEW_SOURCE_PREFIX,
+  LOGGED_FINDING_RESOLUTION,
+  isEvalSourcedFinding,
+  isEvalAdHocSummary,
+  parseSupervisorRecommendation,
+} from '../../../../shared/types/reviews';
 import type { SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
@@ -335,6 +362,53 @@ function isApproveDesignGateItem(item: ReviewItem): boolean {
 }
 
 /**
+ * TASK-222 — centralized gate -> verdict mapping. A gate that declares an
+ * intra-phase `loopback` (today, the ONLY one among human gates: `approve-design`
+ * — shared/types/workflows.ts) must never have its non-approve action recorded as
+ * a plain terminal 'reject': that ENDS the run instead of looping back to
+ * `expand-spec`/`ui-prototype` with the human's note + the adversarial review
+ * threaded in (the 2026-09-17 swift-bison incident — `defaultEscalationActions`'s
+ * discard button used to hardcode 'reject' for every decision kind, silently
+ * downgrading this gate's Dismiss into a run-ending reject on the queue surface).
+ *
+ * ONE function, used by BOTH the explicit verdict pair below AND
+ * `defaultEscalationActions`'s discard, so a future surface/collapse cannot
+ * regress back to a bare 'reject' literal for this gate. Extend the underlying
+ * discriminant (currently just {@link isApproveDesignGateItem}) — never add a new
+ * per-surface conditional — when a future gate adds a loopback.
+ */
+function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
+  return isApproveDesignGateItem(item) ? 'revise' : 'reject';
+}
+
+// ---------------------------------------------------------------------------
+// TASK-277 — eval-sourced finding triage (Address review findings / Log as
+// findings / Dismiss), replacing the legacy Dismiss / Promote-to-task pair.
+// ---------------------------------------------------------------------------
+
+/** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons. */
+const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<'completed' | 'no_step' | 'in_progress', string> = {
+  completed: 'Run already completed — log or dismiss',
+  no_step: 'This flow has no address-review step',
+  in_progress: 'Address review is already running for this run',
+};
+
+/** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case). */
+const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
+  not_found: 'Run not found.',
+  not_programmatic: 'Only programmatic runs support Address review findings.',
+  not_rewindable: 'This run is not in a state that can be rewound right now.',
+  in_progress: 'Address review is already running for this run — its findings are being worked through.',
+  unknown_step: 'This flow has no address-review step.',
+  target_not_prior: 'The address-review step is ahead of the run — nothing to rewind.',
+  fanout_settled: 'Every sprint task in this run is already integrated.',
+  race: 'The run changed state — try again.',
+};
+
+/** The eligibility shape `runs.canAddressReviewFindings` returns; null while loading. */
+type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' | 'in_progress' } | null;
+
+/**
  * The narrower half of {@link isApproveDesignGateItem}: ONLY the programmatic
  * runner's singular `gate:human-step:approve-design` item.
  *
@@ -416,6 +490,12 @@ export function ReviewItemCard({
   // readGateResolutionNote and it outranks the review itself. Empty => no note,
   // so the stored resolution stays the bare verdict word it is today.
   const [reviseNote, setReviseNote] = React.useState('');
+  // TASK-277: in-flight state for the "Address review findings" rewind (a
+  // separate busy flag — this mutation never resolves the item, so it must
+  // not disable Log/Dismiss the way the shared `pendingItemId` would).
+  const [addressBusy, setAddressBusy] = React.useState(false);
+  const [addressError, setAddressError] = React.useState<string | null>(null);
+  const [addressEligibility, setAddressEligibility] = React.useState<AddressReviewEligibility>(null);
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -424,6 +504,13 @@ export function ReviewItemCard({
   // null = no chip. Rendered on BOTH surfaces (the header block below is shared),
   // because the advice is just as useful in the queue as it is in the session.
   const recommendation = parseSupervisorRecommendation(item.body);
+  // TASK-277: eval-sourced findings (source LIKE 'agent:eval%') get a
+  // dedicated triage set (Address review findings / Log as findings /
+  // Dismiss) instead of the legacy Dismiss / Promote-to-task pair — see the
+  // 'finding' case below. The ad-hoc quick-session summary is a sub-case that
+  // never offers Address (its run has no address-review step to reopen).
+  const isEvalFinding = item.kind === 'finding' && isEvalSourcedFinding(item.source);
+  const isAdHocEvalSummary = isEvalFinding && isEvalAdHocSummary(item);
   // A/B testing slice C: an experiment-comparison decision routes to the
   // comparison view instead of the legacy resolve/dismiss actions.
   const comparisonExperimentId = experimentComparisonId(item);
@@ -468,6 +555,7 @@ export function ReviewItemCard({
       outcome === 'revise' && isApproveDesignGateItem(item) ? reviseNote.trim() || undefined : undefined;
     void resolve(item.project_id, item.id, {
       outcome,
+      surface,
       ...(modifier !== undefined ? { modifier } : {}),
       ...(note !== undefined ? { resolution: note } : {}),
     }).then((r) => {
@@ -500,6 +588,70 @@ export function ReviewItemCard({
         onResolved?.();
       }
     });
+  };
+
+  // TASK-277: fetch the "Address review findings" eligibility for an
+  // eligible eval finding's run — the button renders disabled (with an
+  // explanatory tooltip) until this resolves, rather than letting the human
+  // click it and hit a `noOp` reason. Skipped entirely for the ad-hoc summary
+  // (never offers Address) and any run-less item (defensive — evalWorker
+  // always binds a run).
+  React.useEffect(() => {
+    if (!isEvalFinding || isAdHocEvalSummary || item.run_id === null) {
+      setAddressEligibility(null);
+      return;
+    }
+    let cancelled = false;
+    setAddressEligibility(null);
+    void trpc.cyboflow.runs.canAddressReviewFindings
+      .query({ runId: item.run_id })
+      .then((result) => {
+        if (!cancelled) setAddressEligibility(result);
+      })
+      .catch(() => {
+        if (!cancelled) setAddressEligibility({ eligible: false, reason: 'completed' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isEvalFinding, isAdHocEvalSummary, item.run_id]);
+
+  // TASK-277: "Log as findings" — resolve with 'triaged:logged' (no task
+  // minted, the row stays queryable). Clears a blocking cap item's gate the
+  // same way any other resolve does (aggregate-unblock).
+  const handleLogFinding = (): void => {
+    void resolve(item.project_id, item.id, { resolution: LOGGED_FINDING_RESOLUTION }).then((r) => {
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'log_as_finding', blocking: item.blocking });
+        onResolved?.();
+      }
+    });
+  };
+
+  // TASK-277: "Address review findings" — reopen the run's `address-review`
+  // step so it discovers + acts on EVERY still-pending eval finding for this
+  // run (cyboflow_list_run_findings, called from the step itself). The
+  // findings stay pending — address-review resolves each one it fixes/triages
+  // — so this action never removes the card the way a resolve/dismiss would.
+  const handleAddressReviewFindings = (): void => {
+    if (item.run_id === null) return;
+    setAddressBusy(true);
+    setAddressError(null);
+    void trpc.cyboflow.runs.addressReviewFindings
+      .mutate({ runId: item.run_id })
+      .then((result) => {
+        if ('delivered' in result) {
+          trackEvent('review_item_resolved', {
+            kind: item.kind,
+            action: 'address_review_findings',
+            blocking: item.blocking,
+          });
+        } else {
+          setAddressError(ADDRESS_REVIEW_NOOP_MESSAGE[result.reason] ?? 'Could not rewind the run.');
+        }
+      })
+      .catch(() => { setAddressError('Could not rewind the run — please try again.'); })
+      .finally(() => { setAddressBusy(false); });
   };
 
   // Accept a docs/prompt finding: resolve with 'triaged:accepted-<target>' (the
@@ -652,16 +804,19 @@ export function ReviewItemCard({
     // already dealt with in the session would kill the walk. The design gate has
     // a real "drop the entries and carry on" verdict (`approve[no-findings]`),
     // so the queue's discard points at THAT instead, and the label says what it
-    // does. Every other decision keeps the reject (which is the only thing that
-    // runs the gate-specific teardown); findings keep the plain dismiss.
-    // Keyed on the PROGRAMMATIC gate only: the server admits the modifier for no
-    // other source, so the orchestrated plane's approve-design item keeps the
-    // reject rather than sending a verdict that would be refused.
+    // does. Keyed on the PROGRAMMATIC gate only: the server admits the modifier
+    // for no other source. Defence in depth: the explicit approve-design pair
+    // above is checked BEFORE `usesDefaultActions`, so this branch is not reached
+    // for that gate today — but if that ordering ever changes, the queue's
+    // discard must still never send a run-ending reject.
+    // TASK-222: every OTHER decision's discard routes through the centralized
+    // gate-decline mapping, never a bare 'reject' literal — see
+    // gateDeclineOutcome. Findings keep the plain dismiss.
     const approveDesign = isProgrammaticApproveDesignGate(item);
     const discard = approveDesign
       ? () => handleGateDecision('approve', 'no-findings')
       : item.kind === 'decision'
-        ? () => handleGateDecision('reject')
+        ? () => handleGateDecision(gateDeclineOutcome(item))
         : handleDismiss;
     return (
       <>
@@ -855,27 +1010,27 @@ export function ReviewItemCard({
             </Button>
           );
         }
-        // A `gate:human-step:*` gate carries NO options (humanStepManager mints
-        // payload: null for every step but approve-ideas), so the queue routes to
-        // the run rather than inventing a verdict — the real control is the flow's
-        // own artifact tab (decomposed-stories' approve-plan, approve-designs' grid)
-        // or the transcript. In-session the explicit pair below stays: it is the
-        // terminal surface for the flows that have no artifact tab of their own.
-        if (usesDefaultActions) return defaultEscalationActions();
-        // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
-        // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
-        // drafts and ends the run 'rejected' (no resume). The two-way approve-design
-        // gate (Tier 2, item 12b) is a REVISION loop, not a plain accept/deny — its
-        // "reject" outcome reruns planning with the adversarial-review findings as
-        // feedback, so the generic copy would read backwards for it.
-        return (
-          <>
-            {/* The revise note. Shown only for the approve-design gate and only on
-                the surface that actually offers the revision loop — the queue
-                surface routes to the run instead (usesDefaultActions above), so
-                there is no decision to annotate there. `w-full` makes the flex-wrap
-                row break, which puts the buttons underneath. */}
-            {isApproveDesignGateItem(item) && (
+        // TASK-222 — the two-way approve-design gate (Tier 2, item 12b) is a
+        // REVISION loop, not a plain accept/deny: its decline outcome (via
+        // gateDeclineOutcome) is ALWAYS 'revise', which reruns the refine phase
+        // with the adversarial-review findings as feedback, never a terminal
+        // 'reject'. Checked BEFORE `usesDefaultActions` — UNLIKE every other
+        // `gate:human-step:*` gate below — so it renders this exact Approve/Revise
+        // pair on EVERY surface (queue included) instead of collapsing into
+        // defaultEscalationActions' "Open in session" + Dismiss, which is how the
+        // 2026-09-17 swift-bison incident silently sent 'reject' from the queue.
+        // There is deliberately no third "End run" button here: the controller's
+        // own MAX_STEP_LOOPBACKS budget already ends the run automatically once
+        // revise is exhausted, and the app-wide "Cancel run" control (RunActionBar
+        // / RunCancelDialog) is the explicitly-labelled end-run affordance for
+        // anyone who wants to stop sooner.
+        if (isApproveDesignGateItem(item)) {
+          return (
+            <>
+              {/* The revise note. Rendered wherever this pair is (the pair is
+                  checked before usesDefaultActions, so that includes the queue).
+                  `w-full` makes the flex-wrap row break, which puts the buttons
+                  underneath. */}
               <textarea
                 value={reviseNote}
                 onChange={(e) => setReviseNote(e.target.value)}
@@ -885,35 +1040,60 @@ export function ReviewItemCard({
                 data-testid="design-gate-note"
                 className="w-full rounded border border-border-primary bg-bg-secondary px-2 py-1 text-xs text-text-primary"
               />
-            )}
-            <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
-              {isApproveDesignGateItem(item) ? 'Continue, log as findings' : 'Approve & resume'}
-            </Button>
-            <Button
-              variant={gateVariant(isApproveDesignGateItem(item) ? 'revise' : 'reject')}
-              size="sm"
-              disabled={busy}
-              onClick={() => handleGateDecision(isApproveDesignGateItem(item) ? 'revise' : 'reject')}
-              data-testid="decision-reject"
-            >
-              {isApproveDesignGateItem(item) ? 'Rerun planning with findings' : 'Reject'}
-            </Button>
-            {/* The approve-design gate's THIRD choice: approve the design and
-                drop the surviving review entries instead of logging them. It
-                exists only here — a plain gate has nothing to not-log — and only
-                for the PROGRAMMATIC gate, the one source the server accepts the
-                `no-findings` modifier on. */}
-            {isProgrammaticApproveDesignGate(item) && (
+              <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
+                Continue, log as findings
+              </Button>
               <Button
-                variant={gateVariant('no-findings')}
+                variant={gateVariant('revise')}
                 size="sm"
                 disabled={busy}
-                onClick={() => handleGateDecision('approve', 'no-findings')}
-                data-testid="decision-continue-no-findings"
+                onClick={() => handleGateDecision(gateDeclineOutcome(item))}
+                data-testid="decision-reject"
               >
-                Continue without logging
+                Rerun planning with findings
               </Button>
-            )}
+              {/* The gate's THIRD choice: approve the design and drop the surviving
+                  review entries instead of logging them. Only for the PROGRAMMATIC
+                  gate, the one source the server accepts the `no-findings`
+                  modifier on. */}
+              {isProgrammaticApproveDesignGate(item) && (
+                <Button
+                  variant={gateVariant('no-findings')}
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => handleGateDecision('approve', 'no-findings')}
+                  data-testid="decision-continue-no-findings"
+                >
+                  Continue without logging
+                </Button>
+              )}
+            </>
+          );
+        }
+        // A `gate:human-step:*` gate carries NO options (humanStepManager mints
+        // payload: null for every step but approve-ideas), so the queue routes to
+        // the run rather than inventing a verdict — the real control is the flow's
+        // own artifact tab (decomposed-stories' approve-plan, approve-designs' grid)
+        // or the transcript. In-session the explicit pair below stays: it is the
+        // terminal surface for the flows that have no artifact tab of their own.
+        if (usesDefaultActions) return defaultEscalationActions();
+        // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
+        // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
+        // drafts and ends the run 'rejected' (no resume).
+        return (
+          <>
+            <Button variant={gateVariant('approve')} size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
+              Approve &amp; resume
+            </Button>
+            <Button
+              variant={gateVariant('reject')}
+              size="sm"
+              disabled={busy}
+              onClick={() => handleGateDecision(gateDeclineOutcome(item))}
+              data-testid="decision-reject"
+            >
+              Reject
+            </Button>
           </>
         );
       }
@@ -944,6 +1124,52 @@ export function ReviewItemCard({
         );
       case 'finding':
       default:
+        // TASK-277: an eval-sourced finding (source LIKE 'agent:eval%' — every
+        // confirmed jury finding, the synthesized catastrophic-cap item, and
+        // the ad-hoc summary) is a POST-HOC jury flag on a run parked at its
+        // human-review gate, not a plain agent observation — Promote to task
+        // is wrong vocabulary for it (a human who wants a task can Log it and
+        // let Compound propose one instead). Takes priority over the
+        // blocking/surface branches below: this triage set applies on every
+        // surface, blocking or not.
+        if (isEvalFinding) {
+          if (isAdHocEvalSummary) {
+            // The quick-session ad-hoc rollup: its run has no address-review
+            // step to reopen, so Address never renders here at all (not just
+            // disabled) — only Log / Dismiss.
+            return (
+              <>
+                <Button variant="secondary" size="sm" disabled={busy} onClick={handleLogFinding} data-testid="log-as-findings">
+                  Log as findings
+                </Button>
+                <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+                  Dismiss
+                </Button>
+              </>
+            );
+          }
+          const ineligibleReason = addressEligibility && !addressEligibility.eligible ? addressEligibility.reason : undefined;
+          return (
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy || addressBusy || addressEligibility === null || !addressEligibility.eligible}
+                title={ineligibleReason ? ADDRESS_REVIEW_DISABLED_TOOLTIP[ineligibleReason] : undefined}
+                onClick={handleAddressReviewFindings}
+                data-testid="address-review-findings"
+              >
+                Address review findings
+              </Button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handleLogFinding} data-testid="log-as-findings">
+                Log as findings
+              </Button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+                Dismiss
+              </Button>
+            </>
+          );
+        }
         // A BLOCKING finding parked a programmatic run (Fix: blocking findings must
         // block) — a DEFECT, not a decision. Resolving or promoting it from the queue
         // clears the park without the defect being looked at, so the queue routes to
@@ -1069,6 +1295,12 @@ export function ReviewItemCard({
       {recoveryError && (
         <p className="mt-2 text-xs text-status-error" role="alert" data-testid="recovery-gate-error">
           {recoveryError}
+        </p>
+      )}
+
+      {addressError && (
+        <p className="mt-2 text-xs text-status-error" role="alert" data-testid="address-review-error">
+          {addressError}
         </p>
       )}
     </div>

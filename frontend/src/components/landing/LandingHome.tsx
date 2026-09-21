@@ -41,6 +41,7 @@ import {
   useAggregatedBlockingRunIds,
   useAggregatedReviewItems,
   useAggregatedRuns,
+  useAggregatedRetainedRuns,
   useLandingProjects,
   useLandingStore,
   useProjectsCount,
@@ -68,7 +69,15 @@ import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/t
 import type { QuickSessionRow } from '../../../../shared/types/quickSessions';
 import type { ExperimentRow } from '../../../../shared/types/experiments';
 import type { SessionSettleState } from '../../../../shared/types/cyboflow';
-import { countApprovals, selectReadyToReviewRuns } from './queueSelectors';
+import {
+  applyFlowRunPrecedence,
+  countApprovals,
+  nonTerminalFlowRunBySession,
+  resolveOpenTarget,
+  significantFlowRunBySession,
+  selectReadyToReviewRuns,
+} from './queueSelectors';
+import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import { useTaskRunLauncher } from '../Backlog/useTaskRunLauncher';
 import { ViewSurface } from '../../customViews/ViewSurface';
 import { scrollToSectionOrTop } from '../../customViews/scrollToSectionOrTop';
@@ -142,6 +151,26 @@ function openRunSession(runId: string, projectId: number): void {
   useNavigationStore.getState().goToSession();
 }
 
+/**
+ * Open a session row from ANY home section, resolving the flow-vs-quick
+ * ambiguity the one way — see {@link resolveOpenTarget}. Every call site that
+ * used to reach for `openQuickSession` directly off a triage-derived row goes
+ * through this instead, so a session a live flow run already represents can
+ * never reopen its stale `__quick__` chat, even if a future row somehow slips
+ * past the triage filtering in `applyFlowRunPrecedence`.
+ */
+function openSessionRow(
+  row: Pick<QuickSessionRow, 'sessionId' | 'runId' | 'projectId'>,
+  flowRunBySession: ReadonlyMap<string, ActiveRunRow>,
+): void {
+  const target = resolveOpenTarget(row, flowRunBySession);
+  if (target.kind === 'run') {
+    openRunSession(target.runId, target.projectId);
+    return;
+  }
+  openQuickSession(row);
+}
+
 /** LandingHome — see {@link LandingHomeProps}. */
 export default function LandingHome({ focusQueue = false }: LandingHomeProps): React.JSX.Element {
   // -------------------------------------------------------------------------
@@ -153,6 +182,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   const blockingFindings = useAggregatedBlockingFindings();
   const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const runs = useAggregatedRuns();
+  const retainedRuns = useAggregatedRetainedRuns();
   const runProjectMap = useRunProjectMap();
   const runSessionMap = useRunSessionMap();
   const loadError = useLandingStore((s) => s.loadError);
@@ -223,9 +253,29 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     () => new Set(activeDynamicWorkflows.map((w) => w.sessionId)),
     [activeDynamicWorkflows],
   );
+  // Sessions a non-terminal FLOW run already represents — the same precedence
+  // WorkingSection has always applied (flow run > dynamic workflow > quick
+  // session), now computed once and shared by every bucket below (see
+  // queueSelectors.ts's `nonTerminalFlowRunBySession` / `applyFlowRunPrecedence`
+  // for the TASK-226 rationale).
+  const flowRunBySession = React.useMemo(() => nonTerminalFlowRunBySession(runs), [runs]);
+  // The Ready-for-review counterpart: the session's most significant flow run
+  // INCLUDING a finished one (the rail store retains the newest terminal run
+  // per session). Once the flow run is terminal its session's own quick row
+  // returns to Ready — but "Open →" there must open THAT run, and the label
+  // must describe it, not the `__quick__` chat the flow interrupted (TASK-226).
+  // Bucket precedence above deliberately keeps using the non-terminal map.
+  const readyFlowRunBySession = React.useMemo(
+    () => significantFlowRunBySession(retainedRuns),
+    [retainedRuns],
+  );
   const triage = React.useMemo(
-    () => deriveQuickSessionTriage(quickRows, activeWorkflowSessionIds, nowMs),
-    [quickRows, activeWorkflowSessionIds, nowMs],
+    () =>
+      applyFlowRunPrecedence(
+        deriveQuickSessionTriage(quickRows, activeWorkflowSessionIds, nowMs),
+        flowRunBySession,
+      ),
+    [quickRows, activeWorkflowSessionIds, nowMs, flowRunBySession],
   );
 
   const projectNameById = React.useMemo(() => {
@@ -269,13 +319,10 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     // active ones: scoping this to active runs meant a run parking at a gate
     // handed the session straight back to Working, which then reported a blocked
     // session as "Running". Only once the run is terminal does the session speak
-    // for itself again.
-    const runSessionIds = new Set(
-      runs
-        .filter((run) => classifyRun(run.status) !== 'terminal')
-        .map((run) => run.session_id)
-        .filter((id): id is string => typeof id === 'string' && id !== ''),
-    );
+    // for itself again. `triage.working` already has these sessions filtered out
+    // (applyFlowRunPrecedence, above); `runSessionIds` here still gates dynamic
+    // workflows, which are not part of the quick-session triage.
+    const runSessionIds = new Set(flowRunBySession.keys());
     // A live dynamic workflow REPLACES its session's row rather than hiding
     // behind it: the workflow row says what the fan-out is doing (agent pips, the
     // running/done tally) where the session row only says "Running". Suppressing
@@ -288,11 +335,11 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     return [
       ...activeRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
       ...triage.working
-        .filter((row) => !runSessionIds.has(row.sessionId) && !dynamicSessionIds.has(row.sessionId))
+        .filter((row) => !dynamicSessionIds.has(row.sessionId))
         .map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
       ...dynamics.map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
     ];
-  }, [runs, triage.working, activeDynamicWorkflows]);
+  }, [runs, triage.working, activeDynamicWorkflows, flowRunBySession]);
 
   // Blocked runs — the halted runs NOTHING else on this page speaks for. A run
   // parked at a gate has a decision item (red band) and a cleanly drained one is
@@ -382,10 +429,18 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   );
   const readyRows = React.useMemo<ReadyRow[]>(
     () => [
-      ...triage.readyForReview.map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
+      ...triage.readyForReview.map((row) => {
+        const flowRun = readyFlowRunBySession.get(row.sessionId);
+        return {
+          kind: 'quick' as const,
+          id: row.sessionId,
+          row,
+          ...(flowRun !== undefined ? { flowRun } : {}),
+        };
+      }),
       ...readyRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
     ],
-    [triage.readyForReview, readyRuns],
+    [triage.readyForReview, readyRuns, readyFlowRunBySession],
   );
 
   // A session that is one arm of a LIVE A/B experiment must not be merged or
@@ -538,7 +593,10 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
       ? item.source.slice(IDLE_REVIEW_SOURCE_PREFIX.length)
       : null;
     if (quickSessionId !== null) {
-      openQuickSession({ sessionId: quickSessionId, runId: item.run_id, projectId: item.project_id });
+      openSessionRow(
+        { sessionId: quickSessionId, runId: item.run_id, projectId: item.project_id },
+        flowRunBySession,
+      );
       return;
     }
     if (item.run_id !== null) openRunSession(item.run_id, item.project_id);
@@ -556,14 +614,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         // hands you the list instead of picking for you.
         if (action.sessionIds.length === 1) {
           const row = triage.readyForReview.find((r) => r.sessionId === action.sessionIds[0]);
-          if (row !== undefined) openQuickSession(row);
+          if (row !== undefined) openSessionRow(row, readyFlowRunBySession);
           else jumpToReady();
         } else jumpToReady();
         return;
       }
       case 'rebase-behind': {
         const row = triage.readyForReview.find((r) => r.sessionId === action.sessionIds[0]);
-        if (row !== undefined) openQuickSession(row);
+        if (row !== undefined) openSessionRow(row, readyFlowRunBySession);
         return;
       }
       case 'wrap-up-stale':
@@ -714,9 +772,10 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         nowMs={nowMs}
         showWhenEmpty={showEmptyWells}
         flashing={flashing}
-        onOpenQuickSession={openQuickSession}
+        onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
         onOpenReviewItem={openReviewItem}
         onApprovalDecided={afterLifecycleAction}
+        onQuickSessionAskDismissed={afterLifecycleAction}
       />
     ) : null,
     'queue.blocked-runs': showSessionSections ? (
@@ -744,7 +803,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           projectNameById={projectNameById}
           guardedSessionIds={guardedSessionIds}
           nowMs={nowMs}
-          onOpenQuickSession={openQuickSession}
+          onOpenQuickSession={(row) => openSessionRow(row, readyFlowRunBySession)}
           onOpenRun={(run) => openRunSession(run.id, run.project_id)}
           onMergeSession={requestMerge}
           onDismissSession={setDismissTargetId}
@@ -764,14 +823,17 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         rows={workingRows}
         nowMs={nowMs}
         showWhenEmpty={showEmptyWells}
-        onOpenQuickSession={openQuickSession}
+        onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
         onOpenRun={(run) => openRunSession(run.id, run.project_id)}
         onOpenDynamicWorkflow={(workflow) =>
-          openQuickSession({
-            sessionId: workflow.sessionId,
-            runId: workflow.runId,
-            projectId: workflow.projectId,
-          })
+          openSessionRow(
+            {
+              sessionId: workflow.sessionId,
+              runId: workflow.runId,
+              projectId: workflow.projectId,
+            },
+            flowRunBySession,
+          )
         }
       />
     ),

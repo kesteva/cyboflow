@@ -186,7 +186,7 @@ describe('WorkflowController — run-level verification posture', () => {
     const d = def([phase('p', [sprintFanStep(3)])]);
     const h = makePostureHost({
       items: THREE_LANES,
-      posture: { kind: 'unavailable', reason: 'mobile modality is deferred' },
+      posture: { kind: 'unavailable', reason: 'the project has no proven mobile verification runbook' },
       maxConcurrency: 3,
     });
 
@@ -194,7 +194,7 @@ describe('WorkflowController — run-level verification posture', () => {
 
     expect(result.outcome).toBe('completed');
     // ONE card for the run, not one per lane.
-    expect(h.declarations).toEqual([{ runId: 'r', reason: 'mobile modality is deferred' }]);
+    expect(h.declarations).toEqual([{ runId: 'r', reason: 'the project has no proven mobile verification runbook' }]);
     expect(h.laneSkips).toEqual([]);
     // No enqueue, and therefore no merge-gate park: the lane advances straight
     // through visual-verify, exactly as a verify-inactive run does.
@@ -261,7 +261,11 @@ describe('WorkflowController — run-level verification posture', () => {
       items: THREE_LANES,
       posture: { kind: 'available' },
       enqueueOutcomes: [
-        { outcome: 'skipped', reason: "unsupported modality 'mobile': deferred — pending Xcode MCP" },
+        {
+          outcome: 'skipped',
+          reason:
+            "unsupported modality 'mobile': the mobile modality needs the iOS Simulator toolchain probe, which is not wired on this host",
+        },
       ],
     });
 
@@ -311,7 +315,7 @@ describe('WorkflowController — run-level verification posture', () => {
     const d = def([phase('p', [sprintFanStep(1)])]);
     const h = makePostureHost({
       items: ['t1', 't2'],
-      posture: { kind: 'unavailable', reason: 'mobile modality is deferred' },
+      posture: { kind: 'unavailable', reason: 'the project has no proven mobile verification runbook' },
     });
     // A substrate that captures no final text: the OTHER per-lane skip seam.
     await new WorkflowController(makeRunner(null), h.host).run('r', d);

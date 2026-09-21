@@ -171,6 +171,13 @@ with it, so `dl.cyboflow.com/dev/…` always serves the newest green main.
   ships with both SDKs silently no-op'd.
 - **Manual:** `gh workflow run dev-release.yml -f ref=<sha-on-main>` publishes
   any main commit to the dev feed (a ref off main is refused).
+- **Notary flakes retry themselves.** Apple's notary service is a live network
+  dependency mid-build, and a `-1001 "The request timed out"` on ONE arch used
+  to skip the publish job and strand an otherwise finished release until a human
+  clicked rerun (first seen on `0.4.3-dev.1`). `macos.yml` now rebuilds up to
+  three times, but only when the log shows a transient notary/network failure —
+  a notarization *rejection* (`status: Invalid`) or any other build error still
+  fails on the first attempt.
 - **Releases still publish `dev/`** as the runbook describes — the release build
   (`0.4.3`) lands on the dev feed too, and the next main push moves it on to
   `0.4.4-dev.N`. Nothing about the `stable/` feed changed.

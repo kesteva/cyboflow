@@ -119,6 +119,37 @@ describe('useReviewItemActions', () => {
     });
   });
 
+  it('resolve forwards the resolving surface alongside an outcome (TASK-222 post-mortem trail)', async () => {
+    mockResolve.mockResolvedValue({ reviewItemId: 'rvw_gs', resumed: true });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    await act(async () => {
+      await result.current.resolve(3, 'rvw_gs', { outcome: 'revise', surface: 'queue' });
+    });
+
+    expect(mockResolve).toHaveBeenCalledWith({
+      projectId: 3,
+      reviewItemId: 'rvw_gs',
+      outcome: 'revise',
+      surface: 'queue',
+    });
+  });
+
+  it('resolve omits surface when not provided', async () => {
+    mockResolve.mockResolvedValue({ reviewItemId: 'rvw_g2', resumed: true });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    await act(async () => {
+      await result.current.resolve(3, 'rvw_g2', { outcome: 'approve' });
+    });
+
+    expect(mockResolve).toHaveBeenCalledWith({
+      projectId: 3,
+      reviewItemId: 'rvw_g2',
+      outcome: 'approve',
+    });
+  });
+
   it('resolve omits resolution when not provided', async () => {
     mockResolve.mockResolvedValue({ reviewItemId: 'rvw_2', resumed: false });
     const { result } = renderHook(() => useReviewItemActions());

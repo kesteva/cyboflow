@@ -160,13 +160,28 @@ export interface ReadyStateDescription {
  * state; a user-stopped run is next; only then does the git snapshot (cache-only
  * — see {@link QuickSessionRow.git}) decide ready-to-merge / behind / uncommitted
  * / clean. A row with no git cache entry renders nothing (empty label).
+ *
+ * `terminalFlowRun` (TASK-226): when the session's most significant run is a
+ * FLOW run that has since finished, that run — not the `__quick__` chat the
+ * flow interrupted when it launched — is what the row is about, so its status
+ * decides the stop/fail wording: `failed` → "stopped early", `canceled` →
+ * "stopped by you", `completed` → nothing stopped, fall through to git facts.
+ * Only `status` is read, so callers can pass any row-shaped run.
  */
-export function describeReadyState(row: QuickSessionRow): ReadyStateDescription {
-  if (row.rawStatus === 'failed' || (row.exitCode !== null && row.exitCode !== 0)) {
-    return { label: 'stopped early', tone: 'error' };
-  }
-  if (row.rawStatus === 'stopped') {
-    return { label: 'stopped by you', tone: 'neutral' };
+export function describeReadyState(
+  row: QuickSessionRow,
+  terminalFlowRun?: { status: string } | null,
+): ReadyStateDescription {
+  if (terminalFlowRun) {
+    if (terminalFlowRun.status === 'failed') return { label: 'stopped early', tone: 'error' };
+    if (terminalFlowRun.status === 'canceled') return { label: 'stopped by you', tone: 'neutral' };
+  } else {
+    if (row.rawStatus === 'failed' || (row.exitCode !== null && row.exitCode !== 0)) {
+      return { label: 'stopped early', tone: 'error' };
+    }
+    if (row.rawStatus === 'stopped') {
+      return { label: 'stopped by you', tone: 'neutral' };
+    }
   }
   if (row.git !== null) {
     if (row.git.isReadyToMerge) {

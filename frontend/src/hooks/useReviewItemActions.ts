@@ -62,6 +62,11 @@ export interface ReviewItemActionsState {
    * `verdicts` is the "Submit decisions" payload for an approve-ideas BATCH gate
    * — a per-idea verdict map keyed by display ref. Ignored (harmless) by the
    * server for every other item; omit it for non-batch resolves.
+   *
+   * `surface` (TASK-222) is the UI surface recording an `outcome` verdict (e.g.
+   * a card's own `ReviewItemCardSurface`) — stamped into the item's payload_json
+   * as `resolvedSurface` for post-mortem attribution. Meaningless without
+   * `outcome`; omit for non-gate resolves.
    */
   resolve: (
     projectId: number,
@@ -71,6 +76,7 @@ export interface ReviewItemActionsState {
       outcome?: 'approve' | 'reject' | 'revise';
       modifier?: 'no-findings';
       verdicts?: IdeaVerdictMap;
+      surface?: string;
     },
   ) => Promise<{ resumed: boolean } | null>;
   /**
@@ -142,6 +148,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
         outcome?: 'approve' | 'reject' | 'revise';
         modifier?: 'no-findings';
         verdicts?: IdeaVerdictMap;
+        surface?: string;
       },
     ): Promise<{ resumed: boolean } | null> => {
       setError(null);
@@ -154,6 +161,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
           ...(opts?.outcome !== undefined ? { outcome: opts.outcome } : {}),
           ...(opts?.modifier !== undefined ? { modifier: opts.modifier } : {}),
           ...(opts?.verdicts !== undefined ? { verdicts: opts.verdicts } : {}),
+          ...(opts?.surface !== undefined ? { surface: opts.surface } : {}),
         });
         return { resumed: result.resumed };
       } catch (err: unknown) {

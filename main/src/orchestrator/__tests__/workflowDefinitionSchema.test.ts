@@ -91,9 +91,45 @@ describe('validateWorkflowDefinition (accept cases)', () => {
     const def = makeValidDefinition();
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
+
+  // -------------------------------------------------------------------------
+  // Case 11: a human step may carry its gate header, and it round-trips
+  // -------------------------------------------------------------------------
+  it('accepts a human step with a gateHeader and round-trips it', () => {
+    const def = makeValidDefinition();
+    def.phases[0].steps.push({
+      id: 'approve-plan',
+      name: 'Approve task plan',
+      agent: 'human',
+      mcps: [],
+      retries: 0,
+      human: true,
+      gateHeader: 'Approve plan',
+    });
+    const parsed = validateWorkflowDefinition(def);
+    expect(parsed.phases[0].steps[2].gateHeader).toBe('Approve plan');
+  });
 });
 
 describe('validateWorkflowDefinition (reject cases)', () => {
+  // -------------------------------------------------------------------------
+  // An empty gateHeader is a mistake, not a clear — omit the field to fall back
+  // to the step name.
+  // -------------------------------------------------------------------------
+  it('rejects an empty-string gateHeader', () => {
+    const def = makeValidDefinition();
+    def.phases[0].steps.push({
+      id: 'approve-plan',
+      name: 'Approve task plan',
+      agent: 'human',
+      mcps: [],
+      retries: 0,
+      human: true,
+      gateHeader: '',
+    });
+    expect(() => validateWorkflowDefinition(def)).toThrow();
+  });
+
   // -------------------------------------------------------------------------
   // Case 2: non-kebab step id
   // -------------------------------------------------------------------------

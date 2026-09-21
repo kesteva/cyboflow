@@ -33,6 +33,8 @@ const {
   mockLaunchSeparatePlanner,
   mockReturnIdeaToBacklog,
   mockEnsureSessionForLaunch,
+  mockCanAddressReviewFindings,
+  mockAddressReviewFindings,
 } = vi.hoisted(() => ({
   mockResolve: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', resumed: true }),
   mockDismiss: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1' }),
@@ -45,6 +47,8 @@ const {
     .mockResolvedValue({ runId: 'run_child', worktreePath: '/tmp/wt', branchName: 'quick-child' }),
   mockReturnIdeaToBacklog: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', ideaId: 'idea_1' }),
   mockEnsureSessionForLaunch: vi.fn().mockResolvedValue('sess-child'),
+  mockCanAddressReviewFindings: vi.fn().mockResolvedValue({ eligible: true }),
+  mockAddressReviewFindings: vi.fn().mockResolvedValue({ delivered: true, stepId: 'address-review', abortedLiveWalk: false, fanOutKeptSettled: false }),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -63,6 +67,8 @@ vi.mock('../../../trpc/client', () => ({
         answerRecoveryGate: { mutate: mockAnswerRecovery },
         launchSeparatePlanner: { mutate: mockLaunchSeparatePlanner },
         returnIdeaToBacklog: { mutate: mockReturnIdeaToBacklog },
+        canAddressReviewFindings: { query: mockCanAddressReviewFindings },
+        addressReviewFindings: { mutate: mockAddressReviewFindings },
       },
     },
   },
@@ -121,6 +127,15 @@ beforeEach(() => {
   mockReturnIdeaToBacklog.mockClear();
   mockEnsureSessionForLaunch.mockClear();
   mockEnsureSessionForLaunch.mockResolvedValue('sess-child');
+  mockCanAddressReviewFindings.mockClear();
+  mockCanAddressReviewFindings.mockResolvedValue({ eligible: true });
+  mockAddressReviewFindings.mockClear();
+  mockAddressReviewFindings.mockResolvedValue({
+    delivered: true,
+    stepId: 'address-review',
+    abortedLiveWalk: false,
+    fanOutKeptSettled: false,
+  });
 });
 
 describe('ReviewItemCard', () => {
@@ -151,7 +166,13 @@ describe('ReviewItemCard', () => {
     render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec', blocking: true })} surface="session" />);
     fireEvent.click(screen.getByTestId('decision-resolve'));
     await waitFor(() =>
-      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec', outcome: 'approve' }),
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_dec',
+        outcome: 'approve',
+        // TASK-222: the resolving surface is stamped alongside the outcome.
+        surface: 'session',
+      }),
     );
   });
 
@@ -159,7 +180,12 @@ describe('ReviewItemCard', () => {
     render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec_r', blocking: true })} surface="session" />);
     fireEvent.click(screen.getByTestId('decision-reject'));
     await waitFor(() =>
-      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec_r', outcome: 'reject' }),
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_dec_r',
+        outcome: 'reject',
+        surface: 'session',
+      }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
   });
@@ -195,15 +221,45 @@ describe('ReviewItemCard', () => {
     );
     fireEvent.click(screen.getByTestId('decision-reject'));
     await waitFor(() =>
-      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_design_rr', outcome: 'revise' }),
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_design_rr',
+        outcome: 'revise',
+        surface: 'session',
+      }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it("the approve-design gate's rerun button resolves with outcome=revise from the QUEUE surface too (never collapses into the default Dismiss=reject pair)", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_design_queue', blocking: true, source: 'gate:human-step:approve-design' })}
+      />,
+    );
+    // The queue's usual option-less collapse (Open in session + Dismiss) never
+    // applies to this gate — it renders its own Approve/Revise pair directly.
+    expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_design_queue',
+        outcome: 'revise',
+        surface: 'queue',
+      }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
   });
 
   it('the approve-design gate offers a revise note, and only there', () => {
     // The textarea belongs to the revision loop: it is the human's chance to say
-    // "only AR-2 matters". A generic gate has no such loop, and the QUEUE surface
-    // routes to the run instead of deciding, so neither renders it.
+    // "only AR-2 matters". A generic gate has no such loop, so it never renders
+    // it; the QUEUE surface renders the same approve-design pair (TASK-222 checks
+    // it before usesDefaultActions), so the note is there too.
     const { rerender } = render(
       <ReviewItemCard
         item={makeItem('decision', { id: 'rvw_note', blocking: true, source: 'gate:human-step:approve-design' })}
@@ -234,7 +290,7 @@ describe('ReviewItemCard', () => {
         surface="queue"
       />,
     );
-    expect(screen.queryByTestId('design-gate-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('design-gate-note')).toBeInTheDocument();
   });
 
   it("sends the typed note alongside outcome=revise, and nothing when it is blank", async () => {
@@ -254,6 +310,7 @@ describe('ReviewItemCard', () => {
         reviewItemId: 'rvw_note_send',
         outcome: 'revise',
         resolution: 'only AR-2 matters, drop AR-11',
+        surface: 'session',
       }),
     );
 
@@ -265,6 +322,7 @@ describe('ReviewItemCard', () => {
         projectId: 5,
         reviewItemId: 'rvw_note_send',
         outcome: 'approve',
+        surface: 'session',
       }),
     );
   });
@@ -283,6 +341,7 @@ describe('ReviewItemCard', () => {
         projectId: 5,
         reviewItemId: 'rvw_note_empty',
         outcome: 'revise',
+        surface: 'session',
       }),
     );
   });
@@ -661,6 +720,31 @@ describe('ReviewItemCard', () => {
           projectId: 5,
           reviewItemId: 'rvw_q_gate_dis',
           outcome: 'reject',
+          surface: 'queue',
+        }),
+      );
+      expect(mockDismiss).not.toHaveBeenCalled();
+    });
+
+    it('a DECISION Dismiss on the approve-design gate never reaches the default pair (revise, not reject)', async () => {
+      // Unlike approve-plan above, approve-design is checked BEFORE the queue's
+      // default-actions collapse, so it never has a 'default-dismiss' button to
+      // click at all — it renders the real Approve/Revise pair directly, even on
+      // the queue surface. This pins that regression guard.
+      const item = makeItem('decision', {
+        id: 'rvw_q_design_dis',
+        blocking: true,
+        source: 'gate:human-step:approve-design',
+      });
+      render(<ReviewItemCard item={item} />);
+      expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('decision-reject'));
+      await waitFor(() =>
+        expect(mockResolve).toHaveBeenCalledWith({
+          projectId: 5,
+          reviewItemId: 'rvw_q_design_dis',
+          outcome: 'revise',
+          surface: 'queue',
         }),
       );
       expect(mockDismiss).not.toHaveBeenCalled();
@@ -1025,6 +1109,7 @@ describe('ReviewItemCard', () => {
         reviewItemId: 'rvw_nf',
         outcome: 'approve',
         modifier: 'no-findings',
+        surface: 'session',
       }),
     );
   });
@@ -1078,12 +1163,16 @@ describe('ReviewItemCard', () => {
     expect(isPrimary(screen.getByTestId('decision-reject'))).toBe(false);
   });
 
-  it('the QUEUE discard on an approve-design gate continues without logging — it no longer rejects the run', async () => {
+  it('the QUEUE surface offers the same three approve-design controls — no default discard can reject the run', async () => {
+    // TASK-222 renders the approve-design pair on every surface (checked before
+    // usesDefaultActions), so the queue gets the third choice too, and the
+    // run-ending default discard is not reachable for this gate at all.
     render(<ReviewItemCard item={designGateItem('rvw_q_design')} surface="queue" />);
-    const discard = screen.getByTestId('default-dismiss');
-    expect(discard).toHaveTextContent('Continue without logging');
+    expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
 
-    fireEvent.click(discard);
+    fireEvent.click(screen.getByTestId('decision-continue-no-findings'));
 
     await waitFor(() =>
       expect(mockResolve).toHaveBeenCalledWith({
@@ -1091,6 +1180,7 @@ describe('ReviewItemCard', () => {
         reviewItemId: 'rvw_q_design',
         outcome: 'approve',
         modifier: 'no-findings',
+        surface: 'queue',
       }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
@@ -1108,15 +1198,20 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
   });
 
-  it('the QUEUE discard on the PAYLOAD-discriminated approve-design item still rejects', async () => {
+  it('the PAYLOAD-discriminated approve-design item on the QUEUE renders the pair without the third button, and its decline is a revise', async () => {
     render(<ReviewItemCard item={payloadDesignGateItem('rvw_orch_q')} surface="queue" />);
-    const discard = screen.getByTestId('default-dismiss');
-    expect(discard).toHaveTextContent('Dismiss');
+    expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-continue-no-findings')).not.toBeInTheDocument();
 
-    fireEvent.click(discard);
+    fireEvent.click(screen.getByTestId('decision-reject'));
 
     await waitFor(() =>
-      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_orch_q', outcome: 'reject' }),
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_orch_q',
+        outcome: 'revise',
+        surface: 'queue',
+      }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
   });
@@ -1134,7 +1229,116 @@ describe('ReviewItemCard', () => {
     fireEvent.click(discard);
 
     await waitFor(() =>
-      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_q_other', outcome: 'reject' }),
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_q_other',
+        outcome: 'reject',
+        surface: 'queue',
+      }),
     );
+  });
+
+  // -- TASK-277: eval-sourced finding triage --------------------------------
+
+  function makeEvalFinding(overrides: Partial<ReviewItem> = {}, payload: ReviewItemPayload | null = null): ReviewItem {
+    return makeItem(
+      'finding',
+      { id: 'rvw_eval', source: 'agent:eval', ...overrides },
+      payload ?? ({ kind: 'finding', category: 'robustness' } as unknown as ReviewItemPayload),
+    );
+  }
+
+  it('an eval finding offers Address review findings / Log as findings / Dismiss, never Promote to task', async () => {
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(mockCanAddressReviewFindings).toHaveBeenCalledWith({ runId: 'run-1' }));
+    expect(screen.getByTestId('address-review-findings')).toHaveTextContent('Address review findings');
+    expect(screen.getByTestId('log-as-findings')).toHaveTextContent('Log as findings');
+    expect(screen.getByText('Dismiss')).toBeInTheDocument();
+    expect(screen.queryByTestId('promote-to-task')).not.toBeInTheDocument();
+  });
+
+  it('a BLOCKING eval finding (the synthesized catastrophic-cap item) also gets the eval triage set, not Resolve & resume', async () => {
+    render(<ReviewItemCard item={makeEvalFinding({ blocking: true })} />);
+    await waitFor(() => expect(mockCanAddressReviewFindings).toHaveBeenCalled());
+    expect(screen.getByTestId('address-review-findings')).toBeInTheDocument();
+    expect(screen.getByTestId('log-as-findings')).toBeInTheDocument();
+    expect(screen.queryByTestId('finding-resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+  });
+
+  it('the Address button is enabled once eligibility resolves eligible, and rewinds the run', async () => {
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalledWith({ runId: 'run-1' }));
+    // The finding is NOT resolved/dismissed by this action — address-review
+    // resolves each finding itself as it works through them.
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('the Address button renders disabled with a tooltip when the run already completed', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'completed' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'Run already completed — log or dismiss',
+    );
+    // Log / Dismiss stay usable.
+    expect(screen.getByTestId('log-as-findings')).toBeEnabled();
+    expect(screen.getByText('Dismiss')).toBeEnabled();
+  });
+
+  it('the Address button renders disabled with a tooltip when the flow has no address-review step', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'no_step' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'This flow has no address-review step',
+    );
+  });
+
+  it('Log as findings resolves with triaged:logged and does not promote to a task', async () => {
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={makeEvalFinding()} onResolved={onResolved} />);
+    fireEvent.click(screen.getByTestId('log-as-findings'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_eval',
+        resolution: 'triaged:logged',
+      }),
+    );
+    expect(mockPromote).not.toHaveBeenCalled();
+    await waitFor(() => expect(onResolved).toHaveBeenCalledTimes(1));
+  });
+
+  it('Dismiss on an eval finding routes through reviewItems.dismiss like any other finding', async () => {
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    fireEvent.click(screen.getByText('Dismiss'));
+    await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_eval' }));
+  });
+
+  it('the ad-hoc eval summary item (quick session) offers only Log / Dismiss — no Address button at all', async () => {
+    const item = makeEvalFinding(
+      { id: 'rvw_eval_adhoc', blocking: false },
+      { kind: 'finding', category: 'eval' } as unknown as ReviewItemPayload,
+    );
+    render(<ReviewItemCard item={item} />);
+    // No eligibility check is even made — the run has no address-review step
+    // to reopen for a quick session, so there is nothing to pre-check.
+    expect(mockCanAddressReviewFindings).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('address-review-findings')).not.toBeInTheDocument();
+    expect(screen.getByTestId('log-as-findings')).toBeInTheDocument();
+    expect(screen.getByText('Dismiss')).toBeInTheDocument();
+  });
+
+  it('a non-eval finding is unaffected by the eval triage set (source null)', () => {
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_nf' })} />);
+    expect(screen.queryByTestId('address-review-findings')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('log-as-findings')).not.toBeInTheDocument();
+    expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
   });
 });

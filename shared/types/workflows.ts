@@ -610,6 +610,14 @@ export interface WorkflowStep {
   /** When true the step pauses the run and waits for a human response. */
   human?: boolean;
   /**
+   * Human-facing header for a human gate. The programmatic plane titles the
+   * gate's review-queue item with it (`Human gate: ⟨gateHeader⟩`), and it is
+   * expected to match the AskUserQuestion header the flow markdown asks the
+   * same gate with, so both planes show one title for one decision. Falls back
+   * to `name` when absent.
+   */
+  gateHeader?: string;
+  /**
    * Id of the step within the SAME phase to loop back to on failure.
    * V1 constraint: intra-phase only.
    */
@@ -657,6 +665,22 @@ export interface WorkflowStep {
    * channel-unavailable degradation task-verify's verdict channel takes.
    */
   consumesPriorStepOutput?: boolean;
+  /**
+   * When true, the programmatic host's blocking-review-items checkpoint (see
+   * `ProgrammaticRunHost.awaitBlockingReviewItems`) does NOT park the run
+   * before starting this step, even though a pending BLOCKING review_item
+   * exists. Set on a step that itself resolves the run's pending blocking
+   * items (e.g. `address-review`, reopened via `addressReviewFindings` to
+   * repair a confirmed-catastrophic eval finding).
+   *
+   * Without this, the checkpoint deadlocks: `addressReviewFindings` rewinds
+   * the run to this step SPECIFICALLY BECAUSE a blocking item is pending, but
+   * the walk loop parks `awaiting_review` again before the step's agent ever
+   * runs, since the very item the rewind exists to clear is still open —
+   * the repair step can never start. Absent (the default) preserves today's
+   * behavior for every other step.
+   */
+  consumesBlockingReviewItems?: boolean;
 }
 
 /**
@@ -836,7 +860,8 @@ export interface WorkflowStepTransitionEvent {
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
 
-  // planner — idea → epics → tasks (board stages 1-6), terminal decompose archives the idea; writes via cyboflow_* MCP tools
+  // planner — idea → epics → tasks (board stages 1-6); the terminal approve-plan gate reveals the
+  // tasks, retires the decomposed idea, and completes the run; writes via cyboflow_* MCP tools
   planner: {
     id: 'planner',
     phases: [
@@ -861,6 +886,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -957,16 +983,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You sign off on scope before tasks queue for sprint.',
-          },
-          {
-            id: 'decompose',
-            name: 'Archive idea',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'Confirm archiving the idea(s) to Decomposed; ends the run.',
+            gateHeader: 'Approve plan',
+            desc: 'You sign off on scope. Approve puts the tasks on the board, retires the decomposed idea(s), and ends the run.',
           },
         ],
       },
@@ -1088,6 +1106,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
@@ -1096,6 +1120,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check before the sprint is sealed.',
           },
         ],
@@ -1176,6 +1201,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve compound',
             desc: 'Final "merge in changes" gate over the applied compound diff — review the committed quick fixes + doc edits and the recommendations doc, then approve to make the branch mergeable or reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1191,8 +1217,9 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // + lanes and stamp workflow_runs.batch_id (the handoff seam). The original
   // idea is retired to the terminal Decomposed board stage at the FINAL
   // human-review gate (on Approve), prose-driven via cyboflow_set_task_stage —
-  // not earlier. Planner's terminal 'decompose' step is dropped; sprint's 'plan'
-  // phase id is renamed 'sprint-plan' to avoid colliding with planner's 'plan'.
+  // not earlier. Planner's approve-plan gate is MID-RUN here (it never completes a
+  // ship run); sprint's 'plan' phase id is renamed 'sprint-plan' to avoid colliding
+  // with planner's 'plan'.
   ship: {
     id: 'ship',
     phases: [
@@ -1216,6 +1243,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve idea',
             desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
@@ -1306,6 +1334,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve plan',
             desc: 'You sign off on scope and select which tasks execute now before they queue for the sprint.',
           },
         ],
@@ -1422,6 +1451,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'git'],
             retries: 1,
             desc: 'Verify every code-review finding this run filed, judge which are worth acting on, fix those in place, and resolve them — so a review changes code instead of only filling the backlog. Confirmed-but-out-of-scope findings stay open for the human.',
+            // This step is exactly what resolves a pending blocking review item
+            // (a confirmed-catastrophic eval finding, or a code-review blocking
+            // defect) — the blocking-review-items checkpoint must not park the
+            // run before this step starts on account of the very item it exists
+            // to clear. See WorkflowStep.consumesBlockingReviewItems.
+            consumesBlockingReviewItems: true,
           },
           {
             id: 'human-review',
@@ -1430,6 +1465,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve sprint',
             desc: 'Final taste check; on approve, retire the idea to Decomposed and seal the sprint.',
           },
         ],
@@ -1538,6 +1574,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
+            gateHeader: 'Approve setup',
             desc: 'Final "merge in changes" gate over the committed runbook + repo diff and the per-modality proof outcomes (proven, or still an unproven draft with its diagnosis) — approve to make the branch mergeable, reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
@@ -1549,8 +1586,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // produces a project brief, the brief decomposes into an ordered idea set,
   // and every approved idea becomes execution-ready epics and tasks. Ends at the approved backlog — Launch never materializes a
   // sprint; Sprint/Ship run afterwards against the tasks it created. Reuses
-  // planner's approve-plan / decompose step ids so the hidden-draft reveal and
-  // idea-retirement machinery apply unchanged.
+  // planner's approve-plan step id so the hidden-draft reveal, idea-retirement,
+  // and run-completion machinery apply unchanged.
   launch: {
     id: 'launch',
     phases: [
@@ -1703,16 +1740,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You sign off on the whole task plan before tasks queue for sprint.',
-          },
-          {
-            id: 'decompose',
-            name: 'Archive idea',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'Confirm archiving the decomposed idea(s); denied ideas stay on the backlog. Ends the run.',
+            gateHeader: 'Approve plan',
+            desc: 'You sign off on the whole task plan. Approve puts the tasks on the board, retires the decomposed idea(s) (denied ideas stay on the backlog), and ends the run.',
           },
         ],
       },

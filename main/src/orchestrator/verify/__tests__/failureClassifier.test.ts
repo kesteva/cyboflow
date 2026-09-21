@@ -59,6 +59,14 @@ describe('classifyVerificationFailure — env class', () => {
     expect(result.evidence[0]).toEqual({ source: 'preflight', check: 'chromium', detail: 'chromium not resolved (absent)' });
   });
 
+  it('a failed preflight check (mobile-toolchain) classifies env with source preflight (through the generic loop, no classifier change needed)', () => {
+    const result = classifyVerificationFailure(
+      baseInputs({ preflight: preflightWithFailure('mobile-toolchain', 'mobile toolchain unavailable') }),
+    );
+    expect(result.failureClass).toBe('env');
+    expect(result.evidence[0]).toEqual({ source: 'preflight', check: 'mobile-toolchain', detail: 'mobile toolchain unavailable' });
+  });
+
   it('a failed preflight check (driver-cli) classifies env with source preflight', () => {
     const result = classifyVerificationFailure(
       baseInputs({ preflight: preflightWithFailure('driver-cli', 'driver CLI not found') }),

@@ -594,8 +594,11 @@ landmine list first):
 - **The 93% funnel:** most verify-enabled runs never reach the verify step at
   all (canceled/failed runs; `__quick__` sessions never wire it in). This
   redesign fixes what happens once the step fires, not run survival.
-- **native-desktop / mobile types:** out of scope; those `verify_type`s keep
-  resolving to `skipped` with a reason.
+- **native-desktop / mobile types:** `native-desktop` already resolves to the
+  `native-screen` modality (Peekaboo) and `mobile-flow` now resolves to the
+  `mobile` modality (iOS Simulator via `xcodebuild`/`simctl`,
+  `docs/proposals/mobile-verification-tier.md`) — neither is out of scope any
+  more; this note is stale to when it was written.
 - **OS-sandboxed runner:** designated hardening follow-up (§5.4).
 - **Commit-side batch mutex:** still deferred; the snapshot design (§5.5)
   removes the dirty-neighbor dependency on it, but batch-wide commit

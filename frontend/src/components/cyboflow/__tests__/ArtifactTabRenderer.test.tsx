@@ -849,7 +849,7 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('stories-reject-plan')).toBeInTheDocument();
   });
 
-  it('Approve resolves the programmatic approve-plan gate with outcome approve', async () => {
+  it('Approve resolves the programmatic approve-plan gate with outcome approve (stamping the artifact surface — TASK-222)', async () => {
     setReviewItems([makePlanGateItem()]);
     renderStories(makeDraftIdeas());
 
@@ -859,6 +859,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_plan',
         outcome: 'approve',
+        surface: 'artifact:decomposed-stories',
       }),
     );
     // The programmatic variant does NOT take the live-question answer path.
@@ -875,6 +876,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_plan',
         outcome: 'reject',
+        surface: 'artifact:decomposed-stories',
       }),
     );
   });

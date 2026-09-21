@@ -55,6 +55,7 @@ import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
 import { GateSideEffects, gateDecisionFromResolution } from './gateSideEffects';
 import { listApproveIdeasBatchRows, listRunDecomposedIdeaIds } from './runEntityOwnership';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
 import type { IdeaComponentKey } from '../../../shared/types/ideaComponents';
 import {
@@ -420,7 +421,13 @@ export interface ResolveReviewItemDeps {
    */
   applyReviewItemResolve: (
     projectId: number,
-    args: { reviewItemId: string; actor: 'user'; resolution?: string | null },
+    args: {
+      reviewItemId: string;
+      actor: 'user';
+      resolution?: string | null;
+      /** TASK-222 — forwarded to ReviewItemRouter's `resolutionMeta` (see there). */
+      resolutionMeta?: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null };
+    },
   ) => Promise<{ reviewItemId: string }>;
   /** Q1 reveal (approve-plan approve): QuestionRouter.promotePendingDraftsForRun. */
   promotePendingDraftsForRun: (runId: string) => Promise<void>;
@@ -474,6 +481,15 @@ export interface ResolveReviewItemInput {
    * resolutions stay byte-for-byte unaffected.
    */
   verdicts?: IdeaVerdictMap;
+  /**
+   * TASK-222: the UI surface that recorded this verdict (e.g. `'queue'` /
+   * `'session'` — {@link ReviewItemCardSurface} in the renderer, or another
+   * resolving surface's own id). Only meaningful alongside `outcome`; stamped
+   * into the item's payload_json as `resolvedSurface` (see
+   * {@link ReviewItemTriage.resolutionMeta}) so a post-mortem can tell which
+   * button, on which surface, answered the gate. Omitted entirely when absent.
+   */
+  surface?: string;
 }
 
 /**
@@ -533,6 +549,39 @@ async function maybeApplyOrchestratedGateSideEffects(
   } catch {
     // GateSideEffects.apply is itself fail-soft; this catch is the belt to its
     // braces, because the resolve above has already committed.
+  }
+}
+
+/**
+ * TASK-222 attributable-reject guard: true when the run's FROZEN spec declares
+ * `stepId` as an OPTIONAL step with an intra-phase `loopback` target — the shape
+ * `approve-design` has today (shared `workflows.ts`). Drives the warn below when
+ * a resolve arrives with `outcome: 'reject'` for such a step: a plain reject on a
+ * gate that declares a revise target ENDS the run instead of looping back (the
+ * 2026-09-17 swift-bison incident), so the occurrence needs to be attributable to
+ * a surface/actor even when the resolve itself is still honored as requested.
+ *
+ * Fail-soft (false on ANY parse/lookup miss) — a malformed/legacy spec, or a run
+ * predating `spec_hash`, must never turn a committed resolve into a throw; it
+ * just means the warn is silently skipped for that run.
+ */
+function stepDeclaresOptionalLoopback(db: DatabaseLike, runId: string, stepId: string): boolean {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    if (!frozen || frozen.specJson === null) return false;
+    const spec = JSON.parse(frozen.specJson) as {
+      phases?: Array<{ steps?: Array<{ id?: unknown; optional?: unknown; loopback?: unknown }> }>;
+    };
+    for (const phase of spec.phases ?? []) {
+      for (const step of phase.steps ?? []) {
+        if (step.id === stepId) {
+          return step.optional === true && typeof step.loopback === 'string' && step.loopback.length > 0;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
@@ -691,6 +740,26 @@ export async function resolveReviewItem(
         })
       : input.resolution;
 
+  // TASK-222 attributable-reject guard: a plain 'reject' on a gate that declares
+  // an optional intra-phase loopback (today: only `approve-design`) ENDS the run
+  // instead of looping back — this is exactly the swift-bison-20260917 incident.
+  // The resolve below still honors the caller's explicit choice (no refusal, no
+  // behavior change) — this only makes the NEXT occurrence attributable to a
+  // surface/actor instead of silently repeating. Covers both mint paths: the
+  // programmatic `gate:human-step:*` source (gateStepId) and the orchestrated
+  // plane's payload `gate` discriminant (parseDecisionGate).
+  if (input.outcome === 'reject' && before?.runId) {
+    const stepIdForLoopbackCheck = gateStepId ?? parseDecisionGate(before.payloadJson);
+    if (
+      stepIdForLoopbackCheck !== null &&
+      stepDeclaresOptionalLoopback(db, before.runId, stepIdForLoopbackCheck)
+    ) {
+      console.warn(
+        `[reviewItems.resolve] gate '${stepIdForLoopbackCheck}' on run ${before.runId} resolved with outcome 'reject' even though it declares an optional loopback (a revise target) — this ends the run instead of re-driving it. surface=${input.surface ?? 'unknown'} actor=user reviewItemId=${input.reviewItemId}`,
+      );
+    }
+  }
+
   try {
     // MODIFIER guard. The modifier rides the stored resolution and is read back by
     // the gate's side effects, so an unrecognized or misplaced one would silently
@@ -807,6 +876,13 @@ export async function resolveReviewItem(
       reviewItemId: input.reviewItemId,
       actor: 'user',
       ...(resolution !== undefined ? { resolution } : {}),
+      // TASK-222: stamp which verdict + surface answered a gate resolve, so a
+      // post-mortem can tell which button was pressed. Only ever set when the
+      // caller supplied an explicit outcome — a plain free-text resolve leaves
+      // payload_json untouched exactly as before.
+      ...(input.outcome !== undefined
+        ? { resolutionMeta: { outcome: input.outcome, surface: input.surface ?? null } }
+        : {}),
     });
 
     // ORCHESTRATED-PLANE design/brief gate side effects (durably bind the approved

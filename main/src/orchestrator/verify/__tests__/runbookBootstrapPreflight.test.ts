@@ -118,6 +118,29 @@ describe('runbookBootstrapPreflight', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it('declines a MOBILE lane before it reads anything, and before any controller exists', async () => {
+    // The whole point of putting the policy in the eligibility layer: a mobile
+    // lane costs a decision and nothing else — no status read, no stamp claim,
+    // no drafting agent, no controller. The `calls` assertion is what proves the
+    // read never happened; the returned decline is what stops the caller from
+    // constructing one.
+    const info = vi.fn();
+    const d = deps({ logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } });
+    await expect(
+      runbookBootstrapPreflight({ ...ARGS, modality: 'mobile' }, d),
+    ).resolves.toEqual({ proceed: false, reason: 'auto-derive-unsupported' });
+    expect(d.calls).toEqual([]);
+    // Loud, not quiet: "why did my mobile verification never run" is a question
+    // someone asks of this log, and the answer has to be in it.
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('auto-derive-unsupported'),
+      // NOT the seeded 'indeterminate' — that is a real answer meaning the store
+      // could not tell, and logging it for a read that never happened would send
+      // a reader hunting a store fault that does not exist.
+      expect.objectContaining({ modality: 'mobile', runbookReason: null }),
+    );
+  });
+
   it('declines on a proof that belongs to another branch, and says so at INFO', async () => {
     // Loud on purpose: this is the case where the obvious remedy (run
     // verification setup) is the destructive one.

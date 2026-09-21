@@ -260,6 +260,20 @@ export interface DecisionPayload {
   comparisonPreference?: 'A' | 'B' | 'tie';
   /** (experiment-comparison) the winning arm's run id, when the verdict has one. */
   suggestedWinnerRunId?: string | null;
+  /**
+   * TASK-222 post-mortem trail: the explicit verdict a gate resolution was
+   * recorded with, when the resolve carried an `outcome` (reviewItems.resolve).
+   * Stamped by `ReviewItemRouter.runTriage` — MERGED into whatever payload the
+   * gate minted with (never clobbering `gate`/`ideaRefs`/`designRefs`), so a
+   * plain free-text resolve (no `outcome`) leaves this absent exactly as before.
+   */
+  resolvedOutcome?: 'approve' | 'reject' | 'revise';
+  /**
+   * TASK-222 post-mortem trail: which UI surface (`ReviewItemCardSurface` —
+   * 'queue' | 'session' — or another resolving surface's own id) recorded the
+   * verdict above. Absent when the caller supplied no surface id.
+   */
+  resolvedSurface?: string;
 }
 
 /**
@@ -386,6 +400,47 @@ export const RESOLUTION_PREFIX_TRIAGED = 'triaged:';
  */
 export function acceptedResolution(target: 'docs' | 'prompt'): string {
   return `${RESOLUTION_PREFIX_TRIAGED}accepted-${target}`;
+}
+
+/**
+ * Resolution note for "Log as findings" (TASK-277) — an eval-sourced finding
+ * kept as a durable record without minting a task. Parses as 'triaged' (no
+ * code fix, no task): the row stays queryable in Insights and mineable by
+ * Compound, and resolving it clears a blocking catastrophic-cap item's gate
+ * the same way any other resolve does.
+ */
+export const LOGGED_FINDING_RESOLUTION = `${RESOLUTION_PREFIX_TRIAGED}logged`;
+
+/**
+ * True for a review item minted by the code-review quality eval — every
+ * confirmed jury finding, the synthesized catastrophic-cap item, and the
+ * ad-hoc verdict summary all stamp `source: 'agent:eval'`
+ * (main/src/orchestrator/eval/evalWorker.ts `writeFindings` /
+ * `maybeWriteAdHocSummary`). Mirrors the `source LIKE 'agent:eval%'` predicate
+ * `reviewItems.ts`'s list query already uses to exempt these rows from the
+ * orphan-hide — keep the two checks in sync (prefix, not an exact match, in
+ * case a future eval variant stamps a suffixed source).
+ */
+export function isEvalSourcedFinding(source: string | null | undefined): boolean {
+  return typeof source === 'string' && source.startsWith('agent:eval');
+}
+
+/**
+ * True for the eval worker's AD-HOC verdict summary item (a quick session's
+ * whole-eval rollup — evalWorker.ts `maybeWriteAdHocSummary`) — the one
+ * eval-sourced finding that must NEVER offer "Address review findings": its
+ * run is a quick session, which has no `address-review` step to reopen.
+ * Keyed on the summary's dedicated `payload.category === 'eval'` (every other
+ * eval-sourced finding's category is a rubric dimension key or the
+ * synthesized cap item's 'security' | 'robustness').
+ */
+export function isEvalAdHocSummary(item: {
+  source: string | null | undefined;
+  payload: ReviewItemPayload | null;
+}): boolean {
+  if (!isEvalSourcedFinding(item.source)) return false;
+  const payload = item.payload;
+  return Boolean(payload && payload.kind === 'finding' && payload.category === 'eval');
 }
 
 /** Discriminant a {@link parseResolutionKind} result narrows to. */

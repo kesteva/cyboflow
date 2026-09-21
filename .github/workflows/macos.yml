@@ -93,7 +93,9 @@ jobs:
         # matrix would be ADDED as a new combination — so the filter lives here.)
         arch: ${{ fromJSON(inputs.arch == 'arm64' && '["arm64"]' || inputs.arch == 'x64' && '["x64"]' || '["arm64","x64"]') }}
     runs-on: ${{ matrix.arch == 'x64' && 'macos-15-intel' || 'macos-latest' }}
-    timeout-minutes: 60
+    # Three build attempts worst case (see "Build DMG"): a successful x64 leg
+    # is ~20 min and a notary timeout burns ~8.
+    timeout-minutes: 120
     env:
       # `inputs.variant` is empty on a push run → dev.
       MAC_VARIANT: ${{ inputs.variant == 'stable' && 'stable' || 'dev' }}
@@ -153,14 +155,70 @@ jobs:
       # TELEMETRY: SENTRY_DSN / APTABASE_APP_KEY are BAKED into buildInfo.json
       # by inject-build-info.js; a build without them ships with both SDKs
       # silently no-op'd.
+      #
+      # RETRY: Apple's notary service is a live network dependency in the
+      # middle of an otherwise hermetic build, and it fails transiently: run
+      # 35379967567's x64 leg died on `HTTPError ... NSURLErrorDomain Code=-1001
+      # "The request timed out."` after ~6 minutes of polling, with the arm64
+      # DMG and the Windows installer already green — which skipped the publish
+      # job and stranded a finished release until a human clicked rerun. The dev
+      # channel is unattended by design, so a flake there must not need a person.
+      #
+      # electron-builder owns the notarize call (build.mac.notarize), so there
+      # is no hook to retry inside; the retry is the whole build. It is
+      # therefore CONDITIONAL: only a transient notary/network failure earns a
+      # second run. A notarization REJECTION is a defect in the bundle (the same
+      # app would be rejected again), and any other build failure is a real one
+      # — both fail on the first attempt rather than burning three rebuilds.
       - name: Build DMG
-        run: pnpm run build:mac:${{ env.MAC_VARIANT == 'dev' && 'dev:' || '' }}${{ matrix.arch }}
+        run: |
+          set -uo pipefail
+          set +e   # every failure below is classified, never inherited from -e
+
+          SCRIPT="build:mac:${{ env.MAC_VARIANT == 'dev' && 'dev:' || '' }}${{ matrix.arch }}"
+          LOG="$RUNNER_TEMP/build-mac.log"
+          ATTEMPTS=3
+
+          # Substrings that mark the notary submission itself as the casualty.
+          TRANSIENT='Failed to notarize via notarytool|NSURLErrorDomain'
+          TRANSIENT="$TRANSIENT"'|The request timed out|The network connection was lost'
+          TRANSIENT="$TRANSIENT"'|Could not connect to the server|hostname could not be found'
+          # Apple looked at the bundle and said no. Retrying re-submits the same
+          # bundle to the same verdict.
+          REJECTED='status: (Invalid|Rejected)'
+
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            echo "::group::build attempt $attempt/$ATTEMPTS — pnpm run $SCRIPT"
+            pnpm run "$SCRIPT" 2>&1 | tee "$LOG"
+            status=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$status" -eq 0 ]; then exit 0; fi
+
+            if grep -qE "$REJECTED" "$LOG"; then
+              echo "::error::notarization REJECTED the bundle — a defect, not a flake; not retrying"
+              exit "$status"
+            fi
+            if ! grep -qE "$TRANSIENT" "$LOG"; then
+              echo "::error::build failed for a non-notarization reason; not retrying"
+              exit "$status"
+            fi
+            if [ "$attempt" -eq "$ATTEMPTS" ]; then
+              echo "::error::notary service still failing after $ATTEMPTS attempts"
+              exit "$status"
+            fi
+
+            echo "::warning::transient notarization failure on attempt $attempt — rebuilding"
+            # A half-written DMG from the dead attempt must not survive into the
+            # next build or into "Verify artifacts".
+            rm -rf dist-electron
+            sleep 60
+          done
         env:
           CI: true
           CYBOFLOW_BUILD_VERSION: ${{ inputs.build_version }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           APTABASE_APP_KEY: ${{ secrets.APTABASE_APP_KEY }}
-        timeout-minutes: 45
+        timeout-minutes: 100
 
       # The runbook's §4 checks, as assertions. Inventory, not size, proves no
       # foreign-arch agent binary shipped; the size floor only catches the stub.

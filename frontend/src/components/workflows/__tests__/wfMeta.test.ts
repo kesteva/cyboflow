@@ -11,11 +11,13 @@ import {
 } from '../../../../../shared/types/workflows';
 
 describe('wfMeta', () => {
-  it('planner: 2 phases, 11 steps, 4 human gates, 2 loops (adversarial-review + approve-design → expand-spec)', () => {
+  it('planner: 2 phases, 10 steps, 3 human gates, 2 loops (adversarial-review + approve-design → expand-spec)', () => {
+    // approve-idea, approve-design, approve-plan (the terminal gate — the old
+    // separate archive-idea gate was folded into it).
     expect(wfMeta(WORKFLOW_DEFINITIONS.planner)).toEqual({
       phases: 2,
-      steps: 11,
-      human: 4,
+      steps: 10,
+      human: 3,
       loops: 2,
     });
   });

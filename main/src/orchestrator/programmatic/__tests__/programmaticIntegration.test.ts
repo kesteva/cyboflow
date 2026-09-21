@@ -328,7 +328,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
 
     // Every AGENT step ran exactly once via the spawn surface (context,
     // expand-spec, ui-prototype, architecture, adversarial-review, epics, tasks)
-    // — pure gates (approve-idea/approve-design/approve-plan/decompose) did NOT
+    // — pure gates (approve-idea/approve-design/approve-plan) did NOT
     // spawn. The fake spawner cannot distinguish a prompt-directed optional skip.
     const stepPrompts = spawner.calls.map((c) => c.prompt);
     expect(spawner.calls).toHaveLength(7);
@@ -338,10 +338,10 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(stepPrompts.some((p) => p.includes('(id: `epics`)'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('(id: `tasks`)'))).toBe(true);
 
-    // All four human gates were opened AND resolved (approve-idea +
-    // approve-design + approve-plan + decompose).
+    // All three human gates were opened AND resolved (approve-idea +
+    // approve-design + approve-plan — the terminal gate).
     const rows = reviewRows(db, 'run-int');
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(3);
     expect(rows.every((r) => r.status === 'resolved')).toBe(true);
     expect(rows.every((r) => r.source.startsWith('gate:human-step:'))).toBe(true);
 
@@ -349,7 +349,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-int') as {
       current_step_id: string | null;
     };
-    expect(finalStep.current_step_id).toBe('decompose');
+    expect(finalStep.current_step_id).toBe('approve-plan');
   });
 
   it('ends the run rejected when the human rejects a gate (resolution carries "reject")', async () => {
@@ -439,7 +439,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-esc') as {
       current_step_id: string | null;
     };
-    expect(finalStep.current_step_id).toBe('decompose');
+    expect(finalStep.current_step_id).toBe('approve-plan');
 
     // The escalated-then-accepted 'context' step recorded a 'skipped' marker on the
     // live timeline — the REAL reporter → buildStepTransitionEvent path persisted it
@@ -506,7 +506,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-sdk') as {
       current_step_id: string | null;
     };
-    expect(finalStep.current_step_id).toBe('decompose');
+    expect(finalStep.current_step_id).toBe('approve-plan');
   });
 
   it('crash-safe resume: resumeFromStepId fast-forwards the walk past completed steps', async () => {
@@ -539,7 +539,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-res') as {
       current_step_id: string | null;
     };
-    expect(finalStep.current_step_id).toBe('decompose');
+    expect(finalStep.current_step_id).toBe('approve-plan');
   });
 
   it('cancellation mid-gate settles the walk and leaves no reviewItemChangeEvents listener', async () => {

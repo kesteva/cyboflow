@@ -18,6 +18,8 @@ import type { Browser } from 'playwright';
 import {
   attestFilePath,
   createDefaultDriverDeps,
+  MOBILE_CDP_REFUSAL,
+  MOBILE_WRONG_MODALITY_REFUSAL,
   extractWindowTitles,
   NATIVE_SCREEN_DRIVE_REFUSAL,
   parseArgv,
@@ -57,7 +59,15 @@ interface FakeCalls {
   attributes: Array<{ selector: string; name: string }>;
   evaluates: string[];
   shells: Array<{ command: string; logPath: string }>;
+  tools: Array<{ bin: string; args: string[] }>;
+  fileReads: string[];
 }
+
+/**
+ * Contents `readFileBytes` serves, keyed by absolute path — the seam
+ * `attest bundle` reads its `mobile-install.json` through. Cleared per test.
+ */
+const fakeFiles = new Map<string, string>();
 
 function freshCalls(): FakeCalls {
   return {
@@ -76,6 +86,8 @@ function freshCalls(): FakeCalls {
     attributes: [],
     evaluates: [],
     shells: [],
+    tools: [],
+    fileReads: [],
   };
 }
 
@@ -185,6 +197,28 @@ function makeDeps(
     writeAttestFile: vi.fn(async (path: string, record: DriverAttestRecord) => {
       calls.attestWrites.push({ path, record });
     }),
+    // The MobileDeps half (mobileCommands.ts). Inert here: this file's suites
+    // cover the CDP/native surface plus the mobile MODALITY GUARDS, and a guard
+    // that refuses must never reach any of these. mobileCommands.test.ts drives
+    // the family itself against a real temp filesystem.
+    runTool: vi.fn(async (bin: string, args: string[]) => {
+      calls.tools.push({ bin, args });
+      return { code: 0, stdout: '', stderr: '' };
+    }),
+    readDir: vi.fn(async () => []),
+    pathKind: vi.fn(async () => null),
+    realpath: vi.fn(async (path: string) => path),
+    readFileBytes: vi.fn(async (path: string) => {
+      calls.fileReads.push(path);
+      const body = fakeFiles.get(path);
+      if (body === undefined) throw new Error(`ENOENT: ${path}`);
+      return Buffer.from(body, 'utf8');
+    }),
+    writeTextFile: vi.fn(async () => {}),
+    copyFile: vi.fn(async () => {}),
+    now: vi.fn(() => 0),
+    sleep: vi.fn(async () => {}),
+    cwd: vi.fn(() => '/snapshot'),
     platform: 'darwin',
     stdout: () => {},
     stderr: () => {},
@@ -1542,3 +1576,181 @@ describe.skipIf(process.platform === 'win32')(
     });
   },
 );
+
+// ---------------------------------------------------------------------------
+// The mobile modality guards + `attest bundle` (the two halves of the mobile
+// family that live in driverCore; the `mobile-*` commands themselves are
+// covered in mobileCommands.test.ts).
+// ---------------------------------------------------------------------------
+
+const MOBILE_ENV = {
+  VERIFY_ARTIFACTS_DIR: '/tmp/verify-artifacts',
+  VERIFY_MODALITY: 'mobile',
+  VERIFY_SIM_UDID: 'SIM-UDID-1',
+  VERIFY_APP_BUNDLE_ID: 'com.example.Demo',
+};
+
+/** A well-formed install record, as `mobile-install` would have written it. */
+function installRecord(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    builtPath: '/dd/Build/Products/Debug-iphonesimulator/Demo.app',
+    installedPath: '/sim/containers/Demo.app',
+    builtSha256: 'a'.repeat(64),
+    installedSha256: 'a'.repeat(64),
+    bundleId: 'com.example.Demo',
+    executable: 'Demo',
+    installedAt: '2026-09-17T00:00:00.000Z',
+    ...overrides,
+  });
+}
+
+describe('mobile modality guard', () => {
+  beforeEach(() => {
+    fakeFiles.clear();
+  });
+
+  it.each(['goto', 'click', 'type', 'screenshot'])(
+    'refuses the CDP command %s under VERIFY_MODALITY=mobile, before any connect',
+    async (word) => {
+      const calls = freshCalls();
+      const errors: string[] = [];
+      const deps = makeDeps(calls, { stderr: (line) => errors.push(line) });
+      const argv = word === 'type' ? [word, '#a', 'b'] : [word, 'x'];
+
+      const code = await runDriverCommand(argv, MOBILE_ENV, deps);
+
+      expect(code).toBe(1);
+      expect(errors[0]).toBe(MOBILE_CDP_REFUSAL);
+      // The pointer must name the family that CAN act — the whole difference
+      // between this refusal and native-screen's.
+      expect(errors[1]).toContain('mobile-screenshot');
+      expect(deps.connectOverCDP).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses every mobile-* command when the modality is not mobile', async () => {
+    const words: string[][] = [
+      ['mobile-install'],
+      ['mobile-launch'],
+      ['mobile-screenshot', 'home.png'],
+      ['mobile-openurl', 'demo://x'],
+      ['mobile-tap', 'Login'],
+      ['mobile-type', 'hello'],
+      ['mobile-swipe', 'up'],
+      ['mobile-press', 'home'],
+      ['mobile-flow', 'flow.yaml'],
+    ];
+    for (const argv of words) {
+      const calls = freshCalls();
+      const errors: string[] = [];
+      const deps = makeDeps(calls, { stderr: (line) => errors.push(line) });
+
+      const code = await runDriverCommand(argv, { ...ENV, VERIFY_MODALITY: 'web' }, deps);
+
+      expect(code, argv[0]).toBe(1);
+      expect(errors[0], argv[0]).toBe(MOBILE_WRONG_MODALITY_REFUSAL);
+      expect(calls.tools, argv[0]).toEqual([]);
+    }
+  });
+
+  it('refuses attest bundle outside the mobile modality', async () => {
+    const calls = freshCalls();
+    const errors: string[] = [];
+    const deps = makeDeps(calls, { stderr: (line) => errors.push(line) });
+
+    const code = await runDriverCommand(['attest', 'bundle'], NATIVE_ENV, deps);
+
+    expect(code).toBe(1);
+    expect(errors[0]).toBe(MOBILE_WRONG_MODALITY_REFUSAL);
+    expect(calls.attestWrites).toEqual([]);
+  });
+
+  it('leaves native-screenshot and serve alone on a mobile request', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+
+    expect(await runDriverCommand(['serve', 'true'], MOBILE_ENV, deps)).toBe(0);
+    expect(calls.shells).toHaveLength(1);
+  });
+});
+
+/*
+ * iOS Simulator only, so these model a DARWIN host: the fixtures are POSIX
+ * absolute paths (`/Users/tester/...`, `/sim/data/Containers/...`) and the code
+ * under test joins them with `node:path`. On a win32 runner that join yields
+ * `\Users\tester\...`, which can never match the fixture — the suite would be
+ * measuring the runner's path separator, not the behaviour. The production
+ * paths are already darwin-gated (`if (this.platform !== 'darwin') return
+ * null`), so there is nothing here for Windows to cover.
+ */
+describe.skipIf(process.platform === 'win32')('attest bundle', () => {
+  beforeEach(() => {
+    fakeFiles.clear();
+  });
+
+  it('parses with no arguments and rejects any', () => {
+    expect(parseArgv(['attest', 'bundle'])).toEqual({
+      ok: true,
+      command: { kind: 'attest', channel: 'bundle' },
+    });
+    expect(parseArgv(['attest', 'bundle', 'com.example.Demo'])).toMatchObject({ ok: false });
+  });
+
+  it('echoes a matching install record as bundle-identity, with no browser and no peekaboo', async () => {
+    const calls = freshCalls();
+    const out: string[] = [];
+    fakeFiles.set('/tmp/verify-artifacts/mobile-install.json', installRecord());
+    const deps = makeDeps(calls, { stdout: (line) => out.push(line) });
+
+    const code = await runDriverCommand(['attest', 'bundle'], MOBILE_ENV, deps);
+
+    expect(code).toBe(0);
+    expect(soleAttestRecord(calls)).toMatchObject({ ok: true, kind: 'bundle-identity' });
+    expect(out[0]).toContain('com.example.Demo');
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+    expect(calls.peekaboo).toEqual([]);
+  });
+
+  it('fails when the two hashes disagree — the install did not take', async () => {
+    const calls = freshCalls();
+    fakeFiles.set(
+      '/tmp/verify-artifacts/mobile-install.json',
+      installRecord({ installedSha256: 'b'.repeat(64) }),
+    );
+    const deps = makeDeps(calls);
+
+    const code = await runDriverCommand(['attest', 'bundle'], MOBILE_ENV, deps);
+
+    expect(code).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record.ok).toBe(false);
+    expect(record.kind).toBe('bundle-identity');
+    expect(record.detail).toContain('NOT the product staged here');
+  });
+
+  it('fails with an actionable message when nothing has been installed yet', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+
+    const code = await runDriverCommand(['attest', 'bundle'], MOBILE_ENV, deps);
+
+    expect(code).toBe(1);
+    expect(soleAttestRecord(calls).detail).toContain('mobile-install');
+  });
+
+  it('fails on a record that is not valid JSON, rather than throwing', async () => {
+    const calls = freshCalls();
+    fakeFiles.set('/tmp/verify-artifacts/mobile-install.json', 'not json{');
+    const deps = makeDeps(calls);
+
+    expect(await runDriverCommand(['attest', 'bundle'], MOBILE_ENV, deps)).toBe(1);
+    expect(soleAttestRecord(calls).detail).toContain('not valid JSON');
+  });
+
+  it('lists bundle among the attest channels in USAGE and in the unknown-channel message', () => {
+    expect(USAGE).toContain('attest bundle');
+    const parsed = parseArgv(['attest', 'nonsense']);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) expect(parsed.message).toContain('http|dom|cdp|window|bundle');
+  });
+});

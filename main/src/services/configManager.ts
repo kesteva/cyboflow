@@ -836,6 +836,18 @@ export class ConfigManager extends EventEmitter {
       simulatorDevices: vv?.simulatorDevices
         ? [...vv.simulatorDevices]
         : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
+      // The four `mobile` iOS-Simulator knobs. Floored here and NOWHERE ELSE:
+      // the scheduler reads this resolved block (and only this block), so a knob
+      // Settings persists but this method omits never reaches the tier at all —
+      // it would read as a silently ignored setting rather than a missing one.
+      // The two string knobs floor to '' deliberately: '' means "resolve the
+      // newest compatible device type / runtime live at request time", which is
+      // the only stable answer (no product name survives an Xcode release).
+      mobileSimSlots: vv?.mobileSimSlots ?? VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+      mobileSimDeviceType: vv?.mobileSimDeviceType ?? VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+      mobileSimRuntime: vv?.mobileSimRuntime ?? VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+      mobileDeadlineFloorMs:
+        vv?.mobileDeadlineFloorMs ?? VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
       queuedAgeCeilingMs: vv?.queuedAgeCeilingMs ?? VISUAL_VERIFY_DEFAULTS.queuedAgeCeilingMs,
       agentSlots: vv?.agentSlots ?? VISUAL_VERIFY_DEFAULTS.agentSlots,
       autoBootstrapRunbook:

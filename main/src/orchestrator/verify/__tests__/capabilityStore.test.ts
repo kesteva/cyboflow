@@ -19,6 +19,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MOBILE_TOOLCHAIN_UNPROBED_DETAIL } from '../mobileGates';
 import {
   VerifyCapabilityStore,
   CAPABILITY_BREAKER_THRESHOLD,
@@ -186,17 +187,20 @@ describe('VerifyCapabilityStore', () => {
     const db = buildDb();
     const store = new VerifyCapabilityStore(db);
 
-    store.markUnsupported(1, 'mobile', 'deferred — pending Xcode MCP');
+    // An illustrative literal only — the ledger stores whatever the gate hands
+    // it. Kept in sync with the gate's real mobile detail so a reader does not
+    // learn a reason string the code stopped producing.
+    store.markUnsupported(1, 'mobile', MOBILE_TOOLCHAIN_UNPROBED_DETAIL);
     expect(store.getActiveSuppression(1, 'mobile')).toEqual({
       status: 'unsupported',
-      reason: 'deferred — pending Xcode MCP',
+      reason: MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
     });
 
     // recordHealthyOutcome only clears a 'suppressed' breaker mark, never 'unsupported'.
     store.recordHealthyOutcome(1, 'mobile');
     expect(store.getActiveSuppression(1, 'mobile')).toEqual({
       status: 'unsupported',
-      reason: 'deferred — pending Xcode MCP',
+      reason: MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
     });
     db.close();
   });

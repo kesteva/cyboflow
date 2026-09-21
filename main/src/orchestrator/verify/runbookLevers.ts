@@ -80,11 +80,25 @@ export interface LeverValues {
    * verified instance).
    */
   dataDir: string | null;
+  /**
+   * The UDID of the simulator leased for THIS request, or `null` on every
+   * non-mobile modality (and on a mobile request whose acquisition never
+   * happened). Bound only as a NAME→value export here: §5.3 forbids a
+   * persisted UDID anywhere, and this value lives for exactly one request.
+   */
+  simUdid: string | null;
+  /**
+   * This request's fresh, private `-derivedDataPath` (`VERIFY_DERIVED_DATA`),
+   * or `null` off the mobile path. Exists for the project whose own build
+   * script insists on reading the DerivedData root from its own variable
+   * name rather than the harness's.
+   */
+  derivedData: string | null;
 }
 
 /** One rejected lever, for the caller to log. */
 export interface DroppedLever {
-  lever: 'portEnv' | 'nonceEnv' | 'dataDirEnv';
+  lever: 'portEnv' | 'nonceEnv' | 'dataDirEnv' | 'simUdidEnv' | 'derivedDataEnv';
   name: string;
   reason: 'malformed' | 'denied' | 'shadows-harness';
 }
@@ -98,10 +112,11 @@ export interface ResolvedLeverEnv {
 /**
  * Resolve the exportable half of a runbook's levers against a base env.
  *
- * `portEnv`, `nonceEnv` and `dataDirEnv` are exported. Only `cdpPortFlag`
- * remains unbound, and permanently: it is a CLI FLAG, not an env var — there is
- * no environment for this seam to put it in, and the runbook's serve command is
- * the only thing that knows where in its own argv it goes.
+ * `portEnv`, `nonceEnv`, `dataDirEnv`, `simUdidEnv` and `derivedDataEnv` are
+ * exported. Only `cdpPortFlag` remains unbound, and permanently: it is a CLI
+ * FLAG, not an env var — there is no environment for this seam to put it in,
+ * and the runbook's serve command is the only thing that knows where in its own
+ * argv it goes.
  *
  * `dataDirEnv` was parsed, hashed and documented while being read by nothing
  * until F3 (RC4): the harness now provisions a fresh per-request dir and passes
@@ -143,5 +158,13 @@ export function resolveLeverEnv(
   bind('portEnv', levers.portEnv, values.port);
   bind('nonceEnv', levers.nonceEnv, values.nonce);
   bind('dataDirEnv', levers.dataDirEnv, values.dataDir);
+  // The mobile tier's two levers. Both go through the SAME `bind` as every
+  // other one — same identifier pattern, same execution-environment denylist,
+  // same "a harness var wins" rule — so a runbook cannot reach `PATH` or
+  // rewrite `VERIFY_SIM_UDID` by coming in through the newer door. Both are
+  // `null` off the mobile path, which makes them silent no-ops there rather
+  // than drops.
+  bind('simUdidEnv', levers.simUdidEnv, values.simUdid);
+  bind('derivedDataEnv', levers.derivedDataEnv, values.derivedData);
   return { additions, dropped };
 }

@@ -1055,6 +1055,19 @@ export interface SessionSummary {
    * becomes null, and anything over 300 chars is truncated to it.
    */
   waiting_on: string | null;
+  /**
+   * When the user last hit "Dismiss" on this session's ask (migration 140,
+   * TASK-225). Null until the first manual dismiss.
+   */
+  ask_dismissed_at: string | null;
+  /**
+   * sha256 hex digest (see `main/src/orchestrator/sessionAskHash.ts`) of the
+   * `waiting_on` text that was dismissed — the read-time suppression key
+   * `quickSessionListing.ts` compares a freshly-summarized `waiting_on`
+   * against. Null when never dismissed, or when the dismissed ask had no
+   * `waiting_on` text to hash.
+   */
+  ask_dismissed_hash: string | null;
 }
 
 /**

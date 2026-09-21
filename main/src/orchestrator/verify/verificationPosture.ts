@@ -85,9 +85,32 @@ export interface VerificationPostureDeps {
   ): Promise<VerifyRunbookStatusDetail | null>;
 }
 
-/** The reason text for the deferred mobile modality — the one type nothing can serve. */
-export const MOBILE_DEFERRED_REASON =
-  'the run is stamped `mobile-flow`, and the mobile modality is deferred — pending Xcode MCP';
+/**
+ * WHY a posture came back `unavailable`, as a stable machine token rather than
+ * as prose (mobile-verification-tier M6).
+ *
+ * The reasons are written for a human and get reworded; the code does not. Every
+ * consumer that has to DECIDE something — chiefly
+ * {@link isNoModalityDeclineReason}, which collapses a run's per-lane findings —
+ * keys on this, so a copy edit can no longer quietly turn a run-level fact back
+ * into sixteen identical cards. The reasons still CONTAIN the legacy substrings
+ * as belt and braces for the callers that only ever see a string.
+ */
+export type VerificationDeclineCode =
+  | 'unsupported-modality'
+  | 'no-verification-runbook'
+  | 'modality-deferred';
+
+/**
+ * The posture, widened with the decline code. Assignable to the shared
+ * {@link VerificationPosture} (the code is an ADDITIONAL member), so every
+ * existing consumer — workflowController's map, the controller host — keeps
+ * compiling and keeps reading `reason` exactly as before.
+ */
+export type VerificationPostureResult =
+  | { kind: 'disabled' }
+  | { kind: 'available' }
+  | { kind: 'unavailable'; reason: string; declineCode: VerificationDeclineCode };
 
 /**
  * Human-readable phrasing for a runbook state that cannot serve a request.
@@ -113,6 +136,27 @@ function nativeRunbookReason(status: VerifyRunbookStatusDetail): string {
 }
 
 /**
+ * The mobile mirror of {@link nativeRunbookReason}.
+ *
+ * EVERY sentence here contains the literal "verification runbook", because the
+ * legacy string arm of {@link isNoModalityDeclineReason} matches on exactly that
+ * substring and a mobile decline must keep collapsing per-lane findings for a
+ * caller that never sees the code.
+ */
+function mobileRunbookReason(status: VerifyRunbookStatusDetail): string {
+  switch (declineForRunbookStatus(status)) {
+    case 'proof-belongs-elsewhere':
+      return 'this run is stamped `mobile-flow`, and the project\'s mobile verification runbook is proven elsewhere but its portable file is absent from this tree — merge the branch that carries it';
+    case 'stale-proof':
+      return 'this run is stamped `mobile-flow`, and the project\'s mobile verification runbook has drifted — it needs to be re-proven before any lane can be verified';
+    case 'unobservable':
+      return 'this run is stamped `mobile-flow`, and the project\'s mobile verification runbook could not be read';
+    default:
+      return 'this run is stamped `mobile-flow`, and the project has no proven mobile verification runbook — run verification setup';
+  }
+}
+
+/**
  * Does an enqueue-seam decline reason say "no modality can serve this run" (as
  * opposed to a per-lane accident)?
  *
@@ -123,8 +167,17 @@ function nativeRunbookReason(status: VerifyRunbookStatusDetail): string {
  * path. If one is ever reworded, the cost is that a mid-flight flip stops
  * collapsing per-lane findings — one extra card per lane, never a wedged run.
  */
-export function isNoModalityDeclineReason(reason: string): boolean {
-  const text = reason.toLowerCase();
+export function isNoModalityDeclineReason(
+  decline: string | { reason: string; declineCode?: VerificationDeclineCode },
+): boolean {
+  // A decline that carries a CODE is answered by the code alone (M6): the code is
+  // the stable token, and falling through to the substrings for a coded decline
+  // would reinstate exactly the brittleness the code exists to remove.
+  if (typeof decline !== 'string') {
+    if (decline.declineCode !== undefined) return true;
+    return isNoModalityDeclineReason(decline.reason);
+  }
+  const text = decline.toLowerCase();
   return (
     text.includes('unsupported modality') ||
     text.includes('verification runbook') ||
@@ -138,11 +191,17 @@ export function isNoModalityDeclineReason(reason: string): boolean {
  * Ladder, in order:
  *   1. the stamp is unreadable            → `available` (fail-open: behave as before)
  *   2. `verify_enabled = 0`               → `disabled`  (today's behaviour verbatim)
- *   3. stamped type `mobile-flow`         → `unavailable` (the modality is deferred)
+ *   3. stamped type `mobile-flow` AND
+ *      no PROVEN mobile runbook           → `unavailable`
  *   4. stamped type `native-desktop` AND
  *      no PROVEN native-screen runbook    → `unavailable` (classified by the
  *                                           SAME decline function the gate uses)
  *   5. otherwise                          → `available`
+ *
+ * Rung 3 used to be an unconditional short-circuit — the mobile modality was
+ * deferred, so no runbook could have made it work. The iOS-Simulator tier ended
+ * that, and the rung is now the structural twin of rung 4 in every respect:
+ * same probe, same classifier, same fail-open.
  *
  * No `web` / `cdp-app` runbook probe here on purpose. Those modalities are
  * resolved per REQUEST (the composed task's `serve.attach` picks between them)
@@ -154,7 +213,7 @@ export function isNoModalityDeclineReason(reason: string): boolean {
 export async function resolveVerificationPosture(
   deps: VerificationPostureDeps,
   runId: string,
-): Promise<VerificationPosture> {
+): Promise<VerificationPostureResult> {
   let stamp: VerificationRunStamp | null = null;
   try {
     stamp = deps.readRunStamp(runId);
@@ -163,15 +222,18 @@ export async function resolveVerificationPosture(
   }
   if (stamp === null) return { kind: 'available' };
   if (!stamp.verifyEnabled) return { kind: 'disabled' };
-  if (stamp.verifyType === 'mobile-flow') {
-    return { kind: 'unavailable', reason: MOBILE_DEFERRED_REASON };
-  }
-  if (stamp.verifyType === 'native-desktop') {
+  const probe =
+    stamp.verifyType === 'mobile-flow'
+      ? ({ modality: 'mobile', reasonFor: mobileRunbookReason } as const)
+      : stamp.verifyType === 'native-desktop'
+        ? ({ modality: 'native-screen', reasonFor: nativeRunbookReason } as const)
+        : null;
+  if (probe !== null) {
     let status: VerifyRunbookStatusDetail | null;
     try {
       status = await deps.runbookStatus(
         stamp.projectId,
-        'native-screen',
+        probe.modality,
         stamp.worktreePath ?? undefined,
       );
     } catch {
@@ -181,7 +243,11 @@ export async function resolveVerificationPosture(
     // Same reasoning for an unwired resolver as for a throwing one.
     if (status === null) return { kind: 'available' };
     if (status.status === 'proven') return { kind: 'available' };
-    return { kind: 'unavailable', reason: nativeRunbookReason(status) };
+    return {
+      kind: 'unavailable',
+      reason: probe.reasonFor(status),
+      declineCode: 'no-verification-runbook',
+    };
   }
   return { kind: 'available' };
 }

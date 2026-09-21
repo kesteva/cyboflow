@@ -31,6 +31,7 @@ import {
   dismissPendingReviewItemsForSession,
   backfillArchivedSessionReviewItems,
   sessionDeliveredWork,
+  sessionCompletedNoCodeWork,
   stampSessionRunsCompleted,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
@@ -994,13 +995,50 @@ describe('archived-session review-item sweeps', () => {
 
     const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
 
-    expect(stamped).toBe(1);
+    // run-direct (workflow_runs.session_id) + run-legacy (the fixture's
+    // sessions.run_id back-link) — both ownership shapes, matching the probes
+    // and the sweep. Before the legacy branch was added this read 1.
+    expect(stamped).toBe(2);
     const outcomeOf = (id: string): string | null =>
       (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(id) as { outcome: string | null }).outcome;
     expect(outcomeOf('run-direct')).toBe('completed');
+    expect(outcomeOf('run-legacy')).toBe('completed');
     // Already delivered, and more specific — left alone.
     expect(outcomeOf('run-pr')).toBe('pr_open');
     expect(sessionDeliveredWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it('stampSessionRunsCompleted also stamps a run linked only via the LEGACY sessions.run_id shape', async () => {
+    // sessionCompletedNoCodeWork / sessionDeliveredWork recognise this shape and
+    // make the dialog OFFER Mark complete — the stamp must reach the same row,
+    // or the click succeeds with `stamped: 0` and the archive sweeps the findings.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, { id: 'run-planner-legacy', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE sessions SET run_id = 'run-planner-legacy' WHERE id = 'sess-archived'`).run();
+    expect(
+      (db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get('run-planner-legacy') as {
+        session_id: string | null;
+      }).session_id,
+    ).toBeNull();
+    const findingId = await createReviewItem(router, 'run-planner-legacy', 'Backlog rows this run wrote', 'code-review');
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+
+    const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
+
+    // run-direct (direct link, outcome NULL) AND run-planner-legacy (legacy link).
+    expect(stamped).toBe(2);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-legacy') as { outcome: string | null })
+        .outcome,
+    ).toBe('completed');
+    // …and the archive that follows keeps the legacy-linked run's findings.
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+    expect(result.itemsDismissed).toBe(0);
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status,
+    ).toBe('pending');
   });
 
   it('sessionDeliveredWork answers for the session, not the individual run', async () => {
@@ -1029,6 +1067,108 @@ describe('archived-session review-item sweeps', () => {
     expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 0 });
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(gateId) as { status: string }).status).toBe('dismissed');
+  });
+
+  // -------------------------------------------------------------------------
+  // sessionCompletedNoCodeWork — the DB-only sibling of sessionDeliveredWork
+  // for a completed Planner/Launch run (TASK-276). Read by the dismiss
+  // dialog's getDeliveryState probe to unlock the three-way Mark-complete
+  // choice for a session whose "delivery" is backlog rows, not code.
+  // -------------------------------------------------------------------------
+
+  it("reports true for a session hosting a COMPLETED 'planner' run", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it("reports true for a session hosting a COMPLETED 'launch' run", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-launch', workflowId: 'wf-launch', workflowName: 'launch', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-launch'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it("reports false for a 'sprint' run (touches the repo) even when completed", () => {
+    // buildReviewSweepDb seeds run-direct as a completed 'sprint' run under
+    // sess-archived — the workflow-name filter, not just status, must gate this.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(false);
+  });
+
+  it("reports false for a 'planner' run still parked at a gate (awaiting_review)", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-gate', workflowId: 'wf-planner', workflowName: 'planner', status: 'awaiting_review' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-gate'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(false);
+  });
+
+  it('also sees the LEGACY shape (session.run_id, no run.session_id)', () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-legacy', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE sessions SET run_id = 'run-planner-legacy' WHERE id = 'sess-archived'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it('answers for the session, not a different one', () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-other', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-other'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-active')).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Mark complete → archive, end to end (TASK-276 acceptance #3). The dismiss
+  // dialog's "Mark complete" action is markComplete → stampSessionRunsCompleted
+  // (ipc/gitOps.ts); the "Dismiss" that follows it goes through sessions:delete
+  // → dismissPendingReviewItemsForSession. Neither of those calls is reachable
+  // from sessionCompletedNoCodeWork alone — this pins that stamping a
+  // completedNoCode Planner/Launch session's runs 'completed' is enough for the
+  // DELIVERED_SESSION_FINDING_CARVE_OUT to keep its findings on the very next
+  // archive sweep, even though the run outcome was NULL a moment earlier.
+  // -------------------------------------------------------------------------
+  it("stamping a completedNoCode Planner run 'completed' and then archiving keeps its review items", async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, { id: 'run-planner-mc', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-mc'`).run();
+    const findingId = await createReviewItem(router, 'run-planner-mc', 'Backlog rows this run wrote', 'code-review');
+
+    // Precondition: this is exactly the shape sessionCompletedNoCodeWork keys
+    // on (outcome still NULL — the run finished, but nobody has stamped it).
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-mc') as { outcome: string | null })
+        .outcome,
+    ).toBeNull();
+
+    const stamped = stampSessionRunsCompleted(adapter, 'sess-archived');
+    expect(stamped).toBeGreaterThan(0);
+    expect(
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get('run-planner-mc') as { outcome: string | null })
+        .outcome,
+    ).toBe('completed');
+
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    expect(result.itemsDismissed).toBe(0);
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status,
+    ).toBe('pending');
   });
 });
 

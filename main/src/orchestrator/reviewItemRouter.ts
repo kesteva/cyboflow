@@ -171,6 +171,17 @@ export interface ReviewItemTriage {
   resolution?: string | null;
   /** The run that triggered this triage, recorded on the entity_events row. */
   runId?: string | null;
+  /**
+   * TASK-222 post-mortem trail: only ever set by a RESOLVE that carried an
+   * explicit `outcome` (reviewItems.resolve). Merged into the decision item's
+   * payload_json (never clobbering the mint-time `gate`/`ideaRefs`/`designRefs`
+   * — see {@link ReviewItemRouter.mergeResolutionMeta}) so a post-mortem can tell
+   * which verdict + surface answered a gate; today's gates mint with
+   * `payload_json: null` (humanStepManager.composeGatePayload), which is exactly
+   * why it was unrecoverable before this. Ignored for a `dismiss` op or for a
+   * non-decision kind.
+   */
+  resolutionMeta?: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null };
 }
 
 /**
@@ -383,7 +394,10 @@ export class ReviewItemRouter {
    * Triage path (resolve/dismiss): resolves the row, sets status + resolved_by +
    * resolution + updated_at, and appends a delta to entity_events — all in ONE
    * transaction. Re-resolving / re-dismissing an already-terminal item is
-   * rejected with code='invalid_status'.
+   * rejected with code='invalid_status'. A resolve carrying `resolutionMeta`
+   * (TASK-222 — only ever set when the caller supplied an explicit gate
+   * `outcome`) also merges `{resolvedOutcome, resolvedSurface}` into the row's
+   * payload_json, never clobbering the mint-time payload.
    *
    * Findings-triage paths (migration 034), each finding-scoped, each atomic:
    *  - mutate (re-tag and/or re-prioritize): untriaged-only. Re-tag merges
@@ -645,13 +659,24 @@ export class ReviewItemRouter {
       const resolvedBy = change.resolvedBy ?? change.actor;
       const resolution = change.resolution ?? null;
 
+      // TASK-222: stamp gate-resolution provenance into payload_json — merge,
+      // never replace, so the gate discriminant / batch refs stamped at mint
+      // time (or the ABSENCE of any payload — most `gate:human-step:*` items mint
+      // with payload_json: null) survive the resolve.
+      let nextPayloadJson = current.payload_json;
+      if (change.op === 'resolve' && change.resolutionMeta && current.kind === 'decision') {
+        nextPayloadJson = JSON.stringify(
+          this.mergeResolutionMeta(current.payload_json, change.resolutionMeta),
+        );
+      }
+
       this.db
         .prepare(
           `UPDATE review_items
-              SET status = ?, resolved_by = ?, resolution = ?, updated_at = ?
+              SET status = ?, resolved_by = ?, resolution = ?, payload_json = ?, updated_at = ?
             WHERE id = ?`,
         )
-        .run(targetStatus, resolvedBy, resolution, now, reviewItemId);
+        .run(targetStatus, resolvedBy, resolution, nextPayloadJson, now, reviewItemId);
 
       const deltas: FieldDelta[] = [{ field: 'status', from: current.status, to: targetStatus }];
       if (resolution !== null) deltas.push({ field: 'resolution', from: current.resolution, to: resolution });
@@ -962,6 +987,41 @@ export class ReviewItemRouter {
       }
     }
     return { ...base, kind: 'finding', proposedTarget };
+  }
+
+  // --------------------------------------------------------------------------
+  // payload_json resolutionMeta merge helper (TASK-222 gate-resolution provenance)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Merge gate-resolution provenance into a decision item's payload_json WITHOUT
+   * clobbering whatever siblings (`gate`, `ideaRefs`, `designRefs`, …) the gate
+   * minted with. Deliberately typed as a plain object rather than
+   * `DecisionPayload` — most `gate:human-step:*` items mint with
+   * `payload_json: null` (no `gate` discriminant at all, since
+   * humanStepManager.composeGatePayload composes a payload for `approve-ideas`
+   * ONLY), so requiring the full `DecisionPayload` shape here would force
+   * inventing a `gate` value this router cannot actually know.
+   */
+  private mergeResolutionMeta(
+    payloadJson: string | null,
+    meta: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null },
+  ): Record<string, unknown> {
+    let base: Record<string, unknown> = { kind: 'decision' };
+    if (payloadJson) {
+      try {
+        const parsed: unknown = JSON.parse(payloadJson);
+        if (parsed && typeof parsed === 'object') base = parsed as Record<string, unknown>;
+      } catch {
+        // malformed payload — fall back to the minimal decision marker above
+      }
+    }
+    return {
+      ...base,
+      kind: 'decision',
+      resolvedOutcome: meta.outcome,
+      ...(meta.surface ? { resolvedSurface: meta.surface } : {}),
+    };
   }
 
   // --------------------------------------------------------------------------

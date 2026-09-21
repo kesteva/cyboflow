@@ -57,6 +57,7 @@ import type {
   VisualBackendId,
   VlmJudge,
 } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -143,6 +144,10 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+  mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+  mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+  mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
 };
 

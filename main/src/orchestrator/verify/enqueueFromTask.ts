@@ -137,7 +137,7 @@ function forbiddenCommandError(offenders: string[], source: 'task' | 'runbook'):
 // `VerificationTaskV1` has carried all along (visualVerification.ts) and the
 // task-verify prompt already asks for — is honoured instead of being ignored in
 // favour of the shape. (2) When nothing is declared at all, the project's PROVEN
-// RECORDS are asked, in the order `cdp-app`, `web`: a project with a proven
+// RECORDS are asked, in {@link RECORD_PROBE_ORDER}: a project with a proven
 // cdp-app entry is an app, and a composer that wants its web surface says so.
 //
 // And the answer is computed ONCE per enqueue, BEFORE the bootstrap preflight
@@ -198,8 +198,20 @@ function forbiddenCommandError(offenders: string[], source: 'task' | 'runbook'):
 /**
  * The order the proven records are probed in when the composer declared nothing
  * (F5). BOTH proven + nothing declared ⇒ `cdp-app` wins, by the rule above.
+ *
+ * `mobile` is LAST, and that position is load-bearing rather than tidy. A React
+ * Native / Expo project legitimately holds BOTH a proven `web` record and a
+ * proven `mobile` one, and a task that declared nothing is by construction one
+ * the composer wrote in the WEB shape — no `app` block, because an app-shaped
+ * task declares its own modality through {@link declaredWebModality}'s app rung
+ * and never reaches this list. Probing `mobile` ahead of `web` would therefore
+ * take a plain web-shaped lane, merge a simulator stand-up into it, and turn a
+ * browser check into an `xcodebuild` on the strength of a record that merely
+ * exists. An undeclared lane can only be moved onto `mobile` when this project
+ * has NO web-axis record at all, which is the one reading under which "this
+ * project's proven surface is the simulator" is actually true.
  */
-const RECORD_PROBE_ORDER: readonly VerificationModality[] = ['cdp-app', 'web'];
+const RECORD_PROBE_ORDER: readonly VerificationModality[] = ['cdp-app', 'web', 'mobile'];
 
 /**
  * The DECLARED modality for a request, or `null` when nothing declares one.
@@ -209,22 +221,40 @@ const RECORD_PROBE_ORDER: readonly VerificationModality[] = ['cdp-app', 'web'];
  *   1. the run's verify TYPE, for the two modalities a task shape cannot
  *      express — `native-desktop` → `native-screen`, `mobile-flow` → `mobile`
  *      (identical to {@link resolveTaskModality}, which owns that mapping);
- *   2. the composer's own `task.modality`, when it is one of the two WEB-AXIS
- *      members. A task-declared `native-screen`/`mobile` on a web-shaped run is
- *      deliberately NOT honoured: the run's stamped type owns that axis and step
- *      1 already answered it, and the request row's modality is re-derived from
- *      (type, task) at the INSERT — so honouring it here would stamp a row whose
- *      modality contradicts the one this resolution was made for.
- *   3. `serve.attach === 'cdp'` → `cdp-app` — the legacy shape discriminant,
+ *   2. the composer's own `task.modality`, when the task's own SHAPE can express
+ *      it — the two WEB-AXIS members unconditionally, and `mobile` only when the
+ *      task actually carries the `app` block that expresses it. A declaration
+ *      the shape cannot express is deliberately NOT honoured: the request row's
+ *      modality is re-derived from (type, task) at the INSERT, so honouring a
+ *      word with no shape behind it would stamp a row whose modality contradicts
+ *      the one this resolution was made for. `native-screen` is never
+ *      expressible on a web-shaped run at all (the run's stamped type owns that
+ *      axis, and step 1 already answered it), and a declared `mobile` with NO
+ *      `app` block is the same situation — it falls through to `null` and the
+ *      lane is resolved as if it had declared nothing, exactly as a declared
+ *      `native-screen` always has been. Nothing new declines here.
+ *   3. `app.platform === 'ios-simulator'` → `'mobile'` — the mobile tier's shape
+ *      discriminant, read BEFORE the attach rung for the same reason
+ *      {@link resolveTaskModality} reads it first: an app-shaped task IS a
+ *      simulator run whatever web-shaped `VerificationType` it was composed
+ *      under, and it carries no `serve` for the attach rung to read.
+ *   4. `serve.attach === 'cdp'` → `cdp-app` — the legacy shape discriminant,
  *      still authoritative when the composer wrote the shape but not the word.
+ *
+ * Rungs 3 and 4 are shape readings, so a declaration that AGREES with the shape
+ * and one that was merely implied by it both come out here as the same answer —
+ * which is what keeps the stamp-consistency invariant true for the mobile tier
+ * without a single new branch downstream.
  */
 export function declaredWebModality(
   type: VerificationType,
-  task: Pick<VerificationTaskV1, 'serve' | 'modality'> | null,
+  task: Pick<VerificationTaskV1, 'serve' | 'modality' | 'app'> | null,
 ): VerificationModality | null {
   if (type === 'native-desktop') return 'native-screen';
   if (type === 'mobile-flow') return 'mobile';
+  if (task?.modality === 'mobile' && task.app !== undefined) return 'mobile';
   if (task?.modality === 'web' || task?.modality === 'cdp-app') return task.modality;
+  if (task?.app?.platform === 'ios-simulator') return 'mobile';
   if (task?.serve?.attach === 'cdp') return 'cdp-app';
   return null;
 }
@@ -258,7 +288,7 @@ export function declaredWebModality(
  */
 export async function resolveEnqueueModality(args: {
   type: VerificationType;
-  task: Pick<VerificationTaskV1, 'build' | 'serve' | 'modality'> | null;
+  task: Pick<VerificationTaskV1, 'build' | 'serve' | 'modality' | 'app'> | null;
   projectId: number;
   runId: string;
   /** The requesting run's worktree, when it has one (the store's probe path). */
@@ -385,6 +415,21 @@ export async function resolveEnqueueModality(args: {
  * step" is a positive statement the proof validated, and keeping a guessed one
  * alongside it would re-introduce exactly the guess that was proven wrong.
  *
+ * `app` AND `serve` ARE ONE SLOT, NOT TWO. The stand-up half of the entry is
+ * whichever of the two it declares — the runbook parser enforces that a `mobile`
+ * entry carries `app` and no `serve`, and that no other entry carries `app` at
+ * all — so the merge writes the entry's `app` when it has one and the entry's
+ * `serve` otherwise, and in each case the OTHER field is dropped from the task
+ * entirely. Carrying both through would compose a task that describes two
+ * mutually exclusive stand-ups (a leased port AND a simulator), and would break
+ * the one thing that makes a record-resolved lane safe: the injection's
+ * consistency guard re-derives the modality from the MERGED task, and
+ * {@link resolveTaskModality} reads `app` before `serve.attach` — so a surviving
+ * `app` on a web entry would re-derive the merged task to `mobile` and the guard
+ * would drop a perfectly good web injection. Replacing the whole slot is what
+ * makes a mobile record-resolved lane re-derive to `mobile` and a web one to
+ * `web`, from the record's own declaration rather than from the composer's.
+ *
  * `target` is preserved: it is the composer's pre-live pointer and is orthogonal
  * to standing the project up. The entry's `viewports`/`notes` are NOT merged —
  * capture framing belongs to the request, and the notes are for humans reading
@@ -416,7 +461,13 @@ export function mergeRunbookIntoTask(
     ...(task.viewports !== undefined ? { viewports: task.viewports } : {}),
     ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
     ...(entry.build !== undefined ? { build: entry.build } : {}),
-    ...(entry.serve !== undefined ? { serve: entry.serve } : {}),
+    // The stand-up slot, replaced whole: a mobile entry contributes `app` and no
+    // `serve`, every other entry contributes `serve` and no `app`.
+    ...(entry.app !== undefined
+      ? { app: entry.app }
+      : entry.serve !== undefined
+        ? { serve: entry.serve }
+        : {}),
   };
 }
 
