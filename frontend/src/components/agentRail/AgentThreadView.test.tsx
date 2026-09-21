@@ -13,17 +13,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
 import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { StreamEvent } from '../../utils/cyboflowApi';
 
-// -- UnifiedChatView stub: captures mode/running and renders bottomSlot verbatim. --
+// -- UnifiedChatView stub: captures mode/running/liveTail and renders bottomSlot
+//    verbatim (liveTail alongside it, so tests can assert on its presence/absence
+//    the same way a real ChatTranscript would gate its animated fallback). --
 interface UnifiedChatViewStubProps {
   mode: string;
   running?: boolean;
+  liveTail?: ReactNode;
   bottomSlot?: ReactNode;
 }
 
 vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
-  UnifiedChatView: ({ mode, running, bottomSlot }: UnifiedChatViewStubProps) => (
+  UnifiedChatView: ({ mode, running, liveTail, bottomSlot }: UnifiedChatViewStubProps) => (
     <div data-testid="unified-chat-view-stub" data-mode={mode} data-running={String(running)}>
+      <div data-testid="live-tail-slot">{liveTail}</div>
       {bottomSlot}
     </div>
   ),
@@ -49,12 +54,14 @@ const mockSendMessage = vi.fn().mockResolvedValue(undefined);
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
+let mockLiveEvents: StreamEvent[] = [];
 
 interface FakeAgentThreadState {
   thread: AgentThread | null;
   sending: boolean;
   sendMessage: typeof mockSendMessage;
   proposals: AgentProposal[];
+  liveEvents: StreamEvent[];
 }
 
 vi.mock('../../stores/agentThreadStore', () => ({
@@ -64,8 +71,19 @@ vi.mock('../../stores/agentThreadStore', () => ({
       sending: mockSending,
       sendMessage: mockSendMessage,
       proposals: mockProposals,
+      liveEvents: mockLiveEvents,
     }),
 }));
+
+/** A synthetic `stream_event` envelope matching the wrapper shape AgentThreadService
+ *  publishes and agentThreadStore captures into `liveEvents`. */
+function makeStreamEventEnvelope(event: Record<string, unknown>): StreamEvent {
+  return {
+    type: 'stream_event',
+    payload: { type: 'stream_event', event },
+    timestamp: '2026-09-21T00:00:00.000Z',
+  } as StreamEvent;
+}
 
 function makeThread(overrides: Partial<AgentThread> = {}): AgentThread {
   return {
@@ -92,6 +110,7 @@ beforeEach(() => {
   mockSending = false;
   mockProposals = [];
   mockMessages = [];
+  mockLiveEvents = [];
 });
 
 describe('AgentThreadView — UnifiedChatView wiring', () => {
@@ -178,6 +197,43 @@ describe('AgentThreadView — composer + chips wiring', () => {
     render(<AgentThreadView />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
+  });
+});
+
+describe('AgentThreadView — live tail (claude-sdk stream_event wiring, assistant rail parity)', () => {
+  it('renders progressive LiveTail content when liveEvents carries visible text', async () => {
+    mockThread = makeThread();
+    mockLiveEvents = [
+      makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+      makeStreamEventEnvelope({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi there' } }),
+    ];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.getByTestId('live-tail')).toBeInTheDocument();
+    expect(screen.getByTestId('live-tail')).toHaveTextContent('Hi there');
+  });
+
+  it('renders no LiveTail node (keeps the animated fallback) when liveEvents is empty (e.g. codex-sdk runtime)', async () => {
+    mockThread = makeThread();
+    mockLiveEvents = [];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.queryByTestId('live-tail')).not.toBeInTheDocument();
+    expect(screen.getByTestId('live-tail-slot')).toBeEmptyDOMElement();
+  });
+
+  it('gates on VISIBLE content — an opened-but-empty block does not render a bare header', async () => {
+    mockThread = makeThread();
+    // content_block_start only: the block is open but carries no text yet.
+    mockLiveEvents = [
+      makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+    ];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.queryByTestId('live-tail')).not.toBeInTheDocument();
   });
 });
 

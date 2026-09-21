@@ -53,6 +53,7 @@ import type {
   AgentProposal,
   AgentThreadImageAttachment,
 } from '../../../shared/types/agentThread';
+import type { StreamEvent } from '../utils/cyboflowApi';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 
@@ -74,6 +75,28 @@ const LIVE_TAIL_DEBOUNCE_MS = 150;
 
 /** Backoff before reopening a subscription the server ended or that errored. */
 const RESUBSCRIBE_DELAY_MS = 1_000;
+
+/** Defensive cap on the `liveEvents` buffer, mirroring MAX_EVENTS_PER_PANEL in
+ *  panelLiveEventsStore.ts. Stage 1 has exactly one global thread, so unlike
+ *  that store's per-panel map this is a single flat array. */
+const MAX_LIVE_EVENTS = 2000;
+
+/**
+ * Narrows onThreadEvent's `unknown` payload to the `{type, payload, timestamp}`
+ * envelope shape `AgentThreadService.toEnvelope` produces
+ * (main/src/orchestrator/agentThread/agentThreadService.ts ~666) — the router's
+ * `onThreadEvent` subscription is typed `AsyncGenerator<unknown>`, so nothing
+ * upstream of this guard proves the shape. Structural only (the wrapper's own
+ * three fields, not `payload`'s per-`type` correlation) — same audited-boundary
+ * posture as the `as StreamEnvelope` cast at runEventBridge.ts:237: the
+ * producer's contract, not full runtime validation, is what makes the
+ * subsequent `StreamEvent` cast safe.
+ */
+function isThreadStreamEnvelope(value: unknown): value is StreamEvent {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as { type?: unknown; payload?: unknown; timestamp?: unknown };
+  return typeof v.type === 'string' && 'payload' in v && typeof v.timestamp === 'string';
+}
 
 /** The subset of tRPC's subscription observer this store wires. */
 interface SubscriptionHandlers<T> {
@@ -167,6 +190,17 @@ export interface AgentThreadState {
   liveTailTick: number;
 
   /**
+   * Raw onThreadEvent envelopes for the progressive-render live tail
+   * (AgentThreadView reduces this via `reduceLiveTail` / `hasVisibleTailContent`,
+   * mirroring RunChatView's `streamEvents` / ClaudePanel's `panelLiveEventsStore`).
+   * A FLAT array, not panelLiveEventsStore's per-panel map — Stage 1 has exactly
+   * one global thread. Reset to `[]` on a terminal `result` envelope, on a new
+   * `sendMessage` call, and on `init()`'s bootstrap (thread re-init); capped at
+   * {@link MAX_LIVE_EVENTS}.
+   */
+  liveEvents: StreamEvent[];
+
+  /**
    * A one-shot pre-fill for the composer (Custom Views §7.1's authoring
    * kickoff — `startAuthoring` sets it, `AgentComposer`/`AgentThreadView`
    * apply it once via `onPrefillConsumed` and it is expected to be cleared
@@ -231,6 +265,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     loading: false,
     sending: false,
     liveTailTick: 0,
+    liveEvents: [],
     composerDraft: null,
     pendingContextHint: null,
 
@@ -240,7 +275,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     init: () => {
       if (initialized) return cachedUnsubscribe!;
       initialized = true;
-      set({ loading: true });
+      // Thread re-init (a fresh bootstrap after a prior teardown) starts the
+      // live tail clean — a stale buffer from a torn-down subscription must
+      // not bleed into the newly-opened one.
+      set({ loading: true, liveEvents: [] });
 
       let threadEventSub: { close: () => void } | null = null;
       let refetchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -258,6 +296,29 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
         }, LIVE_TAIL_DEBOUNCE_MS);
       };
 
+      /**
+       * Capture the raw envelope into `liveEvents` for the progressive-render
+       * tail (AgentThreadView's `reduceLiveTail`). UNTHROTTLED — unlike the
+       * debounced tick/proposals refetch above, the reducer needs every
+       * intermediate delta to reconstruct in-flight text, mirroring
+       * panelLiveEventsStore.appendEvent's reset-on-`result` + cap behavior.
+       */
+      const captureLiveEvent = (value: unknown): void => {
+        if (!isThreadStreamEnvelope(value)) return;
+        if (value.type === 'result') {
+          set({ liveEvents: [] });
+          return;
+        }
+        set((s) => {
+          const existing = s.liveEvents;
+          const next =
+            existing.length >= MAX_LIVE_EVENTS
+              ? [...existing.slice(existing.length - MAX_LIVE_EVENTS + 1), value]
+              : [...existing, value];
+          return { liveEvents: next };
+        });
+      };
+
       // onThreadEvent's input is `{ threadId }` (server-side per-thread filter),
       // so it cannot be wired until getThread resolves — bootstrap sequences it.
       const bootstrap = async (): Promise<void> => {
@@ -270,7 +331,12 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
             'onThreadEvent',
             (handlers) =>
               trpc.cyboflow.agentThread.onThreadEvent.subscribe({ threadId: thread.id }, handlers),
-            { onData: () => scheduleLiveTailRefresh(thread.id) },
+            {
+              onData: (value) => {
+                captureLiveEvent(value);
+                scheduleLiveTailRefresh(thread.id);
+              },
+            },
           );
         } catch (err: unknown) {
           console.error('[agentThreadStore] init bootstrap failed:', err);
@@ -326,7 +392,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       const pendingHint = get().pendingContextHint;
       const contextHint = opts?.contextHint ?? pendingHint ?? undefined;
       if (pendingHint !== null) set({ pendingContextHint: null });
-      set({ sending: true });
+      // A new turn starts the live tail clean — a prior turn's trailing
+      // envelopes (if any survived without a `result`, e.g. a cancelled turn)
+      // must not bleed into this one's progressive render.
+      set({ sending: true, liveEvents: [] });
       try {
         await trpc.cyboflow.agentThread.sendMessage.mutate({
           threadId,

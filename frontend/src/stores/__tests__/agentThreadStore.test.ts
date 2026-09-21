@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
+import type { StreamEvent } from '../../utils/cyboflowApi';
 
 // Mutable mock refs — replaced in beforeEach so each test gets fresh spies.
 let mockGetThreadQuery: ReturnType<typeof vi.fn>;
@@ -56,6 +57,26 @@ function makeThread(overrides: Partial<AgentThread> = {}): AgentThread {
   };
 }
 
+/** A synthetic `stream_event` envelope matching AgentThreadService.toEnvelope's
+ *  `{type, payload, timestamp}` shape (payload = the raw SDK `stream_event` message,
+ *  carrying the nested `.event`). */
+function makeStreamEventEnvelope(event: Record<string, unknown>): StreamEvent {
+  return {
+    type: 'stream_event',
+    payload: { type: 'stream_event', event },
+    timestamp: '2026-09-21T00:00:00.000Z',
+  } as StreamEvent;
+}
+
+/** A synthetic terminal `result` envelope, same wrapper shape. */
+function makeResultEnvelope(): StreamEvent {
+  return {
+    type: 'result',
+    payload: { type: 'result' },
+    timestamp: '2026-09-21T00:00:00.000Z',
+  } as StreamEvent;
+}
+
 function makeProposal(overrides: Partial<AgentProposal> & { id: string }): AgentProposal {
   return {
     id: overrides.id,
@@ -96,6 +117,7 @@ beforeEach(() => {
     loading: false,
     sending: false,
     liveTailTick: 0,
+    liveEvents: [],
     composerDraft: null,
     pendingContextHint: null,
   });
@@ -191,6 +213,73 @@ describe('onThreadEvent live-tail', () => {
 
     expect(useAgentThreadStore.getState().liveTailTick).toBe(1);
     expect(mockListProposalsQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('captures stream_event envelopes into liveEvents, unthrottled (no debounce wait needed)', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (value: unknown) => void;
+    const env1 = makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } });
+    const env2 = makeStreamEventEnvelope({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: 'Hi' },
+    });
+    onData(env1);
+    onData(env2);
+
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([env1, env2]);
+  });
+
+  it('resets liveEvents to [] on a terminal result envelope', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (value: unknown) => void;
+    onData(makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }));
+    expect(useAgentThreadStore.getState().liveEvents).toHaveLength(1);
+
+    onData(makeResultEnvelope());
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+  });
+
+  it('ignores a malformed (non-envelope-shaped) onData value', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (value: unknown) => void;
+    onData(undefined);
+    onData('not an envelope');
+    onData({ type: 'stream_event' }); // missing payload/timestamp
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+  });
+
+  it('caps liveEvents at MAX_LIVE_EVENTS (2000), dropping the oldest', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (value: unknown) => void;
+    for (let i = 0; i < 2005; i++) {
+      onData(
+        makeStreamEventEnvelope({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: String(i) } }),
+      );
+    }
+
+    const events = useAgentThreadStore.getState().liveEvents;
+    expect(events).toHaveLength(2000);
+    const firstEvent = events[0] as unknown as { payload: { event: { delta: { text: string } } } };
+    const lastEvent = events[events.length - 1] as unknown as { payload: { event: { delta: { text: string } } } };
+    expect(firstEvent.payload.event.delta.text).toBe('5');
+    expect(lastEvent.payload.event.delta.text).toBe('2004');
+  });
+
+  it('resets liveEvents on a fresh bootstrap (thread re-init)', async () => {
+    useAgentThreadStore.setState({ liveEvents: [makeResultEnvelope()] });
+
+    unsub = useAgentThreadStore.getState().init();
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
   });
 });
 
@@ -387,6 +476,14 @@ describe('sendMessage', () => {
     await useAgentThreadStore.getState().sendMessage('hello', { images: [] });
 
     expect(mockSendMessageMutate).toHaveBeenCalledWith({ threadId: 'thread-1', text: 'hello' });
+  });
+
+  it('resets liveEvents when a new turn starts', async () => {
+    useAgentThreadStore.setState({ thread: makeThread(), liveEvents: [makeResultEnvelope()] });
+
+    await useAgentThreadStore.getState().sendMessage('hello');
+
+    expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
   });
 
   it('clears sending even when the mutation rejects', async () => {
