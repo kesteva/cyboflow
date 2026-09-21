@@ -4,8 +4,16 @@
  *
  * Algorithm (verified empirically against the live `~/.claude/projects/` layout,
  * Probe B — IDEA-013-probe-findings.md):
- *   Replace EVERY character that is not `[A-Za-z0-9_]` — including `/`, `\`, `.`,
- *   and any non-ASCII codepoint — with a single `-`.
+ *   Replace EVERY character that is not `[A-Za-z0-9]` — including `/`, `\`, `.`,
+ *   `_`, and any non-ASCII codepoint — with a single `-`.
+ *
+ *   Underscore used to survive (that Probe B layout was written by an older
+ *   CLI), but Claude Code 2.1.278 maps it to `-` too: on 2026-09-21 a session
+ *   in `~/.cyboflow_smoke295/proj/worktrees/x` wrote its JSONL under
+ *   `-Users-…--cyboflow-smoke295-proj-worktrees-x` while cyboflow watched
+ *   `…--cyboflow_smoke295-…` and transcript discovery gave up after 165s — the
+ *   session ran with no structured pipeline (0 tokens, no claude_session_id).
+ *   `ls ~/.claude/projects | grep _` returned nothing on that machine.
  *
  * Consequences confirmed on disk:
  *   - A leading separator yields a LEADING `-`
@@ -30,5 +38,5 @@
  * dirs collide on one key, the tail source still binds to the correct session.
  */
 export function encodeCwd(absPath: string): string {
-  return absPath.replace(/[^A-Za-z0-9_]/g, '-');
+  return absPath.replace(/[^A-Za-z0-9]/g, '-');
 }
