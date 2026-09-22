@@ -843,9 +843,10 @@ export class WorkflowController {
                 signal,
                 attempt: 1,
                 ...(escalation !== undefined ? { escalation } : {}),
+                ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
               });
               escalation = undefined; // consumed by this gate
-              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
+              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, 1, reviewReportedSinceMs);
               if (next.terminal) return this.finish(next.result, runId);
               i = next.i;
               continue;
@@ -927,9 +928,10 @@ export class WorkflowController {
             ...baseCtx,
             attempt: 1,
             ...(escalation !== undefined ? { escalation } : {}),
+            ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
           });
           escalation = undefined; // consumed by this gate
-          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
+          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, 1, reviewReportedSinceMs);
           if (next.terminal) return this.finish(next.result, runId);
           // Every gate decision REPLACES the pending revision: a revise-with-target
           // arms a fresh one, and anything else (approve, or a revise that only
@@ -1131,9 +1133,10 @@ export class WorkflowController {
               ...baseCtx,
               attempt,
               ...(escalation !== undefined ? { escalation } : {}),
+              ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
             });
             escalation = undefined; // consumed by this gate
-            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt);
+            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt, reviewReportedSinceMs);
             if (next.terminal) return this.finish(next.result, runId);
             pendingGateRevision = next.gateRevision;
             i = next.i;
@@ -3098,12 +3101,18 @@ export class WorkflowController {
     steps: StepReport[],
     i: number,
     attempts = 1,
+    reviewReportedSinceMs?: number,
   ):
     | { terminal: true; result: ControllerResult }
     | {
         terminal: false;
         i: number;
-        gateRevision?: { gateStepId: string; note?: string; round?: number };
+        gateRevision?: {
+          gateStepId: string;
+          note?: string;
+          round?: number;
+          reviewReportedSinceMs?: number;
+        };
       } {
     if (decision === 'approve') {
       this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
@@ -3176,6 +3185,14 @@ export class WorkflowController {
         gateStepId: step.id,
         ...(trimmed.length > 0 ? { note: trimmed } : {}),
         ...(round !== undefined ? { round } : {}),
+        // SNAPSHOT the walk's review-freshness bound as it stood when this gate
+        // was presented, so the re-run's gate-revision quote is read under the
+        // same bound the gate body was composed from. Without it a gate that
+        // told the human "No adversarial review this round" would still thread
+        // that previous round's critique into the re-run as the feedback to act
+        // on. Snapshotted rather than read live at spawn time because the review
+        // step re-stamps the bound when the revision re-drives it.
+        ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
       },
     };
   }

@@ -936,7 +936,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
       expect(optionText()).toEqual([
         'Follow defaults',
         'Fable 5.1 · 1M',
-        'Opus 5 · 1M',
+        'Opus 5.5 · 1M',
         'Sonnet 5 · 1M',
         'Haiku 4.5 · 200K',
         'Auto',
@@ -956,7 +956,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
       fireEvent.change(within(runtimeCard).getByLabelText('Agent runtime'), {
         target: { value: 'claude-interactive' },
       });
-      expect(optionText()).toContain('Opus 5 · 1M');
+      expect(optionText()).toContain('Opus 5.5 · 1M');
     });
 
     it('coerces a stale Codex-family model back to Claude when flipping to a Claude runtime', async () => {

@@ -96,6 +96,7 @@ jobs:
       variant: dev
       build_version: ${{ needs.version.outputs.version }}
       ref: ${{ needs.version.outputs.sha }}
+      require_signed: true
     secrets: inherit
 
   publish:

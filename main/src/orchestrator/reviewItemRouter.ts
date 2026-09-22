@@ -999,8 +999,9 @@ export class ReviewItemRouter {
    * minted with. Deliberately typed as a plain object rather than
    * `DecisionPayload` — most `gate:human-step:*` items mint with
    * `payload_json: null` (no `gate` discriminant at all, since
-   * humanStepManager.composeGatePayload composes a payload for `approve-ideas`
-   * ONLY), so requiring the full `DecisionPayload` shape here would force
+   * humanStepManager.composeGatePayload composes a payload only for
+   * `approve-ideas` and for an `approve-design` opened under a review freshness
+   * bound), so requiring the full `DecisionPayload` shape here would force
    * inventing a `gate` value this router cannot actually know.
    */
   private mergeResolutionMeta(

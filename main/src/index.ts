@@ -2756,7 +2756,7 @@ async function initializeServices(): Promise<boolean> {
       }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
-      // `opus` pin spawns `claude-opus-5` (default window), matching the
+      // `opus` pin spawns `claude-opus-5-5` (default window), matching the
       // orchestrated overlay's `model:` frontmatter semantics (modelContext.ts),
       // NOT the 1M variant a run-level `opus` picker would select. Intentional:
       // per-agent pins are window-agnostic and consistent across both planes.

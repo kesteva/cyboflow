@@ -480,7 +480,7 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
       });
     });
     render(<ChatInput runId={RUN_ID} />);
-    expect(screen.getByText('Opus 5 · 1M')).toBeInTheDocument();
+    expect(screen.getByText('Opus 5.5 · 1M')).toBeInTheDocument();
   });
 
   it('renders NO model pill when the run pins no model (auto / SDK default)', () => {
@@ -505,12 +505,12 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     });
     render(<ChatInput runId={RUN_ID} />);
     // The pill reflects the fallback family…
-    expect(screen.getByText('Opus 5 · 1M')).toBeInTheDocument();
+    expect(screen.getByText('Opus 5.5 · 1M')).toBeInTheDocument();
     // …never the pulled model, and a tooltip explains the swap.
     expect(screen.queryByText('Fable 5.1 · 1M')).toBeNull();
-    expect(screen.getByText('Opus 5 · 1M').closest('span')).toHaveAttribute(
+    expect(screen.getByText('Opus 5.5 · 1M').closest('span')).toHaveAttribute(
       'title',
-      'Fable 5.1 · 1M is unavailable — this run uses Opus 5 · 1M.',
+      'Fable 5.1 · 1M is unavailable — this run uses Opus 5.5 · 1M.',
     );
   });
 

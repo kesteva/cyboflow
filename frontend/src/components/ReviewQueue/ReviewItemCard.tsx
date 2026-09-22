@@ -9,7 +9,9 @@
  * An escalation that carries NO options of its own (a blocking finding, a
  * free-form action item, a `gate:human-step:*` decision minted with
  * `payload: null` — see humanStepManager.composeGatePayload, which composes a
- * payload for `approve-ideas` ONLY) must not have a verdict invented for it by
+ * payload only for `approve-ideas` and for an `approve-design` opened under a
+ * review freshness bound, neither of which carries options) must not have a
+ * verdict invented for it by
  * this card. Its default actions are "Open in session →" + "Dismiss": route the
  * human to the run, where the gate's real surface lives (the decomposed-stories
  * tab's approve-plan control, the approve-ideas / approve-designs verdict grids,
@@ -1070,8 +1072,9 @@ export function ReviewItemCard({
             </>
           );
         }
-        // A `gate:human-step:*` gate carries NO options (humanStepManager mints
-        // payload: null for every step but approve-ideas), so the queue routes to
+        // A `gate:human-step:*` gate carries NO options (humanStepManager mints a
+        // payload only for approve-ideas and for a bound-carrying approve-design,
+        // and neither payload holds options), so the queue routes to
         // the run rather than inventing a verdict — the real control is the flow's
         // own artifact tab (decomposed-stories' approve-plan, approve-designs' grid)
         // or the transcript. In-session the explicit pair below stays: it is the

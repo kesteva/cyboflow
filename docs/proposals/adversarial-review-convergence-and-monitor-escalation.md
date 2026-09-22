@@ -227,9 +227,42 @@ revision prompts), `programmaticRunHost.ts`.
   run this walk, and nothing when the review step completed before this walk; absent bound and
   unknown age both mean no constraint. Both controller reads in a visit (the verdict fallback
   and `selectReviewDocument`) use the SAME instant, and the id-set mismatch check stays the
-  second line of defence. The gate-revision quote is deliberately unbounded — the human just
-  read that critique. `reported_at` is re-stamped on every report, including an identical
-  re-report that moves neither `revision` nor the audit log.
+  second line of defence. (The gate-revision quote was originally left unbounded on the
+  reasoning that the human had just read that critique at the gate; the follow-up below makes
+  that false on the stale path and bounds it too.) `reported_at` is re-stamped on every
+  report, including an identical re-report that moves neither `revision` nor the audit log.
+
+  **Gate body + Approve filing (follow-up, 2026-09-22).** Two consumers of the same row still
+  read it unbounded: the gate's own body, and Approve's accepted-risk filing. Both are now
+  bound. The instant travels `ControllerStepContext.reviewReportedSinceMs` (set at the three
+  `requestHumanGate` call sites, never on an agent step's ctx, so prompts stay byte-identical)
+  → `HumanGateRequest.reviewReportedSinceMs` → `HumanGateOpener.openHumanGate(..., opts)`.
+  `composeAdversarialReviewGateBody` takes the bound and, for a critique reported BEFORE it,
+  renders a "No adversarial review this round" notice instead of its counts — not `null`,
+  because the Adversarial review TAB is still showing the previous round's critique beside the
+  gate and the human has to be told it is out of date. The opener stamps the bound on the gate
+  row as `DecisionPayload.reviewReportedSince` (ISO-8601 UTC) inside the same transaction; it
+  survives the resolve because `ReviewItemRouter.runTriage` merges its resolution meta into
+  the minted payload rather than replacing it. At resolve time `GateSideEffects.apply` carries
+  the settled `reviewItemId`, and `fileAcceptedRiskFindings` re-reads that stamp and applies
+  the same bound — so Approve never files a previous round's `AR-n` entries as risks the human
+  weighed, and logs when a stale artifact is what suppressed the filing. The ORCHESTRATED-plane
+  arm (`maybeApplyOrchestratedGateSideEffects`) passes no `reviewItemId` and stays unbounded.
+
+  **Gate-revision quote (follow-up, 2026-09-22).** The stale gate body creates a third
+  consumer, on the other channel: the human it just told "the previous round's critique does
+  not describe the current design" presses **Revise**, and the re-run's prompt quotes that same
+  document back as the feedback to act on — `ctx.gateRevision.reviewMarkdown` is never set on a
+  human-gate revision, so `SpawnStepRunner` falls through to the run's artifact. So the gate's
+  bound now rides the revision: `applyGateDecision` SNAPSHOTS the walk's
+  `reviewReportedSinceMs` onto `ControllerStepContext.gateRevision`, `SpawnStepRunner` passes
+  it to the `adversarialReviewMarkdown` thunk, and the thunk forwards it to
+  `readAdversarialReviewMarkdown`. A snapshot, not a live read: the review step sits inside the
+  region a revision re-drives and re-stamps the controller's bound at its own visit, so a live
+  read would make that turn's quote vanish. Fresh critique ⇒ the same string as before; no
+  bound (a resume past the reviewer) ⇒ unbounded as before; only the stale case changes, and
+  there the section is dropped exactly as it is on a run with no artifact. The bound is
+  destructured OFF before the revision reaches `composeStepPrompt`, so it never renders.
 - In `tryAdversarialReviewLoopback`: when `resultText` is empty OR `parseCodeReviewVerdict`
   returns `null` with no populated `## Blocking` in the text, read the artifact and treat
   `parseAdversarialReviewDoc(md).blocking.length > 0` as blocking; the quoted `blocking`

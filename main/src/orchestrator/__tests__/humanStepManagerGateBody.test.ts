@@ -35,18 +35,29 @@ function addArtifactsTable(db: Database.Database): void {
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       atype TEXT NOT NULL,
-      payload_json TEXT
+      payload_json TEXT,
+      reported_at TEXT
     );
   `);
 }
 
-function seedReviewArtifact(db: Database.Database, runId: string, markdown: string): void {
-  db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
-    `art-${runId}`,
-    runId,
-    'adversarial-review',
-    JSON.stringify({ markdown }),
-  );
+function seedReviewArtifact(
+  db: Database.Database,
+  runId: string,
+  markdown: string,
+  reportedAt: string | null = null,
+): void {
+  db.prepare(
+    'INSERT INTO artifacts (id, run_id, atype, payload_json, reported_at) VALUES (?, ?, ?, ?, ?)',
+  ).run(`art-${runId}`, runId, 'adversarial-review', JSON.stringify({ markdown }), reportedAt);
+}
+
+function gatePayload(db: Database.Database, reviewItemId: string): string | null {
+  return (
+    db.prepare('SELECT payload_json FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payload_json: string | null;
+    }
+  ).payload_json;
 }
 
 function seedPendingFinding(db: Database.Database, runId: string, id: string): void {
@@ -175,5 +186,134 @@ describe('openHumanGate — approve-design body', () => {
     const body = gateBody(db, id!);
     expect(body).toContain("Workflow step 'approve-plan' requires a human decision");
     expect(body).not.toContain('AR-1');
+  });
+});
+
+/**
+ * The walk's adversarial-review FRESHNESS bound, carried into openHumanGate.
+ *
+ * The critique artifact is ONE row per run, so a walk that never re-reviewed
+ * (a crashed/self-skipped review step after a Revise, or a rewind landing past
+ * it) still finds the PREVIOUS round's critique sitting there. The gate must not
+ * present it as this round's, and it must persist the bound so the resolve-time
+ * accepted-risk filing applies the identical constraint.
+ */
+describe('openHumanGate — approve-design freshness bound', () => {
+  const STALE = '2026-09-20T10:00:00.000Z';
+  const FRESH = '2026-09-20T12:00:00.000Z';
+  const BOUND_ISO = '2026-09-20T11:00:00.000Z';
+  const BOUND = Date.parse(BOUND_ISO);
+
+  it('shows the "no review this round" notice for a PREVIOUS round\'s critique', async () => {
+    const db = buildReviewInboxDb();
+    addArtifactsTable(db);
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+    seedReviewArtifact(db, 'run-d', REVIEW_DOC, STALE);
+
+    const id = await mgr.openHumanGate('run-d', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: BOUND,
+    });
+    const body = gateBody(db, id!);
+
+    expect(body).toContain('**No adversarial review this round.**');
+    expect(body).toContain('Approve files no accepted-risk findings from it.');
+    expect(body).not.toContain('The adversarial reviewer raised');
+    // (the Revise line's own prose mentions "a blocking defect", so the counts
+    // are excluded by their exact shape, not by the bare phrase)
+    expect(body).not.toContain('1 blocking defect');
+    expect(body).not.toContain('**Blocking:**');
+    expect(body).not.toContain('AR-1');
+    // The choices survive — only the critique summary is withheld.
+    expect(body).toContain('**Your two choices:**');
+  });
+
+  it("composes THIS round's counts when the artifact was reported after the bound", async () => {
+    const db = buildReviewInboxDb();
+    addArtifactsTable(db);
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+    seedReviewArtifact(db, 'run-d', REVIEW_DOC, FRESH);
+
+    const id = await mgr.openHumanGate('run-d', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: BOUND,
+    });
+    const body = gateBody(db, id!);
+
+    expect(body).toContain('1 blocking defect');
+    expect(body).toContain('**AR-1** — No error state anywhere in the spend flow');
+    expect(body).not.toContain('No adversarial review this round');
+  });
+
+  it('stamps the bound on the gate row as an ISO-8601 reviewReportedSince', async () => {
+    const db = buildReviewInboxDb();
+    addArtifactsTable(db);
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+    seedReviewArtifact(db, 'run-d', REVIEW_DOC, FRESH);
+
+    const id = await mgr.openHumanGate('run-d', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: BOUND,
+    });
+
+    expect(JSON.parse(gatePayload(db, id!)!)).toEqual({
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: BOUND_ISO,
+    });
+  });
+
+  it('leaves the approve-design payload NULL when no bound was given', async () => {
+    const db = buildReviewInboxDb();
+    addArtifactsTable(db);
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+    seedReviewArtifact(db, 'run-d', REVIEW_DOC, FRESH);
+
+    const id = await mgr.openHumanGate('run-d', 'approve-design', 'Approve design');
+    expect(gatePayload(db, id!)).toBeNull();
+  });
+
+  it('does not stamp — or bound — a NON-design gate handed the same opts', async () => {
+    const db = buildReviewInboxDb();
+    addArtifactsTable(db);
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+    seedReviewArtifact(db, 'run-d', REVIEW_DOC, STALE);
+
+    const id = await mgr.openHumanGate('run-d', 'approve-plan', 'Plan review', undefined, {
+      reviewReportedSinceMs: BOUND,
+    });
+    expect(gatePayload(db, id!)).toBeNull();
+    expect(gateBody(db, id!)).toContain("Workflow step 'approve-plan' requires a human decision");
+    expect(gateBody(db, id!)).not.toContain('No adversarial review this round');
+  });
+
+  it('treats a pre-143 artifacts table (no reported_at) as unknown age — no constraint', async () => {
+    const db = buildReviewInboxDb();
+    db.exec(`
+      CREATE TABLE artifacts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        atype TEXT NOT NULL,
+        payload_json TEXT
+      );
+    `);
+    db.prepare('INSERT INTO artifacts (id, run_id, atype, payload_json) VALUES (?, ?, ?, ?)').run(
+      'art-legacy',
+      'run-d',
+      'adversarial-review',
+      JSON.stringify({ markdown: REVIEW_DOC }),
+    );
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-d', 'running');
+
+    const id = await mgr.openHumanGate('run-d', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: BOUND,
+    });
+    const body = gateBody(db, id!);
+
+    expect(body).toContain('1 blocking defect');
+    expect(body).not.toContain('No adversarial review this round');
   });
 });

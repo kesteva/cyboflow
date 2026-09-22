@@ -92,8 +92,10 @@ done
 # Edit CHANGELOG.md per §2 (the "## [$OLD]" heading must survive the edit).
 git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
 git commit -m "chore: release $NEW"
-git tag "v$NEW"                      # annotate/sign if you prefer; the name is what matters
-git push origin main --follow-tags   # main + the tag in one push
+git tag -a "v$NEW" -m "v$NEW"
+git push origin main
+git push origin "v$NEW"              # NOT --follow-tags: it skips lightweight tags silently
+git ls-remote --tags origin "refs/tags/v$NEW" | grep -q . || echo "TAG DID NOT ARRIVE"
 gh run watch "$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
@@ -103,15 +105,32 @@ What the workflow enforces, so you do not have to:
 - **all four** `package.json` files already say that version, and `CHANGELOG.md`
   has its `## [X.Y.Z]` section — a forgotten bump fails before anything builds;
 - the commit is an ancestor of `origin/main`;
-- **this SHA's Code Quality run went green.** `--follow-tags` pushes both refs at
-  once, so the gate is usually still running when the tag lands — the workflow
-  waits up to 45 min for it. A red or cancelled gate stops the release.
+- **this SHA's Code Quality run went green.** The main push starts it seconds
+  before the tag push, so the gate is usually still running when the tag lands —
+  the workflow waits up to 45 min for it. A red or cancelled gate stops the release.
+
+Push the tag as its own command. `git push --follow-tags` pushes only
+**annotated** tags; with a lightweight `git tag v0.4.3` it pushes main alone and
+says so only by omission (`main -> main`, no tag line). Nothing fails, no
+release run starts, and it reads as "the workflow did not trigger". The 0.4.3
+release hit exactly this. `-a` makes the tag annotated, but the explicit push
+plus `ls-remote` is what proves the tag arrived.
 
 Then it rebuilds the **stable** variant at the tagged commit on the three native
 runners (arm64 `macos-latest`, x64 `macos-15-intel`, `windows-latest`), runs §4's
 checks as assertions, merges the per-arch `latest-mac.yml`, publishes the 12-file
 set to `stable/`, re-reads both live manifests, and cuts the GitHub release with
-the two stable DMGs and the Windows installer.
+the two stable DMGs and the Windows installer. The Windows job fails unless both
+the installer and the app exe carry a valid, timestamped Authenticode signature
+from the release identity. Once the feed is live, the `site` job fires the
+cyboflow-web Workers Builds deploy hook, so cyboflow.com re-stamps the new
+version from `CHANGELOG.md`.
+
+> **One-time setup for the site rebuild:** in Cloudflare, go to the cyboflow-web
+> Worker and open *Settings → Builds → Deploy Hooks*. Create a hook on `main`
+> and store its URL as this repo's `CYBOFLOW_WEB_DEPLOY_HOOK` Actions secret.
+> The URL is the credential. Without it the job only warns, and the site keeps
+> the old version until cyboflow-web next deploys.
 
 > **It is a rebuild, not a promotion.** A dev artifact can never become the
 > stable one — different `appId`, `productName`, feed URL and data dir.
@@ -532,6 +551,16 @@ mirror, but not the channel the app or website depends on).
 
 ## Landmines
 
+- **The gate is the release's single point of failure, and the Windows leg is
+  its slowest, flakiest job.** A unit test that spawns a real process (the first
+  0.4.3 attempt: `playwrightBackend.test.ts` driving the default installer's
+  `npx playwright install chromium`) runs 13 s on ubuntu and 25–30 s on the
+  Windows runner — 30,009 ms on the tagged SHA, one ms over budget, red gate, no
+  release. Fixed by injecting the spawn away (85 ms). When the gate goes red on a
+  timeout that passed at the edge last time, look for a test doing real I/O
+  before raising the timeout again; then land the fix on main and **move the tag**
+  (`git push --delete origin vX.Y.Z && git push origin vX.Y.Z`) — nothing has
+  consumed the old one until `publish` runs. Do not re-roll a coin-flip rerun.
 - **R2 is the real release; GitHub is a mirror.** Publishing the GitHub release
   without §5 leaves every user on the old version (the app polls R2, not GitHub).
 - **Per-arch manifests must be merged** with `gen-mac-latest-yml.mjs` (arm64 zip

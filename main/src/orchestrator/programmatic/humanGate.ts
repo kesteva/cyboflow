@@ -71,6 +71,26 @@ export interface HumanGateRequest {
    * the item. Absent => nothing fires (today's behaviour).
    */
   onOpened?: (snapshot: HumanGateOpenedSnapshot) => void | Promise<void>;
+  /**
+   * The walk's adversarial-review FRESHNESS bound (ms since epoch) at the
+   * instant this gate opens — forwarded to the opener as
+   * {@link HumanGateOpenOptions}. Absent ⇒ no constraint (today's behaviour).
+   */
+  reviewReportedSinceMs?: number;
+}
+
+/**
+ * Per-open options the opener honours.
+ *
+ * `reviewReportedSinceMs` is the walk's adversarial-review FRESHNESS bound (ms
+ * since epoch) at the instant this human gate opens — the same instant the
+ * controller hands `shouldSkipHumanGate`. The opener composes the gate body from
+ * a critique reported THIS round only, and stamps the bound on the gate row so
+ * the resolve-time side effects act on the same critique the human saw. Absent ⇒
+ * no constraint.
+ */
+export interface HumanGateOpenOptions {
+  reviewReportedSinceMs?: number;
 }
 
 /** What the ControllerHost depends on to resolve a human gate. */
@@ -93,6 +113,7 @@ export interface HumanGateOpener {
     stepId: string,
     stepName: string,
     gateHeader?: string,
+    opts?: HumanGateOpenOptions,
   ): Promise<string | null>;
   /**
    * Find an ALREADY-pending gate review-item id for (runId, stepId), or null
@@ -143,6 +164,14 @@ export interface HumanGateOpener {
     resolution: string | null;
     /** True when the human DISMISSED the gate (a rejection) rather than resolving it. */
     dismissed: boolean;
+    /**
+     * The gate row the resolver settled on — lets the side effects read what the
+     * gate was MINTED with (today: the `reviewReportedSince` freshness bound), so
+     * a resolve acts on the same critique the human was shown. Absent when the
+     * resolver never learned an id (it cannot happen on the settle paths, but the
+     * field stays optional so pre-existing openers/fakes keep compiling).
+     */
+    reviewItemId?: string;
   }): Promise<void>;
   /**
    * Read the gate review item back by id, or null.
@@ -256,13 +285,24 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
         // because stranding a run at a gate the human already answered is worse
         // than a missing side-effect.
         const sideEffects = this.opener.onGateResolved
-          ? this.opener.onGateResolved({ runId, stepId: step.id, resolution, dismissed }).catch((err: unknown) => {
-              this.logger?.warn('[ReviewQueueHumanGate] gate side-effects failed (fail-soft)', {
+          ? this.opener
+              .onGateResolved({
                 runId,
                 stepId: step.id,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            })
+                resolution,
+                dismissed,
+                // `targetId` is assigned before either settle path can fire, so in
+                // practice this is always present; the guard keeps the key OFF the
+                // args rather than sending an explicit undefined.
+                ...(targetId !== null ? { reviewItemId: targetId } : {}),
+              })
+              .catch((err: unknown) => {
+                this.logger?.warn('[ReviewQueueHumanGate] gate side-effects failed (fail-soft)', {
+                  runId,
+                  stepId: step.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              })
           : Promise.resolve();
         // .catch swallows a resume failure so the walk can never hang on it;
         // .finally guarantees the walk wakes exactly once the flip has landed.
@@ -303,8 +343,15 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
       this.events.on(channel, onChange);
       if (signal && onAbort) signal.addEventListener('abort', onAbort);
 
-      this.opener
-        .openHumanGate(runId, step.id, step.name, step.gateHeader)
+      // The 5th argument is passed ONLY when the walk actually holds a freshness
+      // bound: an opener/fake written against the 4-arg shape must keep seeing
+      // exactly four arguments on every gate that has no bound to carry.
+      (req.reviewReportedSinceMs !== undefined
+        ? this.opener.openHumanGate(runId, step.id, step.name, step.gateHeader, {
+            reviewReportedSinceMs: req.reviewReportedSinceMs,
+          })
+        : this.opener.openHumanGate(runId, step.id, step.name, step.gateHeader)
+      )
         .then(async (id) => {
           if (settled) return; // aborted while opening
           let effectiveId = id;

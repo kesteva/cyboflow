@@ -812,4 +812,68 @@ describe('SpawnStepRunner — gateRevision review document (CX-4)', () => {
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.prompt).toContain('AR-1 — last round’s defect');
   });
+
+  it('reads the artifact UNBOUNDED when the revision carries no freshness bound', async () => {
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<(o?: { reportedSinceMs?: number }) => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), revisionCtx());
+
+    expect(readArtifact).toHaveBeenCalledWith(undefined);
+  });
+
+  it("applies the revision's freshness bound to the artifact read", async () => {
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<(o?: { reportedSinceMs?: number }) => string | undefined>(() => ARTIFACT);
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), {
+      ...revisionCtx(),
+      gateRevision: { gateStepId: 'approve-design', round: 2, reviewReportedSinceMs: 4242 },
+    });
+
+    expect(readArtifact).toHaveBeenCalledWith({ reportedSinceMs: 4242 });
+  });
+
+  it('renders NO review section when the bound rejects the artifact as a previous round’s', async () => {
+    // The approve-design gate that armed this revision rendered the "No
+    // adversarial review this round" notice, so it never showed the human this
+    // critique. Threading it back as the feedback to act on would contradict the
+    // gate itself — under the bound the read returns undefined and the section
+    // is dropped, exactly as it is on a run that has no artifact at all.
+    const spawner = makeSpawner();
+    const readArtifact = vi.fn<(o?: { reportedSinceMs?: number }) => string | undefined>((o) =>
+      o?.reportedSinceMs !== undefined ? undefined : ARTIFACT,
+    );
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: readArtifact });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), {
+      ...revisionCtx(),
+      gateRevision: { gateStepId: 'approve-design', round: 2, reviewReportedSinceMs: 4242 },
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('AR-1 — last round’s defect');
+    expect(passed.prompt).not.toContain('Adversarial review of the previous round');
+    // The revision itself still renders — the re-run must still learn WHICH gate
+    // sent it back; it just is not handed a critique about a different design.
+    expect(passed.prompt).toContain('approve-design');
+  });
+
+  it('never leaks the bound into the prompt composer’s gateRevision', async () => {
+    // `reviewReportedSinceMs` is controller↔runner plumbing; the composed
+    // revision object must stay the shape stepPrompt declares.
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, adversarialReviewMarkdown: () => ARTIFACT });
+
+    await runner.runStep(step({ id: 'expand-spec', agent: 'expand-spec' }), {
+      ...revisionCtx(),
+      gateRevision: { gateStepId: 'approve-design', round: 2, reviewReportedSinceMs: 4242 },
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('4242');
+    expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
 });

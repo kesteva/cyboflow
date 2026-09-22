@@ -128,7 +128,71 @@ describe('buildReviewQueueHumanGate', () => {
 
     await expect(pending).resolves.toBe('reject');
     expect(applied).toEqual([
-      { runId: 'run-w', stepId: 'approve-design', decision: 'reject', resolution: null },
+      {
+        runId: 'run-w',
+        stepId: 'approve-design',
+        decision: 'reject',
+        resolution: null,
+        reviewItemId: 'rvw_gate',
+      },
+    ]);
+    db.close();
+  });
+
+  it("forwards the opener's per-open options to HumanStepManager.openHumanGate", async () => {
+    const { db } = boot();
+    // The gate is already open (boot's resume fixture), so the real openHumanGate
+    // would return null on the idempotency guard anyway — spying is purely to read
+    // back the arguments the wiring forwarded.
+    const open = vi.spyOn(HumanStepManager.prototype, 'openHumanGate').mockResolvedValue(null);
+    const events = new EventEmitter();
+    const gate = buildReviewQueueHumanGate({ events, channelFor });
+
+    const pending = gate.resolve({
+      runId: 'run-w',
+      projectId: 1,
+      step: step('approve-design', 'Approve design'),
+      reviewReportedSinceMs: 1_758_364_800_000,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(open).toHaveBeenCalledWith('run-w', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: 1_758_364_800_000,
+    });
+
+    events.emit('review-project-1', {
+      reviewItemId: 'rvw_gate',
+      action: 'resolved',
+      item: { resolution: 'approve' },
+    });
+    await expect(pending).resolves.toBe('approve');
+    db.close();
+  });
+
+  it('forwards the settled gate row id into GateSideEffects.apply', async () => {
+    const { db, applied } = boot();
+    const events = new EventEmitter();
+    const gate = buildReviewQueueHumanGate({ events, channelFor });
+
+    const pending = gate.resolve({ runId: 'run-w', projectId: 1, step: step('approve-design') });
+    await new Promise((r) => setTimeout(r, 0));
+    events.emit('review-project-1', {
+      reviewItemId: 'rvw_gate',
+      action: 'resolved',
+      item: { resolution: 'approve' },
+    });
+
+    await expect(pending).resolves.toBe('approve');
+    // The id is what lets the approve-design arm re-read the freshness bound the
+    // gate was minted with, instead of filing whatever the artifact holds now.
+    expect(applied).toEqual([
+      {
+        runId: 'run-w',
+        stepId: 'approve-design',
+        decision: 'approve',
+        resolution: 'approve',
+        reviewItemId: 'rvw_gate',
+      },
     ]);
     db.close();
   });

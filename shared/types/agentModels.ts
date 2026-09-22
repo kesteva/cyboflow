@@ -176,6 +176,18 @@ export function isCodexModelSelection(model: string): boolean {
 export const DEFAULT_CODEX_MODEL = 'auto';
 
 /**
+ * The OMP-family model a launch picker seeds when a Claude/Codex value would
+ * otherwise be paired with an OMP runtime. OMP advertises no "let the runtime
+ * pick" row of its own, but its OpenRouter provider ships an `auto` model
+ * (composed id `openrouter/auto` — see `OmpModelOption`), which routes each
+ * request to whatever OpenRouter judges best. Without this seed the wizard's
+ * native <select> displayed the catalog's FIRST row (Claude Fable) while the
+ * stale cross-family value was dropped at spawn and OMP silently ran its own
+ * config default — a lie in both directions.
+ */
+export const DEFAULT_OMP_LAUNCH_MODEL = 'openrouter/auto';
+
+/**
  * Which provider owns a model id, one predicate per provider. Adding a provider
  * is one entry here (the Record is exhaustive over `AgentProvider`, so the
  * compiler demands it) rather than another arm in a cross-provider if/else.

@@ -180,8 +180,13 @@ export interface SpawnStepRunnerOptions {
    * ONLY by the gate-revision section — a step re-driven by an approve-design
    * 'revise' has no memory of the critique it must address — so it is resolved
    * lazily there rather than rendered on every turn.
+   *
+   * `opts.reportedSinceMs` is the revision's snapshot of the walk's review
+   * freshness bound: a critique last reported before it belongs to a PREVIOUS
+   * round and reads as absent, so the quote never contradicts the gate body the
+   * human actually answered. Omitted ⇒ unbounded, exactly as before.
    */
-  adversarialReviewMarkdown?: () => string | undefined;
+  adversarialReviewMarkdown?: (opts?: { reportedSinceMs?: number }) => string | undefined;
   /**
    * The project's declared solution thoroughness. A thunk re-read per step: on a
    * launch run the level comes off the brief, which only exists from the
@@ -304,12 +309,20 @@ export class SpawnStepRunner implements StepRunner {
           // round's, so re-reading the artifact here would hand the re-run the
           // very document the controller just rejected. Absent (every human-gate
           // revision, and every automatic lap whose artifact was current) ⇒ read
-          // the artifact exactly as before, so that path is byte-identical.
-          const { reviewMarkdown: carried, ...rest } = ctx.gateRevision;
+          // the artifact, under the revision's snapshot of the walk's review
+          // FRESHNESS bound. That bound is what keeps this read honest on the
+          // other channel: an approve-design gate whose body was the "No
+          // adversarial review this round" notice withheld the critique from the
+          // human, so quoting it here as the feedback to act on would contradict
+          // the very gate that armed this revision. No bound ⇒ unbounded, so
+          // every pre-existing path stays byte-identical.
+          const { reviewMarkdown: carried, reviewReportedSinceMs: bound, ...rest } = ctx.gateRevision;
           const reviewMarkdown =
             carried !== undefined && carried.trim().length > 0
               ? carried
-              : this.opts.adversarialReviewMarkdown?.();
+              : this.opts.adversarialReviewMarkdown?.(
+                  bound !== undefined ? { reportedSinceMs: bound } : undefined,
+                );
           return {
             ...rest,
             ...(reviewMarkdown !== undefined && reviewMarkdown.trim().length > 0
