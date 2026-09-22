@@ -16,6 +16,7 @@ import type { ComparisonStatus } from '../../../../../shared/types/experiments';
 const runUsageQuery = vi.fn();
 const runEvalQuery = vi.fn();
 const comparisonStatusQuery = vi.fn();
+const getStepModelsQuery = vi.fn();
 const openExperimentComparison = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
@@ -29,6 +30,7 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         relayInput: { mutate: vi.fn() },
         restart: { mutate: vi.fn() },
+        getStepModels: { query: (...a: unknown[]) => getStepModelsQuery(...a) },
       },
       experiments: {
         comparisonStatus: { query: (...a: unknown[]) => comparisonStatusQuery(...a) },
@@ -68,6 +70,7 @@ beforeEach(() => {
   runUsageQuery.mockReset().mockResolvedValue(ROLLUP);
   runEvalQuery.mockReset().mockResolvedValue(null);
   comparisonStatusQuery.mockReset();
+  getStepModelsQuery.mockReset().mockResolvedValue([]);
   openExperimentComparison.mockReset();
 });
 
