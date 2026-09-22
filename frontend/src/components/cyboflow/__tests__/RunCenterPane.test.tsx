@@ -45,8 +45,15 @@ vi.mock('../WorkflowCanvas', () => ({
     return <div data-testid="mock-workflow-canvas" />;
   },
 }));
+// A sprint/batch run hosts SprintSwimlaneCanvas INSTEAD of WorkflowCanvas, and
+// its PLAN / SPRINT-REVIEW columns are ordinary phases[].steps cards — so they
+// need the same `stepModels` map. Capture its props to pin that threading.
+let capturedSwimlaneProps: { stepModels?: unknown } | undefined;
 vi.mock('../SprintSwimlaneCanvas', () => ({
-  SprintSwimlaneCanvas: () => <div data-testid="mock-swimlane-canvas" />,
+  SprintSwimlaneCanvas: (props: { stepModels?: unknown }) => {
+    capturedSwimlaneProps = props;
+    return <div data-testid="mock-swimlane-canvas" />;
+  },
 }));
 vi.mock('../RunBottomPane', () => ({
   RunBottomPane: ({
@@ -325,6 +332,37 @@ describe('RunCenterPane', () => {
     );
     expect(screen.getByTestId('mock-swimlane-canvas')).toBeInTheDocument();
     expect(screen.queryByTestId('mock-workflow-canvas')).not.toBeInTheDocument();
+  });
+
+  it('threads stepModels into SprintSwimlaneCanvas too, not just WorkflowCanvas', async () => {
+    // Regression: a sprint run took the SprintSwimlaneCanvas branch, which was
+    // rendered WITHOUT stepModels — so its PLAN / SPRINT-REVIEW cards showed
+    // `agent ×N` with no model while an identical card on a non-fan-out run
+    // showed one. The map is resolved the same way for both branches.
+    getStepModelsQuery.mockResolvedValue([
+      {
+        stepId: 'analyze-dependencies',
+        stepName: 'Analyze dependencies',
+        phaseId: 'plan',
+        agentKey: 'dependency-analyzer',
+        label: 'Opus 5',
+        family: 'opus',
+      },
+    ]);
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ batch_id: 'batch-1', session_id: 'sess-sprint' })}
+      />,
+    );
+    await waitFor(() => {
+      expect(
+        (capturedSwimlaneProps?.stepModels as Map<string, { label: string }> | null)?.get(
+          'analyze-dependencies',
+        ),
+      ).toEqual({ label: 'Opus 5', family: 'opus' });
+    });
   });
 
   it('renders flowEndSummary in the Flow tab at run-end WITHOUT hiding the chat dock', () => {

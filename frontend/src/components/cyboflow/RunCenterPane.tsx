@@ -192,6 +192,7 @@ export function RunCenterPane({
           sprintStatus={activeRun?.status}
           projectId={projectId}
           sessionKey={sessionKey}
+          stepModels={stepModels}
         />
       );
     }

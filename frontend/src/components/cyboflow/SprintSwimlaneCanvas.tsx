@@ -37,6 +37,7 @@ import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
+import { modelFamilyColor, type ModelFamily } from '../../../../shared/types/agents';
 import { DesignAffordance } from './DesignAffordance';
 import {
   SPRINT_LANE_STEP_IDS,
@@ -65,6 +66,19 @@ export interface SprintSwimlaneCanvasProps {
    */
   projectId?: number | null;
   sessionKey?: string;
+  /**
+   * Resolved per-step models, keyed by step id — the same map (and the same
+   * `runs.getStepModels` fetch) WorkflowCanvas receives, so a sprint run's
+   * PLAN and SPRINT-REVIEW cards show their model exactly as a non-fan-out
+   * run's cards do.
+   *
+   * Covers only the outer `phases[].steps` cards. The per-lane step strip is
+   * NOT covered: those come from the fan-out step's `fanOut.inner`, which
+   * `resolveRunStepModels` does not descend into, so no entry exists for them.
+   *
+   * `null`/omitted renders exactly as before this prop existed.
+   */
+  stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
 }
 
 /**
@@ -454,6 +468,7 @@ export function SprintSwimlaneCanvas({
   sprintStatus,
   projectId = null,
   sessionKey,
+  stepModels,
 }: SprintSwimlaneCanvasProps) {
   const { lanes } = useSprintLanes(runId);
   const definition = phaseState.definition;
@@ -603,12 +618,20 @@ export function SprintSwimlaneCanvas({
               {planPhase.label.toUpperCase()}
             </span>
             <div data-testid="swimlane-plan">
-              <WorkflowStepCard
-                step={planPhase.steps[0]}
-                phase={planPhase}
-                stepIndex={1}
-                status={planStatus}
-              />
+              {(() => {
+                const planStep = planPhase.steps[0];
+                const model = stepModels?.get(planStep.id);
+                return (
+                  <WorkflowStepCard
+                    step={planStep}
+                    phase={planPhase}
+                    stepIndex={1}
+                    status={planStatus}
+                    modelLabel={model?.label}
+                    modelFamilyColor={model ? modelFamilyColor(model.family) : undefined}
+                  />
+                );
+              })()}
             </div>
           </div>
         )}
@@ -789,6 +812,7 @@ export function SprintSwimlaneCanvas({
 
             {verifyPhase.steps.map((step, stepInPhase) => {
               const flatIdx = verifyFlatStart + stepInPhase;
+              const model = stepModels?.get(step.id);
               return (
                 <div key={step.id} style={{ height: 86, position: 'relative' }}>
                   <WorkflowStepCard
@@ -796,6 +820,8 @@ export function SprintSwimlaneCanvas({
                     phase={verifyPhase}
                     stepIndex={flatIdx + 1}
                     status={statusFor(flatIdx)}
+                    modelLabel={model?.label}
+                    modelFamilyColor={model ? modelFamilyColor(model.family) : undefined}
                   />
                 </div>
               );

@@ -37,7 +37,7 @@ import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
-import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, type ModelFamily } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -184,9 +184,12 @@ export const GRAPH_PAPER_BACKGROUND =
  * this an unlisted string at runtime. It must fall back to the neutral `other`
  * swatch, never paint `undefined`.
  */
-function modelFamilyColorFor(family: ModelFamily): string {
-  return MODEL_FAMILY_COLORS[family] ?? MODEL_FAMILY_COLORS.other;
-}
+/**
+ * Re-exported name kept local for readability at the call site; the lookup
+ * itself lives beside MODEL_FAMILY_COLORS in shared/types/agents so the
+ * sprint swimlane canvas and the summary panel resolve the identical hex.
+ */
+const modelFamilyColorFor = modelFamilyColor;
 
 /** Last path segment of a worktree path, for a compact "folder" chip. */
 function basename(p: string): string {

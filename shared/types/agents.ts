@@ -146,6 +146,21 @@ export const MODEL_FAMILY_COLORS: Record<ModelFamily, string> = {
 };
 
 /**
+ * Swatch hex for a resolved model's family — the single lookup every surface
+ * that paints a family dot goes through (the live workflow canvas, the sprint
+ * swimlane canvas, the summary panel's "Models used" groups), so a card's dot
+ * can always be matched to a summary group by eye.
+ *
+ * The `??` is NOT dead despite `family` being typed: it crosses the tRPC wire
+ * from the main process, so a main/renderer version skew can deliver a bucket
+ * this build's map has no key for. Falling back to `other` keeps a real dot on
+ * screen instead of an invisible one holding its layout.
+ */
+export function modelFamilyColor(family: ModelFamily): string {
+  return MODEL_FAMILY_COLORS[family] ?? MODEL_FAMILY_COLORS.other;
+}
+
+/**
  * Display label for a run/agent's RESOLVED model — the inherit-case sibling of
  * {@link agentRunTargetLabel} (which only ever names a PIN). Importable from
  * main-process code, unlike the frontend-only `modelDisplayLabel`, so a
