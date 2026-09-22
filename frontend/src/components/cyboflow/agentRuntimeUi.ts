@@ -61,3 +61,7 @@ export function launchRuntimeForPickers(
 export function isCodexRuntime(runtime: LaunchAgentRuntime): boolean {
   return providerForRuntime(runtime) === 'codex';
 }
+
+export function isOmpRuntime(runtime: LaunchAgentRuntime): boolean {
+  return providerForRuntime(runtime) === 'omp';
+}

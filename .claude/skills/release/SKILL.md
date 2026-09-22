@@ -203,11 +203,20 @@ verifies, publishes to R2 and cuts the GitHub release from the tag.
 
 ```bash
 V=<version>
-git tag "v$V"
-git push origin main --follow-tags     # main + the tag in one push
+git tag -a "v$V" -m "v$V"
+git push origin main
+git push origin "v$V"
+git ls-remote --tags origin "refs/tags/v$V" | grep -q . || echo "TAG DID NOT ARRIVE"
 ```
 
 Do NOT tag before the bump commit exists — the tag must point at it.
+
+Push the tag as its own command and check it landed. `git push --follow-tags`
+pushes only ANNOTATED tags, so with a lightweight `git tag "v$V"` it silently
+pushes main alone — the push reports `main -> main`, no release run ever starts,
+and it looks like the workflow failed to trigger (this bit the very first 0.4.3
+push). The `-a` above makes the tag annotated as belt-and-braces, but the
+explicit push + `ls-remote` is what actually proves the tag is on origin.
 
 ## Phase 4 — Watch it (do NOT skip)
 
@@ -216,9 +225,10 @@ RUN=$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq
 gh run watch "$RUN" --exit-status
 ```
 
-The first job waits for **this SHA's** Code Quality run, which `--follow-tags`
-starts moments earlier — a few minutes of "waiting for Code Quality" is the
-normal path, not a hang. The workflow refuses the release outright if the tag is
+The first job waits for **this SHA's** Code Quality run, which the main push
+started moments earlier — a few minutes of "waiting for Code Quality" is the
+normal path, not a hang. If it says "waiting" for more than ~25 min, check that
+a Code Quality run EXISTS for the SHA before blaming the poll. The workflow refuses the release outright if the tag is
 not `vX.Y.Z`, if any of the four `package.json` files disagree with it, if
 `CHANGELOG.md` has no section for it, if the commit is not on `origin/main`, or
 if the gate is red.
