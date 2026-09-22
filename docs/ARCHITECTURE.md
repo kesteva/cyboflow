@@ -134,6 +134,32 @@ chokepoint" — this section frames only what each one owns:
 - **`ideaComponentRouter.ts` (`IdeaComponentRouter.applyChange`)** — the `idea_components` ledger
   (migration 101) tracking each idea's idea-spec/prototype/architecture/epics/stories progress.
 
+#### Programmatic plane: systemic pauses and run-scoped agent-target overrides
+
+A programmatic step that dies on a usage/session/rate limit parks the run behind a blocking
+`gate:systemic-pause:<stepId>` decision item (`programmatic/systemicPauseGate.ts`, wired by
+`systemicPauseGateWiring.ts`) whose `DecisionPayload` (gate `'systemic-pause'`) names what was
+blocked: the agent keys, the provider/runtime the failed spawn ran on, whether a fan-out is parked,
+and the `origin`. The pause card offers **Retry now** (a plain resolve), **Switch runtime & retry**,
+and **Stop waiting** (a dismiss; a `reject` outcome on this source is mapped to a dismiss by
+`resolveReviewItemHandler.ts` in both composition roots, because the gate reads any resolve as a
+retry). The switch (`switchRunAgentsHandler.ts`, tRPC `runs.switchPausedStepAgents`) validates the
+target, its provider's Settings toggle, and its readiness (installed and signed in) BEFORE its one
+write, then resolves the pause. That write goes to `workflow_runs.agent_target_overrides_json`
+(migration 144): an explicitly MUTABLE operator directive, unlike the launch stamps, and the
+highest-precedence target layer of `resolveRunEffectiveAgents`. The layers run builtin →
+project `agent_overrides` → the frozen spec's `agentConfigs` → variant deltas → run overrides, with
+prompt addenda appended last. It therefore binds on the very next spawn and also re-targets the
+visual verifier; `visual-verify` is skipped when the target provider has no verify runtime (only
+Claude and Codex have one). A fan-out retry replays every parked lane from inner step 0, so a
+fan-out pause covers EVERY inner-chain agent and offers no step-only scope. The run page's override
+chip reverts via `runs.clearRunAgentTargets`, which takes effect at the next spawn. Two Claude-only
+surfaces are NOT moved by a switch: the lane-triage consult and the run monitor both run on the
+run's supervisor. An `origin: 'triage'` pause says so, and a monitor "switch agents" chat action was
+deferred because it could not execute under a Claude limit. Known gaps: run close-out kills only the
+launch-stamped provider's manager after a mid-run provider flip (pre-existing with per-step mixing),
+and Insights and A/B buckets still key on the launch stamps, not on the agents that actually ran.
+
 #### Visual verification (`main/src/orchestrator/verify/`)
 
 `VerificationScheduler` (`verificationScheduler.ts`) is the DB-backed
