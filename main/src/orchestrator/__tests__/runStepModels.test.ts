@@ -24,6 +24,11 @@ import {
 } from '../runStepModels';
 import type { EffectiveAgent } from '../agents/effectiveAgents';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+// Assert the Claude-alias label through the map rather than a literal: the
+// alias→label binding is re-pinned whenever a family points at a new snapshot
+// (e.g. opus "Opus 5" → "Opus 5.5"), and these tests are about WHICH branch
+// resolves the label, not what that release happens to be called.
+import { AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -212,7 +217,7 @@ describe('resolveRunStepModels', () => {
     const result = resolveRunStepModels(dbAdapter(db), 'run-pinned-claude', fakeResolveEffectiveAgents);
     const step = result.find((s) => s.stepId === 'opus-step');
 
-    expect(step?.label).toBe('Opus 5');
+    expect(step?.label).toBe(AGENT_MODEL_LABELS.opus);
     expect(step?.family).toBe('opus');
   });
 
@@ -330,7 +335,7 @@ describe('cyboflow.runs.getStepModels', () => {
 
     expect(result.some((s) => s.stepId === 'human-gate')).toBe(false);
     const opusStep = result.find((s) => s.stepId === 'opus-step');
-    expect(opusStep?.label).toBe('Opus 5');
+    expect(opusStep?.label).toBe(AGENT_MODEL_LABELS.opus);
     for (const info of result) {
       expect(Object.keys(info).sort()).toEqual(
         ['agentKey', 'family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
