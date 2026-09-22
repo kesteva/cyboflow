@@ -88,6 +88,10 @@ vi.mock('../../../trpc/client', () => ({
         },
         // Sprint lanes (single-run parallel sprint) — RunRightRail mounts SprintLanesPanel.
         sprintLanes: { query: vi.fn().mockResolvedValue([]) },
+        // Run-scoped agent-target overrides — the chip in RunPendingInputStrip
+        // stays mounted standalone even when nothing is pending.
+        runAgentTargets: { query: vi.fn().mockResolvedValue(null) },
+        clearRunAgentTargets: { mutate: vi.fn().mockResolvedValue({ delivered: true }) },
         onSprintLaneChanged: {
           subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
