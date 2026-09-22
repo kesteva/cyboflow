@@ -100,6 +100,18 @@ describe('deriveRunContextUsage', () => {
     expect(deriveRunContextUsage([result(undefined)])).toBeNull();
   });
 
+  it('takes the MAIN model window when a Haiku side query is listed first (regression: 1M read as 200k)', () => {
+    expect(
+      deriveRunContextUsage([
+        assistant({ input_tokens: 1000, cache_read_input_tokens: 56000 }),
+        result({
+          'claude-haiku-4-5-20251001': { contextWindow: 200000, inputTokens: 897 },
+          'claude-opus-5-5[1m]': { contextWindow: 1_000_000, inputTokens: 2 },
+        }),
+      ]),
+    ).toBe('57k/1000k tokens (6%)');
+  });
+
   it('ignores a window with zero used tokens', () => {
     expect(deriveRunContextUsage([result({ [MODEL]: { contextWindow: 200000 } })])).toBeNull();
   });
@@ -147,6 +159,16 @@ describe('stepRunContextUsageParts (incremental) equals the full scan', () => {
       assistant({ input_tokens: 3000, cache_read_input_tokens: 5000 }),
       assistant({ input_tokens: 0, cache_read_input_tokens: 0 }),
     ]],
+    [
+      'Haiku side query listed before the main model',
+      [
+        assistant({ input_tokens: 1000, cache_read_input_tokens: 56000 }),
+        result({
+          'claude-haiku-4-5-20251001': { contextWindow: 200000, inputTokens: 897 },
+          'claude-opus-5-5[1m]': { contextWindow: 1_000_000, inputTokens: 2 },
+        }),
+      ],
+    ],
     ['malformed window ignored', [result({ [MODEL]: { contextWindow: 'lots' } as unknown as Record<string, number> })]],
   ];
 
