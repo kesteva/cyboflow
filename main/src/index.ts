@@ -21,7 +21,7 @@ import { Logger } from './utils/logger';
 import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
+import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory, appIconBasename } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
 import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
@@ -1263,7 +1263,7 @@ async function createWindow() {
     y: windowBounds.y,
     width: windowBounds.width,
     height: windowBounds.height,
-    icon: path.join(__dirname, '../assets/icon.png'),
+    icon: path.join(__dirname, `../assets/${appIconBasename()}`),
     // First-paint: start hidden and paint the renderer's root background so the
     // window never flashes an empty white frame while the (heavy) renderer boots;
     // it is revealed on 'ready-to-show' below, once the first frame is painted.
