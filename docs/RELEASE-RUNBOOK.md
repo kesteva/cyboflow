@@ -541,6 +541,16 @@ mirror, but not the channel the app or website depends on).
 
 ## Landmines
 
+- **The gate is the release's single point of failure, and the Windows leg is
+  its slowest, flakiest job.** A unit test that spawns a real process (the first
+  0.4.3 attempt: `playwrightBackend.test.ts` driving the default installer's
+  `npx playwright install chromium`) runs 13 s on ubuntu and 25–30 s on the
+  Windows runner — 30,009 ms on the tagged SHA, one ms over budget, red gate, no
+  release. Fixed by injecting the spawn away (85 ms). When the gate goes red on a
+  timeout that passed at the edge last time, look for a test doing real I/O
+  before raising the timeout again; then land the fix on main and **move the tag**
+  (`git push --delete origin vX.Y.Z && git push origin vX.Y.Z`) — nothing has
+  consumed the old one until `publish` runs. Do not re-roll a coin-flip rerun.
 - **R2 is the real release; GitHub is a mirror.** Publishing the GitHub release
   without §5 leaves every user on the old version (the app polls R2, not GitHub).
 - **Per-arch manifests must be merged** with `gen-mac-latest-yml.mjs` (arm64 zip
