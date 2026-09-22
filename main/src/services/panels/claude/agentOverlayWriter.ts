@@ -56,6 +56,7 @@ import { parseWorkflowDefinition, type WorkflowAgentConfig } from '../../../../.
 import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/experiments';
 import { bareModelId } from '../../../../../shared/agents/modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
+import type { EffectiveAgentsResolver } from '../../../orchestrator/runStepModels';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */
 const AGENTS_DIR = ['.claude', 'agents'] as const;
@@ -226,6 +227,21 @@ export function resolveRunEffectiveAgents(
     effective = applyPromptAddenda(effective, workflowConfigs);
   }
   return effective;
+}
+
+/**
+ * Bind {@link resolveRunEffectiveAgents} to a live db-handle getter, producing
+ * the `ContextDeps.resolveRunEffectiveAgents` closure `attachOrchestratorTrpcToWindow`
+ * (main/src/index.ts) wires into the tRPC context for `runs.getStepModels`
+ * (IDEA-061 per-step model rail) — the standalone orchestrator tree never
+ * imports this file directly (see `runStepModels.ts`'s "DEPENDENCY INJECTION"
+ * note). `getDb` is read LIVE on every call (the real better-sqlite3 handle
+ * this function needs) rather than the narrowed `DatabaseLike` the closure
+ * itself receives. Extracted here (out of index.ts, which sits at its frozen
+ * size ratchet, issue #19) rather than left inline at the call site.
+ */
+export function createRunEffectiveAgentsResolver(getDb: () => Database.Database): EffectiveAgentsResolver {
+  return (_db, runId, logger) => resolveRunEffectiveAgents(getDb(), runId, logger);
 }
 
 /**

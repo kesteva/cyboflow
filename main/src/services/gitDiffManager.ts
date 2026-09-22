@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
 import { GitOperationalError } from './gitPlumbingCommands';
-import type { WorktreeStatusEntry, DiffGroupRollup } from '../../../shared/types/runFiles';
+import type { WorktreeStatusEntry, DiffGroupRollup, WorktreeStatusPayload } from '../../../shared/types/runFiles';
 
 export interface GitDiffStats {
   additions: number;
@@ -1148,3 +1148,47 @@ export function createUntrackedFileDiffBlock(relPath: string, content: string): 
   }
   return block;
 }
+
+/**
+ * Resolve a caller-supplied ref (branch, tag, sha) to a concrete commit sha for
+ * a run-scoped `gitDiff` context closure (TASK-211), or `null` when the ref is
+ * falsy or fails to resolve. Mirrors this class's private `resolveRefForDiff`
+ * (TASK-208 ref-safety discipline) rather than reaching into its internals:
+ * `END_OF_OPTIONS` forces the ref into a value position and `^{commit}` forces
+ * a commit-ish resolution that an option-like string can never satisfy.
+ *
+ * Lives here (rather than inline at its `main/src/index.ts` call site) so that
+ * file stays under its frozen size ratchet (issue #19) — a free function with
+ * no dependency beyond `runGitAsync`, so it needs no injection.
+ */
+export async function resolveGitRefToSha(worktreePath: string, ref: string | undefined): Promise<string | null> {
+  if (!ref) return null;
+  try {
+    assertNotOptionLike(ref, 'diff ref');
+    const resolved = (
+      await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
+    ).trim();
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A `WorktreeStatusPayload` stub for callers that capture a `RunGitDiff` but
+ * have no meaningful worktree status to report (e.g. the eval snapshot's
+ * fail-soft closure, TASK-211). Still declares all four `DiffGroupScope`
+ * groups (zeroed) per WorktreeStatusPayload's fixed-shape doc comment, rather
+ * than an empty `groups` array. See {@link resolveGitRefToSha}'s doc comment
+ * for why this lives here rather than in `main/src/index.ts`.
+ */
+export const EMPTY_WORKTREE_STATUS: WorktreeStatusPayload = {
+  entries: [],
+  groups: [
+    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: true,
+};
