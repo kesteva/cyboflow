@@ -111,6 +111,24 @@ describe('listRunAgentTargets', () => {
     expect(after.find((t) => t.agentKey === 'implement')?.provider).toBe('codex');
   });
 
+  it('lists only the agents the run\'s frozen definition binds, not the whole catalogue', () => {
+    const { db, runId } = makeRun({ withColumn: true });
+    const keys = listRunAgentTargets(db, runId).map((t) => t.agentKey);
+    // The sprint chain binds these (outer steps + the fan-out inner chain) …
+    expect(keys).toEqual(expect.arrayContaining(['implement', 'code-review', 'task-verify', 'sprint-verify']));
+    // … and never the launch/planner/compound agents, which a switch must not touch.
+    for (const foreign of ['interview', 'context', 'compounder', 'verify-setup']) {
+      expect(keys).not.toContain(foreign);
+    }
+  });
+
+  it('falls back to every effective agent when the frozen definition cannot be resolved', () => {
+    const { db, runId } = makeRun({ withColumn: true });
+    db.prepare("UPDATE workflows SET spec_json = '{}'").run();
+    const keys = listRunAgentTargets(db, runId).map((t) => t.agentKey);
+    expect(keys).toEqual(expect.arrayContaining(['implement', 'interview', 'compounder']));
+  });
+
   it('returns [] for an unknown run', () => {
     const { db } = makeRun({ withColumn: true });
     expect(listRunAgentTargets(db, 'nope')).toEqual([]);

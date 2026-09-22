@@ -54,6 +54,7 @@ import {
   type EffectiveAgent,
 } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
+import { computeAgentUsage } from '../../../orchestrator/agents/agentUsage';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import {
   parseRunAgentTargetOverrides,
@@ -287,11 +288,19 @@ export function resolveRunEffectiveAgents(
 }
 
 /**
- * Every effective agent of the run paired with the PROVIDER it resolves onto:
+ * The agents THIS RUN can spawn, each paired with the PROVIDER it resolves onto:
  * its pinned runtime's provider when one is set, else the run row's
  * `agent_provider` stamp (absent/unknown ⇒ 'claude'). Backs the "Switch runtime &
  * retry" handler's 'provider' scope (every agent currently on the blocked
- * provider). Fail-soft: an unresolvable run yields `[]`.
+ * provider).
+ *
+ * "This run's agents" = the keys its FROZEN definition binds (outer steps +
+ * fan-out inner chains, via computeAgentUsage) — not the whole built-in
+ * catalogue, which would make a switch write a dozen overrides for agents the
+ * run never deploys and pad the run's override chip with them. A run whose
+ * frozen spec cannot be resolved (a custom flow with no definition, a minimal
+ * fixture) falls back to the full effective set, so a switch is never silently
+ * empty. Fail-soft: an unresolvable run yields `[]`.
  */
 export function listRunAgentTargets(
   db: Database.Database,
@@ -310,10 +319,42 @@ export function listRunAgentTargets(
   } catch {
     // Pre-062 DB (column absent) — every run is a Claude run.
   }
-  return resolveRunEffectiveAgents(db, runId, logger).map((agent) => ({
-    agentKey: agent.agentKey,
-    provider: agent.runtime ? providerForRuntime(agent.runtime) : runProvider,
-  }));
+  const used = usedAgentKeysForRun(db, runId, logger);
+  return resolveRunEffectiveAgents(db, runId, logger)
+    .filter((agent) => used === null || used.has(agent.agentKey))
+    .map((agent) => ({
+      agentKey: agent.agentKey,
+      provider: agent.runtime ? providerForRuntime(agent.runtime) : runProvider,
+    }));
+}
+
+/**
+ * The agent keys the run's frozen definition binds, or null when the definition
+ * cannot be resolved (⇒ callers fall back to the full effective set). Read
+ * through the same frozen-spec seam the workflow-config layer uses, so the
+ * agent set and the per-agent configs always describe the same revision.
+ */
+function usedAgentKeysForRun(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): ReadonlySet<string> | null {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    const definition = parseWorkflowDefinition(frozen?.specJson);
+    if (!definition) return null;
+    // computeAgentUsage pre-seeds EVERY canonical key (the catalogue shows
+    // unused agents too) — only an entry some step actually binds counts.
+    const usage = computeAgentUsage([{ name: frozen?.workflowName ?? 'run', definition }]);
+    const used = new Set<string>();
+    for (const [key, entry] of usage) if (entry.usedBy.length > 0) used.add(key);
+    return used.size > 0 ? used : null;
+  } catch (err) {
+    logger?.warn(
+      `[AgentOverlay] frozen definition read failed for runId=${runId}; listing every effective agent: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }
 
 /**
