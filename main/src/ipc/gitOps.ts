@@ -400,8 +400,11 @@ export function countIntegratedLaneTasksNotYetDone(databaseService: DatabaseServ
  * Guarded off any session that is still live: a run still in flight for the
  * SAME session owns its own close-out path and must never be raced by a boot
  * sweep; the `sessions` row (if it still exists — a dismissed session's row
- * may already be gone) must not read 'running', 'waiting', or 'initializing'
- * either.
+ * may already be gone) must not read a live persisted status. Persisted
+ * session statuses are 'pending'|'running'|'stopped'|'completed'|'failed'
+ * (the renderer's 'initializing' is `sessionManager`'s display mapping of
+ * the DB's 'pending' — see its status translation — never a value actually
+ * stored), so the guard checks 'pending'/'running' here, not 'initializing'.
  *
  * Fail-soft + per-session isolated. Idempotent: a lane already on Done fails
  * the trigger predicate on the next boot, so a second run finds no
@@ -433,7 +436,7 @@ export async function backfillLandedSprintCloseOuts(
             AND NOT EXISTS (
               SELECT 1 FROM sessions s
                WHERE s.id = wr.session_id
-                 AND s.status IN ('running', 'waiting', 'initializing')
+                 AND s.status IN ('pending', 'running')
             )
             AND NOT EXISTS (
               SELECT 1 FROM workflow_runs wr2
