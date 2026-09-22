@@ -266,6 +266,18 @@ export function isSystemicStepError(error: string | undefined): boolean {
   return SYSTEMIC_PATTERNS.some(({ pattern }) => pattern.test(error));
 }
 
+const SYSTEMIC_CLASS_NAMES: ReadonlySet<string> = new Set(SYSTEMIC_PATTERNS.map(({ name }) => name));
+
+/**
+ * Whether an `errorClass` label (a {@link classifyErrorPattern} return value)
+ * names a SYSTEMIC condition. The label-side twin of
+ * {@link isSystemicStepError}, for callers that hold only the bounded tag and
+ * never the raw error text — the telemetry chokepoint, which must not see it.
+ */
+export function isSystemicErrorClass(errorClass: string | undefined): boolean {
+  return errorClass !== undefined && SYSTEMIC_CLASS_NAMES.has(errorClass);
+}
+
 /**
  * NON-systemic failure buckets — recoverable/local conditions that are NOT
  * environment-level (so they never trigger a systemic park) but are still worth
