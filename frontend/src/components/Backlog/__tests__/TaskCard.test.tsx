@@ -528,6 +528,7 @@ describe('TaskCard breathing marker for an idea seeded into a live run (TASK-224
     runStatus: 'running',
     sessionId: null,
     sessionName: null,
+    workflowName: 'planner',
   };
 
   it('pulses (border-interactive/60 ring-1 animate-pulse) for an idea with a RUNNING inFlow entry', () => {
@@ -549,6 +550,21 @@ describe('TaskCard breathing marker for an idea seeded into a live run (TASK-224
     render(
       <BoardCard
         task={makeIdea({ ref: 'IDEA-201', inFlow: [runningFlow] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('idea-planning-hint')).toHaveTextContent('planning · planner / research');
+  });
+
+  it('falls back to the agent label when workflowName is unresolved (pre-migration/deleted row)', () => {
+    render(
+      <BoardCard
+        task={makeIdea({
+          ref: 'IDEA-204',
+          inFlow: [{ ...runningFlow, workflowName: null }],
+        })}
         onRun={onRun}
         launchingTaskId={null}
         now={Date.now()}

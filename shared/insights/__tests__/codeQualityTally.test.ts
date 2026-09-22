@@ -158,15 +158,40 @@ describe('computeRecurringTitles', () => {
     });
   });
 
-  it('caps the result at `limit`', () => {
+  it('excludes a title seen only once — "recurring" means count > 1', () => {
+    const findings = [
+      finding({ id: 'a', title: 'Missing null guard' }),
+      finding({ id: 'b', title: 'Missing null guard' }),
+      finding({ id: 'c', title: 'One-off typo fix' }),
+    ];
+    const out = computeRecurringTitles(findings);
+    expect(out).toEqual([{ normalizedTitle: 'Missing null guard', count: 2, findingIds: ['a', 'b'] }]);
+  });
+
+  it('returns [] (the "No repeat findings yet" case) when every title is a one-off', () => {
     const findings = Array.from({ length: 5 }, (_v, i) =>
       finding({ id: `f${i}`, title: `title-${i}` }),
     );
+    expect(computeRecurringTitles(findings)).toEqual([]);
+  });
+
+  it('caps the result at `limit`', () => {
+    // Each of 5 distinct titles occurs twice (count > 1) so all survive the
+    // recurring filter, then `limit` caps the returned entries.
+    const findings = Array.from({ length: 5 }, (_v, i) => i).flatMap((i) => [
+      finding({ id: `f${i}a`, title: `title-${i}` }),
+      finding({ id: `f${i}b`, title: `title-${i}` }),
+    ]);
     expect(computeRecurringTitles(findings, 2)).toHaveLength(2);
   });
 
   it('tiebreaks equal counts alphabetically by normalized title', () => {
-    const findings = [finding({ id: 'a', title: 'Zebra' }), finding({ id: 'b', title: 'Apple' })];
+    const findings = [
+      finding({ id: 'a1', title: 'Zebra' }),
+      finding({ id: 'a2', title: 'Zebra' }),
+      finding({ id: 'b1', title: 'Apple' }),
+      finding({ id: 'b2', title: 'Apple' }),
+    ];
     const out = computeRecurringTitles(findings);
     expect(out.map((e) => e.normalizedTitle)).toEqual(['Apple', 'Zebra']);
   });

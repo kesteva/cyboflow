@@ -161,9 +161,13 @@ export interface RecurringTitleTally {
 export const DEFAULT_RECURRING_TITLES_LIMIT = 10;
 
 /**
- * Top-N recurring finding titles by occurrence, normalized via {@link
- * normalizeFindingTitle}. Sorted by count DESC, normalizedTitle ASC tiebreak
- * (stable regardless of input order). Pure.
+ * Top-N RECURRING (count > 1) finding titles by occurrence, normalized via
+ * {@link normalizeFindingTitle}. A title seen exactly once is not "recurring"
+ * — excluding it is what makes the section's "No repeat findings yet" empty
+ * state reachable (every project with any finding would otherwise land at
+ * least one 1-count entry here, permanently hiding that state). Sorted by
+ * count DESC, normalizedTitle ASC tiebreak (stable regardless of input
+ * order). Pure.
  */
 export function computeRecurringTitles(
   findings: readonly QualityFinding[],
@@ -181,6 +185,7 @@ export function computeRecurringTitles(
     }
   }
   return [...byTitle.entries()]
+    .filter(([, v]) => v.count > 1)
     .map(([normalizedTitle, v]) => ({ normalizedTitle, count: v.count, findingIds: v.findingIds }))
     .sort((a, b) => b.count - a.count || a.normalizedTitle.localeCompare(b.normalizedTitle))
     .slice(0, limit);

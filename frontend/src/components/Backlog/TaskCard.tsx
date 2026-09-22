@@ -410,12 +410,14 @@ export function TaskBody({
 
       {/* Idea-only "planning" hint (TASK-224): explains the breathing glow
           the moment an idea is seeded into a live, non-terminal Planner/Ship
-          run — mirrors the FlowMarker pill above (same agent/step source),
-          just phrased for an idea rather than a task ("planning" vs a bare
-          agent pill), since an idea never itself "runs". */}
+          run. Shows the WORKFLOW identity (planner/ship), not the current-step
+          agent — an idea is seeded into a workflow, not an agent, and the
+          overlay is already restricted to Planner/Ship (see
+          gatherIdeaRunOverlayRows), so workflowName is populated here. Falls
+          back to the agent label only for a pre-migration/unresolved row. */}
       {task.type === 'idea' && task.inFlow.length > 0 && (
         <p className="text-[10.5px] text-text-tertiary" data-testid="idea-planning-hint">
-          planning · {task.inFlow[0].agent}
+          planning · {task.inFlow[0].workflowName ?? task.inFlow[0].agent}
           {task.inFlow[0].stepId ? ` / ${task.inFlow[0].stepId}` : ''}
         </p>
       )}

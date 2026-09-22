@@ -262,6 +262,12 @@ interface RunOverlayRow {
   session_id: string | null;
   /** `sessions.name` via LEFT JOIN; null when the sessions table/join is unavailable or the row is gone. */
   session_name: string | null;
+  /**
+   * `workflows.name` via LEFT JOIN on `workflow_runs.workflow_id` (TASK-224). Undefined on
+   * the task/epic arm (not selected there — no restriction needed), present on the idea arm
+   * where it also drives the Planner/Ship filter.
+   */
+  workflow_name?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -397,12 +403,17 @@ function gatherIdeaRunOverlayRows(
   }
   const whereClause = clauses.map((c) => `(${c})`).join(' OR ');
 
+  // Restrict to Planner/Ship (TASK-224): seed_idea_id/seed_idea_ids is a soft
+  // link written by more than those two workflows (e.g. a launch seeded with
+  // an idea as lineage), so without this join+filter an idea would pulse and
+  // action-gate for an out-of-scope workflow run that merely happens to name it.
   return db
     .prepare(
-      `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, ${sessionSelect}
+      `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, w.name AS workflow_name, ${sessionSelect}
          FROM workflow_runs wr
+         JOIN workflows w ON w.id = wr.workflow_id
          ${sessionJoin}
-        WHERE ${whereClause}`,
+        WHERE (${whereClause}) AND w.name IN ('planner', 'ship')`,
     )
     .all(...params) as RunOverlayRow[];
 }
@@ -499,6 +510,10 @@ export function computeTaskOverlay(
       runStatus: r.status,
       sessionId: r.session_id,
       sessionName: r.session_name,
+      // Only the idea arm selects workflow_name (undefined on the task/epic
+      // arm) — omit the key entirely rather than projecting an always-null
+      // field onto every task's FlowMarker overlay too.
+      ...(r.workflow_name !== undefined ? { workflowName: r.workflow_name } : {}),
     }));
 
   const runIds = runs.map((r) => r.id);

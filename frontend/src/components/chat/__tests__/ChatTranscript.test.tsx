@@ -159,10 +159,16 @@ describe('ChatTranscript — per-row memoization', () => {
 // ---------------------------------------------------------------------------
 
 /** Asserts that `messageId` produced no visible row: no MessageSegment call,
- * no "Unhandled message type" fallback card anywhere in the document. */
+ * no "Unhandled message type" fallback card, and no message-row wrapper
+ * (header/avatar/timestamp) anywhere in the document. The row-wrapper check
+ * is the one that actually proves NOTHING mounted for this message — the
+ * hidden-content branch in ChatTranscript.tsx returns null BEFORE that div,
+ * so a regression that instead rendered an empty header-only row would still
+ * satisfy the segment/fallback probes alone. */
 function expectNoRow(messageId: string): void {
   expect(screen.queryByTestId(`seg-${messageId}`)).toBeNull();
   expect(screen.queryByText('Unhandled message type')).toBeNull();
+  expect(screen.queryByTestId(`message-row-${messageId}`)).toBeNull();
   expect(segmentRenders.ids).not.toContain(messageId);
 }
 
@@ -226,6 +232,19 @@ describe('ChatTranscript — visibility gating (TASK-269)', () => {
     );
     expectNoRow('result-hidden');
   });
+
+  // NOTE: a hidden-TodoWrite regression ("a TodoWrite-only message with
+  // non-empty todos hidden by showToolCalls:false renders no row") was
+  // attempted here per review suggestion and found to FAIL against current
+  // behavior: buildRowDescriptors' "mixed content" arm (ChatTranscript.tsx,
+  // the `else` branch that pushes a 'todo' descriptor whenever a message
+  // contains a TodoWrite tool_call) never checks settings.showToolCalls, so a
+  // TodoWrite's todo list renders even when tool calls are hidden. That code
+  // path is buildRowDescriptors, NOT the TranscriptMessageRowComponent gating
+  // TASK-269 touched (see commit ca5a846e0's diff) — a pre-existing gap this
+  // sprint's diff never reached. Left unfixed and uncovered here deliberately
+  // (fixing/covering it would widen this pass beyond TASK-269's own diff);
+  // flagged for a follow-up task instead.
 
   it('a message with a genuinely unrecognized segment type still hits the Unhandled-type fallback', () => {
     // `error` is a real MessageSegment variant, but ChatTranscript's

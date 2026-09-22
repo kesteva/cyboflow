@@ -872,6 +872,10 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
       ref={isUser && userMessageIndex !== undefined ? (el) => {
         if (el) userMessageRefs.current.set(userMessageIndex, el);
       } : undefined}
+      // TASK-269 test hook: lets the visibility-gating regressions assert the
+      // ROW itself is absent (not just its inner segment/fallback probes) —
+      // the hidden/empty branches above `return null` before this div mounts.
+      data-testid={`message-row-${message.id}`}
       className={`
         rounded-lg transition-all relative group
         ${isUser ? 'bg-surface-secondary' : hasThinking ? 'bg-surface-primary/50' : 'bg-surface-primary'}

@@ -1011,7 +1011,9 @@ describe('computeTaskOverlay — inFlow (direct + sprint-batch runs)', () => {
  * 061, JSON array — multi-idea). Probes for the seed_idea_ids column so the
  * SAME helper works against both `buildOverlayDb()` (has it) and
  * `buildOverlayDb({ skipSeedIdeaIds: true })` (pre-061 — the column literally
- * doesn't exist, so the INSERT must omit it rather than erroring).
+ * doesn't exist, so the INSERT must omit it rather than erroring). `workflowName`
+ * defaults to 'planner' (real acceptance-criterion name, not seedWorkflow()'s
+ * generic 'sprint') — pass a non-planner/ship name to exercise the exclusion.
  */
 function seedIdeaSeededRun(
   db: Database.Database,
@@ -1021,18 +1023,22 @@ function seedIdeaSeededRun(
     seedIdeaId?: string | null;
     seedIdeaIds?: string[] | null;
     sessionId?: string | null;
+    workflowName?: string;
   },
 ): void {
-  seedWorkflow(db);
+  const workflowName = opts.workflowName ?? 'planner';
+  const workflowId = `wf-idea-${workflowName}`;
+  seedNamedWorkflow(db, workflowId, workflowName);
   const hasSeedIdeaIds = (db.pragma('table_info(workflow_runs)') as Array<{ name: string }>).some(
     (c) => c.name === 'seed_idea_ids',
   );
   if (hasSeedIdeaIds) {
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids, session_id)
-       VALUES (?, 'wf-1', 1, ?, 'default', ?, ?, ?)`,
+       VALUES (?, ?, 1, ?, 'default', ?, ?, ?)`,
     ).run(
       opts.runId,
+      workflowId,
       opts.status,
       opts.seedIdeaId ?? null,
       opts.seedIdeaIds ? JSON.stringify(opts.seedIdeaIds) : null,
@@ -1041,8 +1047,8 @@ function seedIdeaSeededRun(
   } else {
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, session_id)
-       VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
-    ).run(opts.runId, opts.status, opts.seedIdeaId ?? null, opts.sessionId ?? null);
+       VALUES (?, ?, 1, ?, 'default', ?, ?)`,
+    ).run(opts.runId, workflowId, opts.status, opts.seedIdeaId ?? null, opts.sessionId ?? null);
   }
 }
 
@@ -1062,8 +1068,33 @@ describe('computeTaskOverlay — inFlow for ideas seeded into a live Planner/Shi
         runStatus: 'running',
         sessionId: 'sess-3',
         sessionName: 'quick-20260715-090000',
+        workflowName: 'planner',
       },
     ]);
+  });
+
+  it('resolves workflowName for a Ship-seeded idea run too', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_ship', 'IDEA-810', 1);
+    seedIdeaSeededRun(db, { runId: 'run-ship', status: 'running', seedIdeaId: 'ide_ship', workflowName: 'ship' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_ship', stage_id: stageId(1), type: 'idea' });
+    expect(overlay.inFlow).toHaveLength(1);
+    expect(overlay.inFlow[0].workflowName).toBe('ship');
+  });
+
+  it('excludes a non-Planner/Ship workflow run seeded with the idea (e.g. a launch lineage seed)', () => {
+    const db = buildOverlayDb();
+    seedIdea(db, 'ide_excl', 'IDEA-811', 1);
+    seedIdeaSeededRun(db, {
+      runId: 'run-launch',
+      status: 'running',
+      seedIdeaId: 'ide_excl',
+      workflowName: 'launch',
+    });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_excl', stage_id: stageId(1), type: 'idea' });
+    expect(overlay.inFlow).toEqual([]);
   });
 
   it('a multi-idea seed_idea_ids JSON array run lights EVERY seeded idea', () => {
@@ -1101,7 +1132,15 @@ describe('computeTaskOverlay — inFlow for ideas seeded into a live Planner/Shi
 
     const overlay = computeTaskOverlay(dbAdapter(db), { id: 'ide_e', stage_id: stageId(1), type: 'idea' });
     expect(overlay.inFlow).toEqual([
-      { agent: 'agent', runId: 'run-pre061', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+      {
+        agent: 'agent',
+        runId: 'run-pre061',
+        stepId: null,
+        runStatus: 'running',
+        sessionId: null,
+        sessionName: null,
+        workflowName: 'planner',
+      },
     ]);
   });
 

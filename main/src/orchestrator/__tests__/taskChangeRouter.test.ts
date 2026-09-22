@@ -3523,8 +3523,32 @@ describe('TaskChangeRouter (3-table entity model)', () => {
 
       const event = await emitNoopUpdate(router, idea.taskId);
       expect(event.task.inFlow).toEqual([
-        { agent: 'agent', runId: 'run-single', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+        {
+          agent: 'agent',
+          runId: 'run-single',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: null,
+          sessionName: null,
+          workflowName: 'planner',
+        },
       ]);
+    });
+
+    it('excludes a non-Planner/Ship workflow run seeded with the idea', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-launch', 1, 'launch', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id)
+         VALUES ('run-launch', 'wf-launch', 1, 'running', 'default', ?)`,
+      ).run(idea.taskId);
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([]);
     });
 
     it('a multi-idea seed_idea_ids JSON array run lights EVERY seeded idea', async () => {
@@ -3574,7 +3598,15 @@ describe('TaskChangeRouter (3-table entity model)', () => {
 
       const event = await emitNoopUpdate(router, idea.taskId);
       expect(event.task.inFlow).toEqual([
-        { agent: 'agent', runId: 'run-pre061', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+        {
+          agent: 'agent',
+          runId: 'run-pre061',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: null,
+          sessionName: null,
+          workflowName: 'planner',
+        },
       ]);
     });
 
