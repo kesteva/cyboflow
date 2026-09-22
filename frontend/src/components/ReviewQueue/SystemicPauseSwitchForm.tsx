@@ -112,6 +112,8 @@ const NOOP_MESSAGE: Record<string, string> = {
   no_agents: 'No agent in this run is on that provider.',
   step_scope_unavailable:
     "Only-these-agents isn't available for a fan-out pause; switch every agent on the provider instead.",
+  origin_triage:
+    "The run's supervisor (always Claude) hit the limit; switching the step agents can't move it.",
 };
 
 export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFormProps): React.ReactElement {
@@ -175,6 +177,11 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
   }, []);
 
   const stillChecking = AGENT_PROVIDERS.some((p) => readiness[p] === 'checking');
+  // With NO ready provider the runtime select can only fall back to the run's
+  // own runtime (its option disabled but still selected) — a submit then is a
+  // guaranteed provider_disabled / provider_unavailable refusal, so it is gated
+  // on the SELECTED provider's readiness and the form says why instead.
+  const noneReady = !stillChecking && !AGENT_PROVIDERS.some((p) => readiness[p] === 'ready');
 
   // -- Scope --------------------------------------------------------------
 
@@ -192,6 +199,7 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
   }, [readiness, blockedProvider, fallbackRuntime]);
   const selectedRuntime = runtimeChoice ?? defaultRuntime;
   const selectedProvider = providerForRuntime(selectedRuntime);
+  const selectedReady = readiness[selectedProvider] === 'ready';
 
   // -- Model / effort (reset whenever the selected provider changes) --------
 
@@ -219,7 +227,7 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
   const [noteMessage, setNoteMessage] = React.useState<string | null>(null);
 
   const handleSubmit = (): void => {
-    if (item.run_id === null || submitting || stillChecking) return;
+    if (item.run_id === null || submitting || stillChecking || !selectedReady) return;
     setSubmitting(true);
     setErrorMessage(null);
     setNoteMessage(null);
@@ -387,11 +395,18 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
         </select>
       </div>
 
+      {noneReady && (
+        <p className="text-xs text-status-warning" role="status" data-testid="pause-switch-blocked">
+          No provider is installed and signed in on this machine. Install or sign in to one in Settings →
+          Integrations, or let the pause auto-resume when the limit resets.
+        </p>
+      )}
+
       <div className="flex items-center gap-2">
         <Button
           variant="primary"
           size="sm"
-          disabled={submitting || stillChecking || item.run_id === null}
+          disabled={submitting || stillChecking || !selectedReady || item.run_id === null}
           onClick={handleSubmit}
           data-testid="pause-switch-submit"
         >

@@ -211,6 +211,26 @@ describe('SystemicPauseSwitchForm', () => {
     render(<SystemicPauseSwitchForm item={makePauseItem()} onDone={vi.fn()} />);
     await waitForReadiness();
     await waitFor(() => expect(screen.getByTestId('pause-switch-same-provider')).toBeInTheDocument());
+    // Claude IS ready, so the (same-provider) switch is still submittable.
+    expect(screen.getByTestId('pause-switch-submit')).not.toBeDisabled();
+    expect(screen.queryByTestId('pause-switch-blocked')).not.toBeInTheDocument();
+  });
+
+  it('with NO ready provider the submit is disabled and the form says why (never a guaranteed refusal)', async () => {
+    mockDetectStates({ claude: 'loggedOut', codex: 'unavailable', omp: 'missing' });
+    render(<SystemicPauseSwitchForm item={makePauseItem()} onDone={vi.fn()} />);
+    await waitForReadiness();
+    await waitFor(() => expect(screen.getByTestId('pause-switch-blocked')).toBeInTheDocument());
+    expect(screen.getByTestId('pause-switch-blocked')).toHaveTextContent('No provider is installed and signed in');
+    const submit = screen.getByTestId('pause-switch-submit');
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
+    expect(mockSwitchPausedStepAgents).not.toHaveBeenCalled();
+    // The select fell back to the run's own (unready) runtime — visibly disabled.
+    const select = screen.getByTestId('pause-switch-runtime') as HTMLSelectElement;
+    expect(select.value).toBe('claude-sdk');
+    const claudeOption = within(select).getAllByRole('option').find((o) => (o as HTMLOptionElement).value === 'claude-sdk');
+    expect((claudeOption as HTMLOptionElement).disabled).toBe(true);
   });
 
   it('the model control is the Claude alias select when the selected runtime is Claude', async () => {
@@ -318,6 +338,7 @@ describe('SystemicPauseSwitchForm', () => {
       'step_scope_unavailable',
       "Only-these-agents isn't available for a fan-out pause; switch every agent on the provider instead.",
     ],
+    ['origin_triage', "The run's supervisor (always Claude) hit the limit; switching the step agents can't move it."],
   ];
 
   it.each(noOpCases)('renders the sentence for noOp reason %s', async (reason, sentence) => {

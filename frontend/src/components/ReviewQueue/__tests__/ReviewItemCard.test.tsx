@@ -1536,20 +1536,33 @@ describe('ReviewItemCard', () => {
       expect(screen.getByTestId('pause-resolved')).toHaveTextContent('Stopped waiting');
     });
 
-    it('renders the triage note only when origin is "triage" — the switch stays available either way', () => {
+    it('a TRIAGE-origin pause renders the note and HIDES the switch on both surfaces (Retry now / Stop waiting only)', () => {
       const { rerender } = render(<ReviewItemCard item={makePausePayloadItem({}, 'triage')} surface="session" />);
       expect(screen.getByTestId('pause-triage-note')).toHaveTextContent(
         "The run's supervisor (always Claude) hit the limit",
       );
-      expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
+      expect(screen.queryByTestId('pause-switch-toggle')).not.toBeInTheDocument();
+      expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
 
-      rerender(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_step' }, 'step')} surface="session" />);
+      rerender(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_triage_q' }, 'triage')} />);
+      expect(screen.getByTestId('pause-triage-note')).toBeInTheDocument();
+      expect(screen.queryByTestId('pause-switch-open')).not.toBeInTheDocument();
+      expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
+    });
+
+    it('a STEP-origin pause (or one with no origin) renders no note and keeps the switch', () => {
+      const { rerender } = render(
+        <ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_step' }, 'step')} surface="session" />,
+      );
       expect(screen.queryByTestId('pause-triage-note')).not.toBeInTheDocument();
       expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
 
       // No `origin` at all (e.g. the source-prefix-only form) also renders no note.
       rerender(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_noorigin' })} surface="session" />);
       expect(screen.queryByTestId('pause-triage-note')).not.toBeInTheDocument();
+      expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
     });
   });
 });

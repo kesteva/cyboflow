@@ -88,7 +88,10 @@
  *                    offers Retry now / Switch runtime & retry (an inline
  *                    {@link SystemicPauseSwitchForm} in-session, "Switch &
  *                    retry…" routing to the session from the queue) / Stop
- *                    waiting, never a resolve(outcome:'reject').
+ *                    waiting, never a resolve(outcome:'reject'). A pause whose
+ *                    payload says `origin: 'triage'` (only the run's Claude-only
+ *                    supervisor hit the limit) offers NO switch — nothing a
+ *                    step-agent switch does can move it.
  *   - human_task   — a free-form action item (blocking per-item). Carries no
  *                    options, so the queue offers the default pair; in-session it
  *                    keeps Resolve / Dismiss / Promote to task.
@@ -1160,6 +1163,11 @@ export function ReviewItemCard({
             );
           }
           const origin = systemicPauseOrigin(item);
+          // A triage-origin pause: only the run's Claude-only supervisor hit the
+          // limit. No step-agent switch moves it (the backend refuses one with
+          // `origin_triage`), so the card offers Retry now / Stop waiting and the
+          // note below — never a switch that would replay every lane for nothing.
+          const switchable = origin !== 'triage';
           const retryNow = (): void => {
             void resolve(item.project_id, item.id, { surface }).then((r) => {
               if (r !== null) {
@@ -1181,7 +1189,7 @@ export function ReviewItemCard({
               <Button variant="primary" size="sm" disabled={busy} onClick={retryNow} data-testid="pause-retry">
                 Retry now
               </Button>
-              {surface === 'session' ? (
+              {switchable && surface === 'session' && (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -1191,7 +1199,8 @@ export function ReviewItemCard({
                 >
                   Switch runtime &amp; retry
                 </Button>
-              ) : (
+              )}
+              {switchable && surface !== 'session' && (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -1210,7 +1219,7 @@ export function ReviewItemCard({
                   The run&apos;s supervisor (always Claude) hit the limit; switching step agents won&apos;t move it.
                 </p>
               )}
-              {surface === 'session' && showSwitchForm && (
+              {switchable && surface === 'session' && showSwitchForm && (
                 <div className="w-full">
                   <SystemicPauseSwitchForm
                     item={item}
