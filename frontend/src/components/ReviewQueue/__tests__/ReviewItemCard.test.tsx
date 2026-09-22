@@ -35,6 +35,9 @@ const {
   mockEnsureSessionForLaunch,
   mockCanAddressReviewFindings,
   mockAddressReviewFindings,
+  mockSwitchPausedStepAgents,
+  mockClearRunAgentTargets,
+  mockRunAgentTargets,
 } = vi.hoisted(() => ({
   mockResolve: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', resumed: true }),
   mockDismiss: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1' }),
@@ -49,6 +52,9 @@ const {
   mockEnsureSessionForLaunch: vi.fn().mockResolvedValue('sess-child'),
   mockCanAddressReviewFindings: vi.fn().mockResolvedValue({ eligible: true }),
   mockAddressReviewFindings: vi.fn().mockResolvedValue({ delivered: true, stepId: 'address-review', abortedLiveWalk: false, fanOutKeptSettled: false }),
+  mockSwitchPausedStepAgents: vi.fn().mockResolvedValue({ delivered: true, agentKeys: ['implement'], target: { runtime: 'codex-sdk' }, retried: true }),
+  mockClearRunAgentTargets: vi.fn().mockResolvedValue({ delivered: true }),
+  mockRunAgentTargets: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -69,6 +75,9 @@ vi.mock('../../../trpc/client', () => ({
         returnIdeaToBacklog: { mutate: mockReturnIdeaToBacklog },
         canAddressReviewFindings: { query: mockCanAddressReviewFindings },
         addressReviewFindings: { mutate: mockAddressReviewFindings },
+        switchPausedStepAgents: { mutate: mockSwitchPausedStepAgents },
+        clearRunAgentTargets: { mutate: mockClearRunAgentTargets },
+        runAgentTargets: { query: mockRunAgentTargets },
       },
     },
   },
@@ -78,6 +87,18 @@ vi.mock('../../../trpc/client', () => ({
 // (via useReviewItemActions) — stub the session helper so no real IPC fires.
 vi.mock('../../../utils/ensureSessionForLaunch', () => ({
   ensureSessionForLaunch: mockEnsureSessionForLaunch,
+}));
+
+// The inline switch form is SystemicPauseSwitchForm.test.tsx's job (readiness
+// probing, model/effort pickers, submit payload shape) — stub it here so these
+// card-level tests stay focused on the card's OWN trio/labels/note and don't
+// pull in provider-detection/model-catalog machinery.
+vi.mock('../SystemicPauseSwitchForm', () => ({
+  SystemicPauseSwitchForm: ({ onDone }: { onDone: () => void }) => (
+    <button type="button" data-testid="pause-switch-form-stub" onClick={onDone}>
+      switch form stub
+    </button>
+  ),
 }));
 
 import { ReviewItemCard } from '../ReviewItemCard';
@@ -136,6 +157,9 @@ beforeEach(() => {
     abortedLiveWalk: false,
     fanOutKeptSettled: false,
   });
+  mockSwitchPausedStepAgents.mockClear();
+  mockClearRunAgentTargets.mockClear();
+  mockRunAgentTargets.mockClear();
 });
 
 describe('ReviewItemCard', () => {
@@ -1340,5 +1364,192 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('address-review-findings')).not.toBeInTheDocument();
     expect(screen.queryByTestId('log-as-findings')).not.toBeInTheDocument();
     expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
+  });
+
+  // -- Plan v2: switch runtime/model on a systemic pause, then retry ---------
+
+  function makePauseItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return makeItem('decision', {
+      id: 'rvw_pause',
+      blocking: true,
+      source: 'gate:systemic-pause:implement',
+      ...overrides,
+    });
+  }
+
+  /** The payload-discriminated form — no `gate:systemic-pause:` source prefix. */
+  function makePausePayloadItem(
+    overrides: Partial<ReviewItem> = {},
+    origin?: 'step' | 'triage',
+  ): ReviewItem {
+    return makeItem(
+      'decision',
+      { id: 'rvw_pause_payload', blocking: true, source: 'agent:programmatic-run-host', ...overrides },
+      {
+        kind: 'decision',
+        gate: 'systemic-pause',
+        ...(origin !== undefined ? { origin } : {}),
+      } as unknown as ReviewItemPayload,
+    );
+  }
+
+  describe('systemic-pause pause card', () => {
+    it('renders the trio in-session, keyed by the SOURCE prefix', () => {
+      render(<ReviewItemCard item={makePauseItem()} surface="session" />);
+      expect(screen.getByTestId('pause-retry')).toHaveTextContent('Retry now');
+      expect(screen.getByTestId('pause-switch-toggle')).toHaveTextContent('Switch runtime');
+      expect(screen.getByTestId('pause-stop')).toHaveTextContent('Stop waiting');
+      // Never the option-less default pair — this gate has real actions.
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
+    });
+
+    it('renders the trio in-session, keyed by the PAYLOAD gate (no gate:systemic-pause: source)', () => {
+      render(<ReviewItemCard item={makePausePayloadItem()} surface="session" />);
+      expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
+    });
+
+    it('renders the QUEUE trio — Retry now / Switch & retry… / Stop waiting, never the toggle form', () => {
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_q' })} />);
+      expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-switch-open')).toHaveTextContent('Switch & retry');
+      expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
+      expect(screen.queryByTestId('pause-switch-toggle')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+    });
+
+    it('the QUEUE trio is also recognized by the PAYLOAD gate alone', () => {
+      render(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_payload_q' })} />);
+      expect(screen.getByTestId('pause-switch-open')).toBeInTheDocument();
+    });
+
+    it('Retry now resolves WITHOUT an outcome, in-session', async () => {
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_retry_s' })} surface="session" />);
+      fireEvent.click(screen.getByTestId('pause-retry'));
+      await waitFor(() =>
+        expect(mockResolve).toHaveBeenCalledWith({
+          projectId: 5,
+          reviewItemId: 'rvw_pause_retry_s',
+          surface: 'session',
+        }),
+      );
+    });
+
+    it('Retry now resolves WITHOUT an outcome, on the queue', async () => {
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_retry_q' })} />);
+      fireEvent.click(screen.getByTestId('pause-retry'));
+      await waitFor(() =>
+        expect(mockResolve).toHaveBeenCalledWith({
+          projectId: 5,
+          reviewItemId: 'rvw_pause_retry_q',
+          surface: 'queue',
+        }),
+      );
+    });
+
+    it('Stop waiting dismisses (never resolves), on either surface', async () => {
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_stop' })} surface="session" />);
+      fireEvent.click(screen.getByTestId('pause-stop'));
+      await waitFor(() =>
+        expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_pause_stop' }),
+      );
+      expect(mockResolve).not.toHaveBeenCalled();
+    });
+
+    it('never sends outcome "reject" for a systemic-pause item, from any action or surface', async () => {
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_noreject_s' })} surface="session" />);
+      fireEvent.click(screen.getByTestId('pause-retry'));
+      await waitFor(() => expect(mockResolve).toHaveBeenCalled());
+      fireEvent.click(screen.getByTestId('pause-stop'));
+      await waitFor(() => expect(mockDismiss).toHaveBeenCalled());
+
+      mockResolve.mockClear();
+      mockDismiss.mockClear();
+      render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_noreject_q' })} />);
+      fireEvent.click(screen.getAllByTestId('pause-retry')[1]);
+      await waitFor(() => expect(mockResolve).toHaveBeenCalled());
+      fireEvent.click(screen.getAllByTestId('pause-stop')[1]);
+      await waitFor(() => expect(mockDismiss).toHaveBeenCalled());
+
+      for (const call of mockResolve.mock.calls) {
+        expect((call[0] as { outcome?: string }).outcome).not.toBe('reject');
+      }
+    });
+
+    it('Switch runtime & retry toggles the inline switch form in-session, and it can close itself', () => {
+      const onResolved = vi.fn();
+      render(
+        <ReviewItemCard item={makePauseItem({ id: 'rvw_pause_toggle' })} surface="session" onResolved={onResolved} />,
+      );
+      expect(screen.queryByTestId('pause-switch-form-stub')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('pause-switch-toggle'));
+      expect(screen.getByTestId('pause-switch-form-stub')).toBeInTheDocument();
+
+      // The form's own onDone collapses it again (and bubbles onResolved).
+      fireEvent.click(screen.getByTestId('pause-switch-form-stub'));
+      expect(screen.queryByTestId('pause-switch-form-stub')).not.toBeInTheDocument();
+      expect(onResolved).toHaveBeenCalledTimes(1);
+    });
+
+    it('a resolved item that was switched shows "Switched & retried"', () => {
+      render(
+        <ReviewItemCard
+          item={makePauseItem({
+            id: 'rvw_pause_resolved_switch',
+            status: 'resolved',
+            resolution: 'retry: switched 2 agent(s) (implement, code-review) → codex-sdk',
+          })}
+        />,
+      );
+      expect(screen.getByTestId('pause-resolved')).toHaveTextContent('Switched & retried');
+    });
+
+    it('a resolved item that was plainly retried (or auto-retried, or has no resolution) shows "Retried"', () => {
+      const cases: Array<[string, string | null]> = [
+        ['bare retry note', 'retry: implement'],
+        ['auto-resume note', 'auto-retry: reset at 7:10pm'],
+        ['no note at all', null],
+      ];
+      for (const [label, resolution] of cases) {
+        const { unmount } = render(
+          <ReviewItemCard item={makePauseItem({ id: `rvw_pause_retried_${label}`, status: 'resolved', resolution })} />,
+        );
+        expect(screen.getByTestId('pause-resolved')).toHaveTextContent('Retried');
+        unmount();
+      }
+    });
+
+    it('a DISMISSED item, or one resolved with a "stop waiting" note, shows "Stopped waiting"', () => {
+      const { unmount: unmount1 } = render(
+        <ReviewItemCard item={makePauseItem({ id: 'rvw_pause_dismissed', status: 'dismissed' })} />,
+      );
+      expect(screen.getByTestId('pause-resolved')).toHaveTextContent('Stopped waiting');
+      unmount1();
+
+      render(
+        <ReviewItemCard
+          item={makePauseItem({ id: 'rvw_pause_stopnote', status: 'resolved', resolution: 'stop waiting' })}
+        />,
+      );
+      expect(screen.getByTestId('pause-resolved')).toHaveTextContent('Stopped waiting');
+    });
+
+    it('renders the triage note only when origin is "triage" — the switch stays available either way', () => {
+      const { rerender } = render(<ReviewItemCard item={makePausePayloadItem({}, 'triage')} surface="session" />);
+      expect(screen.getByTestId('pause-triage-note')).toHaveTextContent(
+        "The run's supervisor (always Claude) hit the limit",
+      );
+      expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
+
+      rerender(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_step' }, 'step')} surface="session" />);
+      expect(screen.queryByTestId('pause-triage-note')).not.toBeInTheDocument();
+      expect(screen.getByTestId('pause-switch-toggle')).toBeInTheDocument();
+
+      // No `origin` at all (e.g. the source-prefix-only form) also renders no note.
+      rerender(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_noorigin' })} surface="session" />);
+      expect(screen.queryByTestId('pause-triage-note')).not.toBeInTheDocument();
+    });
   });
 });
