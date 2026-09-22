@@ -150,6 +150,7 @@ jobs:
     with:
       variant: stable
       ref: ${{ needs.version.outputs.sha }}
+      require_signed: true
     secrets: inherit
 
   publish:
