@@ -26,6 +26,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from '../WorkflowCanvas';
 import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
+import type { ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Mock fixture: 2 phases × 2 steps each
@@ -448,6 +449,94 @@ describe('WorkflowCanvas', () => {
     const allStepWrappers = screen.getAllByTestId(/^step-wrapper-tall-step-/);
     const totalSteps = TALL_DEFINITION.phases.reduce((sum, p) => sum + p.steps.length, 0);
     expect(allStepWrappers).toHaveLength(totalSteps);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-274: stepModels threading into WorkflowStepCard
+  // -------------------------------------------------------------------------
+
+  it('threads a stepModels entry into the matching step card as modelLabel/modelFamilyColor', () => {
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      ['step-a', { label: 'Opus 5', family: 'opus' }],
+      ['step-b', { label: 'Auto', family: 'auto' }],
+    ]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    const modelA = screen.getByTestId('step-card-model-step-a');
+    expect(modelA).toHaveTextContent('Opus 5');
+    expect(screen.getByTestId('step-card-model-dot-step-a')).toHaveStyle({
+      backgroundColor: '#c98a2d',
+    });
+
+    const modelB = screen.getByTestId('step-card-model-step-b');
+    expect(modelB).toHaveTextContent('Auto');
+    expect(screen.getByTestId('step-card-model-dot-step-b')).toHaveStyle({
+      backgroundColor: '#b3a685',
+    });
+
+    // step-c has no entry in the map — no model segment rendered.
+    expect(screen.queryByTestId('step-card-model-step-c')).not.toBeInTheDocument();
+  });
+
+  it('omitting stepModels (undefined/null) renders every card without a model segment, unbroken', () => {
+    const { rerender } = render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" />,
+    );
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+    expect(screen.getByTestId('step-card-step-a')).toBeInTheDocument();
+
+    rerender(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" stepModels={null} />,
+    );
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+    expect(screen.getByTestId('step-card-step-a')).toBeInTheDocument();
+  });
+
+  it('falls back to the "other" family swatch for an unrecognized model family bucket', () => {
+    // Cast: simulates a main/renderer version skew handing the rail a family
+    // bucket this bundle's ModelFamily union does not list.
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      ['step-a', { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
+    ]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    // MODEL_FAMILY_COLORS.other = #7a7268 (shared/types/agents.ts) — unresolved
+    // family buckets must not throw and must not silently render `undefined`.
+    expect(screen.getByTestId('step-card-model-dot-step-a')).toHaveStyle({
+      backgroundColor: '#7a7268',
+    });
+  });
+
+  it('threading a stepModels entry does not change the step card/wrapper height or column width (138x120 unchanged)', () => {
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      ['step-a', { label: 'Opus 5', family: 'opus' }],
+      ['step-b', { label: 'Auto', family: 'auto' }],
+    ]);
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        stepModels={stepModels}
+      />,
+    );
+
+    // ROW_H (wrapper height) and COL_W (column width) are unaffected by the
+    // model segment folding into the existing row — no new row was added.
+    expect(screen.getByTestId('step-wrapper-step-a')).toHaveStyle({ height: '120px' });
+    expect(screen.getByTestId('step-wrapper-step-b')).toHaveStyle({ height: '120px' });
+    expect(screen.getByTestId('phase-column-phase-1')).toHaveStyle({ width: '138px' });
   });
 
   it('measures edge/token overlay coordinates relative to the inner content, not the outer scroll viewport', () => {

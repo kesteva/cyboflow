@@ -108,6 +108,12 @@ import {
 } from '../../rewindRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
 import {
+  resolveRunStepModels,
+  RunNotFoundError,
+  RunDefinitionNotFoundError,
+  type StepModelInfo,
+} from '../../runStepModels';
+import {
   updateSessionAgentPermissionMode,
   type SessionAgentPermissionModeDeps,
 } from '../../sessionPermissionMode';
@@ -3779,6 +3785,49 @@ export const runsRouter = router({
       }
 
       return { definition, currentStepId, stepStates };
+    }),
+
+  /**
+   * Per-step resolved model info (IDEA-061 — "Workflow summary should show
+   * which model is running at each stage"). Flattens the run's effective
+   * workflow definition the SAME way `getPhaseState` does (same frozen-spec
+   * resolution + fallback, same phase/step declaration order), resolves each
+   * step's agentKey via `resolveStepAgentKey` (a human gate step is OMITTED,
+   * never fabricated a model), and labels/colors it via
+   * `runStepModels.resolveRunStepModels` — see that module for the full
+   * inherit/pin precedence. Returns ONLY the `StepModelInfo` wire shape
+   * (stepId/stepName/phaseId/agentKey/label/family); no effective-agent
+   * internals (systemPrompt/tools/mcp*) ever leak into the response.
+   *
+   * Same PRECONDITION_FAILED / NOT_FOUND contract as `getPhaseState` for the
+   * "db not wired" / "run not found" / "no workflow definition" failures.
+   * Additionally throws PRECONDITION_FAILED when
+   * `ctx.resolveRunEffectiveAgents` is not wired (unit tests that omit it) —
+   * this procedure has no fallback for that collaborator, mirroring `gitDiff`.
+   */
+  getStepModels: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(({ ctx, input }): StepModelInfo[] => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      if (!ctx.resolveRunEffectiveAgents) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'resolveRunEffectiveAgents not wired into tRPC context',
+        });
+      }
+      try {
+        return resolveRunStepModels(ctx.db, input.runId, ctx.resolveRunEffectiveAgents);
+      } catch (err) {
+        if (err instanceof RunNotFoundError || err instanceof RunDefinitionNotFoundError) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
+        }
+        throw err;
+      }
     }),
 
   /**

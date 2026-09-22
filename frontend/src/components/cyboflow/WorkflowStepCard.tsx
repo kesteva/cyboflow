@@ -8,6 +8,7 @@
  */
 import type { WorkflowStep, WorkflowPhase } from '../../../../shared/types/workflows';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { MODEL_FAMILY_COLORS } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -21,13 +22,35 @@ export interface WorkflowStepCardProps {
   /** 1-based global step index across all phases. */
   stepIndex: number;
   status: StepStatus;
+  /**
+   * Resolved model label for this step (IDEA-061 per-step model rail), e.g.
+   * "Opus 5" or "Auto". Absent for human/gate steps (never fabricated) and
+   * while the backing `runs.getStepModels` query hasn't resolved yet — in
+   * both cases the row renders exactly as it did before this prop existed.
+   */
+  modelLabel?: string | null;
+  /**
+   * Swatch hex for `modelLabel`'s {@link ModelFamily} bucket — see
+   * MODEL_FAMILY_COLORS. Defaults to the `other` swatch rather than being
+   * left unset: the dot reserves layout whenever `modelLabel` renders, so an
+   * omitted/unresolvable color must still paint something visible instead of
+   * an invisible 4px hole.
+   */
+  modelFamilyColor?: string;
 }
 
 // ---------------------------------------------------------------------------
 // WorkflowStepCard
 // ---------------------------------------------------------------------------
 
-export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowStepCardProps) {
+export function WorkflowStepCard({
+  step,
+  phase,
+  stepIndex,
+  status,
+  modelLabel,
+  modelFamilyColor = MODEL_FAMILY_COLORS.other,
+}: WorkflowStepCardProps) {
   const isPending = status === 'pending';
   const isRunning = status === 'running';
   const isDone = status === 'done';
@@ -101,6 +124,14 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
   // ── Agent short name — resolved canonical key (legacy labels mapped) ───────
   const agentShortName = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
 
+  // ── Model segment gate ─────────────────────────────────────────────────────
+  // A human/gate step NEVER renders a model segment — the approved design
+  // calls that a hard rule, not a data accident. `runs.getStepModels` already
+  // omits gate steps (resolveStepAgentKey -> null), so this is the card-local
+  // enforcement of the same rule: even if a caller hands a human step a label,
+  // neither the segment nor the "· model" title appears.
+  const showModel = !isHuman && Boolean(modelLabel);
+
   return (
     <div style={rootStyle} data-testid={`step-card-${step.id}`}>
       {/* ── Head bar ──────────────────────────────────────────────────────── */}
@@ -163,12 +194,28 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
             marginTop: 5,
             fontSize: 9.5,
             color: isPending ? '#b3a685' : '#6a5e44',
+            // Three flex segments in ONE row per the approved design: the
+            // agent name grows (flex: 1 1 auto below), model + retries hold
+            // their intrinsic width, and a single `gap` — not per-segment
+            // margins — spaces all three. `justifyContent` is deliberately
+            // absent: the growing agent segment already pushes the other two
+            // flush right.
             display: 'flex',
-            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 5,
           }}
+          title={
+            showModel
+              ? isPending
+                ? `${agentShortName} · will run ${modelLabel}`
+                : `${agentShortName} · ${modelLabel}`
+              : undefined
+          }
+          data-testid={`step-card-agent-row-${step.id}`}
         >
           <span
             style={{
+              flex: '1 1 auto',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -177,6 +224,43 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
           >
             {agentShortName}
           </span>
+          {showModel && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                // Hard cap from the approved design: the card is a fixed 138px
+                // and nothing on the row sets overflow, so an uncapped
+                // provider model id (e.g. a long verbatim Codex id) would
+                // spill outside the card instead of truncating.
+                maxWidth: 62,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+              data-testid={`step-card-model-${step.id}`}
+            >
+              <span aria-hidden style={{ letterSpacing: '0.02em' }}>
+                ·
+              </span>
+              <span
+                aria-hidden
+                style={{
+                  width: 4,
+                  height: 4,
+                  borderRadius: '50%',
+                  backgroundColor: modelFamilyColor,
+                  display: 'inline-block',
+                  opacity: isPending ? 0.45 : 1,
+                  flexShrink: 0,
+                }}
+                data-testid={`step-card-model-dot-${step.id}`}
+              />
+              <span style={{ fontStyle: isPending ? 'italic' : 'normal' }}>{modelLabel}</span>
+            </span>
+          )}
           <span style={{ flexShrink: 0 }}>×{step.retries}</span>
         </div>
       </div>
