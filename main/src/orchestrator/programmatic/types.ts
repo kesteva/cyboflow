@@ -187,6 +187,22 @@ export interface ControllerStepContext {
      * runner reads it exactly as before — so that path is byte-identical.
      */
     reviewMarkdown?: string;
+    /**
+     * The walk's adversarial-review FRESHNESS bound (ms since epoch) SNAPSHOT at
+     * the instant this revision was armed — the same bound the gate that sent the
+     * region back was composed from. The step runner applies it to the artifact
+     * read that feeds the gate-revision quote, so a re-run is never handed, as
+     * the feedback it must act on, a critique the gate itself told the human does
+     * not describe the current design (see
+     * `composeAdversarialReviewGateBody`'s stale notice).
+     *
+     * A SNAPSHOT, not a live read of the controller's `reviewReportedSinceMs`:
+     * that local is re-stamped when the review step is revisited, and the review
+     * step sits inside the region this revision re-drives, so a live read would
+     * make its own turn's quote vanish. Absent when the walk holds no bound (a
+     * resume past the review step) ⇒ unbounded, byte-identical to before.
+     */
+    reviewReportedSinceMs?: number;
   };
   /**
    * Provenance for the gate this ctx opens, when a supervisor intervention put
@@ -196,6 +212,17 @@ export interface ControllerStepContext {
    * not a standing property of the run. Absent on every ordinary gate.
    */
   escalation?: ControllerEscalation;
+  /**
+   * The walk's adversarial-review FRESHNESS bound (ms since epoch) at the instant
+   * this human gate opens — the same instant the controller hands
+   * `shouldSkipHumanGate`. The opener uses it to compose the gate body from a
+   * critique reported THIS round only, and stamps it on the gate row so the
+   * resolve-time side effects act on the same critique the human saw. Present
+   * ONLY on a `requestHumanGate` ctx and only when the walk holds a bound (see
+   * `run()`'s `reviewReportedSinceMs`); absent ⇒ no constraint. Never on an
+   * agent step's ctx, so every prompt stays byte-identical.
+   */
+  reviewReportedSinceMs?: number;
   /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see

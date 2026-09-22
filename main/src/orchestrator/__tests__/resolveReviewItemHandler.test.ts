@@ -18,6 +18,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { ReviewItemError } from '../reviewItemRouter';
+import { GateSideEffects, type GateSideEffectArgs } from '../gateSideEffects';
 import {
   resolveReviewItem,
   parseApproveIdeasRefs,
@@ -1379,5 +1380,84 @@ describe('resolveReviewItem — TASK-222 attributable-reject guard', () => {
 
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("declares an optional loopback"));
     expect(result).toMatchObject({ ok: true, gateStepId: 'approve-idea', outcome: 'reject' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Orchestrated-plane side effects — and the PROGRAMMATIC gate's exclusion from
+// them, which a `gate: 'approve-design'` payload must not undo.
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — orchestrated gate side-effects arm', () => {
+  /** Boot the singleton and spy on apply; returns the calls the arm made. */
+  function bootSideEffects(db: Database.Database): GateSideEffectArgs[] {
+    GateSideEffects.initialize({
+      db: dbAdapter(db),
+      snapshotBaseDir: '/tmp/cyboflow-test-snapshots',
+      loadPrototypeHtml: async () => null,
+    });
+    const applied: GateSideEffectArgs[] = [];
+    vi.spyOn(GateSideEffects.prototype, 'apply').mockImplementation(async (args: GateSideEffectArgs) => {
+      applied.push(args);
+    });
+    return applied;
+  }
+
+  afterEach(() => {
+    GateSideEffects._resetForTesting();
+  });
+
+  it('does NOT fire for a programmatic approve-design gate whose payload now carries the freshness bound', async () => {
+    // The gate row mints with `{kind:'decision', gate:'approve-design',
+    // reviewReportedSince}` since the FB-9 follow-up, so the payload discriminant
+    // the orchestrated arm keys on now MATCHES. The source-prefix check
+    // (`gateStepId !== null`) is what must still exclude it — otherwise the
+    // programmatic plane's side effects would run TWICE, and the second pass
+    // would arrive with no reviewItemId and therefore no bound at all.
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_prog_design',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-prog',
+      payloadJson: JSON.stringify({
+        kind: 'decision',
+        gate: 'approve-design',
+        reviewReportedSince: '2026-09-20T11:00:00.000Z',
+      }),
+    });
+    const applied = bootSideEffects(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_prog_design', outcome: 'approve' }),
+      makeDeps(db),
+    );
+
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'approve' });
+    expect(applied).toEqual([]);
+  });
+
+  it('still fires for a genuinely ORCHESTRATED approve-design gate (agent source, payload discriminant)', async () => {
+    // The negative control for the test above: nothing about the new payload
+    // field narrowed the arm that is SUPPOSED to run here.
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_orch_design',
+      kind: 'decision',
+      source: 'agent:planner',
+      blocking: true,
+      runId: 'run-orch',
+      payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-design' }),
+    });
+    const applied = bootSideEffects(db);
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_orch_design', outcome: 'approve' }), makeDeps(db));
+
+    expect(applied).toEqual([
+      { runId: 'run-orch', stepId: 'approve-design', decision: 'approve', resolution: 'approve' },
+    ]);
+    // Unbounded by construction: the orchestrated plane has no walk, so no id.
+    expect(applied[0]).not.toHaveProperty('reviewItemId');
   });
 });

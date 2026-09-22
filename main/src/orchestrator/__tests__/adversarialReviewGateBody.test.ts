@@ -382,6 +382,116 @@ describe('composeAdversarialReviewGateBody', () => {
   });
 });
 
+describe('composeAdversarialReviewGateBody freshness bound', () => {
+  const STALE = '2026-09-20T10:00:00.000Z';
+  const FRESH = '2026-09-20T12:00:00.000Z';
+  const BOUND = Date.parse('2026-09-20T11:00:00.000Z');
+
+  const STALE_LEAD =
+    "**No adversarial review this round.** The reviewer did not report a critique for the design you are looking at. The Adversarial review tab still shows the previous round's critique, which does not describe the current design, and Approve files no accepted-risk findings from it.";
+
+  it('composes THIS round\'s critique unchanged when the artifact is fresh', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, FRESH);
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND });
+    expect(body).toContain('The adversarial reviewer raised **2 blocking defects** and 1 advisory finding.');
+    expect(body).toContain('**AR-1** — The spend flow has no error state');
+    // Byte-identical to the unbounded composition for a fresh artifact.
+    expect(body).toBe(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1'));
+  });
+
+  it('tells the human the tab is a PREVIOUS round when the artifact predates the bound', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, STALE);
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND });
+    expect(body).not.toBeNull();
+    expect(body).toContain(STALE_LEAD);
+    // The previous round's verdict must not leak through anywhere in the body.
+    expect(body).not.toContain('The adversarial reviewer raised');
+    expect(body).not.toContain('AR-1');
+    expect(body).not.toContain('**Blocking:**');
+    // The same two buttons, worded for a body with no findings above: the footer
+    // must not promise to log "every finding above" under a lead that just said
+    // Approve files nothing.
+    expect(body).toContain('**Your two choices:**');
+    expect(body).toContain('- **Revise** — rerun planning. The design steps run again and the reviewer re-reviews the result.');
+    expect(body).toContain("- **Approve** — continue. The previous round's critique is not logged as accepted risks; the run moves on.");
+    expect(body).not.toContain('with these findings as feedback');
+    expect(body).not.toContain('Every finding above is logged');
+  });
+
+  it('returns null, not the stale notice, when the stale row holds no readable critique', () => {
+    // A row reported before the bound whose payload carries no markdown: there is
+    // no previous round's critique in the tab to warn about, so the notice would
+    // assert something untrue. Today's null (the generic gate body) is the answer.
+    const db = buildDb();
+    db.prepare(
+      'INSERT INTO artifacts (id, run_id, atype, payload_json, reported_at) VALUES (?, ?, ?, ?, ?)',
+    ).run('art-run-1', 'run-1', 'adversarial-review', JSON.stringify({ nope: 1 }), STALE);
+
+    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND })).toBeNull();
+  });
+
+  it('carries the revisions-so-far line into the stale notice', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, STALE);
+    seedGateResolution(db, 'run-1', ['revise', 'revise: drop AR-11']);
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND });
+    expect(body).toContain(STALE_LEAD);
+    expect(body).toContain('**Revisions so far this run: 2.**');
+  });
+
+  it('omits the revisions line from the stale notice when nothing has been revised yet', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, STALE);
+
+    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND })).toBe(
+      [
+        STALE_LEAD,
+        '',
+        '**Your two choices:**',
+        '',
+        '- **Revise** — rerun planning. The design steps run again and the reviewer re-reviews the result. Use this when the design has to change before anything is built.',
+        "- **Approve** — continue. The previous round's critique is not logged as accepted risks; the run moves on.",
+      ].join('\n'),
+    );
+  });
+
+  it('still returns null under a bound when the run has NO artifact at all', () => {
+    const db = buildDb();
+    expect(composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND })).toBeNull();
+  });
+
+  it('is UNBOUNDED without opts, even for an ancient artifact', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, '2020-01-01T00:00:00.000Z');
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1');
+    expect(body).toContain('2 blocking defects');
+    expect(body).not.toContain('No adversarial review this round');
+  });
+
+  it('treats a NULL reported_at as unknown age — no constraint', () => {
+    const db = buildDb();
+    seedReview(db, 'run-1', REVIEW_DOC, null);
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND });
+    expect(body).toContain('2 blocking defects');
+    expect(body).not.toContain('No adversarial review this round');
+  });
+
+  it('treats a pre-143 table with no reported_at column as unknown age — no constraint', () => {
+    const db = buildLegacyDb();
+
+    const body = composeAdversarialReviewGateBody(dbAdapter(db), 'run-1', { reportedSinceMs: BOUND });
+    expect(body).toContain('2 blocking defects');
+    expect(body).not.toContain('No adversarial review this round');
+  });
+});
+
 describe('countApproveDesignRevisionsUsed', () => {
   it('counts only RESOLVED approve-design gates of THIS run', () => {
     const db = buildDb();

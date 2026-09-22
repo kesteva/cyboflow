@@ -1564,6 +1564,31 @@ describe('ProgrammaticRunHost.requestHumanGate — the onOpened hook', () => {
   });
 });
 
+describe('ProgrammaticRunHost.requestHumanGate — the review freshness bound', () => {
+  it("forwards the ctx's reviewReportedSinceMs into the resolver request", async () => {
+    const gate = makeGate('approve');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate });
+
+    await host.requestHumanGate(step({ id: 'approve-design' }), {
+      ...ctx,
+      reviewReportedSinceMs: 1_758_364_800_000,
+    });
+
+    expect(gate.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewReportedSinceMs: 1_758_364_800_000 }),
+    );
+  });
+
+  it('OMITS the key entirely when the walk holds no bound (never an explicit undefined)', async () => {
+    const gate = makeGate('approve');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate });
+
+    await host.requestHumanGate(step({ id: 'approve-design' }), ctx);
+
+    expect(gate.resolve.mock.calls[0][0]).not.toHaveProperty('reviewReportedSinceMs');
+  });
+});
+
 describe('firstSentence', () => {
   it('takes the first terminated sentence, or the whole text when there is none', () => {
     expect(firstSentence('AR-1 is cosmetic. It costs nothing.')).toBe('AR-1 is cosmetic.');

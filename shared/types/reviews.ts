@@ -254,6 +254,16 @@ export interface DecisionPayload {
    * exact same questions/options. The chosen option label becomes the resume text.
    */
   recoveredQuestions?: QuestionPayload[];
+  /**
+   * Only for a PROGRAMMATIC `gate: 'approve-design'` (source
+   * `gate:human-step:approve-design`): the walk's adversarial-review freshness
+   * bound at the instant the gate opened, ISO-8601 UTC. The gate body was
+   * composed from a critique reported at or after this instant only, and the
+   * resolve-time accepted-risk filing applies the same bound, so Approve never
+   * files a previous round's entries as risks the human weighed. Absent on an
+   * orchestrated-plane gate and on a gate opened without a bound (no constraint).
+   */
+  reviewReportedSince?: string;
   /** (experiment-comparison) the experiment whose comparison is ready. */
   experimentId?: string;
   /** (experiment-comparison) the aggregate pairwise preference. */

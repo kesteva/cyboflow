@@ -45,8 +45,8 @@ export interface HumanGateWiringDeps {
 export function buildReviewQueueHumanGate(deps: HumanGateWiringDeps): ReviewQueueHumanGate {
   return new ReviewQueueHumanGate(
     {
-      openHumanGate: (runId, stepId, stepName, gateHeader) =>
-        HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName, gateHeader),
+      openHumanGate: (runId, stepId, stepName, gateHeader, opts) =>
+        HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName, gateHeader, opts),
       findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
       maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
       readGateItem: (reviewItemId) => HumanStepManager.getInstance().readGateItem(reviewItemId),
@@ -60,6 +60,10 @@ export function buildReviewQueueHumanGate(deps: HumanGateWiringDeps): ReviewQueu
           // null note must never sniff to 'approve' and bind a declined design.
           decision: args.dismissed ? 'reject' : gateDecisionFromResolution(args.resolution),
           resolution: args.resolution,
+          // The settled gate row. The approve-design arm reads the
+          // `reviewReportedSince` bound it was MINTED with, so Approve files
+          // accepted risks only from the critique the human was actually shown.
+          ...(args.reviewItemId !== undefined ? { reviewItemId: args.reviewItemId } : {}),
         }),
     },
     deps.events,
