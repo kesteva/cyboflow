@@ -204,8 +204,10 @@ vi.mock('../../../../utils/api', () => ({
       continue: vi.fn().mockResolvedValue({ success: true }),
     },
     models: {
-      // Provider-keyed: only the Codex picker has a discovered catalog here, so
-      // Claude keeps rendering exactly its four pinned aliases.
+      // Provider-keyed: only the Codex and OMP pickers have a discovered
+      // catalog here, so Claude keeps rendering exactly its four pinned aliases.
+      // The OMP rows mirror the live openrouter ordering: Fable is the FIRST
+      // row, so a stale value would make the native <select> display it.
       getCatalog: vi.fn(async (provider: string) =>
         provider === 'codex'
           ? {
@@ -215,7 +217,17 @@ vi.mock('../../../../utils/api', () => ({
                 defaultModel: 'gpt-5.4',
               },
             }
-          : { success: true, data: { models: [], defaultModel: null } }),
+          : provider === 'omp'
+            ? {
+                success: true,
+                data: {
+                  models: [
+                    { id: 'openrouter/~anthropic/claude-fable-latest', label: 'Claude Fable Latest', ompProvider: 'openrouter' },
+                    { id: 'openrouter/auto', label: 'Auto', ompProvider: 'openrouter' },
+                  ],
+                },
+              }
+            : { success: true, data: { models: [], defaultModel: null } }),
     },
   },
 }));
@@ -1589,6 +1601,30 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
     });
     await selectUltracodeAndConfigure();
     expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('fable');
+  });
+
+  it('seeds OpenRouter auto (not the first catalog row) when the runtime flips to OMP, and Opus on the way back', async () => {
+    act(() => {
+      useConfigStore.setState({
+        config: { agentProviderAccess: { omp: true } } as unknown as AppConfig,
+      });
+    });
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
+
+    // The Claude alias is dropped at spawn under the OMP provider, so leaving
+    // it in place would show the catalog's first row (Fable) over a launch
+    // that ran on OMP's own config default. The OMP leg seeds openrouter/auto.
+    await chooseRuntime('omp-sdk');
+    await waitFor(() => {
+      expect((screen.getByLabelText('Select OMP model') as HTMLSelectElement).value).toBe('openrouter/auto');
+    });
+    expect(screen.getByTestId('model-selector-omp-hint')).toHaveTextContent('Auto (openrouter)');
+
+    // The reverse coercion drops the OMP id back onto the Claude seed.
+    await chooseRuntime('claude-sdk');
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
   });
 
   it('seeds the quick card from runTypeDefaults.quick.model instead of the Opus floor', async () => {
