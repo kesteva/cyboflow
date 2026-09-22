@@ -31,12 +31,28 @@
  *   2. the target is non-empty and valid for its provider, that provider is
  *      enabled (Settings → Integrations) AND ready (installed + signed in —
  *      an enabled-but-missing CLI would fail non-systemically and burn budgets);
- *   3. the pending pause matches the caller's `reviewItemId` (when given);
+ *   3. the pending pause matches the caller's `reviewItemId` (when given), and
+ *      is not a TRIAGE-origin pause (only the run's Claude-only supervisor hit
+ *      the limit — re-targeting the step agents cannot move it, and the retry
+ *      would replay every parked lane for nothing);
  *   4. the agent key set resolves non-empty;
  *   5. write (read-modify-write inside one transaction; each covered agent's
  *      entry is REPLACED wholesale by the normalized target);
  *   6. resolve the pending pause (retry);
  *   7. return.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * ONE SWITCH / REVERT AT A TIME PER RUN
+ * ───────────────────────────────────────────────────────────────────────────
+ * Switch and Revert are serialized per run ({@link withRunLock}). Unserialized,
+ * two overlapping switches (two windows, a double submit) would BOTH validate
+ * the same pending pause, last-write-wins the override column, and race to
+ * resolve the item — the operator told "target A retried" while the resumed
+ * spawn reads target B. Serialized, the second request runs only after the
+ * first has resolved the pause, finds nothing pending, and refuses
+ * (`item_not_pending`) without writing; a Revert queued behind a switch clears
+ * the switch it was queued behind, which is what a Revert means. The lock is
+ * process-local: one Electron main process owns the DB.
  *
  * Standalone-typecheck invariant: reads/writes through the narrow `DatabaseLike`
  * surface and pure shared types only — no 'electron' / 'better-sqlite3' /
@@ -103,7 +119,8 @@ export type SwitchRunAgentsNoOpReason =
   | 'item_not_pending'
   | 'item_mismatch'
   | 'no_agents'
-  | 'step_scope_unavailable';
+  | 'step_scope_unavailable'
+  | 'origin_triage';
 
 export type SwitchRunAgentsResult =
   | { delivered: true; agentKeys: string[]; target: RunAgentTarget; retried: boolean; note?: string }
@@ -252,6 +269,31 @@ function describeSwitch(keys: readonly string[], target: RunAgentTarget): string
   );
 }
 
+/**
+ * Per-run serialization of switch / clear (see the header). A promise chain per
+ * run id: each caller awaits the previous caller's completion (success OR
+ * failure) before running; the entry is dropped once the last queued caller
+ * finishes so the map never grows past the runs currently being acted on.
+ */
+const runLocks = new Map<string, Promise<void>>();
+
+async function withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = runLocks.get(runId) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const chained = prev.then(() => gate);
+  runLocks.set(runId, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (runLocks.get(runId) === chained) runLocks.delete(runId);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -262,7 +304,14 @@ function describeSwitch(keys: readonly string[], target: RunAgentTarget): string
  * order. With no pending pause and no `reviewItemId` it is an override-only
  * write that applies from the next spawn (`retried: false`).
  */
-export async function switchRunAgentsHandler(
+export function switchRunAgentsHandler(
+  input: SwitchRunAgentsInput,
+  deps: SwitchRunAgentsDeps,
+): Promise<SwitchRunAgentsResult> {
+  return withRunLock(input.runId, () => switchRunAgentsLocked(input, deps));
+}
+
+async function switchRunAgentsLocked(
   input: SwitchRunAgentsInput,
   deps: SwitchRunAgentsDeps,
 ): Promise<SwitchRunAgentsResult> {
@@ -297,6 +346,11 @@ export async function switchRunAgentsHandler(
     if (pending.reviewItemId !== input.reviewItemId) return { noOp: 'item_mismatch' };
   }
   const payload = pending?.payload ?? null;
+  // A triage-origin pause: only the lane-triage consult (the run's Claude-only
+  // supervisor) hit the limit. No step-agent target moves it, and resolving the
+  // pause would replay every parked lane from inner step 0 for nothing — refuse
+  // (the card hides the switch for this origin; this is the defense in depth).
+  if (payload?.origin === 'triage') return { noOp: 'origin_triage' };
 
   // ── 4. The agents to re-target ───────────────────────────────────────────
   let keys: string[];
@@ -379,13 +433,15 @@ function joinNotes(a: string | undefined, b: string): string {
 export function clearRunAgentTargets(
   input: ClearRunAgentsInput,
   deps: Pick<SwitchRunAgentsDeps, 'db' | 'logger'>,
-): ClearRunAgentTargetsResult {
-  const run = readRun(deps.db, input.runId);
-  if (!run) return { noOp: 'not_found' };
-  if (run.execution_model !== 'programmatic') return { noOp: 'not_programmatic' };
-  deps.db
-    .prepare('UPDATE workflow_runs SET agent_target_overrides_json = NULL WHERE id = ?')
-    .run(input.runId);
-  deps.logger?.info('[switchRunAgents] run agent targets cleared', { runId: input.runId });
-  return { delivered: true };
+): Promise<ClearRunAgentTargetsResult> {
+  return withRunLock(input.runId, async () => {
+    const run = readRun(deps.db, input.runId);
+    if (!run) return { noOp: 'not_found' };
+    if (run.execution_model !== 'programmatic') return { noOp: 'not_programmatic' };
+    deps.db
+      .prepare('UPDATE workflow_runs SET agent_target_overrides_json = NULL WHERE id = ?')
+      .run(input.runId);
+    deps.logger?.info('[switchRunAgents] run agent targets cleared', { runId: input.runId });
+    return { delivered: true };
+  });
 }

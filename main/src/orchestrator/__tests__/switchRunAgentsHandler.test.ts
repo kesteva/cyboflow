@@ -196,6 +196,31 @@ describe('switchRunAgentsHandler — refusals are decided before any write', () 
     ).resolves.toEqual({ noOp: 'step_scope_unavailable' });
   });
 
+  it('origin_triage when the pending pause is a triage-origin one (no step-agent target moves the supervisor)', async () => {
+    const { db, runId } = makeDb();
+    const deps = makeDeps(db, {
+      findPendingPause: async () =>
+        pause({
+          payload: {
+            kind: 'decision',
+            gate: 'systemic-pause',
+            stepId: 'implement',
+            agentKeys: ['implement', 'code-review'],
+            blockedProvider: 'claude',
+            origin: 'triage',
+            fanOut: true,
+          },
+        }),
+    });
+    await expect(switchRunAgentsHandler(input(runId), deps)).resolves.toEqual({ noOp: 'origin_triage' });
+    // Also without a reviewItemId: the pending pause would still be the one resolved.
+    await expect(switchRunAgentsHandler(input(runId, { reviewItemId: undefined }), deps)).resolves.toEqual({
+      noOp: 'origin_triage',
+    });
+    expect(overridesJson(db, runId)).toBeNull();
+    expect(deps.resolveItem).not.toHaveBeenCalled();
+  });
+
   it('no_agents when nothing resolves onto the blocked provider', async () => {
     const { db, runId } = makeDb();
     const deps = makeDeps(db, {
@@ -355,23 +380,128 @@ describe('switchRunAgentsHandler — write + retry', () => {
   });
 });
 
+describe('switchRunAgentsHandler — one switch / revert at a time per run', () => {
+  /** A pause that stays pending until the first resolve lands (as the router would report). */
+  function pendingUntilResolved(db: Database.Database): ReturnType<typeof makeDeps> {
+    let settled = false;
+    const resolveItem = vi.fn(async () => {
+      if (settled) return 'already_settled' as const;
+      settled = true;
+      return 'resolved' as const;
+    });
+    return makeDeps(db, {
+      findPendingPause: async () => (settled ? null : pause()),
+      resolveItem,
+    });
+  }
+
+  it('two overlapping switches: the first delivers + retries, the second refuses without writing', async () => {
+    const { db, runId } = makeDb();
+    const deps = pendingUntilResolved(db);
+    const [first, second] = await Promise.all([
+      switchRunAgentsHandler(input(runId, { target: { runtime: 'codex-sdk', providerModel: 'gpt-a' } }), deps),
+      switchRunAgentsHandler(input(runId, { target: { runtime: 'omp-sdk', providerModel: 'omp-b' } }), deps),
+    ]);
+    expect(first).toMatchObject({ delivered: true, retried: true });
+    expect(second).toEqual({ noOp: 'item_not_pending' });
+    expect(deps.resolveItem).toHaveBeenCalledTimes(1);
+    // The column holds the target the operator was told was retried — not the loser's.
+    const stored = readRunAgentTargets(dbAdapter(db), runId);
+    expect(stored?.implement).toMatchObject({ runtime: 'codex-sdk', providerModel: 'gpt-a' });
+  });
+
+  it('a switch and a revert run in call order, never interleaved', async () => {
+    const { db, runId } = makeDb();
+    const deps = makeDeps(db);
+    const [sw, cleared] = await Promise.all([
+      switchRunAgentsHandler(input(runId), deps),
+      clearRunAgentTargets({ runId }, deps),
+    ]);
+    expect(sw).toMatchObject({ delivered: true, retried: true });
+    expect(cleared).toEqual({ delivered: true });
+    // The revert was queued behind the switch, so it cleared it.
+    expect(overridesJson(db, runId)).toBeNull();
+
+    const [cleared2, sw2] = await Promise.all([
+      clearRunAgentTargets({ runId }, deps),
+      switchRunAgentsHandler(input(runId), deps),
+    ]);
+    expect(cleared2).toEqual({ delivered: true });
+    expect(sw2).toMatchObject({ delivered: true });
+    expect(readRunAgentTargets(dbAdapter(db), runId)?.implement).toMatchObject({ runtime: 'codex-sdk' });
+  });
+
+  it('a failing call releases the lock for the next one', async () => {
+    const { db, runId } = makeDb();
+    const boom = makeDeps(db, {
+      isProviderReady: async () => {
+        throw new Error('probe exploded');
+      },
+    });
+    // A throwing readiness probe is caught (provider_unavailable) — force a real
+    // throw through the DB seam instead so the lock's finally path is exercised.
+    const throwing = makeDeps(db, {
+      listRunAgentTargets: () => {
+        throw new Error('listing exploded');
+      },
+    });
+    await expect(switchRunAgentsHandler(input(runId), throwing)).rejects.toThrow('listing exploded');
+    await expect(switchRunAgentsHandler(input(runId), boom)).resolves.toEqual({ noOp: 'provider_unavailable' });
+    await expect(switchRunAgentsHandler(input(runId), makeDeps(db))).resolves.toMatchObject({ delivered: true });
+  });
+
+  it('different runs do not serialize against each other', async () => {
+    const { db, runId } = makeDb();
+    const { runId: otherRunId } = seedRun(db, { status: 'awaiting_review' });
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run(otherRunId);
+    let releaseFirst: () => void = () => {};
+    const firstBlocked = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    const slow = makeDeps(db, {
+      isProviderReady: async () => {
+        await firstBlocked;
+        return true;
+      },
+    });
+    const order: string[] = [];
+    const a = switchRunAgentsHandler(input(runId), slow).then((r) => {
+      order.push('a');
+      return r;
+    });
+    const b = switchRunAgentsHandler(input(otherRunId), makeDeps(db)).then((r) => {
+      order.push('b');
+      return r;
+    });
+    await b;
+    expect(order).toEqual(['b']);
+    releaseFirst();
+    await a;
+    expect(order).toEqual(['b', 'a']);
+  });
+});
+
 describe('clearRunAgentTargets / readRunAgentTargets', () => {
-  it('clears the column for a programmatic run', () => {
+  it('clears the column for a programmatic run', async () => {
     const { db, runId } = makeDb();
     db.prepare('UPDATE workflow_runs SET agent_target_overrides_json = ? WHERE id = ?').run(
       JSON.stringify({ implement: { runtime: 'codex-sdk' } }),
       runId,
     );
     expect(readRunAgentTargets(dbAdapter(db), runId)).toEqual({ implement: { runtime: 'codex-sdk' } });
-    expect(clearRunAgentTargets({ runId }, { db: dbAdapter(db) })).toEqual({ delivered: true });
+    await expect(clearRunAgentTargets({ runId }, { db: dbAdapter(db) })).resolves.toEqual({ delivered: true });
     expect(overridesJson(db, runId)).toBeNull();
     expect(readRunAgentTargets(dbAdapter(db), runId)).toBeNull();
   });
 
-  it('refuses unknown and orchestrated runs', () => {
+  it('refuses unknown and orchestrated runs', async () => {
     const { db, runId } = makeDb({ programmatic: false });
-    expect(clearRunAgentTargets({ runId: 'nope' }, { db: dbAdapter(db) })).toEqual({ noOp: 'not_found' });
-    expect(clearRunAgentTargets({ runId }, { db: dbAdapter(db) })).toEqual({ noOp: 'not_programmatic' });
+    await expect(clearRunAgentTargets({ runId: 'nope' }, { db: dbAdapter(db) })).resolves.toEqual({
+      noOp: 'not_found',
+    });
+    await expect(clearRunAgentTargets({ runId }, { db: dbAdapter(db) })).resolves.toEqual({
+      noOp: 'not_programmatic',
+    });
   });
 
   it('readRunAgentTargets is null on a DB without the column (pre-144)', () => {

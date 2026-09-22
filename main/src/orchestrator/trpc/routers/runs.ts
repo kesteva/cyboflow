@@ -2579,7 +2579,7 @@ export const runsRouter = router({
    */
   clearRunAgentTargets: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
-    .mutation(({ input }): ClearRunAgentTargetsResult => {
+    .mutation(({ input }): Promise<ClearRunAgentTargetsResult> => {
       if (!switchRunAgentsDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',

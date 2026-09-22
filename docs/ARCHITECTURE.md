@@ -145,7 +145,9 @@ and **Stop waiting** (a dismiss; a `reject` outcome on this source is mapped to 
 `resolveReviewItemHandler.ts` in both composition roots, because the gate reads any resolve as a
 retry). The switch (`switchRunAgentsHandler.ts`, tRPC `runs.switchPausedStepAgents`) validates the
 target, its provider's Settings toggle, and its readiness (installed and signed in) BEFORE its one
-write, then resolves the pause. That write goes to `workflow_runs.agent_target_overrides_json`
+write, then resolves the pause; switch and revert are serialized per run, so an overlapping second
+switch runs after the first resolved the pause and refuses (`item_not_pending`) instead of
+last-write-winning the column. That write goes to `workflow_runs.agent_target_overrides_json`
 (migration 144): an explicitly MUTABLE operator directive, unlike the launch stamps, and the
 highest-precedence target layer of `resolveRunEffectiveAgents`. The layers run builtin →
 project `agent_overrides` → the frozen spec's `agentConfigs` → variant deltas → run overrides, with
@@ -155,8 +157,9 @@ Claude and Codex have one). A fan-out retry replays every parked lane from inner
 fan-out pause covers EVERY inner-chain agent and offers no step-only scope. The run page's override
 chip reverts via `runs.clearRunAgentTargets`, which takes effect at the next spawn. Two Claude-only
 surfaces are NOT moved by a switch: the lane-triage consult and the run monitor both run on the
-run's supervisor. An `origin: 'triage'` pause says so, and a monitor "switch agents" chat action was
-deferred because it could not execute under a Claude limit. Known gaps: run close-out kills only the
+run's supervisor. An `origin: 'triage'` pause says so, offers no switch (the handler refuses one with
+`origin_triage`), and a monitor "switch agents" chat action was deferred because it could not
+execute under a Claude limit. Known gaps: run close-out kills only the
 launch-stamped provider's manager after a mid-run provider flip (pre-existing with per-step mixing),
 and Insights and A/B buckets still key on the launch stamps, not on the agents that actually ran.
 
