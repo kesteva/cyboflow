@@ -203,7 +203,22 @@ describe('SpawnStepRunner', () => {
 
     const result = await runner.runStep(step({ id: 'sprint-verify' }), ctx);
 
-    expect(result).toEqual({ status: 'failed', error, systemic: true });
+    // provider/runtime: what the attempt ran on (the run default here — no pin).
+    expect(result).toEqual({ status: 'failed', error, systemic: true, provider: 'claude', runtime: 'claude-sdk' });
+  });
+
+  it('stamps the PINNED provider/runtime on a failed result (the pause names what was blocked)', async () => {
+    const spawner = makeSpawner(() => Promise.reject(new Error("You've hit your session limit")));
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      resolveStepAgent: () => ({ runtime: 'codex-sdk', providerModel: 'gpt-5.6-sol' }),
+    });
+
+    const result = await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    expect(result.status).toBe('failed');
+    expect(result.provider).toBe('codex');
+    expect(result.runtime).toBe('codex-sdk');
   });
 
   it('omits agentPermissionMode from the spawn when none is bound', async () => {
@@ -663,6 +678,43 @@ describe('SpawnStepRunner', () => {
 
       const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
       expect(passed.model).toBe('gpt-5.2-codex');
+    });
+
+    it('honors a providerModel-ONLY resolver return on a non-Claude run (a run-level switch that set only the model)', async () => {
+      // The index.ts resolver guard used to drop an agent carrying ONLY a
+      // providerModel; the runner itself must honour one when it arrives.
+      const spawner = makeSpawner();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const runner = new SpawnStepRunner(
+        spawner,
+        {
+          ...opts,
+          model: 'gpt-5.6-codex',
+          promptRenderContext: { provider: 'codex', runtime: 'codex-sdk', executionModel: 'programmatic' },
+          resolveStepAgent: () => ({ providerModel: 'gpt-5.6-sol' }),
+        },
+        logger,
+      );
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('gpt-5.6-sol');
+      // One info line per pinned spawn names where the step actually ran.
+      expect(logger.info).toHaveBeenCalledWith(
+        "[SpawnStepRunner] step 'implement' spawning on codex/codex-sdk model=gpt-5.6-sol effort=default",
+        expect.objectContaining({ stepId: 'implement' }),
+      );
+    });
+
+    it('logs nothing extra for an UNPINNED spawn', async () => {
+      const spawner = makeSpawner();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const runner = new SpawnStepRunner(spawner, { ...opts, resolveStepAgent: () => undefined }, logger);
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      expect(logger.info).not.toHaveBeenCalled();
     });
 
     it('resolveStepAgent returning undefined for this step (agent unoverridden) omits agentProvider/agentRuntime and keeps opts.model', async () => {

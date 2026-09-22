@@ -29,6 +29,7 @@ import type {
   ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
 import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { PendingBlockingItem } from './blockingItemsGate';
 
 /**
@@ -69,6 +70,15 @@ export interface StepRunResult {
    * (interactive, codex).
    */
   resultText?: string | null;
+  /**
+   * The provider this attempt actually spawned under (the per-agent runtime pin's
+   * provider, else the run's). Set ONLY on a `failed` result, so the controller
+   * can tell a systemic pause WHICH provider was blocked (the pause item's
+   * `blockedProvider`, which scopes "Switch runtime & retry").
+   */
+  provider?: AgentProvider;
+  /** The runtime this attempt spawned on (pin, else the run's). Set ONLY on `failed`. */
+  runtime?: string;
 }
 
 /**

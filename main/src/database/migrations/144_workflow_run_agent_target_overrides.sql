@@ -1,0 +1,42 @@
+-- Migration 144: per-run, operator-written AGENT-TARGET overrides.
+--
+-- Design: "switch runtime/model for the blocked agents of a limit-paused
+-- programmatic run, then resume". When a PROGRAMMATIC run parks on a systemic
+-- pause (a Claude subscription/session limit, a provider overload, …) the human
+-- can re-target the blocked agents onto another runtime/model and retry at once,
+-- instead of waiting for the limit window to roll over.
+--
+--   workflow_runs.agent_target_overrides_json — JSON object
+--     { "<agentKey>": { runtime?, model?, providerModel?, effort? }, … }
+--   (shared/types/workflows.ts RunAgentTargetOverrides; parse ONLY through
+--   parseRunAgentTargetOverrides). NULL = no overrides.
+--
+-- EXPLICITLY MUTABLE — the opposite of the launch stamps around it (spec_hash,
+-- variant_id, tuning_level, runtime_mix, agent_provider/agent_runtime, model).
+-- Those are frozen at createRun and never rewritten; this column is an operator
+-- DIRECTIVE that changes mid-run. Its sole writer is
+-- main/src/orchestrator/switchRunAgentsHandler.ts (switch + clear). The spawn-side
+-- reader is resolveRunEffectiveAgents (agentOverlayWriter.ts), where it is the
+-- HIGHEST-precedence layer (after the frozen spec's agentConfigs and variant
+-- deltas, before prompt addenda) so it binds on the very next spawn; the only
+-- other reader is the runs.runAgentTargets query behind the run's override chip.
+-- Insights / A-B buckets keep keying on the launch stamps; nothing here
+-- re-attributes a run.
+--
+-- Named `agent_target_…` on purpose so it is never confused with
+-- workflow_variants.agent_overrides_json (a variant's Claude prompt/model deltas)
+-- or the agent_overrides table (project-scoped Agents-pane edits).
+--
+-- No CHECK (the JSON shape is validated at the parse seam, which drops malformed
+-- entries), no DEFAULT, no backfill: every existing run reads NULL = "no
+-- overrides", which is exactly today's behaviour. ALTER-only, so schema.sql is
+-- untouched (it carries none of the ALTER-added workflow_runs columns).
+--
+-- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support it.
+-- Re-running raises 'duplicate column name: agent_target_overrides_json', the
+-- idempotency signal runFileBasedMigrations() tolerates per statement.
+--
+-- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in a
+-- this.transaction(...) call.
+
+ALTER TABLE workflow_runs ADD COLUMN agent_target_overrides_json TEXT;

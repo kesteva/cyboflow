@@ -2777,7 +2777,7 @@ async function initializeServices(): Promise<boolean> {
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
       // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
       // written by the MCP workflow-config tools as well as the editor, so a pin
       // naming a provider the user switched off in Settings → Integrations can

@@ -445,6 +445,15 @@ export class SpawnStepRunner implements StepRunner {
     // §3c#2) — never captured at construction — so a mid-run mode change is
     // honored on the next step turn.
     const agentPermissionMode = this.opts.agentPermissionMode?.();
+    // One line per PINNED spawn (any per-agent runtime/model/effort — including a
+    // mid-run "Switch runtime & retry" override) so the log shows where each step
+    // actually ran; an unpinned step spawns exactly as the run says and logs nothing.
+    if (stepAgent && (stepAgent.runtime || stepAgent.model || stepAgent.providerModel || stepAgent.effort)) {
+      this.logger?.info(
+        `[SpawnStepRunner] step '${step.id}' spawning on ${effectiveProvider}/${renderCtx.runtime} model=${spawnModel ?? 'run default'} effort=${stepEffort ?? 'default'}`,
+        { runId: this.opts.runId, stepId: step.id },
+      );
+    }
     try {
       const outcome = await this.spawner.spawnCliProcess({
         panelId: this.opts.panelId,
@@ -490,7 +499,15 @@ export class SpawnStepRunner implements StepRunner {
       // Stamp systemic:true when the error text is an environment-level condition
       // (usage/rate limit, overload, auth) so the controller parks-and-retries
       // rather than consuming this step's retry/optional/loopback/triage budget.
-      return { status: 'failed', error, ...(isSystemicStepError(error) ? { systemic: true } : {}) };
+      // provider/runtime: what this attempt ran on, so a systemic pause can name the
+      // blocked provider (the operator's "Switch runtime & retry" scopes off it).
+      return {
+        status: 'failed',
+        error,
+        ...(isSystemicStepError(error) ? { systemic: true } : {}),
+        provider: effectiveProvider,
+        runtime: stepRuntime ?? baseRenderCtx.runtime,
+      };
     }
   }
 }
