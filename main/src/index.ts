@@ -74,7 +74,7 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
+import { listRunAgentTargets, resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
@@ -128,7 +128,8 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { buildSystemicPauseGate } from './orchestrator/systemicPauseGateWiring';
+import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
 import {
   DefaultMonitorSession,
@@ -157,7 +158,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -166,7 +167,7 @@ import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
 import { providerForRuntime } from '../../shared/types/agentRuntime';
-import { setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
+import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
@@ -3670,6 +3671,17 @@ async function initializeServices(): Promise<boolean> {
   // mutations are ops closures over this very services object now, not
   // ipcMain.handle registrations.
   sessionOps = createSessionOps(services);
+  // "Switch runtime & retry" on a limit-paused programmatic run (switchRunAgentsHandler.ts).
+  // Wired HERE, not beside setPauseRunDeps: its readiness probe needs this services object.
+  setSwitchRunAgentsDeps({
+    db: cyboflowDb,
+    isProviderEnabled: isAgentProviderAllowed,
+    isProviderReady: async (p) => (await detectProvider(p, services)).state === 'detected',
+    listRunAgentTargets: (runId) => listRunAgentTargets(rawDb, runId, cyboflowLogger),
+    findPendingPause: findPendingSystemicPause,
+    resolveItem: resolveSystemicPauseItem,
+    logger: cyboflowLogger,
+  });
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
