@@ -120,7 +120,17 @@ Then it rebuilds the **stable** variant at the tagged commit on the three native
 runners (arm64 `macos-latest`, x64 `macos-15-intel`, `windows-latest`), runs §4's
 checks as assertions, merges the per-arch `latest-mac.yml`, publishes the 12-file
 set to `stable/`, re-reads both live manifests, and cuts the GitHub release with
-the two stable DMGs and the Windows installer.
+the two stable DMGs and the Windows installer. The Windows job fails unless both
+the installer and the app exe carry a valid, timestamped Authenticode signature
+from the release identity. Once the feed is live, the `site` job fires the
+cyboflow-web Workers Builds deploy hook, so cyboflow.com re-stamps the new
+version from `CHANGELOG.md`.
+
+> **One-time setup for the site rebuild:** in Cloudflare, go to the cyboflow-web
+> Worker and open *Settings → Builds → Deploy Hooks*. Create a hook on `main`
+> and store its URL as this repo's `CYBOFLOW_WEB_DEPLOY_HOOK` Actions secret.
+> The URL is the credential. Without it the job only warns, and the site keeps
+> the old version until cyboflow-web next deploys.
 
 > **It is a rebuild, not a promotion.** A dev artifact can never become the
 > stable one — different `appId`, `productName`, feed URL and data dir.

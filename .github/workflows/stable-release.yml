@@ -314,3 +314,36 @@ jobs:
           done
           gh release view "$TAG" --json assets --jq '.assets[].name'
           echo "### GitHub release [$TAG](https://github.com/${{ github.repository }}/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"
+
+  # cyboflow.com stamps the current version into its pages (and rebakes the
+  # changelog fallback) at BUILD time, from this repo's CHANGELOG.md on main —
+  # so without a rebuild the site keeps naming the previous release until
+  # something else pushes to cyboflow-web. This fires its Workers Builds deploy
+  # hook once the new version is live on the feed. The hook URL is the
+  # credential (no auth header), hence a secret; absent → a warning, never a
+  # red release. Runs after publish rather than after the GitHub release: the
+  # site's download links point at the feed, not at the release page.
+  site:
+    name: Rebuild cyboflow.com
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger the cyboflow-web deploy hook
+        env:
+          HOOK: ${{ secrets.CYBOFLOW_WEB_DEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOOK" ]; then
+            echo "::warning::CYBOFLOW_WEB_DEPLOY_HOOK is not set — cyboflow.com will keep the previous version until cyboflow-web next deploys"
+            exit 0
+          fi
+          for i in 1 2 3; do
+            code=$(curl -sS -o resp.json -w '%{http_code}' -X POST "$HOOK") || code=000
+            case "$code" in 2*) break ;; esac
+            echo "deploy hook answered $code — retry $i"; sleep 10
+          done
+          case "$code" in
+            2*) echo "### cyboflow.com rebuild triggered for \`${{ needs.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY" ;;
+            *)  echo "::warning::deploy hook failed ($code) — trigger the cyboflow-web build by hand"; cat resp.json || true ;;
+          esac
