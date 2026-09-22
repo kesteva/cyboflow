@@ -54,7 +54,8 @@ import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
 import { SprintLaneStore } from '../sprintLaneStore';
-import { buildUserTextEvent, buildAssistantTextEvent } from './syntheticEvents';
+import { buildUserTextEvent, buildAssistantTextEvent, buildLoginRequiredEvent } from './syntheticEvents';
+import { isClaudeLoginRequiredError } from '../../../../shared/types/claudeAuth';
 import { isSystemicStepError } from './systemicError';
 
 // ---------------------------------------------------------------------------
@@ -2490,6 +2491,21 @@ export interface DefaultMonitorSessionDeps {
 const ANSWER_FAILED =
   'Sorry — I could not answer that right now (the monitor encountered an error). Please try again.';
 
+/**
+ * Rendered instead of {@link ANSWER_FAILED} when the query died on a missing or
+ * expired Claude login. "Please try again" is wrong advice there — every retry
+ * fails the same way until the user signs in — so the reply names the cause and
+ * `converseOnce` injects it as a login-failure row, which puts the sign-in card
+ * under it.
+ */
+const LOGIN_REQUIRED_REPLY =
+  "I can't reach Claude — your Claude Code login has expired or is missing. Sign in again below, then resend your question.";
+
+/** The fail-soft reply for a thrown monitor query: login-specific when it can be. */
+function answerFailedReply(message: string): string {
+  return isClaudeLoginRequiredError(message) ? LOGIN_REQUIRED_REPLY : ANSWER_FAILED;
+}
+
 /** Rendered when the monitor returns a successful-but-empty answer (so a turn always renders). */
 const NO_ANSWER = 'I could not produce an answer for that.';
 
@@ -2997,11 +3013,12 @@ export class DefaultMonitorSession implements MonitorSession {
       });
       return reply;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn('[Monitor] answer failed (fail-soft)', {
         runId: this.ctx.runId,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
-      return ANSWER_FAILED;
+      return answerFailedReply(message);
     }
   }
 
@@ -3039,7 +3056,9 @@ export class DefaultMonitorSession implements MonitorSession {
     // render as nothing — the user would see their question with no answer. Always
     // render something (review: empty-monitor-reply-dropped).
     const rendered = reply.trim().length > 0 ? reply : NO_ANSWER;
-    this.tryInject(buildAssistantTextEvent(rendered));
+    this.tryInject(
+      rendered === LOGIN_REQUIRED_REPLY ? buildLoginRequiredEvent(rendered) : buildAssistantTextEvent(rendered),
+    );
     await this.handleControlAndAction(control, action);
     return rendered;
   }
@@ -3135,11 +3154,12 @@ export class DefaultMonitorSession implements MonitorSession {
       });
       return parseConverseOutput(structured);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn('[Monitor] action-capable answer failed (fail-soft)', {
         runId: this.ctx.runId,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
-      return { reply: ANSWER_FAILED };
+      return { reply: answerFailedReply(message) };
     }
   }
 

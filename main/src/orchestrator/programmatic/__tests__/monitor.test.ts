@@ -1369,6 +1369,71 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     expect(injected.at(-1)?.text.toLowerCase()).toContain('sorry');
   });
 
+  describe('a query that dies on a dead Claude login', () => {
+    const LOGIN_ERROR = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+
+    function rawInjected(): { injectEvent: (event: unknown) => void; events: Array<Record<string, unknown>> } {
+      const events: Array<Record<string, unknown>> = [];
+      return { injectEvent: (event: unknown) => events.push(event as Record<string, unknown>), events };
+    }
+
+    it('replies with a sign-in prompt (not "try again") as an authentication_failed row — action-capable path', async () => {
+      const { reader } = fakeHistory({ conversation: [], steps: [] });
+      const { injectEvent, events } = rawInjected();
+      const session = new DefaultMonitorSession({
+        ctx,
+        history: reader,
+        structuredQuery: vi.fn().mockRejectedValue(new Error(LOGIN_ERROR)),
+        textQuery: vi.fn(),
+        injectEvent,
+        actions: makeActions(),
+      });
+
+      const reply = await session.converse('what is happening?');
+
+      expect(reply).toMatch(/sign in/i);
+      expect(reply).not.toMatch(/try again/i);
+      const last = events.at(-1) as { error?: string; message: { model: string } };
+      expect(last.error).toBe('authentication_failed');
+      expect(last.message.model).toBe('<synthetic>');
+    });
+
+    it('does the same on the plain answer() path (no actions wired)', async () => {
+      const { reader } = fakeHistory({ conversation: [], steps: [] });
+      const { injectEvent, events } = rawInjected();
+      const session = new DefaultMonitorSession({
+        ctx,
+        history: reader,
+        structuredQuery: vi.fn(),
+        textQuery: vi.fn().mockRejectedValue(new Error('Not logged in · Please run /login')),
+        injectEvent,
+      });
+
+      const reply = await session.converse('status?');
+
+      expect(reply).toMatch(/sign in/i);
+      expect((events.at(-1) as { error?: string }).error).toBe('authentication_failed');
+    });
+
+    it('keeps the generic apology for an external-credential failure a sign-in cannot fix', async () => {
+      const { reader } = fakeHistory({ conversation: [], steps: [] });
+      const { injectEvent, events } = rawInjected();
+      const session = new DefaultMonitorSession({
+        ctx,
+        history: reader,
+        structuredQuery: vi.fn().mockRejectedValue(new Error('Invalid API key · Fix external API key')),
+        textQuery: vi.fn(),
+        injectEvent,
+        actions: makeActions(),
+      });
+
+      const reply = await session.converse('status?');
+
+      expect(reply.toLowerCase()).toContain('sorry');
+      expect((events.at(-1) as { error?: string }).error).toBeUndefined();
+    });
+  });
+
   it('a switch_to_orchestrated action calls switchToOrchestrated(reason) and injects a ▶-prefixed success turn; retryStep untouched', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
     const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
