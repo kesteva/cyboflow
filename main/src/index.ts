@@ -1976,7 +1976,6 @@ async function initializeServices(): Promise<boolean> {
     getMainWindow: () => mainWindow
   });
 
-
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
   // singletons assembled with the rest of AppServices (not lazy on first IPC).
@@ -4256,24 +4255,7 @@ app.whenReady().then(async () => {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
     }
 
-    // Boot backfill (TASK-296): heal sessions whose `markComplete` ran under the
-    // OLD bookkeeping-only stamp before this task landed — outcome='completed'
-    // but the sprint's integrated lanes never moved to Done because the
-    // close-out never ran. Fail-soft internally; never blocks boot.
-    try {
-      const landedSprintBackfill = await backfillLandedSprintCloseOuts(databaseService, loggerLike);
-      if (landedSprintBackfill.sessionsFixed > 0) {
-        console.log(
-          `[Main] Boot backfill: closed out ${landedSprintBackfill.sessionsFixed} landed sprint session(s) left incomplete by the pre-TASK-296 markComplete stamp (moved ${landedSprintBackfill.tasksMoved} task(s) to Done)`,
-        );
-      }
-    } catch (landedBackfillErr) {
-      console.warn(
-        '[Main] landed-sprint-close-out backfill failed (continuing boot):',
-        landedBackfillErr instanceof Error ? landedBackfillErr.message : String(landedBackfillErr),
-      );
-    }
-
+    await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
     // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
     // a previous process (state intent/snapshotted/folded) forward through the SAME
     // step functions the first-run approve uses — a crash after the body fold cannot
