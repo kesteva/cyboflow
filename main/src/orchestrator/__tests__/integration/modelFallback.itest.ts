@@ -13,7 +13,7 @@
  *
  * Asserts:
  *   1. exactly TWO `query()` calls — attempt 1 pinned to `claude-fable-5-1`, attempt
- *      2 (the retry) pinned to Opus (`claude-opus-5[1m]`, the resolved fallback);
+ *      2 (the retry) pinned to Opus (`claude-opus-5-5[1m]`, the resolved fallback);
  *   2. the guarded model is marked `unavailable` on the singleton after the run;
  *   3. availability state RESETS cleanly between cases (a second test starts with
  *      Fable usable again — proving `integration.setup.ts`'s per-test
@@ -79,7 +79,7 @@ vi.mock('../../../utils/sessionValidation', () => ({
 
 /** The resolved concrete ids the spawn seam pins for each family. */
 const FABLE_CONCRETE = 'claude-fable-5-1';
-const OPUS_FALLBACK_CONCRETE = 'claude-opus-5[1m]';
+const OPUS_FALLBACK_CONCRETE = 'claude-opus-5-5[1m]';
 
 /** Options captured on a query() call, narrowed to the field under test. */
 function callModel(index: number): string | undefined {

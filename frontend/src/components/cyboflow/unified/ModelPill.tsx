@@ -41,7 +41,7 @@ export interface ModelOption {
 
 // Fable 5.1 is Anthropic's frontier model (1M-native, like Sonnet 5) and leads the
 // list. Opus has a single honest 1M row; the spawn seam (modelContext.ts) maps
-// `fable`→claude-fable-5-1, `opus`→claude-opus-5[1m] (the suffix is what actually
+// `fable`→claude-fable-5-1, `opus`→claude-opus-5-5[1m] (the suffix is what actually
 // unlocks 1M on the Claude Code login plane). The legacy `opus-250k` alias stays
 // resolvable (→ Opus 4.8) for back-compat but is not offered here.
 // Sonnet 5 is 1M-native (no context-1m beta, no 250K mode), so it has a single
@@ -51,7 +51,7 @@ export interface ModelOption {
 // it unavailable (see useModelAvailabilityStore / isModelOptionDisabled).
 export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
   { id: 'fable', label: 'Fable 5.1', context: '1M', description: 'Frontier — most capable' },
-  { id: 'opus', label: 'Opus 5', context: '1M', description: 'More capable' },
+  { id: 'opus', label: 'Opus 5.5', context: '1M', description: 'More capable' },
   { id: 'sonnet', label: 'Sonnet 5', context: '1M', description: 'Balanced' },
   { id: 'haiku', label: 'Haiku 4.5', context: '200K', description: 'Fastest' },
   { id: 'auto', label: 'Auto', context: null, description: 'Let Claude pick the model' },
@@ -84,7 +84,7 @@ export function isOpusModel(id: string | null | undefined): boolean {
  * Friendly display label for a DYNAMIC ("Other models") Claude row, derived from
  * its concrete wire id so it disambiguates from the pinned families. The SDK's
  * bare `displayName` for a non-default snapshot is just the family (e.g. "Opus"),
- * which would collide with the pinned "Opus 5 · 1M" row — so we parse the version
+ * which would collide with the pinned "Opus 5.5 · 1M" row — so we parse the version
  * (and 1M context) out of the resolved id instead: `claude-opus-4-8[1m]` →
  * "Opus 4.8 · 1M". Falls back to the SDK label / raw id if the id doesn't parse.
  */
@@ -143,7 +143,7 @@ export function ModelPill({
   // the ModelOption shape (context/description) OMP's catalog does not carry.
   const options = isOmp ? [] : agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
   // A dynamic (non-pinned) Claude id displays its friendly parsed label; a pinned
-  // alias falls through to modelDisplayLabel (which knows the curated "Opus 5 · 1M").
+  // alias falls through to modelDisplayLabel (which knows the curated "Opus 5.5 · 1M").
   const claudeDynamicActive =
     agentProvider !== 'codex' && !isOmp
       ? claudeCatalogOptions.find((option) => option.id === active)

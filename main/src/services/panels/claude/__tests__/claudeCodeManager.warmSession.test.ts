@@ -248,7 +248,7 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
     // A second query() ran, carrying --resume from the captured session id.
     expect(fakeSdk.calls).toHaveLength(2);
     expect(callResume(1)).toBe(SESSION_UUID);
-    expect(callModel(1)).toBe('claude-opus-5[1m]');
+    expect(callModel(1)).toBe('claude-opus-5-5[1m]');
   });
 
   // -------------------------------------------------------------------------

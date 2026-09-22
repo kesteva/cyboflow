@@ -279,9 +279,9 @@ describe('agentOverlayWriter — installAgentOverlay integration (AC-P1-6)', () 
 
     installAgentOverlay(db, 'run-model', worktree, makeSpyLogger());
 
-    // Opus pins the current Opus 5 snapshot (1M-native, no [1m] marker to strip).
+    // Opus pins the current Opus 5.5 snapshot (1M-native, no [1m] marker to strip).
     expect(fs.readFileSync(agentFile(worktree, 'implement'), 'utf8')).toContain(
-      'model: claude-opus-5\n',
+      'model: claude-opus-5-5\n',
     );
     expect(fs.readFileSync(agentFile(worktree, 'sonnet-helper'), 'utf8')).toContain(
       'model: claude-sonnet-5\n',
@@ -499,7 +499,7 @@ describe('agentOverlayWriter — workflow agent configs (workflow-scoped)', () =
     installAgentOverlay(db, 'run-wf', worktree, makeSpyLogger());
 
     const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
-    expect(md).toContain('model: claude-opus-5\n');
+    expect(md).toContain('model: claude-opus-5-5\n');
     expect(md).not.toContain('model: claude-sonnet-5');
 
     db.close();

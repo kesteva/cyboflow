@@ -8,7 +8,7 @@ import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentMode
 describe('agentModelContext', () => {
   describe('resolveAgentModelAlias', () => {
     it('resolves Claude aliases only in the Claude provider namespace', () => {
-      expect(resolveAgentModelAlias('claude', 'opus')).toBe('claude-opus-5[1m]');
+      expect(resolveAgentModelAlias('claude', 'opus')).toBe('claude-opus-5-5[1m]');
       expect(resolveAgentModelAlias('claude', ' SONNET ')).toBe('claude-sonnet-5');
       expect(resolveAgentModelAlias('claude', 'claude-sonnet-5')).toBe('claude-sonnet-5');
     });
