@@ -14,12 +14,10 @@
  * provider can be enabled but not actually usable on this machine, and
  * offering it here would just trade one stuck pause for another.
  *
- * Deliberately duplicates the small payload-narrowing helper that
- * ReviewItemCard.tsx also has (`isSystemicPauseItem` et al.) instead of
- * importing it: `'systemic-pause'` is not yet a member of
- * {@link DecisionPayload}'s `gate` union (the backend lane adds it alongside
- * this form — plan v2 D2), so each file reads the payload defensively via its
- * own `unknown` cast and compiles independently of when the union lands.
+ * Reads the pause payload's `agentKeys` / `blockedProvider` / `fanOut` through
+ * an `unknown` cast rather than trusting the {@link DecisionPayload} type: a
+ * pause item minted before the payload existed (payload_json NULL) or a
+ * malformed blob must degrade to the provider-wide default, never throw.
  */
 import React from 'react';
 import { Button } from '../ui/Button';
@@ -235,14 +233,7 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
       .mutate({ runId: item.run_id, reviewItemId: item.id, scope, target })
       .then((result) => {
         if ('delivered' in result) {
-          // TelemetryEventMap['review_item_resolved']['action'] (shared/types/
-          // telemetry.ts — owned by a concurrent lane in this worktree, not
-          // editable here) has no 'switch_agents' member yet: reuses the
-          // generic 'resolve' tag, which is what this ultimately is
-          // server-side (switchPausedStepAgents resolves the pause item once
-          // the override is written). A future telemetry-union addition can
-          // split this into its own action if the distinction earns its keep.
-          trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
+          trackEvent('review_item_resolved', { kind: item.kind, action: 'switch_agents', blocking: item.blocking });
           if (result.retried === false) {
             setNoteMessage(
               result.note ?? "The pause had already cleared; the switch applies from the run's next spawn.",

@@ -403,10 +403,10 @@ function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
  * subscription/session limit. Keyed on EITHER the source prefix (matches even
  * a pause re-attached before its payload landed) OR the payload discriminant,
  * mirroring the dual-discriminant pattern of {@link isApproveIdeasGateItem} /
- * {@link isApproveDesignGateItem} above. Parsed defensively via an `unknown`
- * cast: `'systemic-pause'` is not yet a member of {@link DecisionPayload}'s
- * `gate` union (the backend lane adds it alongside this card), so a directly
- * typed comparison would be a compile error until it lands.
+ * {@link isApproveDesignGateItem} above. The payload is read through an
+ * `unknown` cast on purpose: a pause item minted before the payload existed
+ * (payload_json NULL) or re-attached across an app restart must still match by
+ * its source prefix, and a malformed payload must never throw out of a card.
  */
 function isSystemicPauseItem(item: ReviewItem): boolean {
   if (item.kind !== 'decision') return false;
@@ -1160,18 +1160,10 @@ export function ReviewItemCard({
             );
           }
           const origin = systemicPauseOrigin(item);
-          // TelemetryEventMap['review_item_resolved']['action'] (shared/types/
-          // telemetry.ts — owned by a concurrent lane in this worktree, not
-          // editable here) has no 'retry' / 'stop_waiting' member yet: both
-          // reuse the existing generic 'resolve' / 'dismiss' tags, which is
-          // exactly what these two calls are underneath (a bare resolve() /
-          // dismiss() with no outcome). A future telemetry-union addition can
-          // split these into their own action if the distinction earns its
-          // keep.
           const retryNow = (): void => {
             void resolve(item.project_id, item.id, { surface }).then((r) => {
               if (r !== null) {
-                trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'retry', blocking: item.blocking });
                 onResolved?.();
               }
             });
@@ -1179,7 +1171,7 @@ export function ReviewItemCard({
           const stopWaiting = (): void => {
             void dismiss(item.project_id, item.id).then((ok) => {
               if (ok) {
-                trackEvent('review_item_resolved', { kind: item.kind, action: 'dismiss', blocking: item.blocking });
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'stop_waiting', blocking: item.blocking });
                 onResolved?.();
               }
             });
