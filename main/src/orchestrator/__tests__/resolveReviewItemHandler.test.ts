@@ -18,6 +18,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { ReviewItemError } from '../reviewItemRouter';
+import { GateSideEffects, type GateSideEffectArgs } from '../gateSideEffects';
 import {
   resolveReviewItem,
   parseApproveIdeasRefs,
@@ -56,9 +57,20 @@ function buildDb(): Database.Database {
       payload_json TEXT,
       resolution TEXT
     );
+    -- workflow_id/spec_hash are joined by resolveRunFrozenSpec (TASK-222's
+    -- stepDeclaresOptionalLoopback guard). Every existing test leaves them NULL,
+    -- so the reader degrades via its own schema-absence/fallback paths; the new
+    -- TASK-222 describe block below is the only one that populates them.
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY,
-      status TEXT NOT NULL
+      status TEXT NOT NULL,
+      workflow_id TEXT,
+      spec_hash TEXT
+    );
+    CREATE TABLE workflows (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      spec_json TEXT
     );
   `);
   return db;
@@ -187,10 +199,13 @@ describe('resolveReviewItem — approve-plan Q1 reveal', () => {
       deps.applyReviewItemResolve.mock.invocationCallOrder[0],
     );
     // outcome wins over free text → resolution 'approve' (deterministic verdict).
+    // TASK-222: an explicit outcome also stamps resolutionMeta (gate-resolution
+    // provenance) — surface is null here (baseInput supplies no surface).
     expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
       reviewItemId: 'rvw_ap',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toEqual({
       ok: true,
@@ -247,6 +262,7 @@ describe('resolveReviewItem — non-approve-plan gate', () => {
       reviewItemId: 'rvw_ai',
       actor: 'user',
       resolution: 'approve',
+      resolutionMeta: { outcome: 'approve', surface: null },
     });
     expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: 'approve-idea', outcome: 'approve' });
     expect(runStatus(db, 'run-ai')).toBe('running');
@@ -285,6 +301,68 @@ describe('resolveReviewItem — non-gate items', () => {
 
     expect(deps.maybeResumeRun).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true, reviewItemId: 'rvw_nb', resumed: false, gateStepId: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-277 — "Log as findings" on an eval-sourced finding (resolution
+// 'triaged:logged'): the SAME aggregate-unblock mechanism as any other
+// blocking finding (keyed on `blocking`, never on the resolution text or
+// source), so a blocking catastrophic-cap eval item stops gating the run
+// exactly like the generic case above — and no task is ever minted, because
+// this chokepoint's dep bag carries no task-creation collaborator at all
+// (only reviewItems.promoteToTask does that, via a wholly separate handler).
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — TASK-277 eval finding "Log as findings"', () => {
+  it('a blocking eval-sourced (catastrophic-cap) finding resolved triaged:logged stops gating the run', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_cap',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: true,
+      runId: 'run-eval',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_cap', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    // No task-minting collaborator exists on this path — resolve never mints one.
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledWith(1, {
+      reviewItemId: 'rvw_eval_cap',
+      actor: 'user',
+      resolution: 'triaged:logged',
+    });
+    expect(deps.promotePendingDraftsForRun).not.toHaveBeenCalled();
+    expect(deps.deleteRunCreatedEntities).not.toHaveBeenCalled();
+    // The blocking cap item no longer gates the run — aggregate-unblock resumes it.
+    expect(deps.maybeResumeRun).toHaveBeenCalledWith('run-eval');
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_cap', resumed: true, gateStepId: null });
+    expect(runStatus(db, 'run-eval')).toBe('running');
+  });
+
+  it('a non-blocking eval finding resolved triaged:logged just resolves — no resume attempted, no task minted', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_eval_nb',
+      kind: 'finding',
+      source: 'agent:eval',
+      blocking: false,
+      runId: 'run-eval-nb',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_eval_nb', resolution: 'triaged:logged' }),
+      deps,
+    );
+
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_eval_nb', resumed: false, gateStepId: null });
   });
 });
 
@@ -1079,5 +1157,307 @@ describe('resolveReviewItem — approve-plan reject unwinds the plan ledger', ()
       makeDeps(db),
     );
     expect(result).toMatchObject({ ok: true, outcome: 'reject' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verdict grammar — `<verdict>[<modifier>]: <note>` composition + modifier guard
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — gate resolution grammar', () => {
+  const APPROVE_DESIGN_SOURCE = 'gate:human-step:approve-design';
+
+  it('composes outcome + note into the prefixed resolution', async () => {
+    // The note used to be DISCARDED (outcome won outright); now it rides along
+    // behind the anchored verdict, so 'rejects' inside it can never be sniffed
+    // back out as the verdict.
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_n', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-n' });
+    const deps = makeDeps(db);
+    const result = await resolveReviewItem(
+      baseInput({
+        reviewItemId: 'rvw_n',
+        outcome: 'revise',
+        resolution: '  the architecture rejects empty input  ',
+      }),
+      deps,
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(resolvedWith(deps)).toBe('revise: the architecture rejects empty input');
+  });
+
+  it('stores the BARE verdict for an outcome with no note (byte-identical to today)', async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_b', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-b' });
+    const deps = makeDeps(db);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_b', outcome: 'revise' }), deps);
+    expect(resolvedWith(deps)).toBe('revise');
+
+    const db2 = buildDb();
+    seedItem(db2, { id: 'rvw_b2', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-b2' });
+    const deps2 = makeDeps(db2);
+    await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_b2', outcome: 'approve', resolution: '   ' }),
+      deps2,
+    );
+    expect(resolvedWith(deps2)).toBe('approve');
+  });
+
+  it('passes free text through untouched when no outcome is given', async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_f', kind: 'finding' });
+    const deps = makeDeps(db);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_f', resolution: 'triaged:accepted-docs' }), deps);
+    expect(resolvedWith(deps)).toBe('triaged:accepted-docs');
+  });
+
+  it("stores approve[no-findings] on the singular approve-design gate", async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_m', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-m' });
+    const deps = makeDeps(db);
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_m', outcome: 'approve', modifier: 'no-findings' }),
+      deps,
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(resolvedWith(deps)).toBe('approve[no-findings]');
+  });
+
+  it('REFUSES a modifier on the wrong verdict, the wrong gate, or with a bad value', async () => {
+    // The modifier changes what an approval DOES, so a misplaced one must refuse
+    // (invalid_payload -> BAD_REQUEST) and leave the gate pending rather than be
+    // stored and silently read back later.
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_v', kind: 'decision', source: APPROVE_DESIGN_SOURCE, runId: 'run-v' });
+    seedItem(db, {
+      id: 'rvw_g',
+      kind: 'decision',
+      source: 'gate:human-step:approve-designs',
+      runId: 'run-g',
+    });
+    const wrongVerdict = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        baseInput({ reviewItemId: 'rvw_v', outcome: 'revise', modifier: 'no-findings' }),
+        wrongVerdict,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    const wrongGate = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        baseInput({ reviewItemId: 'rvw_g', outcome: 'approve', modifier: 'no-findings' }),
+        wrongGate,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    const badValue = makeDeps(db);
+    expect(
+      await resolveReviewItem(
+        // A widened union reaching the handler from a non-tRPC caller (the
+        // monitor action) must fail loudly instead of being stored.
+        baseInput({
+          reviewItemId: 'rvw_v',
+          outcome: 'approve',
+          modifier: 'sideways' as ResolveReviewItemInput['modifier'],
+        }),
+        badValue,
+      ),
+    ).toMatchObject({ ok: false, reason: 'invalid_payload' });
+
+    // Nothing was resolved by any of the three refusals.
+    expect(wrongVerdict.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(wrongGate.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(badValue.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_v')).toBe('pending');
+    expect(itemStatus(db, 'rvw_g')).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-222 — attributable-reject guard (stepDeclaresOptionalLoopback)
+//
+// The swift-bison-20260917 incident: a plain 'reject' on the approve-design gate
+// (which the frozen spec declares optional with an intra-phase `loopback` target)
+// ENDS the run instead of looping back to expand-spec. This handler does not itself
+// own the loopback (the WorkflowController does — untouched by this task), but it
+// MUST warn-log so the occurrence is attributable to a surface/actor, and it MUST
+// still honor the caller's explicit choice (no refusal, no behavior change).
+// ---------------------------------------------------------------------------
+
+/** Seed a `workflows` row + point the run at it, so resolveRunFrozenSpec resolves a spec. */
+function seedWorkflowSpec(
+  db: Database.Database,
+  opts: { runId: string; workflowId: string; steps: Array<{ id: string; optional?: boolean; loopback?: string }> },
+): void {
+  db.prepare('INSERT INTO workflows (id, name, spec_json) VALUES (?, ?, ?)').run(
+    opts.workflowId,
+    'test-workflow',
+    JSON.stringify({ phases: [{ steps: opts.steps }] }),
+  );
+  db.prepare('UPDATE workflow_runs SET workflow_id = ? WHERE id = ?').run(opts.workflowId, opts.runId);
+}
+
+describe('resolveReviewItem — TASK-222 attributable-reject guard', () => {
+  it('warns when a reject arrives for a programmatic approve-design gate whose frozen spec declares an optional loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design',
+      workflowId: 'wf-1',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("gate 'approve-design' on run run-design resolved with outcome 'reject'"),
+    );
+    expect(warnSpy.mock.calls[0][0]).toContain('surface=queue');
+    // The reject itself is still honored exactly as requested — no refusal, no
+    // forced remap to 'revise' (that behavior lives in the surfaces, not here).
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'reject' });
+  });
+
+  it('does NOT warn when the same gate is resolved with outcome revise (the intended loopback)', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_design_revise',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-design-2',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-design-2',
+      workflowId: 'wf-2',
+      steps: [{ id: 'approve-design', optional: true, loopback: 'expand-spec' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_design_revise', outcome: 'revise', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'revise' });
+  });
+
+  it('does NOT warn on reject for a gate whose frozen spec declares NO loopback', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_plain_reject',
+      kind: 'decision',
+      source: 'gate:human-step:approve-idea',
+      blocking: true,
+      runId: 'run-plain',
+    });
+    seedWorkflowSpec(db, {
+      runId: 'run-plain',
+      workflowId: 'wf-3',
+      steps: [{ id: 'approve-idea' }],
+    });
+    const deps = makeDeps(db);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_plain_reject', outcome: 'reject', surface: 'queue' }),
+      deps,
+    );
+
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("declares an optional loopback"));
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-idea', outcome: 'reject' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Orchestrated-plane side effects — and the PROGRAMMATIC gate's exclusion from
+// them, which a `gate: 'approve-design'` payload must not undo.
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — orchestrated gate side-effects arm', () => {
+  /** Boot the singleton and spy on apply; returns the calls the arm made. */
+  function bootSideEffects(db: Database.Database): GateSideEffectArgs[] {
+    GateSideEffects.initialize({
+      db: dbAdapter(db),
+      snapshotBaseDir: '/tmp/cyboflow-test-snapshots',
+      loadPrototypeHtml: async () => null,
+    });
+    const applied: GateSideEffectArgs[] = [];
+    vi.spyOn(GateSideEffects.prototype, 'apply').mockImplementation(async (args: GateSideEffectArgs) => {
+      applied.push(args);
+    });
+    return applied;
+  }
+
+  afterEach(() => {
+    GateSideEffects._resetForTesting();
+  });
+
+  it('does NOT fire for a programmatic approve-design gate whose payload now carries the freshness bound', async () => {
+    // The gate row mints with `{kind:'decision', gate:'approve-design',
+    // reviewReportedSince}` since the FB-9 follow-up, so the payload discriminant
+    // the orchestrated arm keys on now MATCHES. The source-prefix check
+    // (`gateStepId !== null`) is what must still exclude it — otherwise the
+    // programmatic plane's side effects would run TWICE, and the second pass
+    // would arrive with no reviewItemId and therefore no bound at all.
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_prog_design',
+      kind: 'decision',
+      source: 'gate:human-step:approve-design',
+      blocking: true,
+      runId: 'run-prog',
+      payloadJson: JSON.stringify({
+        kind: 'decision',
+        gate: 'approve-design',
+        reviewReportedSince: '2026-09-20T11:00:00.000Z',
+      }),
+    });
+    const applied = bootSideEffects(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_prog_design', outcome: 'approve' }),
+      makeDeps(db),
+    );
+
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-design', outcome: 'approve' });
+    expect(applied).toEqual([]);
+  });
+
+  it('still fires for a genuinely ORCHESTRATED approve-design gate (agent source, payload discriminant)', async () => {
+    // The negative control for the test above: nothing about the new payload
+    // field narrowed the arm that is SUPPOSED to run here.
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_orch_design',
+      kind: 'decision',
+      source: 'agent:planner',
+      blocking: true,
+      runId: 'run-orch',
+      payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-design' }),
+    });
+    const applied = bootSideEffects(db);
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_orch_design', outcome: 'approve' }), makeDeps(db));
+
+    expect(applied).toEqual([
+      { runId: 'run-orch', stepId: 'approve-design', decision: 'approve', resolution: 'approve' },
+    ]);
+    // Unbounded by construction: the orchestrated plane has no walk, so no id.
+    expect(applied[0]).not.toHaveProperty('reviewItemId');
   });
 });

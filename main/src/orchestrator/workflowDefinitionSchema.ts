@@ -89,9 +89,17 @@ export const workflowStepSchema = z.object({
   retries: z.number().int().min(0, 'retries must be a non-negative integer'),
   optional: z.boolean().optional(),
   human: z.boolean().optional(),
+  // Human-facing header for a human gate (the programmatic plane's review-queue
+  // title; expected to match the flow markdown's AskUserQuestion header). Falls
+  // back to `name` when absent, so an empty string is a mistake, not a clear.
+  gateHeader: z.string().min(1, 'gateHeader must be non-empty when set').optional(),
   loopback: z.string().optional(),
   desc: z.string().optional(),
   fanOut: fanOutSchema.optional(),
+  // Opts this step out of the blocking-review-items checkpoint (see
+  // ProgrammaticRunHost.awaitBlockingReviewItems / WorkflowStep.consumesBlockingReviewItems)
+  // because it is itself the step that resolves the run's pending blocking items.
+  consumesBlockingReviewItems: z.boolean().optional(),
   // Declares the artifact this step produces on completion (auto-mint + the
   // "creates ⟨artifact⟩" chip). Kept in the schema so the field survives parse.
   outputArtifact: z

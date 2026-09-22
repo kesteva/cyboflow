@@ -44,6 +44,7 @@ function makeFakeOps(): FakeOps {
       .fn()
       .mockResolvedValue({ success: true, data: { tasks: [], activeCount: 0, totalCount: 0 } }),
     markViewed: vi.fn().mockResolvedValue({ success: true }),
+    dismissAsk: vi.fn().mockResolvedValue({ success: true }),
     rename: vi.fn().mockResolvedValue({ success: true, data: { id: 's1', name: 'renamed' } }),
     toggleFavorite: vi.fn().mockResolvedValue({ success: true, data: { isFavorite: true } }),
     updateAgentPermissionMode: vi.fn().mockResolvedValue({ success: true }),
@@ -98,6 +99,22 @@ describe('cyboflow.sessions', () => {
       const result = await caller.cyboflow.sessions.rename({ sessionId: 's1', newName: 'renamed' });
       expect(sessionOps.rename).toHaveBeenCalledWith({ sessionId: 's1', newName: 'renamed' });
       expect(result).toEqual({ success: true, data: { id: 's1', name: 'renamed' } });
+    });
+
+    it('dismissAsk forwards the sessionId and passes the envelope through', async () => {
+      const sessionOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionOps }));
+      const result = await caller.cyboflow.sessions.dismissAsk({ sessionId: 's1' });
+      expect(sessionOps.dismissAsk).toHaveBeenCalledWith({ sessionId: 's1' });
+      expect(result).toEqual({ success: true });
+    });
+
+    it("dismissAsk's validation-failure envelope passes through byte-identical", async () => {
+      const sessionOps = makeFakeOps();
+      sessionOps.dismissAsk.mockResolvedValue({ success: false, error: 'Session s1 not found' });
+      const caller = appRouter.createCaller(createContext({ sessionOps }));
+      const result = await caller.cyboflow.sessions.dismissAsk({ sessionId: 's1' });
+      expect(result).toEqual({ success: false, error: 'Session s1 not found' });
     });
 
     it('toggleFavorite passes the new favourite state through', async () => {
@@ -289,6 +306,13 @@ describe('cyboflow.sessions', () => {
       const caller = appRouter.createCaller(createContext());
       await expect(
         caller.cyboflow.sessions.setActiveSession({ sessionId: null }),
+      ).rejects.toSatisfy(isPrecond);
+    });
+
+    it('dismissAsk', async () => {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.sessions.dismissAsk({ sessionId: 's1' }),
       ).rejects.toSatisfy(isPrecond);
     });
   });

@@ -8,7 +8,17 @@ import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { QueueItem } from '../../../utils/reviewQueueSelectors';
 import type { Approval } from '../../../../../shared/types/approvals';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
-import { compactAge, countApprovals, selectReadyToReviewRuns } from '../queueSelectors';
+import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
+import type { QuickSessionTriage } from '../../../utils/quickSessionTriage';
+import {
+  applyFlowRunPrecedence,
+  compactAge,
+  countApprovals,
+  nonTerminalFlowRunBySession,
+  resolveOpenTarget,
+  selectReadyToReviewRuns,
+  significantFlowRunBySession,
+} from '../queueSelectors';
 
 function makeRun(overrides: Partial<ActiveRunRow> & { id: string }): ActiveRunRow {
   return {
@@ -52,6 +62,27 @@ function makeReviewItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
     resolved_by: null,
     resolution: null,
     ...overrides,
+  };
+}
+
+function makeQuickRow(overrides: Partial<QuickSessionRow> & { sessionId: string }): QuickSessionRow {
+  return {
+    sessionId: overrides.sessionId,
+    name: overrides.name ?? 'faint-harbor',
+    projectId: overrides.projectId ?? 1,
+    runId: overrides.runId ?? 'quick-run-1',
+    state: overrides.state ?? 'idle',
+    idleSince: overrides.idleSince ?? null,
+    unviewed: overrides.unviewed ?? false,
+    restedAtIso: overrides.restedAtIso ?? null,
+    rawStatus: overrides.rawStatus ?? 'completed',
+    exitCode: overrides.exitCode ?? null,
+    summary: overrides.summary ?? null,
+    summaryState: overrides.summaryState ?? null,
+    waitingOn: overrides.waitingOn ?? null,
+    summarySupported: overrides.summarySupported ?? true,
+    worktreeName: overrides.worktreeName ?? null,
+    git: overrides.git ?? null,
   };
 }
 
@@ -197,5 +228,139 @@ describe('compactAge', () => {
 
   it('returns the placeholder for an unparseable timestamp', () => {
     expect(compactAge('not-a-date', nowMs)).toBe('—');
+  });
+});
+
+describe('nonTerminalFlowRunBySession', () => {
+  it('includes a running run, keyed by its session id', () => {
+    const run = makeRun({ id: 'run-a', status: 'running', session_id: 'sess-a' });
+    expect(nonTerminalFlowRunBySession([run])).toEqual(new Map([['sess-a', run]]));
+  });
+
+  it('includes a blocked run (awaiting_review/stuck/paused/awaiting_input) — not just active', () => {
+    for (const status of ['awaiting_review', 'stuck', 'paused', 'awaiting_input'] as const) {
+      const run = makeRun({ id: `run-${status}`, status, session_id: 'sess-a' });
+      expect(nonTerminalFlowRunBySession([run]).get('sess-a')).toEqual(run);
+    }
+  });
+
+  it('excludes a terminal run (completed/failed/canceled)', () => {
+    for (const status of ['completed', 'failed', 'canceled'] as const) {
+      const run = makeRun({ id: `run-${status}`, status, session_id: 'sess-a' });
+      expect(nonTerminalFlowRunBySession([run]).has('sess-a')).toBe(false);
+    }
+  });
+
+  it('excludes a run with no session_id', () => {
+    const run = makeRun({ id: 'run-a', status: 'running', session_id: null });
+    expect(nonTerminalFlowRunBySession([run]).size).toBe(0);
+  });
+});
+
+describe('significantFlowRunBySession (TASK-226 — Ready-for-review navigation/label map)', () => {
+  it('includes a terminal run, keyed by its session id', () => {
+    for (const status of ['completed', 'failed', 'canceled'] as const) {
+      const run = makeRun({ id: `run-${status}`, status, session_id: 'sess-a' });
+      expect(significantFlowRunBySession([run]).get('sess-a')).toEqual(run);
+    }
+  });
+
+  it('prefers a non-terminal run over a terminal one for the same session, regardless of order', () => {
+    const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a', created_at: '2026-07-06 13:00:00' });
+    const live = makeRun({ id: 'run-live', status: 'running', session_id: 'sess-a', created_at: '2026-07-06 12:00:00' });
+    expect(significantFlowRunBySession([done, live]).get('sess-a')).toEqual(live);
+    expect(significantFlowRunBySession([live, done]).get('sess-a')).toEqual(live);
+  });
+
+  it('picks the NEWEST terminal run when a session has only terminal runs', () => {
+    const older = makeRun({ id: 'run-old', status: 'failed', session_id: 'sess-a', created_at: '2026-07-06 12:00:00' });
+    const newer = makeRun({ id: 'run-new', status: 'completed', session_id: 'sess-a', created_at: '2026-07-06 13:00:00' });
+    expect(significantFlowRunBySession([older, newer]).get('sess-a')).toEqual(newer);
+    expect(significantFlowRunBySession([newer, older]).get('sess-a')).toEqual(newer);
+  });
+
+  it('excludes a run with no session_id', () => {
+    const run = makeRun({ id: 'run-a', status: 'completed', session_id: null });
+    expect(significantFlowRunBySession([run]).size).toBe(0);
+  });
+
+  it('routes a Ready row of a session whose flow run finished to THAT run via resolveOpenTarget', () => {
+    const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a', project_id: 4 });
+    const target = resolveOpenTarget(
+      makeQuickRow({ sessionId: 'sess-a', runId: 'wf-6-__quick__', projectId: 4 }),
+      significantFlowRunBySession([done]),
+    );
+    expect(target).toEqual({ kind: 'run', runId: 'run-done', projectId: 4 });
+  });
+});
+
+describe('applyFlowRunPrecedence', () => {
+  it('strips a session from needsInput/readyForReview/working alike when a flow run represents it', () => {
+    const flowRunBySession = new Map([['sess-a', makeRun({ id: 'run-a', status: 'running', session_id: 'sess-a' })]]);
+    const triage: QuickSessionTriage = {
+      needsInput: [makeQuickRow({ sessionId: 'sess-a', state: 'blocked' })],
+      readyForReview: [makeQuickRow({ sessionId: 'sess-a', rawStatus: 'stopped' })],
+      working: [makeQuickRow({ sessionId: 'sess-a', state: 'running' })],
+    };
+    expect(applyFlowRunPrecedence(triage, flowRunBySession)).toEqual({
+      needsInput: [],
+      readyForReview: [],
+      working: [],
+    });
+  });
+
+  it('the swift-bison case: a failed __quick__ run beside a running flow run never lands in Ready for review', () => {
+    const flowRunBySession = new Map([
+      ['swift-bison', makeRun({ id: 'wf-global-planner', status: 'running', session_id: 'swift-bison' })],
+    ]);
+    // deriveQuickSessionTriage classifies an interrupted/failed __quick__ run as idle -> readyForReview.
+    const triage: QuickSessionTriage = {
+      needsInput: [],
+      readyForReview: [makeQuickRow({ sessionId: 'swift-bison', rawStatus: 'stopped', runId: 'wf-6-__quick__' })],
+      working: [],
+    };
+    expect(applyFlowRunPrecedence(triage, flowRunBySession).readyForReview).toEqual([]);
+  });
+
+  it('leaves an unrelated session untouched in every bucket', () => {
+    const flowRunBySession = new Map([['sess-a', makeRun({ id: 'run-a', status: 'running', session_id: 'sess-a' })]]);
+    const untouchedRow = makeQuickRow({ sessionId: 'sess-b' });
+    const triage: QuickSessionTriage = {
+      needsInput: [],
+      readyForReview: [untouchedRow],
+      working: [],
+    };
+    expect(applyFlowRunPrecedence(triage, flowRunBySession).readyForReview).toEqual([untouchedRow]);
+  });
+
+  it('gives a session back to its own row once its flow run is terminal (not in the map)', () => {
+    const flowRunBySession = new Map<string, ActiveRunRow>(); // the flow run finished -> excluded upstream
+    const row = makeQuickRow({ sessionId: 'sess-a', rawStatus: 'stopped' });
+    const triage: QuickSessionTriage = { needsInput: [], readyForReview: [row], working: [] };
+    expect(applyFlowRunPrecedence(triage, flowRunBySession).readyForReview).toEqual([row]);
+  });
+});
+
+describe('resolveOpenTarget', () => {
+  it('routes to the flow run when the session hosts one, ignoring the row\'s own (possibly dead) runId', () => {
+    const flowRun = makeRun({ id: 'wf-global-planner', status: 'running', session_id: 'swift-bison', project_id: 7 });
+    const flowRunBySession = new Map([['swift-bison', flowRun]]);
+    const row = { sessionId: 'swift-bison', runId: 'wf-6-__quick__', projectId: 1 };
+
+    expect(resolveOpenTarget(row, flowRunBySession)).toEqual({
+      kind: 'run',
+      runId: 'wf-global-planner',
+      projectId: 7,
+    });
+  });
+
+  it('falls back to the quick session when no flow run represents it', () => {
+    const row = { sessionId: 'sess-a', runId: 'quick-run-1', projectId: 1 };
+    expect(resolveOpenTarget(row, new Map())).toEqual({
+      kind: 'quick',
+      sessionId: 'sess-a',
+      runId: 'quick-run-1',
+      projectId: 1,
+    });
   });
 });

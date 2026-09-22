@@ -27,7 +27,7 @@ import { TaskChangeRouter } from '../taskChangeRouter';
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { IdeaComponentRouter } from '../ideaComponents/ideaComponentRouter';
-import type { DatabaseLike } from '../types';
+import type { DatabaseLike, LoggerLike } from '../types';
 import {
   GateSideEffects,
   gateDecisionFromResolution,
@@ -139,13 +139,37 @@ function attributeIdeaToRun(h: Harness, ideaId: string, runId: string): void {
     .run(ideaId, seq.next, runId);
 }
 
-function seedArtifact(h: Harness, runId: string, atype: string, payload: unknown): void {
+function seedArtifact(
+  h: Harness,
+  runId: string,
+  atype: string,
+  payload: unknown,
+  reportedAt: string | null = null,
+): void {
   h.db
     .prepare(
-      `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json)
-       VALUES (?, ?, ?, ?, 'template', 1, ?)`,
+      `INSERT INTO artifacts (id, run_id, atype, label, mode, revision, payload_json, reported_at)
+       VALUES (?, ?, ?, ?, 'template', 1, ?, ?)`,
     )
-    .run(`art-${runId}-${atype}`, runId, atype, atype, JSON.stringify(payload));
+    .run(`art-${runId}-${atype}`, runId, atype, atype, JSON.stringify(payload), reportedAt);
+}
+
+/**
+ * A RESOLVED programmatic approve-design gate row, seeded directly — the shape
+ * `HumanStepManager.openHumanGate` mints and `ReviewItemRouter.runTriage` then
+ * merges its resolution meta into. `payload` is written verbatim so a test can
+ * stage a row with, without, or with a malformed `reviewReportedSince`.
+ */
+function seedGateItem(h: Harness, id: string, runId: string, payload: unknown): void {
+  const now = new Date().toISOString();
+  h.db
+    .prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, source, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, 'decision', 'resolved', 1, 'human', 'Human gate: Approve design', 'body',
+               'gate:human-step:approve-design', ?, ?, ?)`,
+    )
+    .run(id, h.projectId, runId, payload === undefined ? null : JSON.stringify(payload), now, now);
 }
 
 function seedPrototype(h: Harness, runId: string): void {
@@ -196,6 +220,18 @@ describe('gateDecisionFromResolution', () => {
     expect(gateDecisionFromResolution('')).toBe('approve');
     expect(gateDecisionFromResolution('   ')).toBe('approve');
     expect(gateDecisionFromResolution(undefined)).toBe('approve');
+  });
+
+  it('reads the anchored verdict prefix without sniffing the note', () => {
+    // Same contract (and same bug) as parseGateVerdict: the note after the colon
+    // is the human's words, never a verdict source. 'rejects' in it must NOT end
+    // the run.
+    expect(gateDecisionFromResolution('revise: the architecture rejects empty input')).toBe('revise');
+    expect(gateDecisionFromResolution('approve[no-findings]')).toBe('approve');
+    expect(gateDecisionFromResolution('reject: retry later if you must')).toBe('reject');
+    expect(gateDecisionFromResolution('REVISE')).toBe('revise');
+    // Legacy rows keep the sniff.
+    expect(gateDecisionFromResolution('please revise this')).toBe('revise');
   });
 });
 
@@ -347,6 +383,46 @@ describe('GateSideEffects.apply — accepted-risk findings', () => {
     });
   });
 
+  it('a plain approve files the findings; approve[no-findings] binds but files none', async () => {
+    // The approve-design gate's THIRD choice ("Continue without logging"). The
+    // design is still approved — the bind must happen — but the human explicitly
+    // said not to carry the surviving entries, so nothing is filed.
+    const plain = setup();
+    const plainIdea = await makeIdea(plain, 'Idea');
+    seedRun(plain, 'run-a', 'planner', plainIdea.id);
+    seedPrototype(plain, 'run-a');
+    seedArtifact(plain, 'run-a', 'adversarial-review', { markdown: REVIEW_DOC });
+    GateSideEffects.initialize(makeDeps(plain));
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-a',
+      stepId: 'approve-design',
+      decision: 'approve',
+      resolution: 'approve',
+    });
+    expect(adversarialFindings(plain, 'run-a')).toHaveLength(2);
+
+    const quiet = setup();
+    const quietIdea = await makeIdea(quiet, 'Idea');
+    seedRun(quiet, 'run-b', 'planner', quietIdea.id);
+    seedPrototype(quiet, 'run-b');
+    seedArtifact(quiet, 'run-b', 'adversarial-review', { markdown: REVIEW_DOC });
+    GateSideEffects.initialize(makeDeps(quiet));
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-b',
+      stepId: 'approve-design',
+      decision: 'approve',
+      resolution: 'approve[no-findings]: dropping the nits',
+    });
+
+    expect(adversarialFindings(quiet, 'run-b')).toEqual([]);
+    // ...and the design IS bound — this is an approve, not a rejection.
+    expect(
+      (quiet.db.prepare('SELECT COUNT(*) AS n FROM approved_designs WHERE idea_id = ?').get(quietIdea.id) as {
+        n: number;
+      }).n,
+    ).toBe(1);
+  });
+
   it('files nothing when the run has no adversarial-review artifact', async () => {
     const h = setup();
     const idea = await makeIdea(h, 'Idea');
@@ -360,6 +436,206 @@ describe('GateSideEffects.apply — accepted-risk findings', () => {
       decision: 'approve',
     });
     expect(adversarialFindings(h, 'run-p')).toEqual([]);
+  });
+});
+
+/**
+ * The FRESHNESS bound the gate row was minted with, re-applied at resolve time.
+ *
+ * The adversarial-review artifact is ONE row per run and survives a rewind or a
+ * Revise loopback. Approving a gate opened over a design that was never
+ * re-reviewed used to file the PREVIOUS round's entries as risks the human
+ * weighed — about a design revised precisely to address them.
+ */
+describe('GateSideEffects.apply — accepted-risk filing freshness bound', () => {
+  const STALE = '2026-09-20T10:00:00.000Z';
+  const FRESH = '2026-09-20T12:00:00.000Z';
+  const BOUND_ISO = '2026-09-20T11:00:00.000Z';
+
+  /** Run + idea + prototype + a critique artifact reported at `reportedAt`. */
+  async function stage(
+    h: Harness,
+    runId: string,
+    reportedAt: string | null,
+  ): Promise<{ id: string; ref: string }> {
+    const idea = await makeIdea(h, 'Idea');
+    seedRun(h, runId, 'planner', idea.id);
+    seedPrototype(h, runId);
+    seedArtifact(h, runId, 'adversarial-review', { markdown: REVIEW_DOC }, reportedAt);
+    return idea;
+  }
+
+  function boundDesigns(h: Harness, ideaId: string): number {
+    return (
+      h.db.prepare('SELECT COUNT(*) AS n FROM approved_designs WHERE idea_id = ?').get(ideaId) as {
+        n: number;
+      }
+    ).n;
+  }
+
+  function makeLogger(): { logger: LoggerLike; info: Array<{ msg: string; ctx?: Record<string, unknown> }> } {
+    const info: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
+    return {
+      info,
+      logger: {
+        info: (msg, ctx) => {
+          info.push({ msg, ...(ctx ? { ctx } : {}) });
+        },
+        warn: () => undefined,
+        error: () => undefined,
+        debug: () => undefined,
+      },
+    };
+  }
+
+  it('(a) files NOTHING and logs WHY when the artifact predates the gate row\'s bound — but still binds', async () => {
+    const h = setup();
+    const idea = await stage(h, 'run-p', STALE);
+    seedGateItem(h, 'rvw_gate', 'run-p', {
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: BOUND_ISO,
+    });
+    const { logger, info } = makeLogger();
+    GateSideEffects.initialize(makeDeps(h, { logger }));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_gate',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toEqual([]);
+    // The approval itself still lands — only the previous round's entries are.
+    expect(boundDesigns(h, idea.id)).toBe(1);
+    const skip = info.find((l) => l.msg.includes('accepted-risk filing skipped'));
+    expect(skip).toBeDefined();
+    expect(skip?.ctx).toMatchObject({
+      runId: 'run-p',
+      reviewItemId: 'rvw_gate',
+      reportedAt: STALE,
+      bound: BOUND_ISO,
+    });
+  });
+
+  it('(b) files as before when the artifact was reported AFTER the bound', async () => {
+    const h = setup();
+    await stage(h, 'run-p', FRESH);
+    seedGateItem(h, 'rvw_gate', 'run-p', {
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: BOUND_ISO,
+    });
+    GateSideEffects.initialize(makeDeps(h));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_gate',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toEqual([
+      { title: 'AR-1 — No error state in the spend flow', severity: 'error' },
+      { title: 'AR-2 — Copy drifts between screens', severity: 'info' },
+    ]);
+  });
+
+  it('(c) files with NO reviewItemId at all — the orchestrated plane stays unbounded', async () => {
+    const h = setup();
+    await stage(h, 'run-p', STALE);
+    GateSideEffects.initialize(makeDeps(h));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toHaveLength(2);
+  });
+
+  it('(d) files when the gate row carries no reviewReportedSince (a legacy / unbounded gate)', async () => {
+    const h = setup();
+    await stage(h, 'run-p', STALE);
+    seedGateItem(h, 'rvw_plain', 'run-p', { kind: 'decision', gate: 'approve-design' });
+    GateSideEffects.initialize(makeDeps(h));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_plain',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toHaveLength(2);
+  });
+
+  it('(e) files when the artifact has a NULL reported_at — unknown age is no constraint', async () => {
+    const h = setup();
+    await stage(h, 'run-p', null);
+    seedGateItem(h, 'rvw_gate', 'run-p', {
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: BOUND_ISO,
+    });
+    const { logger, info } = makeLogger();
+    GateSideEffects.initialize(makeDeps(h, { logger }));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_gate',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toHaveLength(2);
+    expect(info.some((l) => l.msg.includes('accepted-risk filing skipped'))).toBe(false);
+  });
+
+  it('a run with NO artifact under a bound stays the SILENT return it has always been', async () => {
+    const h = setup();
+    const idea = await makeIdea(h, 'Idea');
+    seedRun(h, 'run-p', 'planner', idea.id);
+    seedPrototype(h, 'run-p');
+    seedGateItem(h, 'rvw_gate', 'run-p', {
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: BOUND_ISO,
+    });
+    const { logger, info } = makeLogger();
+    GateSideEffects.initialize(makeDeps(h, { logger }));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_gate',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toEqual([]);
+    expect(info.some((l) => l.msg.includes('accepted-risk filing skipped'))).toBe(false);
+  });
+
+  it('an unparseable reviewReportedSince degrades to NO constraint', async () => {
+    const h = setup();
+    await stage(h, 'run-p', STALE);
+    seedGateItem(h, 'rvw_bad', 'run-p', {
+      kind: 'decision',
+      gate: 'approve-design',
+      reviewReportedSince: 'not-a-date',
+    });
+    GateSideEffects.initialize(makeDeps(h));
+
+    await GateSideEffects.getInstance().apply({
+      runId: 'run-p',
+      stepId: 'approve-design',
+      decision: 'approve',
+      reviewItemId: 'rvw_bad',
+    });
+
+    expect(adversarialFindings(h, 'run-p')).toHaveLength(2);
   });
 });
 

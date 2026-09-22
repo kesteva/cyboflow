@@ -7,10 +7,11 @@
  * body (delegated to {@link ProposalCardBodies}) with a rust-primary Confirm
  * + ghost Dismiss footer, while `status === 'proposed'`. On any terminal
  * status the head bar/footer disappear and the card collapses to a compact
- * resolved row — a status circle + a bold verb + muted detail — EXCEPT the two
- * per-item kinds (reprioritize-backlog and create-backlog-items), which keep
- * their rows visible with a per-item ✓/✕ overlay (the brief's explicit ask for
- * partial-failure visibility, not a one-line opaque summary).
+ * resolved row — a status circle + a bold verb + muted detail — EXCEPT the
+ * per-item kinds (reprioritize-backlog, create-backlog-items and the grouped
+ * triage-findings), which keep their rows visible with a per-item ✓/✕ overlay
+ * (the brief's explicit ask for partial-failure visibility, not a one-line
+ * opaque summary).
  *
  * Confirm/dismiss wiring:
  *   - Confirm sets a LOCAL optimistic 'executing' flag immediately (spinner +
@@ -53,6 +54,10 @@ import {
   CreateBacklogRows,
   CreateWorkflowBody,
   CreateWorkflowAgentRows,
+  LAUNCH_SEED_FIELD_LABEL,
+  TriageFindingsBody,
+  TriageFindingsGroups,
+  StartQuickSessionBody,
   workflowNameLabel,
 } from './ProposalCardBodies';
 import {
@@ -61,6 +66,8 @@ import {
   parseEditWorkflowResult,
   parseCreateBacklogResult,
   parseCreateWorkflowResult,
+  parseTriageFindingsResult,
+  parseStartQuickSessionResult,
 } from './proposalResultTypes';
 import { navigateToProposalTarget } from './proposalNavigation';
 
@@ -169,24 +176,40 @@ function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.Rea
       sessionNameById ?? (r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null);
     const workflowLabel = payload != null ? workflowNameLabel(payload.workflowName) : null;
     const detail = launchRunResolvedDetail({ sessionName, workflowLabel });
+    // Seeds the flow's shape did not take were dropped before launch — say so,
+    // since "Run launched." alone would read as if every seed went in.
+    const ignored =
+      r.ignoredSeeds != null && r.ignoredSeeds.length > 0 ? (
+        <p className="ml-7 text-[10.5px] italic text-text-tertiary" data-testid="launch-run-ignored-seeds">
+          Ignored {r.ignoredSeeds.map((f) => LAUNCH_SEED_FIELD_LABEL[f]).join(' · ')} — this flow takes no such seed.
+        </p>
+      ) : null;
     if (r.runId != null) {
       const runId = r.runId;
       return (
-        <button
-          type="button"
-          onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
-          data-testid="proposal-card-resolved-row"
-          className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
-        >
-          <StatusCircle tone="success" glyph="✓" />
-          <div className="text-[11px] leading-snug">
-            <span className="font-bold text-text-primary">Run launched.</span>
-            {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
-          </div>
-        </button>
+        <div className="flex flex-col">
+          <button
+            type="button"
+            onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
+            data-testid="proposal-card-resolved-row"
+            className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+          >
+            <StatusCircle tone="success" glyph="✓" />
+            <div className="text-[11px] leading-snug">
+              <span className="font-bold text-text-primary">Run launched.</span>
+              {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
+            </div>
+          </button>
+          {ignored != null && <div className="pb-2.5">{ignored}</div>}
+        </div>
       );
     }
-    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />;
+    return (
+      <div className="flex flex-col">
+        <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />
+        {ignored != null && <div className="pb-2.5">{ignored}</div>}
+      </div>
+    );
   }
   return <ResolvedLine tone="error" glyph="✕" verb="Launch failed." detail={r.error} />;
 }
@@ -326,11 +349,94 @@ function CreateWorkflowResolved({ proposal }: { proposal: AgentProposal }): Reac
   );
 }
 
+function TriageFindingsResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  const payload = proposal.payload.kind === 'triage-findings' ? proposal.payload : null;
+  const result = parseTriageFindingsResult(proposal.result);
+  if (payload === null) {
+    return <ResolvedLine tone="error" glyph="✕" verb="Resolved." />;
+  }
+  const total = payload.items.length;
+  const applied = result?.applied ?? 0;
+  const skipped = result?.skipped ?? 0;
+  const failed = result === null ? 0 : total - applied - skipped;
+  return (
+    <div className="flex flex-col gap-2 p-2.5">
+      <div className="flex items-center gap-2.5">
+        <StatusCircle tone={result?.status === 'failed' ? 'warning' : 'success'} glyph={result?.status === 'failed' ? '!' : '✓'} />
+        <span className="text-[11px] font-bold text-text-primary" data-testid="triage-resolved-summary">
+          Triaged {applied} of {total} finding{total === 1 ? '' : 's'}
+          {skipped > 0 ? ` · ${skipped} skipped (already triaged)` : ''}
+          {failed > 0 ? ` · ${failed} failed` : ''}.
+        </span>
+      </div>
+      <TriageFindingsGroups items={payload.items} result={result} />
+    </div>
+  );
+}
+
 function OpenSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
   }
   return <ResolvedLine tone="success" glyph="✓" verb="Opened." />;
+}
+
+/**
+ * Resolved start-quick-session row: the same "Open" affordance an executed
+ * launch-run row has, dispatching the open-session navigation to the minted
+ * quick session (its `__quick__` sentinel runId rides along so the center pane
+ * resolves the run-backed chat, exactly like TypeGroupedQueue's openQuickSession).
+ */
+function StartQuickSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  const r = parseStartQuickSessionResult(proposal.result);
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  if (r === null) {
+    return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} verb="Resolved." glyph={proposal.status === 'failed' ? '✕' : '✓'} />;
+  }
+  if (r.status === 'executed' && r.sessionId != null) {
+    const payload = proposal.payload.kind === 'start-quick-session' ? proposal.payload : null;
+    const sessionId = r.sessionId;
+    const detail = r.sessionName != null ? `${r.sessionName}${r.substrate != null ? ` · ${r.substrate}` : ''}` : undefined;
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          navigateToProposalTarget({
+            target: 'quick-session',
+            sessionId,
+            ...(r.runId != null ? { runId: r.runId } : {}),
+            ...(payload != null ? { projectId: payload.projectId } : {}),
+          })
+        }
+        data-testid="proposal-card-resolved-row"
+        className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+      >
+        <StatusCircle tone="success" glyph="✓" />
+        <div className="text-[11px] leading-snug">
+          <span className="font-bold text-text-primary">Session started.</span>
+          {detail != null && <span className="text-text-tertiary"> {detail}</span>}
+          <span className="text-text-tertiary"> — Open</span>
+        </div>
+      </button>
+    );
+  }
+  if (r.status === 'executed') {
+    return <ResolvedLine tone="success" glyph="✓" verb="Session started." detail={r.sessionName} />;
+  }
+  const compensated = r.compensations?.some((c) => c.step === 'dismiss-session' && c.ok) === true;
+  return (
+    <ResolvedLine
+      tone="error"
+      glyph="✕"
+      verb="Session not started."
+      detail={compensated ? `${r.error ?? 'failed'} (the half-created session was dismissed)` : r.error}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +534,12 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'create-workflow' && proposal.payload.kind === 'create-workflow' && (
             <CreateWorkflowBody payload={proposal.payload} />
           )}
+          {proposal.kind === 'triage-findings' && proposal.payload.kind === 'triage-findings' && (
+            <TriageFindingsBody payload={proposal.payload} />
+          )}
+          {proposal.kind === 'start-quick-session' && proposal.payload.kind === 'start-quick-session' && (
+            <StartQuickSessionBody payload={proposal.payload} />
+          )}
         </div>
       )}
 
@@ -462,6 +574,8 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'open-session' && <OpenSessionResolved proposal={proposal} />}
           {proposal.kind === 'create-backlog-items' && <CreateBacklogResolved proposal={proposal} />}
           {proposal.kind === 'create-workflow' && <CreateWorkflowResolved proposal={proposal} />}
+          {proposal.kind === 'triage-findings' && <TriageFindingsResolved proposal={proposal} />}
+          {proposal.kind === 'start-quick-session' && <StartQuickSessionResolved proposal={proposal} />}
         </>
       )}
 

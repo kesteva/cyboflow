@@ -10,7 +10,7 @@ vi.mock('../../../utils/api', () => ({
       // existing behavior-only tests don't need to know about the probe.
       getDeliveryState: vi.fn().mockResolvedValue({
         success: true,
-        data: { delivered: false, landed: false, ownCommits: 0 },
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: false },
       }),
       markComplete: vi.fn().mockResolvedValue({ success: true, data: { stamped: 1 } }),
     },
@@ -32,7 +32,7 @@ beforeEach(() => {
   vi.mocked(API.sessions.delete).mockResolvedValue({ success: true });
   vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
     success: true,
-    data: { delivered: false, landed: false, ownCommits: 0 },
+    data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: false },
   });
   vi.mocked(API.sessions.markComplete).mockResolvedValue({ success: true, data: { stamped: 1 } });
 });
@@ -138,7 +138,7 @@ describe('SessionDismissDialog', () => {
     it('offers Mark complete, Dismiss anyway, and Cancel when the session is delivered', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
-        data: { delivered: true, landed: false, ownCommits: 0 },
+        data: { delivered: true, landed: false, ownCommits: 0, completedNoCode: false },
       });
 
       render(<SessionDismissDialog {...defaultProps} />);
@@ -153,7 +153,7 @@ describe('SessionDismissDialog', () => {
     it('offers the choice when landed is true even if delivered is false', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
-        data: { delivered: false, landed: true, ownCommits: 0 },
+        data: { delivered: false, landed: true, ownCommits: 0, completedNoCode: false },
       });
 
       render(<SessionDismissDialog {...defaultProps} />);
@@ -164,7 +164,7 @@ describe('SessionDismissDialog', () => {
     it('Mark complete calls markComplete BEFORE delete, then onSuccess(true) and onClose', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
-        data: { delivered: true, landed: false, ownCommits: 0 },
+        data: { delivered: true, landed: false, ownCommits: 0, completedNoCode: false },
       });
 
       const callOrder: string[] = [];
@@ -192,7 +192,7 @@ describe('SessionDismissDialog', () => {
     it('a failed markComplete does NOT call delete, and shows an error', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
-        data: { delivered: true, landed: false, ownCommits: 0 },
+        data: { delivered: true, landed: false, ownCommits: 0, completedNoCode: false },
       });
       vi.mocked(API.sessions.markComplete).mockResolvedValue({ success: false, error: 'stamp failed' });
 
@@ -214,7 +214,72 @@ describe('SessionDismissDialog', () => {
     it('Dismiss anyway calls delete directly (no markComplete) and fires onSuccess without the completed flag', async () => {
       vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
         success: true,
-        data: { delivered: true, landed: false, ownCommits: 0 },
+        data: { delivered: true, landed: false, ownCommits: 0, completedNoCode: false },
+      });
+
+      render(<SessionDismissDialog {...defaultProps} />);
+      const dismissAnywayButton = await screen.findByText('Dismiss anyway');
+
+      await act(async () => {
+        fireEvent.click(dismissAnywayButton);
+      });
+
+      expect(API.sessions.markComplete).not.toHaveBeenCalled();
+      expect(API.sessions.delete).toHaveBeenCalledWith('sess-dismiss-1');
+      expect(defaultProps.onSuccess).toHaveBeenCalledWith();
+    });
+  });
+
+  describe('completedNoCode session (DB-only Planner/Launch run) — three-way choice', () => {
+    it('offers Mark complete, Dismiss anyway, and Cancel, with copy that does not mention unmerged changes', async () => {
+      vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: true },
+      });
+
+      render(<SessionDismissDialog {...defaultProps} />);
+
+      expect(await screen.findByText('Mark complete')).toBeInTheDocument();
+      expect(screen.getByText('Dismiss anyway')).toBeInTheDocument();
+      expect(screen.getByText('Cancel')).toBeInTheDocument();
+      // Neither the plain confirm's own copy nor its "unmerged" claim should show.
+      expect(screen.queryByText('Dismiss session?')).not.toBeInTheDocument();
+      expect(screen.queryByText(/unmerged/)).not.toBeInTheDocument();
+      expect(screen.getByText(/completed without changing the repository/)).toBeInTheDocument();
+    });
+
+    it('Mark complete calls markComplete BEFORE delete, then onSuccess(true) and onClose', async () => {
+      vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: true },
+      });
+
+      const callOrder: string[] = [];
+      vi.mocked(API.sessions.markComplete).mockImplementation(async () => {
+        callOrder.push('markComplete');
+        return { success: true, data: { stamped: 1 } };
+      });
+      vi.mocked(API.sessions.delete).mockImplementation(async () => {
+        callOrder.push('delete');
+        return { success: true };
+      });
+
+      render(<SessionDismissDialog {...defaultProps} />);
+      const markCompleteButton = await screen.findByText('Mark complete');
+
+      await act(async () => {
+        fireEvent.click(markCompleteButton);
+      });
+
+      expect(callOrder).toEqual(['markComplete', 'delete']);
+      expect(defaultProps.onSuccess).toHaveBeenCalledWith(true);
+      expect(defaultProps.onClose).toHaveBeenCalled();
+    });
+
+    it('Dismiss anyway calls delete directly (no markComplete)', async () => {
+      vi.mocked(API.sessions.getDeliveryState).mockResolvedValue({
+        success: true,
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: true },
       });
 
       render(<SessionDismissDialog {...defaultProps} />);

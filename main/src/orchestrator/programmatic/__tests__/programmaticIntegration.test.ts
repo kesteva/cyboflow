@@ -23,19 +23,32 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
+import { DefaultProgrammaticRunner, type EscalationSinks } from '../defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from '../humanGate';
+import { ReviewQueueBlockingItemsGate } from '../blockingItemsGate';
 import { MonitorRegistry, type MonitorSession } from '../monitor';
 import type { StepReporter } from '../programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
-import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
+import {
+  ReviewItemRouter,
+  reviewItemChangeEvents,
+  reviewItemProjectChannel,
+} from '../../reviewItemRouter';
+import { SUPERVISOR_RECOMMENDATION_HEADING } from '../../../../../shared/types/reviews';
+import type { DatabaseLike } from '../../types';
 import { buildStepTransitionEvent } from '../../stepTransitionBridge';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
-import type { FanOutDriver } from '../types';
+import type {
+  BlockingItemDecision,
+  BlockingItemsEscalationRequest,
+  FanOutDriver,
+  GateEscalationDecision,
+  GateEscalationRequest,
+} from '../types';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -709,4 +722,419 @@ describe('programmatic integration — host-driven fanOut walk drives lanes to i
     };
     expect(finalStep.current_step_id).toBe('verify');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Gate escalation (item 8b, CR-15) — the supervisor's recommendation reaching a
+// LIVE gate, against the real HumanStepManager + the real ReviewItemRouter.
+// ---------------------------------------------------------------------------
+
+/** Read one review item's body + status straight out of the DB. */
+function reviewItemRow(db: Database.Database, id: string): { body: string | null; status: string } {
+  return db.prepare('SELECT body, status FROM review_items WHERE id = ?').get(id) as {
+    body: string | null;
+    status: string;
+  };
+}
+
+/**
+ * A fake escalation-capable monitor whose consult resolves ON DEMAND, so a test
+ * can interleave the human's answer with the consult still in flight.
+ */
+function makeEscalationMonitor(): {
+  monitor: MonitorSession;
+  requests: GateEscalationRequest[];
+  release: (decision: GateEscalationDecision) => void;
+} {
+  const requests: GateEscalationRequest[] = [];
+  let release: (decision: GateEscalationDecision) => void = () => {};
+  const monitor: MonitorSession = {
+    triage: vi.fn().mockResolvedValue({ decision: 'escalate', rationale: '' }),
+    answer: vi.fn().mockResolvedValue(''),
+    reviewGateEscalation: vi.fn((req: GateEscalationRequest) => {
+      requests.push(req);
+      return new Promise<GateEscalationDecision>((resolve) => {
+        release = resolve;
+      });
+    }),
+  };
+  return { monitor, requests, release: (d) => release(d) };
+}
+
+describe('gate escalation against the real gate + review-item router', () => {
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+  });
+
+  /**
+   * Runner deps wiring the escalation seam onto the REAL router, exactly as
+   * index.ts does via monitorActionSinks (the annotate op, actor `monitor`).
+   */
+  function escalationDeps(adapter: DatabaseLike, monitor: MonitorSession) {
+    const router = ReviewItemRouter.initialize(adapter);
+    const annotated: Array<{ ok: boolean; code?: string }> = [];
+    return {
+      annotated,
+      deps: {
+        monitorFactory: () => monitor,
+        escalationSinks: (): EscalationSinks => ({
+          listRunReviewItems: async () => [],
+          annotate: async (_runId: string, input: { reviewItemId: string; markdown: string }) => {
+            try {
+              await router.applyReviewItem(1, {
+                op: 'annotate' as const,
+                actor: 'monitor' as const,
+                reviewItemId: input.reviewItemId,
+                heading: SUPERVISOR_RECOMMENDATION_HEADING,
+                markdown: input.markdown,
+              });
+              annotated.push({ ok: true });
+            } catch (err) {
+              annotated.push({ ok: false, code: (err as { code?: string }).code });
+              throw err;
+            }
+          },
+          resolveAsMonitor: async (_runId: string, input: { reviewItemId: string; resolution: string }) => {
+            await router.applyReviewItem(1, {
+              op: 'resolve' as const,
+              actor: 'monitor' as const,
+              reviewItemId: input.reviewItemId,
+              resolution: input.resolution,
+            });
+          },
+          countMonitorResolves: async () => 0,
+          // The REAL barrier: this is what item 9 exists to prove — a finding
+          // created fire-and-forget on the router's queue is visible to the
+          // boundary read that follows.
+          awaitWritesSettled: (projectId: number) => router.awaitProjectWritesSettled(projectId),
+        }),
+      },
+    };
+  }
+
+  it('a human who answers DURING the consult wins: the annotate is refused invalid_status and the walk uses their verdict', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    seedRun(db, 'run-esc-race');
+
+    const spawner = makeSpawner();
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const { monitor, requests, release } = makeEscalationMonitor();
+    const { annotated, deps } = escalationDeps(adapter, monitor);
+
+    // The human answers each gate the moment it exists — i.e. while the
+    // fire-and-forget consult is still hanging.
+    const answered: string[] = [];
+    const approver = (payload: unknown): void => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action === 'created' && p.reviewItemId) {
+        const id = p.reviewItemId;
+        answered.push(id);
+        setTimeout(() => void mgr.resolveHumanGate('run-esc-race', id, 'user', 'approve'), 0);
+      }
+    };
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate, ...deps });
+    const walk = runner.run(ctxFor('run-esc-race'));
+    // Let the first gate open + be answered, then let the consult come back late.
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(answered.length).toBeGreaterThan(0));
+    release({ action: 'recommend', choice: 'approve', rationale: 'looks right. and here is why.' });
+
+    await expect(walk).resolves.toBeUndefined();
+
+    // The human's verdict stands: the item is resolved and carries NO section.
+    const row = reviewItemRow(db, answered[0]);
+    expect(row.status).toBe('resolved');
+    expect(row.body ?? '').not.toContain('## Supervisor recommendation');
+    // ...and the refusal the host swallows is exactly `invalid_status`.
+    expect(annotated.some((a) => !a.ok && a.code === 'invalid_status')).toBe(true);
+  });
+
+  it('a RESUMED gate is consulted when it carries no section, and left alone when it does', async () => {
+    for (const preAnnotated of [false, true]) {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const mgr = HumanStepManager.initialize(adapter);
+      const runId = `run-esc-resume-${String(preAnnotated)}`;
+      seedRun(db, runId);
+
+      // Open the FIRST gate out-of-band so the resolver re-attaches to it
+      // (findPendingGate) instead of minting one — that is what `resumed` means.
+      const existingId = await mgr.openHumanGate(runId, 'approve-idea', 'Approve idea');
+      // A fresh open always mints an id; narrow it so the rest of the test can
+      // address the row directly.
+      if (existingId === null) throw new Error('expected the out-of-band gate open to mint an item');
+      if (preAnnotated) {
+        db.prepare('UPDATE review_items SET body = ? WHERE id = ?').run(
+          'The gate body.\n\n## Supervisor recommendation\n\nRecommended: approve — advised on the first pass.\n',
+          existingId,
+        );
+      }
+
+      const spawner = makeSpawner();
+      const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+      const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+      const { monitor, requests, release } = makeEscalationMonitor();
+      const { deps } = escalationDeps(adapter, monitor);
+
+      // Answer every gate on a later macrotask (a real human is never synchronous).
+      const approver = (payload: unknown): void => {
+        const p = payload as { reviewItemId?: string; action?: string };
+        if (p?.action === 'created' && p.reviewItemId) {
+          const id = p.reviewItemId;
+          setTimeout(() => void mgr.resolveHumanGate(runId, id, 'user', 'approve'), 0);
+        }
+      };
+      reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+      // The pre-existing gate fires no 'created' event (it already exists), so
+      // it is answered directly.
+      setTimeout(() => void mgr.resolveHumanGate(runId, existingId, 'user', 'approve'), 5);
+
+      const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate, ...deps });
+      const walk = runner.run(ctxFor(runId));
+      // Every later gate's consult must also be released or the walk would
+      // finish with hooks still pending; releasing eagerly is harmless.
+      const pump = setInterval(() => release({ action: 'pass', rationale: 'no advice' }), 5);
+      await expect(walk).resolves.toBeUndefined();
+      clearInterval(pump);
+
+      const resumedRequests = requests.filter((r) => r.reviewItemId === existingId);
+      // The ALREADY-ANNOTATED gate is left alone; the bare one gets its consult.
+      expect(resumedRequests).toHaveLength(preAnnotated ? 0 : 1);
+      if (!preAnnotated) {
+        expect(resumedRequests[0].stepId).toBe('approve-idea');
+        expect(resumedRequests[0].body).not.toBe('');
+      }
+
+      reviewItemChangeEvents.removeAllListeners();
+      HumanStepManager._resetForTesting();
+      ReviewItemRouter._resetForTesting();
+    }
+  });
+});
+
+/**
+ * ITEM 9 — the step-boundary escalation review against the REAL
+ * ReviewQueueBlockingItemsGate + HumanStepManager + ReviewItemRouter.
+ *
+ * The thing under test is the WRITE BARRIER (CR-3). The MCP `report_finding`
+ * path replies to the agent BEFORE its create drains the router's per-project
+ * queue, so the step spawn below files its blocking finding FIRE-AND-FORGET —
+ * exactly as production does — and the boundary that follows must still see it.
+ * Without `awaitWritesSettled` the consult reads an empty queue and the run
+ * marches past the defect, which is the bug this item closes.
+ */
+describe('blocking-items escalation at a step boundary (real gate + router)', () => {
+  afterEach(() => {
+    reviewItemChangeEvents.removeAllListeners();
+    HumanStepManager._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+  });
+
+  const FINDING_TITLE = 'parser dereferences node before the guard';
+
+  /**
+   * The escalation bag wired onto the REAL router, exactly as index.ts wires
+   * `monitorActionSinks.buildGateEscalationSinks` — including the real
+   * `awaitProjectWritesSettled` barrier, which is what these two tests exercise.
+   */
+  function realEscalationSinks(router: ReviewItemRouter, runId: string): EscalationSinks {
+    return {
+      listRunReviewItems: async () => [],
+      annotate: async (_r, input) => {
+        await router.applyReviewItem(1, {
+          op: 'annotate',
+          actor: 'monitor',
+          reviewItemId: input.reviewItemId,
+          heading: SUPERVISOR_RECOMMENDATION_HEADING,
+          markdown: input.markdown,
+          runId,
+        });
+      },
+      resolveAsMonitor: async (_r, input) => {
+        await router.applyReviewItem(1, {
+          op: 'resolve',
+          actor: 'monitor',
+          reviewItemId: input.reviewItemId,
+          resolution: input.resolution,
+          runId,
+        });
+      },
+      countMonitorResolves: async () => 0,
+      awaitWritesSettled: (projectId) => router.awaitProjectWritesSettled(projectId),
+    };
+  }
+
+  /**
+   * A spawner that, on its FIRST step, files a pending blocking finding through
+   * the router WITHOUT awaiting it — the MCP report_finding shape.
+   *
+   * The create is deliberately queued BEHIND a slow no-op on the same
+   * concurrency-1 project queue. Without it the fire-and-forget write usually
+   * commits before the boundary reads anyway, and the test would pass with the
+   * barrier removed; with it, an un-barriered read provably sees an empty queue,
+   * so the assertion below is about the barrier and nothing else.
+   */
+  function findingFilingSpawner(router: ReviewItemRouter, runId: string): ClaudeSpawnerLike {
+    let filed = false;
+    return {
+      spawnCliProcess: vi.fn(async () => {
+        if (filed) return;
+        filed = true;
+        void router._queueForProject(1).add(() => new Promise<void>((r) => setTimeout(r, 40)));
+        void router.applyReviewItem(1, {
+          op: 'create',
+          actor: 'agent:code-review',
+          kind: 'finding',
+          title: FINDING_TITLE,
+          body: 'parse() dereferences `node` before the null guard.',
+          severity: 'error',
+          blocking: true,
+          source: 'agent:code-review',
+          runId,
+        });
+      }),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  /** A monitor whose blocking-items consult answers every shown item the same way. */
+  function blockingMonitor(action: BlockingItemDecision['action']): {
+    monitor: MonitorSession;
+    requests: BlockingItemsEscalationRequest[];
+  } {
+    const requests: BlockingItemsEscalationRequest[] = [];
+    return {
+      requests,
+      monitor: {
+        triage: vi.fn().mockResolvedValue({ decision: 'escalate', rationale: '' }),
+        answer: vi.fn().mockResolvedValue(''),
+        reviewGateEscalation: vi.fn().mockResolvedValue({ action: 'pass', rationale: 'no advice' }),
+        reviewBlockingItems: vi.fn(async (req: BlockingItemsEscalationRequest) => {
+          requests.push(req);
+          return req.items.map((i) => ({
+            reviewItemId: i.id,
+            action,
+            rationale: 'the guard landed in this worktree.',
+          }));
+        }),
+      },
+    };
+  }
+
+  /** Answer every DECISION gate as it opens; leave findings alone. */
+  function answerGates(db: Database.Database, mgr: HumanStepManager, runId: string): void {
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (payload: unknown) => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action !== 'created' || !p.reviewItemId) return;
+      const row = db.prepare('SELECT kind FROM review_items WHERE id = ?').get(p.reviewItemId) as
+        | { kind?: string }
+        | undefined;
+      if (row?.kind !== 'decision') return;
+      const id = p.reviewItemId;
+      setTimeout(() => void mgr.resolveHumanGate(runId, id, 'user', 'approve'), 0);
+    });
+  }
+
+  it('sees a fire-and-forget finding at the boundary and RESOLVES it, so the walk never parks on it', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, 'run-bi-resolve');
+
+    const reporter: StepReporter = { report: (rid, sid, st) => void buildStepTransitionEvent(rid, sid, st, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const blockingGate = new ReviewQueueBlockingItemsGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const { monitor, requests } = blockingMonitor('resolve');
+    answerGates(db, mgr, 'run-bi-resolve');
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: findingFilingSpawner(router, 'run-bi-resolve'),
+      reporter,
+      gate,
+      blockingGate,
+      monitorFactory: () => monitor,
+      escalationSinks: () => realEscalationSinks(router, 'run-bi-resolve'),
+      // The supervisor's autonomous resolve is gated on its audit record landing
+      // (the durable cap is counted from those findings), so the sink production
+      // always wires has to be here too.
+      monitorFindingSink: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(runner.run(ctxFor('run-bi-resolve'))).resolves.toBeUndefined();
+
+    // The barrier worked: the consult SAW the finding the spawn never awaited.
+    const seen = requests.flatMap((r) => r.items).filter((i) => i.title === FINDING_TITLE);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0].body).toContain('null guard');
+
+    const finding = db
+      .prepare(`SELECT status, resolution, resolved_by FROM review_items WHERE title = ?`)
+      .get(FINDING_TITLE) as { status: string; resolution: string | null; resolved_by: string | null };
+    expect(finding.status).toBe('resolved');
+    expect(finding.resolution).toBe('resolved by supervisor: the guard landed in this worktree.');
+    expect(finding.resolved_by).toBe('monitor');
+  }, 30_000);
+
+  it('on a PASS the run parks on the finding until a human clears it', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    const router = ReviewItemRouter.initialize(adapter);
+    seedRun(db, 'run-bi-pass');
+
+    const reporter: StepReporter = { report: (rid, sid, st) => void buildStepTransitionEvent(rid, sid, st, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const blockingGate = new ReviewQueueBlockingItemsGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const { monitor, requests } = blockingMonitor('pass');
+    answerGates(db, mgr, 'run-bi-pass');
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: findingFilingSpawner(router, 'run-bi-pass'),
+      reporter,
+      gate,
+      blockingGate,
+      monitorFactory: () => monitor,
+      escalationSinks: () => realEscalationSinks(router, 'run-bi-pass'),
+    });
+    const walk = runner.run(ctxFor('run-bi-pass'));
+
+    // The walk stops at the boundary: the run is parked awaiting_review with the
+    // finding still pending, and no supervisor resolution anywhere.
+    const findingId = await vi.waitFor(() => {
+      const row = db
+        .prepare(`SELECT id FROM review_items WHERE title = ? AND status = 'pending'`)
+        .get(FINDING_TITLE) as { id?: string } | undefined;
+      expect(row?.id).toBeTruthy();
+      return row?.id as string;
+    });
+    await vi.waitFor(() => {
+      const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-bi-pass') as {
+        status: string;
+      };
+      expect(run.status).toBe('awaiting_review');
+    });
+    expect(requests.flatMap((r) => r.items).some((i) => i.title === FINDING_TITLE)).toBe(true);
+
+    // The human clears it; the walk resumes and completes.
+    await router.applyReviewItem(1, {
+      op: 'resolve',
+      actor: 'user',
+      reviewItemId: findingId,
+      resolution: 'fixed by hand',
+      runId: 'run-bi-pass',
+    });
+    await expect(walk).resolves.toBeUndefined();
+
+    const finding = db
+      .prepare(`SELECT resolved_by, resolution FROM review_items WHERE id = ?`)
+      .get(findingId) as { resolved_by: string | null; resolution: string | null };
+    expect(finding.resolved_by).toBe('user');
+    expect(finding.resolution).toBe('fixed by hand');
+  }, 30_000);
 });

@@ -88,16 +88,25 @@ export interface TelemetryEventMap {
     // 'approve' / 'reject' are the explicit programmatic human-gate verdicts
     // (reviewItems.resolve `outcome`); 'resolve'/'dismiss'/'promote_to_task' are
     // the generic triage actions; 'launch_separate_planner'/'return_idea_to_backlog'
-    // are the big-idea guard's two CTAs (IDEA-009).
+    // are the big-idea guard's two CTAs (IDEA-009); 'log_as_finding' /
+    // 'address_review_findings' are the eval-sourced finding's triage pair
+    // (TASK-277 — replaces promote_to_task for `source LIKE 'agent:eval%'`).
+    // 'approve[no-findings]' is the approve-design gate's third choice ("Continue
+    // without logging") — an approve whose MODIFIER suppresses the accepted-risk
+    // findings, counted apart from a plain approve because that is the thing
+    // worth counting: how often people drop a critique rather than carry it.
     action:
       | 'resolve'
       | 'dismiss'
       | 'promote_to_task'
       | 'approve'
+      | 'approve[no-findings]'
       | 'reject'
       | 'revise'
       | 'launch_separate_planner'
-      | 'return_idea_to_backlog';
+      | 'return_idea_to_backlog'
+      | 'log_as_finding'
+      | 'address_review_findings';
     blocking?: boolean;
   };
   approval_decided: { decision: 'approve' | 'reject'; scope: 'single' | 'rest_of_run' };

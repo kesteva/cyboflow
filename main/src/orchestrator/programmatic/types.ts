@@ -24,6 +24,12 @@
 import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type {
+  AdversarialFinding,
+  ParsedAdversarialReview,
+} from '../../../../shared/types/adversarialReview';
+import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { PendingBlockingItem } from './blockingItemsGate';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -145,8 +151,78 @@ export interface ControllerStepContext {
    * human ever saw the design gate, and `note` holds the review's `## Blocking`
    * section. The prompt renders a different heading for it, so the re-run agent
    * never reads a machine verdict as "a human rejected this".
+   *
+   * `round` is how many adversarial-review results this walk has completed for
+   * the review step attached to this revision — so the re-run's prompt can tell
+   * the reviewer which round it is about to write and which `AR-n` ids are
+   * already spent. Absent when the walk has no review step for the gate, or when
+   * the revision came from a path that never ran one; the prompt then drops the
+   * round clause and keeps the rest. It is WALK state, not run state: a restart
+   * or a rewind resets it, which is why it is never persisted.
    */
-  gateRevision?: { gateStepId: string; note?: string; source?: 'adversarial-review' };
+  gateRevision?: {
+    gateStepId: string;
+    note?: string;
+    source?: 'adversarial-review';
+    round?: number;
+    /**
+     * The supervisor's steering for THIS automatic lap — present only on a
+     * `source: 'adversarial-review'` revision whose lap the supervisor voted
+     * for. It names the entries the lap must close and the ones it must NOT
+     * spend itself on, and the prompt renders it as outranking the review
+     * itself. Absent on a mechanical lap (no supervisor verdict) and on every
+     * human-gate revision, where the prompt is byte-identical to before.
+     */
+    steering?: ReviewLoopSteering;
+    /**
+     * The review document this revision was composed from, carried on the ctx
+     * instead of being re-read at spawn time.
+     *
+     * Set ONLY when the controller did NOT select the run's adversarial-review
+     * ARTIFACT as this round's document (see
+     * `WorkflowController.selectReviewDocument`): the artifact is missing, or the
+     * reviewer wrote a verdict in its text while its `cyboflow_report_artifact`
+     * call failed or lagged, leaving the artifact on the PREVIOUS round's `AR-n`
+     * set. Absent whenever the artifact WAS the selected document, where the step
+     * runner reads it exactly as before — so that path is byte-identical.
+     */
+    reviewMarkdown?: string;
+    /**
+     * The walk's adversarial-review FRESHNESS bound (ms since epoch) SNAPSHOT at
+     * the instant this revision was armed — the same bound the gate that sent the
+     * region back was composed from. The step runner applies it to the artifact
+     * read that feeds the gate-revision quote, so a re-run is never handed, as
+     * the feedback it must act on, a critique the gate itself told the human does
+     * not describe the current design (see
+     * `composeAdversarialReviewGateBody`'s stale notice).
+     *
+     * A SNAPSHOT, not a live read of the controller's `reviewReportedSinceMs`:
+     * that local is re-stamped when the review step is revisited, and the review
+     * step sits inside the region this revision re-drives, so a live read would
+     * make its own turn's quote vanish. Absent when the walk holds no bound (a
+     * resume past the review step) ⇒ unbounded, byte-identical to before.
+     */
+    reviewReportedSinceMs?: number;
+  };
+  /**
+   * Provenance for the gate this ctx opens, when a supervisor intervention put
+   * it there (today: a `stop` verdict that ended the automatic review loop).
+   * Set on the ONE `requestHumanGate` call that follows the intervention and
+   * cleared the moment that call returns — it is about this gate presentation,
+   * not a standing property of the run. Absent on every ordinary gate.
+   */
+  escalation?: ControllerEscalation;
+  /**
+   * The walk's adversarial-review FRESHNESS bound (ms since epoch) at the instant
+   * this human gate opens — the same instant the controller hands
+   * `shouldSkipHumanGate`. The opener uses it to compose the gate body from a
+   * critique reported THIS round only, and stamps it on the gate row so the
+   * resolve-time side effects act on the same critique the human saw. Present
+   * ONLY on a `requestHumanGate` ctx and only when the walk holds a bound (see
+   * `run()`'s `reviewReportedSinceMs`); absent ⇒ no constraint. Never on an
+   * agent step's ctx, so every prompt stays byte-identical.
+   */
+  reviewReportedSinceMs?: number;
   /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see
@@ -197,6 +273,12 @@ export interface StepRunner {
  * it can consult the ON-DEMAND monitor (or, absent a monitor, the host defaults to
  * 'escalate' — routing every exhausted required failure to the human review queue):
  *   - 'retry'    — re-run the step once more (bounded by a per-step triage budget).
+ *                  A monitor 'retry' must come with GUIDANCE saying what the next
+ *                  attempt should do differently (staged as a one-shot
+ *                  `RunDirectives.retryGuidance` entry the next spawn consumes);
+ *                  a retry verdict without it is downgraded to 'escalate' by
+ *                  `parseTriageAdvice`, since an identical re-attempt is what the
+ *                  step's own retry budget already spent.
  *   - 'escalate' — open a human gate routing the failure to the review queue; the
  *                  human then decides (approve = skip the step and advance, reject
  *                  = fail the run, revise = retry, abort = cancel). The host's
@@ -416,6 +498,229 @@ export type LaneRescueOutcome =
   | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
 
+// ---------------------------------------------------------------------------
+// Adversarial-review LOOP protocol (the supervisor steering each automatic lap)
+// ---------------------------------------------------------------------------
+
+/**
+ * One EARLIER adversarial-review round of the same review step, as the
+ * controller recorded it when that round completed.
+ *
+ * The supervisor needs the round-over-round trend to tell a CONVERGING review
+ * (the blocking set shrinking) from CHURN (new ids replacing old ones), and it
+ * cannot read that anywhere else: `step_results` collapses every lap of a step
+ * into ONE row, so a run that looped three times looks exactly like one that
+ * ran once. The controller therefore keeps the ledger in walk state and passes
+ * it explicitly. Ids and titles only — the full text of a superseded round is
+ * both large and no longer true.
+ */
+export interface ReviewLoopPriorRound {
+  /** 1-based round number (the `reviewRounds` counter at the time). */
+  round: number;
+  /** The `AR-n` ids that round listed under `## Blocking`. */
+  blockingIds: string[];
+  /** Those entries' titles, positionally aligned with `blockingIds`. */
+  blockingTitles: string[];
+}
+
+/**
+ * Everything the supervisor needs to decide what ONE blocking adversarial-review
+ * round should do next. Assembled by the controller (which knows the budget and
+ * the walk's round ledger) and handed to `ControllerHost.adviseReviewLoop`; the
+ * HOST enriches nothing here — unlike a lane triage, every fact is already in
+ * the controller's hands.
+ */
+export interface ReviewLoopRequest {
+  /** The adversarial-review step whose result just came back BLOCKING. */
+  stepId: string;
+  /** The intra-phase step id an automatic lap would jump back to. */
+  loopbackStepId: string;
+  /** The review round that just completed (`reviewRounds.get(stepId)`). */
+  round: number;
+  /** Automatic laps already taken for this step this walk. */
+  lapsUsed: number;
+  /** The cap on automatic laps (MAX_REVIEW_AUTO_REVISIONS). */
+  maxLaps: number;
+  /**
+   * The review document the verdict was read from — the run's artifact when
+   * there is one (preferred: it carries BOTH `## Blocking` and `## Findings`),
+   * else the reviewer's WHOLE captured result text, verbatim. Absent when
+   * neither could be read.
+   */
+  reviewMarkdown?: string;
+  /** `reviewMarkdown` parsed — the id allow-list the steering is validated against. */
+  parsed: ParsedAdversarialReview;
+  /** Every EARLIER round of this step, oldest first (empty on round 1). */
+  priorRounds: ReviewLoopPriorRound[];
+}
+
+/**
+ * The supervisor's per-entry instruction for ONE automatic lap.
+ *
+ * `address` is the must-fix set the re-run is told to close; `setAside` names
+ * entries judged not worth this lap (each filed as a finding IMMEDIATELY, so
+ * setting one aside never drops it); `guidance` is free-text advice for the
+ * whole lap. Rendered into the re-run's prompt as the authoritative instruction
+ * — it OUTRANKS the review where the two disagree.
+ */
+export interface ReviewLoopSteering {
+  address: string[];
+  setAside: { id: string; reason: string }[];
+  guidance?: string;
+}
+
+/**
+ * What the supervisor decided about a blocking review round:
+ *   - 'loop' — take another automatic lap, steered by `steering`.
+ *   - 'stop' — do NOT lap; advance to the human gate now, with `rationale`
+ *              (and any set-aside ids) carried into the gate as an escalation.
+ * Absent (`undefined` from the host) means the supervisor had no verdict at all
+ * — the controller then falls back to the pre-seam MECHANICAL budget.
+ */
+export type ReviewLoopDecision =
+  | { verdict: 'loop'; rationale: string; steering: ReviewLoopSteering }
+  | { verdict: 'stop'; rationale: string; setAside: { id: string; reason: string }[] };
+
+/**
+ * What the controller carries INTO the next human gate after a supervisor
+ * intervention the human should know about. Present only on the ctx handed to
+ * `requestHumanGate` immediately after a `stop`, and consumed by that one gate
+ * (the controller clears it as soon as the call returns) — it describes THAT
+ * gate's provenance, not a standing run property.
+ */
+export interface ControllerEscalation {
+  /** Why the supervisor stopped looping instead of taking another lap. */
+  loopStopRationale?: string;
+  /** The `AR-n` ids it set aside (already filed as findings by the host). */
+  setAsideIds?: string[];
+}
+
+/**
+ * One review-queue row as the GATE-ESCALATION consult sees it — a header, never
+ * the body.
+ *
+ * The bodies are deliberately left out: a run can carry dozens of findings and
+ * the whole point of this list is that the supervisor's OWN autonomous actions
+ * (set-aside entries, loop stops, lane rescues) reach the human's gate reviewer,
+ * which the titles alone already establish. A body the supervisor needs it can
+ * read from the worktree or the run digest.
+ */
+export interface EscalationReviewItemSummary {
+  id: string;
+  kind: ReviewItemKind;
+  /** Provenance tag, e.g. `monitor` / `adversarial-review`. Null on old rows. */
+  source: string | null;
+  severity: string | null;
+  status: string;
+  title: string;
+}
+
+/**
+ * The ESCALATION consult request for one open human gate: what the human is
+ * being asked, plus everything the supervisor needs to judge whether one answer
+ * is clearly right.
+ *
+ * `title`/`body` are the gate review item's own text, which exists only once the
+ * gate is open (the body is composed inside the gate-open transaction), which is
+ * why this consult is driven from the gate-open hook rather than before it.
+ *
+ * `kind` discriminates this request from item 9's blocking-items sibling on the
+ * same `MonitorSession` method family.
+ */
+export interface GateEscalationRequest {
+  kind: 'gate';
+  stepId: string;
+  stepName: string;
+  /** The review item the recommendation would be annotated onto. */
+  reviewItemId: string;
+  title: string;
+  body: string;
+  /** The supervisor's own loop-stop rationale + set-aside ids, when this gate follows one. */
+  escalation?: ControllerEscalation;
+  /** Bounded (≤ 30) summaries of this run's pending + monitor-authored items. */
+  reviewItems: EscalationReviewItemSummary[];
+}
+
+/**
+ * The supervisor's answer to a gate escalation: a NON-BINDING recommendation, or
+ * an explicit pass.
+ *
+ * There is no third arm, and deliberately no way to ANSWER the gate: everything
+ * this consult can do is annotate the item with advice the human may ignore. A
+ * malformed verdict, a choice outside the gate's own menu, or a consult that
+ * timed out all land on `pass` — the card then renders exactly as it does today.
+ */
+export type GateEscalationDecision =
+  | { action: 'recommend'; choice: SupervisorRecommendationChoice; rationale: string }
+  | { action: 'pass'; rationale: string };
+
+/**
+ * The ESCALATION consult request at a STEP BOUNDARY the run is about to park on
+ * (item 9): every pending blocking review item that has not already been
+ * reviewed on this walk, bodies included.
+ *
+ * Sibling of {@link GateEscalationRequest} on the same `MonitorSession` family —
+ * the `kind` discriminant is what lets a reader tell the two apart. The
+ * difference that matters: at a GATE the supervisor may only advise, while here
+ * it may RESOLVE a finding outright (bounded by the host's two caps), because a
+ * blocking finding — unlike a designed gate — is a defect claim the run itself
+ * filed and may itself have already closed.
+ */
+export interface BlockingItemsEscalationRequest {
+  kind: 'blocking-items';
+  items: PendingBlockingItem[];
+}
+
+/**
+ * The supervisor's verdict on ONE pending blocking item.
+ *
+ * `choice` is free-text rather than {@link SupervisorRecommendationChoice}
+ * because the menu depends on the item's KIND and the host owns that mapping (a
+ * finding is recommended `dismiss`/`continue`, a decision `approve`/`reject`);
+ * an out-of-menu value is dropped there — no recommendation is written — and is
+ * never trusted here.
+ */
+export interface BlockingItemDecision {
+  reviewItemId: string;
+  action: 'resolve' | 'recommend' | 'pass';
+  choice?: string;
+  rationale: string;
+}
+
+/**
+ * The run's own DELIVERABLES and ENTITIES, folded into the supervisor's prompts
+ * (CR-6).
+ *
+ * The step timeline and the chat digest say what HAPPENED; neither says what the
+ * run actually produced. A supervisor asked whether a design gate should be
+ * approved was reading a list of step names — so this carries the payload-bearing
+ * artifacts (the adversarial review, the brief, the runbook proposal…) and the
+ * ideas/epics/tasks the run owns, which is the content the templated `idea-spec`
+ * / `decomposed-stories` tabs re-derive.
+ */
+export interface RunDigest {
+  artifacts: { atype: string; label: string; markdown: string }[];
+  entities: { kind: 'idea' | 'epic' | 'task'; ref: string; title: string; body: string }[];
+}
+
+/**
+ * One adversarial-review entry the supervisor set aside, on its way to the
+ * review queue as a non-blocking finding.
+ *
+ * The ENTRY travels rather than a pre-rendered body so the sink can compose the
+ * finding exactly the way the approve-design gate composes its accepted-risk
+ * findings (same title shape, same severity mapping, same category) — which is
+ * what makes `gateSideEffects.filedAdversarialIds` dedupe a set-aside entry
+ * instead of filing it twice when the human later approves the gate.
+ */
+export interface SetAsideFindingInput {
+  entry: AdversarialFinding;
+  /** The supervisor's one-line reason, rendered as the body's first line. */
+  reason: string;
+  /** The review round the entry was set aside on. */
+  round: number;
+}
+
 /**
  * The outcome of awaiting an async visual merge-gate verdict for ONE lane
  * (programmatic actuation — closes the merge-gate's prose-only boundary). The
@@ -609,8 +914,21 @@ export interface ControllerHost {
    * review), or null to open the gate normally. Absent ⇒ every gate opens
    * (today's behavior). A thrown consult is treated as null (fail-open toward
    * the gate — never silently skip a human review on an error).
+   *
+   * `ctx.reviewReportedSinceMs` is the FRESHNESS bound for the adversarial-review
+   * half of that precondition: a critique artifact reported BEFORE this instant
+   * belongs to a previous walk (the row survives a rewind / Revise) and reads as
+   * ABSENT, so it alone no longer opens the gate. The controller supplies the
+   * instant the review step's visit started this walk, or — when that step did
+   * not run this walk — the walk's own start; it supplies NOTHING when the review
+   * step completed before this walk (the critique belongs to the surviving
+   * timeline). Absent ctx / absent field ⇒ no constraint, today's behaviour.
    */
-  shouldSkipHumanGate?(step: WorkflowStep, runId: string): string | null;
+  shouldSkipHumanGate?(
+    step: WorkflowStep,
+    runId: string,
+    ctx?: { reviewReportedSinceMs?: number },
+  ): string | null;
 
   /**
    * Optional read-back of the free text a human typed when resolving a gate.
@@ -632,6 +950,34 @@ export interface ControllerHost {
   readGateResolutionNote?(stepId: string): string | undefined;
 
   /**
+   * Optional read-back of the run's CURRENT adversarial-review artifact markdown.
+   *
+   * The artifact is the DURABLE half of a review: the step agent reports it
+   * before its turn ends, so it survives even when the turn's final text does
+   * not. The reviewer's captured chat text does not always arrive (a substrate
+   * that drops the final message, a turn that ends on a tool result — a real
+   * failure mode seen in live runs), and an empty text used to read as "no
+   * verdict" and advance a design phase the reviewer had just blocked. The
+   * controller therefore falls back to this reader when the text carries no
+   * verdict of its own.
+   *
+   * `opts.reportedSinceMs` is the FRESHNESS bound. The artifact is ONE row per
+   * run, so it also outlives the walk that wrote it: after a whole-run rewind or
+   * a Revise loopback the PREVIOUS walk's critique is still there, and reading it
+   * as this round's verdict arms a phantom design loop. An artifact last reported
+   * BEFORE this instant therefore reads as ABSENT. The controller supplies the
+   * instant the review step's visit started this walk, or the walk's own start
+   * when that step did not run this walk, and supplies NOTHING when the review
+   * step completed before this walk. Absent opts — and an unknown `reported_at`
+   * age — ⇒ no constraint, today's behaviour.
+   *
+   * Fail-soft: returns undefined when there is no artifact or the host cannot
+   * read it. Absent ⇒ the controller reads only the reviewer's final text
+   * (today's behaviour).
+   */
+  readAdversarialReview?(opts?: { reportedSinceMs?: number }): string | undefined;
+
+  /**
    * Optional monitor feed. The controller calls this at run/step boundaries.
    * Fail-soft (never throws); the production host no longer implements it (no
    * continuous chat feed), so absent ⇒ the feed is dropped.
@@ -644,8 +990,22 @@ export interface ControllerHost {
    * decision (retry / escalate-to-human / fail). Absent ⇒ the controller fails the
    * run. The production host always implements it (escalate by default, or the
    * monitor's verdict when one is wired).
+   *
+   * `opts.retryAvailable` tells the host whether a 'retry' verdict can actually
+   * be HONOURED — i.e. whether this step's per-step triage budget
+   * (MAX_STEP_LOOPBACKS) still has room. It is false on the last consult, where
+   * the controller would discard a 'retry' and fail the run: a host that spent a
+   * consult there would stage retry guidance for a spawn that never happens and
+   * file an audit record asserting a re-drive that never happened. Absent ⇒ true,
+   * so every caller that does not pass it (tests, any other controller) behaves
+   * exactly as before this option existed.
    */
-  triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
+  triageFailure?(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    error: string | undefined,
+    opts?: { retryAvailable: boolean },
+  ): Promise<TriageDecision>;
 
   /**
    * Optional LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted
@@ -666,6 +1026,28 @@ export interface ControllerHost {
    * controller settles the lane failed exactly as before the seam existed.
    */
   triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
+
+  /**
+   * Optional REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling.
+   * Consulted on EVERY blocking adversarial-review round for which automatic
+   * laps remain, BEFORE the controller decides whether to take one.
+   *
+   * The production host asks the ON-DEMAND monitor whether another lap is worth
+   * it and, if so, which entries the lap must close (`steering.address`) and
+   * which it must leave alone (`steering.setAside`, filed as findings by the
+   * host there and then). The controller stays dumb: it branches on
+   * loop / stop / undefined and never learns what a monitor or a finding is.
+   *
+   * `undefined` is the FAIL-SOFT value and means "no supervisor verdict" — a
+   * kill switch, a missing monitor, a thrown consult, an aborted run. The
+   * controller then falls back to MAX_REVIEW_MECHANICAL_REVISIONS, i.e. exactly
+   * the behaviour of a run without this seam. MUST never reject and MUST honour
+   * `ctx.signal`.
+   */
+  adviseReviewLoop?(
+    req: ReviewLoopRequest,
+    ctx: ControllerStepContext,
+  ): Promise<ReviewLoopDecision | undefined>;
 
   /**
    * Optional per-step result sink (Stage 3, migration 033). The controller calls
@@ -819,11 +1201,15 @@ export interface ControllerHost {
   reportBuildBreakGroup?(input: { runId: string; group: BuildBreakGroup }): void;
 
   /**
-   * Optional wall clock, for the one place the controller needs one: the
-   * fan-out pool's corroboration window (SAME_ERROR_COHORT_MAX_MS), which bounds
-   * how long a lane's 'failed' write is held waiting for a sibling to corroborate
-   * it. Absent ⇒ `Date.now()`. Exists so a test can advance the ceiling without
-   * faking timers around real agent promises.
+   * Optional wall clock, for the two places the controller needs one:
+   *   - the fan-out pool's corroboration window (SAME_ERROR_COHORT_MAX_MS),
+   *     which bounds how long a lane's 'failed' write is held waiting for a
+   *     sibling to corroborate it; and
+   *   - the adversarial-review FRESHNESS bound — the instant stamped at walk
+   *     entry and at each review-step visit, compared against the critique
+   *     artifact's `reported_at` (see `readAdversarialReview`).
+   * Absent ⇒ `Date.now()`. Exists so a test can advance the ceiling (or script
+   * the review instants) without faking timers around real agent promises.
    */
   now?(): number;
 

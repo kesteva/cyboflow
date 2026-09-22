@@ -3,7 +3,8 @@
  * cyboflow_fs_list / cyboflow_fs_grep / cyboflow_history MCP handler family,
  * extracted from mcpQueryHandler.ts (GitHub issue #19, the god-file split,
  * step 3), plus the cyboflow_workflows / cyboflow_workflow / cyboflow_agents /
- * cyboflow_propose_action family that followed it out.
+ * cyboflow_propose_action family that followed it out, and cyboflow_queue
+ * (mcp-queue), which moved here when it grew filters/paging (TASK-293).
  *
  * A CLASS rather than free functions (contrast workflowConfigHandlers.ts):
  * this family owns process-lifetime state, the lazily-opened readonly sibling
@@ -54,6 +55,7 @@ import { prepareProposal, createPrepareProposalDeps } from '../../agentThread/pr
 import { computeEffectiveAgents } from '../../agents/effectiveAgents';
 import { loadBuiltInAgents } from '../../agents/agentCatalogue';
 import { readWorkflowRow, toCompactWorkflow } from './workflowConfigHandlers';
+import { ReviewItemRouter, type ReviewItemDbRow } from '../../reviewItemRouter';
 
 /**
  * Everything the global-agent tool handlers need from McpQueryHandler, built
@@ -97,6 +99,50 @@ const HISTORY_MAX_PAYLOAD_BYTES = 100_000;
  */
 const HISTORY_MAX_DAYS_BACK = 36_500;
 
+// ---------------------------------------------------------------------------
+// cyboflow_queue caps (mcp-queue, TASK-293). A large inbox (Margin Letter: 456
+// pending findings) serialized with every body blew past the tool-result cap,
+// so the default row is COMPACT and the reply is paged by ROW COUNT — a page of
+// QUEUE_MAX_LIMIT compact rows (~340 bytes each, measured on a 456-row inbox)
+// stays under the ~100KB ceiling the other tools honour. `includeBody`
+// restores the old shape on a page the caller has deliberately narrowed.
+// ---------------------------------------------------------------------------
+
+/** Default page size when the caller passes no `limit`. */
+export const QUEUE_DEFAULT_LIMIT = 100;
+/** Hard ceiling on `limit` — 250 compact rows ≈ 85KB, the largest page that stays under the cap. */
+export const QUEUE_MAX_LIMIT = 250;
+
+const REVIEW_ITEM_KINDS: ReadonlySet<string> = new Set(['finding', 'permission', 'decision', 'human_task', 'notification']);
+const REVIEW_ITEM_SEVERITIES: ReadonlySet<string> = new Set(['info', 'warning', 'error']);
+
+/** The compact row cyboflow_queue returns by default — no body, no payload. */
+export interface CompactReviewItemRow {
+  id: string;
+  project_id: number;
+  run_id: string | null;
+  kind: string;
+  status: string;
+  blocking: boolean;
+  severity: string | null;
+  source: string | null;
+  title: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  staged_at: string | null;
+  selected: boolean;
+  created_at: string;
+}
+
+/** One tally row of the summary_only reply. */
+export interface QueueSummaryRow {
+  kind: string;
+  status: string;
+  severity: string | null;
+  source: string | null;
+  count: number;
+}
+
 /** One row of the transcript scan (the four columns mcp-history selects). */
 interface AgentThreadEventScanRow {
   id: number;
@@ -113,6 +159,26 @@ interface HistoryTurn {
   text: string;
   /** Present (true) only in search mode, where `text` is a match excerpt. */
   matched?: boolean;
+}
+
+/** Project a review_items row onto the compact cyboflow_queue shape (no body / payload). */
+export function toCompactReviewItemRow(row: ReviewItemDbRow): CompactReviewItemRow {
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    run_id: row.run_id,
+    kind: row.kind,
+    status: row.status,
+    blocking: row.blocking === 1,
+    severity: row.severity,
+    source: row.source,
+    title: row.title,
+    entity_type: row.entity_type,
+    entity_id: row.entity_id,
+    staged_at: row.staged_at,
+    selected: row.selected === 1,
+    created_at: row.created_at,
+  };
 }
 
 export class GlobalAgentToolHandlers {
@@ -603,6 +669,106 @@ export class GlobalAgentToolHandlers {
    * still count toward `scanned`, which is why the scan cap exists separately
    * from `limit`.
    */
+  /**
+   * cyboflow_queue — the review_items inbox, compact + filtered + paged.
+   * Pending-only by default (`includeResolved` widens); every filter is
+   * optional and ANDed. `summaryOnly` skips the rows and returns the
+   * {kind,status,severity,source} → count tallies over the SAME filter set, so
+   * the assistant can size an inbox before it pages it. Invalid enum values
+   * are rejected up front (`invalid_kind` / `invalid_severity`) rather than
+   * silently matching nothing.
+   */
+  handleAgentQueue(
+    msg: Extract<McpQueryMessage, { type: 'mcp-queue' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const reply = (response: Omit<McpQueryResponse, 'type' | 'requestId'>): void =>
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ...response } as McpQueryResponse);
+
+    if (msg.kind !== undefined && !REVIEW_ITEM_KINDS.has(msg.kind)) {
+      reply({ ok: false, error: 'invalid_kind' });
+      return;
+    }
+    const severities = msg.severity === undefined ? undefined : [...new Set(msg.severity)];
+    if (severities !== undefined && (severities.length === 0 || severities.some((sev) => !REVIEW_ITEM_SEVERITIES.has(sev)))) {
+      reply({ ok: false, error: 'invalid_severity' });
+      return;
+    }
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (!(msg.includeResolved ?? false)) clauses.push("status = 'pending'");
+    if (msg.projectId !== undefined) {
+      clauses.push('project_id = ?');
+      params.push(msg.projectId);
+    }
+    if (msg.kind !== undefined) {
+      clauses.push('kind = ?');
+      params.push(msg.kind);
+    }
+    if (severities !== undefined) {
+      clauses.push(`severity IN (${severities.map(() => '?').join(', ')})`);
+      params.push(...severities);
+    }
+    if (msg.sourcePrefix !== undefined && msg.sourcePrefix.length > 0) {
+      // LIKE with the wildcard chars escaped, so a prefix like 'agent:eval_'
+      // matches literally rather than as a single-char wildcard.
+      clauses.push("source LIKE ? ESCAPE '\\'");
+      params.push(`${msg.sourcePrefix.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+    }
+    if (msg.createdAfter !== undefined && msg.createdAfter.length > 0) {
+      clauses.push('created_at >= ?');
+      params.push(msg.createdAfter);
+    }
+    if (msg.createdBefore !== undefined && msg.createdBefore.length > 0) {
+      clauses.push('created_at < ?');
+      params.push(msg.createdBefore);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+
+    const totalRow = this.ctx.db.prepare(`SELECT COUNT(*) AS n FROM review_items ${where}`).get(...params) as
+      | { n: number }
+      | undefined;
+    const total = totalRow?.n ?? 0;
+
+    if (msg.summaryOnly === true) {
+      const summary = this.ctx.db
+        .prepare(
+          `SELECT kind, status, severity, source, COUNT(*) AS count
+             FROM review_items ${where}
+            GROUP BY kind, status, severity, source
+            ORDER BY count DESC, kind ASC, status ASC, severity ASC, source ASC`,
+        )
+        .all(...params) as QueueSummaryRow[];
+      reply({ ok: true, data: { total, summary } });
+      return;
+    }
+
+    const limit = Math.max(1, Math.min(QUEUE_MAX_LIMIT, Math.floor(msg.limit ?? QUEUE_DEFAULT_LIMIT)));
+    const offset = Math.max(0, Math.floor(msg.offset ?? 0));
+    const rows = this.ctx.db
+      .prepare(`SELECT * FROM review_items ${where} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as ReviewItemDbRow[];
+    const items = msg.includeBody === true ? rows.map((r) => ReviewItemRouter.shapeRow(r)) : rows.map(toCompactReviewItemRow);
+    const truncated = offset + rows.length < total;
+    reply({
+      ok: true,
+      data: {
+        items,
+        total,
+        limit,
+        offset,
+        truncated,
+        ...(truncated ? { nextOffset: offset + rows.length } : {}),
+      },
+    });
+  }
+
   handleAgentHistory(
     msg: Extract<McpQueryMessage, { type: 'mcp-history' }>,
     client: net.Socket,

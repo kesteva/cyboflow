@@ -865,6 +865,136 @@ describe('cyboflow.reviewItems.resolve — programmatic human-gate outcome', () 
     };
     expect(row.resolution).toBe('approve');
   });
+
+  // -------------------------------------------------------------------------
+  // TASK-222 — attributable-reject warn guard + gate-resolution provenance
+  // -------------------------------------------------------------------------
+
+  /**
+   * Seed a plan-gated run whose FROZEN spec (falls back to the live
+   * `workflows.spec_json` — this fixture predates migration 026's spec_hash)
+   * declares one phase with a single OPTIONAL step carrying an intra-phase
+   * `loopback` — the exact `approve-design` shape (shared/types/workflows.ts).
+   */
+  function seedLoopbackGate(
+    db: Database.Database,
+    opts: { runId: string; stepId: string; loopbackTarget: string },
+  ): { reviewItemId: string } {
+    const specJson = JSON.stringify({
+      id: 'planner',
+      phases: [
+        {
+          id: 'refine',
+          label: 'Refine',
+          color: '#5a4ad6',
+          steps: [
+            { id: opts.loopbackTarget, name: 'Loopback target', agent: 'context', mcps: [], retries: 0 },
+            {
+              id: opts.stepId,
+              name: 'Approve design',
+              agent: 'human',
+              mcps: [],
+              retries: 0,
+              optional: true,
+              human: true,
+              loopback: opts.loopbackTarget,
+            },
+          ],
+        },
+      ],
+    });
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-loopback', 1, 'planner', ?)`,
+    ).run(specJson);
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-loopback', 1, '/w/lb', 'b/lb', 'awaiting_review', '{}')`,
+    ).run(opts.runId);
+    const reviewItemId = `rvw_gate_${opts.stepId}`;
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, ?, NULL, NULL, ?, NULL, ?, ?, NULL, NULL)`,
+    ).run(reviewItemId, opts.runId, `Human gate: ${opts.stepId}`, `gate:human-step:${opts.stepId}`, now, now);
+    return { reviewItemId };
+  }
+
+  it('a reject on a gate that declares an optional loopback (approve-design) warns, attributing the surface — but still honors the reject', async () => {
+    const { caller, db } = buildCaller();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const del = vi.spyOn(TaskChangeRouter.prototype, 'deleteRunCreatedEntities').mockResolvedValue(undefined);
+    const { reviewItemId } = seedLoopbackGate(db, {
+      runId: 'run-lb',
+      stepId: 'approve-design',
+      loopbackTarget: 'expand-spec',
+    });
+
+    await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'reject',
+      surface: 'queue',
+    });
+
+    // Not an approve-plan gate — the reject teardown never fires for approve-design.
+    expect(del).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("gate 'approve-design'"),
+    );
+    const warnMessage = warn.mock.calls.map((c) => String(c[0])).find((m) => m.includes('approve-design'));
+    expect(warnMessage).toContain('surface=queue');
+    expect(warnMessage).toContain(reviewItemId);
+  });
+
+  it('a reject on a gate with NO declared loopback (approve-plan) never fires the attributable-reject warn', async () => {
+    const { caller, db } = buildCaller();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(TaskChangeRouter.prototype, 'deleteRunCreatedEntities').mockResolvedValue(undefined);
+    const { reviewItemId } = seedGate(db, { runId: 'run-noloop', stepId: 'approve-plan' });
+
+    await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'reject',
+      surface: 'queue',
+    });
+
+    const loopbackWarn = warn.mock.calls
+      .map((c) => String(c[0]))
+      .find((m) => m.includes('declares an optional loopback'));
+    expect(loopbackWarn).toBeUndefined();
+  });
+
+  it('gate-resolution provenance: an explicit outcome + surface is merged into payload_json (never clobbering the mint-time gate)', async () => {
+    const { caller, db } = buildCaller();
+    const { reviewItemId } = seedLoopbackGate(db, {
+      runId: 'run-prov',
+      stepId: 'approve-design',
+      loopbackTarget: 'expand-spec',
+    });
+
+    await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'revise',
+      surface: 'session',
+    });
+
+    const row = db.prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?').get(reviewItemId) as {
+      payloadJson: string | null;
+    };
+    expect(row.payloadJson).not.toBeNull();
+    const payload = JSON.parse(row.payloadJson as string) as {
+      kind: string;
+      resolvedOutcome: string;
+      resolvedSurface: string;
+    };
+    expect(payload.kind).toBe('decision');
+    expect(payload.resolvedOutcome).toBe('revise');
+    expect(payload.resolvedSurface).toBe('session');
+  });
 });
 
 // ---------------------------------------------------------------------------

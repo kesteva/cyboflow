@@ -49,6 +49,23 @@ import { DESIGN_SPEC_SECTION_HEADING, PROTOTYPE_HTML_RELPATH } from '../../../..
 import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
 import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudgets';
 import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
+import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
+
+/**
+ * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
+ * imported from `./types`: this module composes prompt text from shared types
+ * only, and the controller's `ReviewLoopSteering` is assignable to it, so the
+ * two stay in step without stepPrompt taking on the controller protocol's
+ * import graph.
+ */
+interface MonitorSteering {
+  /** `AR-n` ids this lap must close. */
+  address: string[];
+  /** `AR-n` ids this lap must NOT spend itself on, each with the reason a human will read. */
+  setAside: { id: string; reason: string }[];
+  /** Free-text advice for the whole lap. */
+  guidance?: string;
+}
 
 export interface ComposeStepPromptArgs {
   step: WorkflowStep;
@@ -169,6 +186,17 @@ export interface ComposeStepPromptArgs {
    */
   userGuidance?: string;
   /**
+   * The run SUPERVISOR's one-shot RETRY guidance for THIS attempt of this step
+   * (monitor triage `retry`). Rendered as its own section AFTER the operator's
+   * `## Operator guidance`, and deliberately NOT folded into it: the operator's
+   * steer is a standing preference while this is a correction that applies to
+   * exactly one attempt, and the agent has to be able to tell the difference.
+   * Sourced from `RunDirectives.retryGuidance`, which SpawnStepRunner's thunk
+   * consumes, so no later spawn of the step carries it. Absent / empty ⇒ no
+   * section (output byte-identical to before this field existed).
+   */
+  retryGuidance?: string;
+  /**
    * The run supervisor's LANE-RESCUE guidance for this fan-out lane (monitor
    * lane triage). Rendered in the SAME `## Operator guidance` section as
    * `userGuidance` — an agent should not have to learn two section names for
@@ -223,6 +251,22 @@ export interface ComposeStepPromptArgs {
     note?: string;
     reviewMarkdown?: string;
     source?: 'adversarial-review';
+    /**
+     * Completed adversarial-review rounds for this revision's review step, from
+     * the controller's walk-scoped counter. Renders the "this is round R+1"
+     * clause; absent ⇒ the clause is dropped and the id list still renders.
+     */
+    round?: number;
+    /**
+     * The supervisor's steering for THIS lap (the controller's
+     * `ReviewLoopSteering`, declared structurally so this module keeps importing
+     * shared types only). Present only on a supervisor-voted automatic lap:
+     * `address` is the must-fix set for the lap, `setAside` the entries it must
+     * NOT spend itself on (already filed as findings), `guidance` free-text
+     * advice. Absent on a mechanical lap and on every human-gate revision, where
+     * the prompt is byte-identical to before.
+     */
+    steering?: MonitorSteering;
   };
   /**
    * The most recent preceding AGENT step's final text, for a step whose
@@ -333,7 +377,7 @@ function artifactFollowUp(
       // queue of items the very next gate is about to triage. The artifact IS the
       // channel: it is what the gate body is composed from, and — being one per
       // atype per run — what a revision round enriches rather than duplicates.
-      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-adversarial-review\` subagent returns its \`## Result\`, compose ONE markdown doc from it and report it — that doc is the ONLY surface the \`approve-design\` gate reviews, and the gate has nothing to show without it.\n\nCompose it with exactly two top-level sections, in this order:\n\n- \`## Blocking\` — the subagent's \`### Blocking\` entries.\n- \`## Findings\` — its \`### Findings\` entries.\n\nCarry every entry across VERBATIM, keeping its \`#### AR-n — <title>\` heading and its \`**Severity:**\` / \`**Area:**\` / \`**What:**\` / \`**Why it matters:**\` / \`**Fix:**\` fields. Do not renumber, merge, summarize, or re-rank them: the \`AR-n\` ids are how the gate's revision round reports back what it resolved, and a re-numbered entry breaks that thread. Keep a section's heading with \`None.\` under it when it is empty.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'adversarial-review'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. Re-reporting the same atype ENRICHES the same tab, so a re-review after a revision replaces the document rather than stacking a second one.\n\nDo NOT call \`cyboflow_report_finding\` at this step — not for a blocking entry, not for an advisory one, not as a \`decision\`. The approve-design gate decides what becomes a finding: on Approve every entry is logged as an accepted-risk finding, and on Revise the design steps re-run against them. Filing them here pre-empts that decision and buries the human under items the very next gate was about to triage. Likewise do not "auto-fix" a blocking entry yourself by editing a spec or re-running a design step — this step reviews and reports; the host routes.\n\n**Verdict trailer (machine-read).** After reporting the artifact, end your final message with the \`## Blocking\` section exactly as you reported it (its \`#### AR-n\` entries verbatim, or \`None.\`), followed by a LAST line that is exactly \`REVIEW: BLOCKING\` when that section has one or more entries, else \`REVIEW: CLEAN\`. ${
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-adversarial-review\` subagent returns its \`## Result\`, compose ONE markdown doc from it and report it — that doc is the ONLY surface the \`approve-design\` gate reviews, and the gate has nothing to show without it.\n\nCompose it with exactly three top-level sections, in this order:\n\n- \`## Blocking\` — the subagent's \`### Blocking\` entries.\n- \`## Findings\` — its \`### Findings\` entries.\n- \`## Prior entries\` — the subagent's \`### Prior entries\` ledger, VERBATIM (one line per prior id with its previous severity and status); write \`None.\` under it on a first review.\n\nCarry every entry across VERBATIM, keeping its \`#### AR-n — <title>\` heading and its \`**Severity:**\` / \`**Area:**\` / \`**What:**\` / \`**Why it matters:**\` / \`**Fix:**\` fields. Do not renumber, merge, summarize, or re-rank them: the \`AR-n\` ids are how the gate's revision round reports back what it resolved, and a re-numbered entry breaks that thread. Keep a section's heading with \`None.\` under it when it is empty.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'adversarial-review'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. Re-reporting the same atype ENRICHES the same tab, so a re-review after a revision replaces the document rather than stacking a second one.\n\nDo NOT call \`cyboflow_report_finding\` at this step — not for a blocking entry, not for an advisory one, not as a \`decision\`. The approve-design gate decides what becomes a finding: on Approve every entry is logged as an accepted-risk finding, and on Revise the design steps re-run against them. Filing them here pre-empts that decision and buries the human under items the very next gate was about to triage. Likewise do not "auto-fix" a blocking entry yourself by editing a spec or re-running a design step — this step reviews and reports; the host routes.\n\n**Verdict trailer (machine-read).** After reporting the artifact, end your final message with the \`## Blocking\` section exactly as you reported it (its \`#### AR-n\` entries verbatim, or \`None.\`), followed by a LAST line that is exactly \`REVIEW: BLOCKING\` when that section has one or more entries, else \`REVIEW: CLEAN\`. ${
         autoRevises
           ? 'The host orchestrator parses this line: on `REVIEW: BLOCKING` it re-runs the design steps automatically against your entries (once) before the human sees the gate; on `REVIEW: CLEAN` it opens the gate. A populated section with no trailer is still read as blocking, but do not rely on that — emit the line.'
           : 'The host orchestrator parses this line to know the review\'s verdict; on this flow the design gate is what routes either way, so emit it and stop.'
@@ -640,18 +684,96 @@ function conditionalExecution(step: WorkflowStep, workflowName: string, hasRunOw
  * the artifact could not be read so the re-run is never left with a bare "it
  * was blocking" and nothing to act on.
  */
+/**
+ * The id-continuity sentence appended wherever a revision hands an agent the
+ * previous round's review.
+ *
+ * Without it every re-review starts numbering at AR-1, and the gate can no
+ * longer say whether AR-2 is the defect it was last round or an unrelated new
+ * one — which is the whole basis of the convergence reporting. The ROUND number
+ * is optional on purpose: a revision that reaches here without the controller's
+ * counter (a path that never ran a review step) should still get the id rule,
+ * just without a round it cannot vouch for. Empty when no `AR-n` id exists yet
+ * (k = 0): there is nothing to preserve, and naming a range of none reads as a
+ * bug.
+ */
+function composeReviewRoundNote(reviewMarkdown: string, round: number | undefined): string {
+  const k = maxAdversarialId(reviewMarkdown);
+  if (k <= 0) return '';
+  const ids = k === 1 ? '`AR-1`' : `\`AR-1\`..\`AR-${k}\``;
+  const roundClause =
+    round !== undefined && round > 0 ? `This is round ${round + 1} of the adversarial review. ` : '';
+  return `\n\n${roundClause}Ids used so far: ${ids}. Keep them: never renumber an existing \`AR-n\`, continue any NEW entry from AR-${k + 1}, and list every prior id under \`### Prior entries\` with its previous severity.`;
+}
+
+/**
+ * The supervisor's steering, rendered INSIDE the automatic-revision section.
+ *
+ * It outranks the review deliberately, and says so: the review is one critic's
+ * opinion, while the steering is the run supervisor's judgement of which of
+ * those opinions this lap should spend itself on, made with the round-over-round
+ * trend in front of it. Without the precedence line an agent handed both would
+ * reasonably try to satisfy every blocking entry — which is exactly the churn
+ * the set-aside list exists to stop.
+ *
+ * The SET ASIDE half also carries an instruction for the NEXT reviewer: a
+ * set-aside id must come back under `### Prior entries` as `set-aside`, not as a
+ * fresh blocker. Nothing else closes that loop — the reviewer never sees the
+ * steering, so an id dropped without a word would read to it as an unaddressed
+ * defect and be re-raised on the next round, forever.
+ *
+ * Empty when neither list has an entry (a steering that names nothing has
+ * nothing to outrank).
+ */
+function composeMonitorSteeringSection(steering: MonitorSteering): string {
+  const address = steering.address.filter((id) => id.trim().length > 0);
+  const setAside = steering.setAside.filter((entry) => entry.id.trim().length > 0);
+  if (address.length === 0 && setAside.length === 0) return '';
+  const guidance = (steering.guidance ?? '').trim();
+  const lines: string[] = [
+    '',
+    '',
+    '### The supervisor\'s steering',
+    '',
+    "The supervisor's steering — authoritative, outranks the review where they disagree:",
+  ];
+  if (address.length > 0) {
+    lines.push(
+      '',
+      `ADDRESS ${address.map((id) => `\`${id}\``).join(', ')}${guidance.length > 0 ? ` (${guidance})` : ''}.`,
+    );
+  }
+  if (setAside.length > 0) {
+    const rendered = setAside
+      .map((entry) => `\`${entry.id}\` (${entry.reason.trim().length > 0 ? entry.reason.trim() : 'no reason given'})`)
+      .join(', ');
+    lines.push(
+      '',
+      `SET ASIDE ${rendered}: do not spend this lap on them; they are already filed as findings.`,
+      '',
+      'Reviewer: list set-aside ids under `### Prior entries` as `set-aside`; do not re-raise them as blocking.',
+    );
+  }
+  return lines.join('\n');
+}
+
 function composeAdversarialRevisionSection(
   reviewStepId: string,
   blockingNote: string,
   reviewMarkdown: string,
+  round: number | undefined,
+  steering: MonitorSteering | undefined,
 ): string {
   const body =
     reviewMarkdown.length > 0
-      ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.\n\n${reviewMarkdown}`
+      ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.${composeReviewRoundNote(reviewMarkdown, round)}\n\n${reviewMarkdown}`
       : blockingNote.length > 0
         ? `\n\n### Blocking entries from the previous round\n\nThe full review artifact could not be read back, so these are the \`## Blocking\` entries as the review step reported them. Address EVERY one; state in your output which \`AR-n\` ids you resolved and how, and name — with your reason — any you deliberately did not.\n\n${blockingNote}`
         : `\n\nNeither the review artifact nor its blocking entries could be read back, so you have the verdict and nothing else. Re-examine your previous output against the spec and the brief, fix what you judge weakest, and state that judgement explicitly in your summary — do NOT re-emit the same result and do NOT ask a question; nothing in this step can answer one.`;
-  return `\n\n## Adversarial review: revision requested\n\nThis run's adversarial review (the \`${reviewStepId}\` step) found must-fix defects in the design, and the workflow sent the refine phase back to address them AUTOMATICALLY — no human has seen the design gate yet, and this re-run is what they will see when it opens. You are part of the RE-RUN: the review found your previous output wanting, and repeating it unchanged wastes the revision and hands the human the same defects. Produce a revised result that answers the entries below that fall within this step's remit, and say plainly in your summary what you changed.${body}`;
+  // The steering renders AFTER the review it outranks, so the agent reads the
+  // critique first and the instruction about which parts of it to act on last.
+  const steeringSection = steering !== undefined ? composeMonitorSteeringSection(steering) : '';
+  return `\n\n## Adversarial review: revision requested\n\nThis run's adversarial review (the \`${reviewStepId}\` step) found must-fix defects in the design, and the workflow sent the refine phase back to address them AUTOMATICALLY — no human has seen the design gate yet, and this re-run is what they will see when it opens. You are part of the RE-RUN: the review found your previous output wanting, and repeating it unchanged wastes the revision and hands the human the same defects. Produce a revised result that answers the entries below that fall within this step's remit, and say plainly in your summary what you changed.${body}${steeringSection}`;
 }
 
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
@@ -756,7 +878,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
           workflowName,
           // The verdict-trailer routing sentence is only true on a review step
           // that declares a loopback — the controller's automatic revision keys
-          // on it (see WorkflowController.tryAdversarialReviewLoopback).
+          // on it (see WorkflowController.readAdversarialReviewResult).
           step.agent === 'adversarial-review' && step.loopback !== undefined && step.loopback.length > 0,
         )
       : '';
@@ -841,6 +963,15 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   }
   const userGuidance =
     guidanceBlocks.length > 0 ? `\n\n## Operator guidance\n\n${guidanceBlocks.join('\n\n')}` : '';
+  // The supervisor's ONE-SHOT retry guidance, rendered immediately after the
+  // operator's section (and only when the host staged one for this attempt). Its
+  // own heading, not a third block inside `## Operator guidance`: the heading is
+  // what tells the agent this instruction expires with this attempt, and the
+  // previous attempt of this step having FAILED is the reason it exists.
+  const retryGuidance =
+    args.retryGuidance !== undefined && args.retryGuidance.trim().length > 0
+      ? `\n\n## Supervisor retry guidance (this attempt only)\n\nThe previous attempt of this step FAILED and the run's SUPERVISOR bought this retry on the strength of a specific correction. It applies to THIS attempt only — follow it:\n\n${args.retryGuidance.trim()}`
+      : '';
   // Visual-verification output-contract re-run (§5.1/§5.3): a task-verify PASS
   // result MUST contain EXACTLY ONE of a `## Visual verification task` fence or a
   // `VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>` line. The previous attempt
@@ -880,7 +1011,13 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     revision === undefined
       ? ''
       : revision.source === 'adversarial-review'
-        ? composeAdversarialRevisionSection(revision.gateStepId, revisionNote, revisionReview)
+        ? composeAdversarialRevisionSection(
+            revision.gateStepId,
+            revisionNote,
+            revisionReview,
+            revision.round,
+            revision.steering,
+          )
         : `\n\n## Design gate: revision requested\n\nA human reviewed this run's design at the \`${revision.gateStepId}\` gate and sent it back. You are part of the RE-RUN: your previous output was not accepted, and repeating it unchanged wastes the revision. Produce a revised result that answers what is below, and say plainly in your summary what you changed.${
           revisionNote.length > 0
             ? `\n\nThe reviewer's own words, verbatim — this is the authoritative instruction and it outranks the review below where the two disagree:\n\n> ${revisionNote.replace(/\n/g, '\n> ')}`
@@ -889,7 +1026,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
               : `\n\nThe reviewer left no note and this run has no adversarial review to work from, so you have the decision and nothing else. Re-examine your previous output against the spec and the brief, fix what you judge weakest, and state that judgement explicitly in your summary — do NOT re-emit the same result and do NOT ask a question; nothing in this step can answer one.`
         }${
           revisionReview.length > 0
-            ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.\n\n${revisionReview}`
+            ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.${composeReviewRoundNote(revisionReview, revision.round)}\n\n${revisionReview}`
             : ''
         }`;
 
@@ -903,5 +1040,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

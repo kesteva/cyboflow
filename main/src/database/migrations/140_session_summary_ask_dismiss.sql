@@ -1,0 +1,31 @@
+-- Migration 140: manual-dismiss + resurface-suppression columns on
+-- session_summaries (TASK-225, "Home 'Needs your input': let the user dismiss
+-- stale quick-session asks").
+--
+-- WHY. Migration 121 gave the review-home board `state`/`waiting_on` — the
+-- summarizer's own read of "is this session waiting on you, and about what".
+-- Those two columns are a SNAPSHOT taken at summary time: if the user answers
+-- in-chat and the agent moves on, or the session simply goes idle, nothing
+-- clears them until the summarizer happens to run again — and a stopped
+-- session never gets another summary. The board's only escape was opening the
+-- session, which does not always clear a stale ask (the agent may not
+-- re-summarize immediately).
+--
+-- `ask_dismissed_at` marks a session whose ask a human explicitly cleared via
+-- the "Dismiss" action (main/src/database/database.ts `dismissSessionAsk`).
+-- `ask_dismissed_hash` is a stable hash (sha256 hex, see
+-- main/src/orchestrator/sessionAskHash.ts) of the EXACT `waiting_on` text that
+-- was dismissed. Both are nullable with no FK/CHECK: a session that has never
+-- been dismissed simply reads null for both, and dismissing again always
+-- overwrites the pair rather than accumulating history (one outstanding
+-- dismissal per session is all the read-time filter needs).
+--
+-- The pairing is what lets `quickSessionListing.ts` distinguish "the
+-- summarizer repeated the SAME stale question" (hash matches → stay hidden)
+-- from "the summarizer asked something NEW" (hash differs → resurface) — see
+-- that module's read-time filter. `state`/`waiting_on` themselves keep
+-- meaning exactly what migration 121 gave them; this migration adds a
+-- parallel, independent read-time signal rather than changing their contract.
+
+ALTER TABLE session_summaries ADD COLUMN ask_dismissed_at TEXT;
+ALTER TABLE session_summaries ADD COLUMN ask_dismissed_hash TEXT;

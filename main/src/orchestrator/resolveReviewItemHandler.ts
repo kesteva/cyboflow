@@ -55,6 +55,7 @@ import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
 import { GateSideEffects, gateDecisionFromResolution } from './gateSideEffects';
 import { listApproveIdeasBatchRows, listRunDecomposedIdeaIds } from './runEntityOwnership';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
 import type { IdeaComponentKey } from '../../../shared/types/ideaComponents';
 import {
@@ -62,6 +63,8 @@ import {
   serializeIdeaVerdictMap,
   serializeDesignVerdictMap,
   parseIdeaVerdictMap,
+  composeGateResolution,
+  GATE_RESOLUTION_MODIFIER_NO_FINDINGS,
   type IdeaVerdictMap,
 } from '../../../shared/types/reviews';
 
@@ -79,6 +82,12 @@ const APPROVE_PLAN_STEP_ID = 'approve-plan';
 const APPROVE_IDEAS_STEP_ID = 'approve-ideas';
 /** The multi-idea BATCH design gate resolved by a per-idea design verdict map. */
 const APPROVE_DESIGNS_STEP_ID = 'approve-designs';
+/**
+ * The SINGULAR inline design gate — the only gate whose approval may carry the
+ * `no-findings` modifier. Its plural batch sibling above is NOT eligible: a batch
+ * approval folds a per-design verdict map, which has no room for the modifier.
+ */
+const APPROVE_DESIGN_GATE_SOURCE = `${HUMAN_GATE_SOURCE_PREFIX}approve-design`;
 
 /**
  * The step id encoded in a `gate:human-step:<stepId>` source, or null when the source
@@ -412,7 +421,13 @@ export interface ResolveReviewItemDeps {
    */
   applyReviewItemResolve: (
     projectId: number,
-    args: { reviewItemId: string; actor: 'user'; resolution?: string | null },
+    args: {
+      reviewItemId: string;
+      actor: 'user';
+      resolution?: string | null;
+      /** TASK-222 — forwarded to ReviewItemRouter's `resolutionMeta` (see there). */
+      resolutionMeta?: { outcome: 'approve' | 'reject' | 'revise'; surface?: string | null };
+    },
   ) => Promise<{ reviewItemId: string }>;
   /** Q1 reveal (approve-plan approve): QuestionRouter.promotePendingDraftsForRun. */
   promotePendingDraftsForRun: (runId: string) => Promise<void>;
@@ -451,6 +466,13 @@ export interface ResolveReviewItemInput {
   /** Explicit gate verdict for a `gate:human-step:*` decision item (drives verdict + approve-plan reveal/decline). */
   outcome?: 'approve' | 'reject' | 'revise';
   /**
+   * Bracketed qualifier stored alongside the verdict (`approve[no-findings]`).
+   * REFUSED (invalid_payload) unless it is exactly 'no-findings', paired with
+   * outcome 'approve', on the singular `gate:human-step:approve-design` item —
+   * see the guard in the handler for why each of those is load-bearing.
+   */
+  modifier?: typeof GATE_RESOLUTION_MODIFIER_NO_FINDINGS;
+  /**
    * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate (the
    * "Submit decisions" payload). ONLY consumed when the item is one of those batch
    * decision gates — it is validated against the gate's batch payload (`ideaRefs`
@@ -459,6 +481,15 @@ export interface ResolveReviewItemInput {
    * resolutions stay byte-for-byte unaffected.
    */
   verdicts?: IdeaVerdictMap;
+  /**
+   * TASK-222: the UI surface that recorded this verdict (e.g. `'queue'` /
+   * `'session'` — {@link ReviewItemCardSurface} in the renderer, or another
+   * resolving surface's own id). Only meaningful alongside `outcome`; stamped
+   * into the item's payload_json as `resolvedSurface` (see
+   * {@link ReviewItemTriage.resolutionMeta}) so a post-mortem can tell which
+   * button, on which surface, answered the gate. Omitted entirely when absent.
+   */
+  surface?: string;
 }
 
 /**
@@ -518,6 +549,39 @@ async function maybeApplyOrchestratedGateSideEffects(
   } catch {
     // GateSideEffects.apply is itself fail-soft; this catch is the belt to its
     // braces, because the resolve above has already committed.
+  }
+}
+
+/**
+ * TASK-222 attributable-reject guard: true when the run's FROZEN spec declares
+ * `stepId` as an OPTIONAL step with an intra-phase `loopback` target — the shape
+ * `approve-design` has today (shared `workflows.ts`). Drives the warn below when
+ * a resolve arrives with `outcome: 'reject'` for such a step: a plain reject on a
+ * gate that declares a revise target ENDS the run instead of looping back (the
+ * 2026-09-17 swift-bison incident), so the occurrence needs to be attributable to
+ * a surface/actor even when the resolve itself is still honored as requested.
+ *
+ * Fail-soft (false on ANY parse/lookup miss) — a malformed/legacy spec, or a run
+ * predating `spec_hash`, must never turn a committed resolve into a throw; it
+ * just means the warn is silently skipped for that run.
+ */
+function stepDeclaresOptionalLoopback(db: DatabaseLike, runId: string, stepId: string): boolean {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    if (!frozen || frozen.specJson === null) return false;
+    const spec = JSON.parse(frozen.specJson) as {
+      phases?: Array<{ steps?: Array<{ id?: unknown; optional?: unknown; loopback?: unknown }> }>;
+    };
+    for (const phase of spec.phases ?? []) {
+      for (const step of phase.steps ?? []) {
+        if (step.id === stepId) {
+          return step.optional === true && typeof step.loopback === 'string' && step.loopback.length > 0;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
@@ -659,12 +723,72 @@ export async function resolveReviewItem(
 
   const gateStepId = humanGateStepId(before?.kind, before?.source);
   // The stored resolution the WorkflowController parses into its verdict. An explicit
-  // outcome wins over free text (deterministic verdict); otherwise the caller's
-  // free-text resolution passes through unchanged. An approve-ideas verdict map
-  // overrides both below (inside the try, so a malformed map surfaces as a refusal).
-  let resolution = input.outcome !== undefined ? input.outcome : input.resolution;
+  // outcome wins over free text (deterministic verdict) — but no longer DISCARDS it:
+  // the two are composed into the `<verdict>[<modifier>]: <note>` grammar, whose
+  // anchored prefix is what every verdict reader parses first. A bare outcome still
+  // stores the bare verdict word byte-for-byte, so nothing pre-grammar changes shape.
+  // Without an outcome the caller's free text passes through unchanged. An
+  // approve-ideas verdict map overrides both below (inside the try, so a malformed
+  // map surfaces as a refusal).
+  const outcomeNote = (input.resolution ?? '').trim() || undefined;
+  let resolution =
+    input.outcome !== undefined
+      ? composeGateResolution({
+          verdict: input.outcome,
+          ...(input.modifier !== undefined ? { modifier: input.modifier } : {}),
+          ...(outcomeNote !== undefined ? { note: outcomeNote } : {}),
+        })
+      : input.resolution;
+
+  // TASK-222 attributable-reject guard: a plain 'reject' on a gate that declares
+  // an optional intra-phase loopback (today: only `approve-design`) ENDS the run
+  // instead of looping back — this is exactly the swift-bison-20260917 incident.
+  // The resolve below still honors the caller's explicit choice (no refusal, no
+  // behavior change) — this only makes the NEXT occurrence attributable to a
+  // surface/actor instead of silently repeating. Covers both mint paths: the
+  // programmatic `gate:human-step:*` source (gateStepId) and the orchestrated
+  // plane's payload `gate` discriminant (parseDecisionGate).
+  if (input.outcome === 'reject' && before?.runId) {
+    const stepIdForLoopbackCheck = gateStepId ?? parseDecisionGate(before.payloadJson);
+    if (
+      stepIdForLoopbackCheck !== null &&
+      stepDeclaresOptionalLoopback(db, before.runId, stepIdForLoopbackCheck)
+    ) {
+      console.warn(
+        `[reviewItems.resolve] gate '${stepIdForLoopbackCheck}' on run ${before.runId} resolved with outcome 'reject' even though it declares an optional loopback (a revise target) — this ends the run instead of re-driving it. surface=${input.surface ?? 'unknown'} actor=user reviewItemId=${input.reviewItemId}`,
+      );
+    }
+  }
 
   try {
+    // MODIFIER guard. The modifier rides the stored resolution and is read back by
+    // the gate's side effects, so an unrecognized or misplaced one would silently
+    // change what an approval DOES. Refuse instead — invalid_payload reaches the
+    // caller as a BAD_REQUEST and the gate stays pending, exactly like the batch-gate
+    // refusals below. The value check is defensive: the tRPC zod already pins the
+    // enum, but the monitor action builds this input in TypeScript, and a widened
+    // union must fail loudly here rather than be stored.
+    if (input.modifier !== undefined) {
+      if (input.modifier !== GATE_RESOLUTION_MODIFIER_NO_FINDINGS) {
+        throw new ReviewItemError(
+          'invalid_payload',
+          `unknown resolution modifier '${String(input.modifier)}' — the only modifier is '${GATE_RESOLUTION_MODIFIER_NO_FINDINGS}'`,
+        );
+      }
+      if (input.outcome !== 'approve') {
+        throw new ReviewItemError(
+          'invalid_payload',
+          `the '${GATE_RESOLUTION_MODIFIER_NO_FINDINGS}' modifier only qualifies an 'approve' outcome`,
+        );
+      }
+      if (before?.source !== APPROVE_DESIGN_GATE_SOURCE) {
+        throw new ReviewItemError(
+          'invalid_payload',
+          `the '${GATE_RESOLUTION_MODIFIER_NO_FINDINGS}' modifier is only valid on the '${APPROVE_DESIGN_GATE_SOURCE}' gate`,
+        );
+      }
+    }
+
     // Approve-ideas BATCH gate, scalar-resolve REFUSAL: without a verdict map
     // there is nothing to fold OR deliver — a bare approve/reject (the generic
     // queue card's buttons, or a monitor resolveReviewItem action) would clear
@@ -752,6 +876,13 @@ export async function resolveReviewItem(
       reviewItemId: input.reviewItemId,
       actor: 'user',
       ...(resolution !== undefined ? { resolution } : {}),
+      // TASK-222: stamp which verdict + surface answered a gate resolve, so a
+      // post-mortem can tell which button was pressed. Only ever set when the
+      // caller supplied an explicit outcome — a plain free-text resolve leaves
+      // payload_json untouched exactly as before.
+      ...(input.outcome !== undefined
+        ? { resolutionMeta: { outcome: input.outcome, surface: input.surface ?? null } }
+        : {}),
     });
 
     // ORCHESTRATED-PLANE design/brief gate side effects (durably bind the approved

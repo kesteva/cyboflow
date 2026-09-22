@@ -19,6 +19,7 @@ import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
 import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
+import { IDLE_REVIEW_SOURCE_PREFIX } from '../../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Shared mutable mock state — reset in beforeEach
@@ -32,6 +33,8 @@ let mockReviewItems: ReviewItem[] = [];
 let mockBlockingFindings: ReviewItem[] = [];
 let mockBlockingRunIds: ReadonlySet<string> = new Set();
 let mockRuns: ActiveRunRow[] = [];
+/** The rail store's RETAINED rows (active + newest terminal per session) — `useAggregatedRetainedRuns`. */
+let mockRetainedRuns: ActiveRunRow[] = [];
 let mockRunProjectMap: Record<string, number> = {};
 let mockApprovalsQueueLength = 0;
 let mockApprovalBlocking: unknown[] = [];
@@ -54,6 +57,7 @@ vi.mock('../../../stores/landingStore', () => ({
   useAggregatedBlockingFindings: () => mockBlockingFindings,
   useAggregatedBlockingRunIds: () => mockBlockingRunIds,
   useAggregatedRuns: () => mockRuns,
+  useAggregatedRetainedRuns: () => (mockRetainedRuns.length > 0 ? mockRetainedRuns : mockRuns),
   useRunProjectMap: () => mockRunProjectMap,
   useRunSessionMap: () => ({}),
   useLandingStore: (selector: (s: { loadError: boolean; retry: () => void }) => unknown) =>
@@ -87,8 +91,12 @@ vi.mock('../../../stores/backlogStore', () => {
   return { useBacklogStore: hook };
 });
 
+const mockSetActiveQuickSession = vi.fn();
+const mockSetActiveRun = vi.fn();
 vi.mock('../../../stores/cyboflowStore', () => ({
-  useCyboflowStore: { getState: () => ({ setActiveQuickSession: vi.fn(), setActiveRun: vi.fn() }) },
+  useCyboflowStore: {
+    getState: () => ({ setActiveQuickSession: mockSetActiveQuickSession, setActiveRun: mockSetActiveRun }),
+  },
 }));
 
 vi.mock('../../../stores/navigationStore', () => ({
@@ -317,12 +325,15 @@ const CONNECTED_ACCESS: AgentProviderAccess = { claude: true, codex: false, omp:
 beforeEach(() => {
   mockLoadError = false;
   mockRetry.mockClear();
+  mockSetActiveQuickSession.mockClear();
+  mockSetActiveRun.mockClear();
   mockProjects = [];
   mockProjectsCount = 0;
   mockReviewItems = [];
   mockBlockingFindings = [];
   mockBlockingRunIds = new Set();
   mockRuns = [];
+  mockRetainedRuns = [];
   mockRunProjectMap = {};
   mockApprovalsQueueLength = 0;
   mockApprovalBlocking = [];
@@ -676,5 +687,277 @@ describe('LandingHome — page states', () => {
 
     const working = screen.getByTestId('rq-working-section');
     expect(within(working).getByText('faint-harbor-20260903')).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------
+  // TASK-226 — a session hosting a live flow run must never be classified
+  // from a stopped/failed sibling `__quick__` run, and `Open →` must never
+  // reopen that dead chat while the flow run is still alive.
+  // ---------------------------------------------------------------------
+
+  it('TASK-226: a stopped __quick__ run beside a running flow run classifies Working only, never doubling into Ready for review', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    // The __quick__ run is interrupted/failed -> the triage board alone would
+    // read this session as rested ("stopped by you"), landing it in Ready for
+    // review, EVEN THOUGH the session's planner run is still running.
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'swift-bison-20260917',
+        name: 'swift-bison-20260917',
+        runId: 'wf-6-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'stopped',
+        summary: null,
+      }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'running',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    // Working shows exactly the live planner run — nothing else.
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(1);
+    expect(within(working).getByText('planner')).toBeInTheDocument();
+
+    // Ready for review has nothing to show for this session (the section
+    // itself doesn't render when its row list is empty).
+    expect(screen.queryByTestId('rq-ready-section')).not.toBeInTheDocument();
+    expect(screen.queryByText('stopped by you')).not.toBeInTheDocument();
+  });
+
+  it('TASK-226: Open → on that Working row opens the live flow run, never the interrupted quick chat', async () => {
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'swift-bison-20260917',
+        name: 'swift-bison-20260917',
+        runId: 'wf-6-__quick__',
+        state: 'idle',
+        rawStatus: 'stopped',
+      }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'running',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    await user.click(within(working).getByTestId('rq-working-row'));
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('wf-global-planner');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: once the flow run is fully terminal, the session\'s own row returns to Ready for review and Open → opens THAT flow run', async () => {
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'swift-bison-20260917',
+        name: 'swift-bison-20260917',
+        runId: 'wf-6-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'stopped',
+        unviewed: true,
+      }),
+    ];
+    // The flow run finished (terminal) -> `useAggregatedRuns` no longer
+    // carries it as a live thing (so the session's own row comes back), but
+    // the rail store still RETAINS it as the session's newest terminal run.
+    mockRuns = [];
+    mockRetainedRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'completed',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const ready = screen.getByTestId('rq-ready-section');
+    expect(within(ready).getByText('swift-bison-20260917')).toBeInTheDocument();
+    // The label describes the run that finished (completed), not the parked
+    // `__quick__` chat that reads `stopped` — nothing was stopped by the user.
+    expect(within(ready).queryByText('stopped by you')).not.toBeInTheDocument();
+    // Working shows nothing — the run is terminal and the session is idle.
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
+
+    await user.click(within(ready).getByText('Open →'));
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('wf-global-planner');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: a session whose flow run was CANCELED reads "stopped by you" in Ready for review', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'swift-bison-20260917',
+        name: 'swift-bison-20260917',
+        runId: 'wf-6-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'completed',
+        unviewed: true,
+      }),
+    ];
+    mockRuns = [];
+    mockRetainedRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'canceled',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const ready = screen.getByTestId('rq-ready-section');
+    expect(within(ready).getByText('stopped by you')).toBeInTheDocument();
+  });
+
+  it('TASK-226: a session with NO flow run at all still opens its own quick session from Ready for review', async () => {
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({
+        sessionId: 'plain-chat',
+        name: 'plain-chat',
+        runId: 'wf-7-__quick__',
+        state: 'idle',
+        idleSince: '2026-09-17T00:00:00.000Z',
+        restedAtIso: '2026-09-17T00:00:00.000Z',
+        rawStatus: 'stopped',
+        unviewed: true,
+      }),
+    ];
+    mockRuns = [];
+    mockRetainedRuns = [];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const ready = screen.getByTestId('rq-ready-section');
+    expect(within(ready).getByText('stopped by you')).toBeInTheDocument();
+    await user.click(within(ready).getByText('Open →'));
+
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('plain-chat', 'wf-7-__quick__');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: an idle-session decision review item routes Answer -> to the live flow run, not the dead quick chat', async () => {
+    // openReviewItem is a SEPARATE call site from the triage-row Open-> buttons
+    // above (it resolves an `idle-session:<id>` review-item source instead of a
+    // QuickSessionRow), but it must funnel through the same
+    // resolveOpenTarget/openSessionRow precedence — otherwise a review item
+    // filed against a session whose quick chat has since gone dead would still
+    // reopen that dead chat instead of the live flow run sitting beside it.
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockReviewItems = [
+      makeReviewItem({
+        id: 'rvw-idle',
+        kind: 'decision',
+        title: 'Pick a direction',
+        blocking: true,
+        run_id: 'wf-6-__quick__',
+        project_id: 1,
+        source: `${IDLE_REVIEW_SOURCE_PREFIX}swift-bison-20260917`,
+      }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'running',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const needsInput = screen.getByTestId('rq-needs-input-section');
+    await user.click(within(needsInput).getByText('Answer →'));
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('wf-global-planner');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: dedupe invariant — no session id appears in more than one of Needs-input / Working / Ready-for-review', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      // Live-flow-run session: quick row is a dead/interrupted chat.
+      quickRow({ sessionId: 'sess-flow', name: 'flow-session', runId: 'q1', state: 'idle', rawStatus: 'stopped' }),
+      // A genuinely blocked plain quick session.
+      quickRow({ sessionId: 'sess-blocked', name: 'blocked-session', state: 'blocked', idleSince: null, waitingOn: 'Which branch?' }),
+      // A genuinely idle/ready plain quick session.
+      quickRow({ sessionId: 'sess-ready', name: 'ready-session', state: 'idle', unviewed: true, summary: 'Done.' }),
+      // A genuinely running plain quick session.
+      quickRow({ sessionId: 'sess-running', name: 'running-session', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({ id: 'run-flow', status: 'running', workflowName: 'planner', session_id: 'sess-flow' }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const sectionText = (testId: string): string => screen.queryByTestId(testId)?.textContent ?? '';
+    const inNeedsInput = sectionText('rq-needs-input-section');
+    const inWorking = sectionText('rq-working-section');
+    const inReady = sectionText('rq-ready-section');
+
+    for (const row of mockQuickRows) {
+      const memberships = [inNeedsInput, inWorking, inReady].filter((text) => text.includes(row.name)).length;
+      expect(memberships).toBeLessThanOrEqual(1);
+    }
+    // Sanity: each plain session landed somewhere, and the flow-run session's
+    // OWN name is represented by the run row in Working (workflowName), not
+    // duplicated as its own quick row anywhere.
+    expect(inWorking.includes('planner')).toBe(true);
+    expect(inWorking.includes('flow-session')).toBe(false);
+    expect(inReady.includes('flow-session')).toBe(false);
+    expect(inNeedsInput.includes('flow-session')).toBe(false);
   });
 });

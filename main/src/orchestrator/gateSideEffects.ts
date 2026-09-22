@@ -54,13 +54,21 @@ import type { ReviewItemRouter } from './reviewItemRouter';
 import { listRunOwnedIdeaIds } from './runEntityOwnership';
 import { bindApprovedDesignsForRun } from './design/flowDesignBinding';
 import { stampSolutionThoroughness, type ProjectSettingsDeps } from './projectSettings';
-import { readAdversarialReviewMarkdown } from './adversarialReviewGateBody';
+import {
+  readAdversarialReviewMarkdown,
+  readAdversarialReviewReportedAtMs,
+} from './adversarialReviewGateBody';
 import {
   parseAdversarialReviewDoc,
   adversarialSeverityToReviewSeverity,
   type AdversarialFinding,
 } from '../../../shared/types/adversarialReview';
-import { parseIdeaVerdictMap, parseDesignVerdictMap } from '../../../shared/types/reviews';
+import {
+  GATE_RESOLUTION_MODIFIER_NO_FINDINGS,
+  parseIdeaVerdictMap,
+  parseDesignVerdictMap,
+  parseGateResolution,
+} from '../../../shared/types/reviews';
 import { parseThoroughnessDeclaration } from '../../../shared/types/thoroughness';
 
 // ---------------------------------------------------------------------------
@@ -79,40 +87,19 @@ const DESIGN_FLOWS = new Set(['launch', 'planner', 'ship']);
 /** Provenance stamped on every accepted-risk finding this module files. */
 export const ADVERSARIAL_FINDING_SOURCE = 'agent:adversarial-review';
 
-/** Grouping category for the accepted-risk findings in the review queue. */
-const ADVERSARIAL_FINDING_CATEGORY = 'design-review';
-
-/** The human's answer, as the gate resolver reports it. */
-export type GateDecision = 'approve' | 'revise' | 'reject' | 'abort';
-
 /**
- * The verdict a resolution note encodes.
- *
- * Mirrors `programmatic/humanGate.parseGateVerdict` exactly, and lives here so
- * every call site that has a resolution string but not a decision (the gate
- * opener's `onGateResolved`, the orchestrated-plane resolve) reads it the SAME
- * way the controller does. Duplicated rather than imported to keep this module —
- * and, transitively, the review-item resolve path — free of a `programmatic/`
- * import, the same argument humanStepManager.ts makes for its copied constants.
- *
- * Both serialized verdict-map prefixes spell a declined item 'deny', never
- * 'reject', precisely so a batch gate carrying denials still reads as
- * approve-to-proceed here.
- *
- * A null/empty note is an APPROVE, deliberately and in agreement with
- * `parseGateVerdict`: resolving a blocking gate IS the act of approval, and the
- * queue card's Approve button records no note. Do NOT "harden" this by reading
- * null as a rejection — a DISMISSED gate also arrives with a null note, but the
- * two are told apart by the opener's own `dismissed` flag (see the
- * `onGateResolved` wiring in main/src/index.ts), not by the string. Suppressing
- * on null would silently stop binding designs on the most common approve path.
+ * Grouping category for the accepted-risk findings in the review queue.
+ * Exported because the supervisor's SET-ASIDE sink files the same entries early
+ * (monitorActionSinks.ts) and the two must be indistinguishable in the queue —
+ * a second spelling would split one defect across two groups.
  */
-export function gateDecisionFromResolution(resolution: string | null | undefined): GateDecision {
-  const r = (resolution ?? '').trim().toLowerCase();
-  if (r.includes('reject')) return 'reject';
-  if (r.includes('revise') || r.includes('retry')) return 'revise';
-  return 'approve';
-}
+export const ADVERSARIAL_FINDING_CATEGORY = 'design-review';
+
+// The verdict sniff lives in its own leaf module so `adversarialReviewGateBody`
+// (which this file imports for the review markdown) can borrow it without a
+// module cycle; re-exported here so every existing importer is untouched.
+export { gateDecisionFromResolution, type GateDecision } from './gateDecision';
+import { gateDecisionFromResolution, type GateDecision } from './gateDecision';
 
 export interface GateSideEffectsDeps {
   db: DatabaseLike;
@@ -137,9 +124,51 @@ export interface GateSideEffectArgs {
   /**
    * The resolution note the human's answer was recorded under. For a batch gate
    * it carries the serialized per-idea verdict map, which is how an
-   * `approve-ideas` bind learns WHICH ideas were approved.
+   * `approve-ideas` bind learns WHICH ideas were approved. It also carries the
+   * verdict MODIFIER (`approve[no-findings]`), which is how the approve-design
+   * arm learns the human chose "Continue without logging".
    */
   resolution?: string | null;
+  /**
+   * The RESOLVED gate row's id. The approve-design arm reads the
+   * `reviewReportedSince` freshness bound the row was MINTED with (payload_json,
+   * stamped by `HumanStepManager.composeGatePayload`) so the accepted-risk filing
+   * acts on the same critique the human was shown, rather than on whatever the
+   * one-per-run `adversarial-review` artifact happens to hold at resolve time.
+   *
+   * Absent on the ORCHESTRATED-plane arm (that plane has no walk and no bound to
+   * carry) and on legacy rows minted before the stamp ⇒ NO CONSTRAINT, which is
+   * today's behaviour exactly.
+   */
+  reviewItemId?: string;
+}
+
+/**
+ * The adversarial-review freshness bound a resolved gate row was minted with, as
+ * epoch ms — `DecisionPayload.reviewReportedSince` (ISO-8601 UTC, written by
+ * `toISOString()` so it is always zoned and `Date.parse` is the right reader).
+ *
+ * `null` means NO CONSTRAINT and every caller must read it that way. It is
+ * returned for a missing row, a null/malformed payload, a payload without the
+ * field, an unparseable value, or any throw — the bound can only ever SUPPRESS a
+ * filing, so an unreadable one must never be allowed to drop findings a human
+ * actually accepted.
+ */
+export function readGateReviewBoundMs(db: DatabaseLike, reviewItemId: string): number | null {
+  try {
+    const row = db
+      .prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?')
+      .get(reviewItemId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return null;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const raw = (parsed as { reviewReportedSince?: unknown }).reviewReportedSince;
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    const ms = Date.parse(raw);
+    return Number.isNaN(ms) ? null : ms;
+  } catch {
+    return null;
+  }
 }
 
 interface RunMetaRow {
@@ -222,7 +251,22 @@ export class GateSideEffects {
           await this.bind(args.runId, meta.projectId, listRunOwnedIdeaIds(this.deps.db, args.runId));
           // The human approved with the critique in front of them, so every
           // remaining entry is an ACCEPTED risk — recorded, not discarded.
-          await this.fileAcceptedRiskFindings(args.runId, meta.projectId);
+          //
+          // UNLESS they took the third choice, "Continue without logging"
+          // (`approve[no-findings]`). That is an explicit instruction to drop the
+          // surviving entries rather than carry them, taken with the same critique
+          // in front of them — so the bind still happens (the design WAS approved)
+          // and the filing does not. The modifier is the only thing that suppresses
+          // it; a plain approve, a legacy free-text 'approve', and every other
+          // modifier still file.
+          if (parseGateResolution(args.resolution)?.modifier !== GATE_RESOLUTION_MODIFIER_NO_FINDINGS) {
+            await this.fileAcceptedRiskFindings(args.runId, meta.projectId, args.reviewItemId);
+          } else {
+            this.deps.logger?.info('[gateSideEffects] design approved without logging — accepted-risk findings skipped', {
+              runId: args.runId,
+              stepId: args.stepId,
+            });
+          }
           return;
 
         case APPROVE_BRIEF:
@@ -377,18 +421,57 @@ export class GateSideEffects {
    * Every write goes through the ReviewItemRouter chokepoint. Without the router
    * wired this arm is a no-op, which is the right failure: findings are entity
    * state, and there is no sanctioned path around the chokepoint.
+   *
+   * FRESHNESS. The artifact is ONE row per run and survives a rewind and a Revise
+   * loopback, so a gate can open over a design whose critique was never re-written
+   * — and filing that survivor's entries would record a previous round's defects
+   * as risks the human accepted about a design that was revised to address them.
+   * `reviewItemId` is the resolved gate row, and the bound it was MINTED with
+   * ({@link readGateReviewBoundMs}) is re-applied here, so this filing reads
+   * exactly the critique the gate BODY was composed from. No id, no bound on the
+   * row, or an unknown artifact age ⇒ no constraint (today's behaviour). A stale
+   * artifact is logged and files nothing; a run with no artifact at all stays the
+   * silent return it has always been.
    */
-  private async fileAcceptedRiskFindings(runId: string, projectId: number): Promise<void> {
+  private async fileAcceptedRiskFindings(
+    runId: string,
+    projectId: number,
+    reviewItemId?: string,
+  ): Promise<void> {
     const router = this.deps.reviewItemRouter;
     if (!router) return;
-    const markdown = readAdversarialReviewMarkdown(this.deps.db, runId);
-    if (markdown === undefined) return;
+    const bound = reviewItemId !== undefined ? readGateReviewBoundMs(this.deps.db, reviewItemId) : null;
+    const markdown = readAdversarialReviewMarkdown(
+      this.deps.db,
+      runId,
+      bound !== null ? { reportedSinceMs: bound } : undefined,
+    );
+    if (markdown === undefined) {
+      // Say WHY nothing was filed when the bound is what suppressed it: an
+      // artifact that exists but predates the gate is the one case an operator
+      // would otherwise read as a lost filing.
+      if (bound !== null) {
+        const reportedAtMs = readAdversarialReviewReportedAtMs(this.deps.db, runId);
+        if (reportedAtMs !== null) {
+          this.deps.logger?.info(
+            "[gateSideEffects] accepted-risk filing skipped — the adversarial-review artifact predates the gate's review bound",
+            {
+              runId,
+              reviewItemId,
+              reportedAt: new Date(reportedAtMs).toISOString(),
+              bound: new Date(bound).toISOString(),
+            },
+          );
+        }
+      }
+      return;
+    }
 
     const { blocking, findings } = parseAdversarialReviewDoc(markdown);
     const entries = [...blocking, ...findings];
     if (entries.length === 0) return;
 
-    const alreadyFiled = this.filedAdversarialIds(runId);
+    const alreadyFiled = filedAdversarialIds(this.deps.db, runId);
     let filed = 0;
     for (const entry of entries) {
       if (alreadyFiled.has(entry.id)) continue;
@@ -428,35 +511,6 @@ export class GateSideEffects {
         total: entries.length,
       });
     }
-  }
-
-  /**
-   * The `AR-n` ids this run has already filed, read off the finding TITLES.
-   *
-   * The title prefix is the idempotence key rather than a payload field because
-   * `FindingPayload` has no slot for one, and inventing an untyped key on the
-   * payload would be invisible to every reader. The prefix is stable, visible in
-   * the queue, and the same thing the review doc calls the entry.
-   */
-  private filedAdversarialIds(runId: string): Set<string> {
-    const ids = new Set<string>();
-    try {
-      const rows = this.deps.db
-        .prepare(
-          `SELECT title FROM review_items
-            WHERE run_id = ? AND kind = 'finding' AND source = ?`,
-        )
-        .all(runId, ADVERSARIAL_FINDING_SOURCE) as Array<{ title?: unknown }>;
-      for (const row of rows) {
-        if (typeof row.title !== 'string') continue;
-        const m = /^(AR-\d+)\b/.exec(row.title);
-        if (m) ids.add(m[1]);
-      }
-    } catch {
-      // An unreadable history is treated as "nothing filed": a duplicate finding
-      // is recoverable by a human, a dropped one is not.
-    }
-    return ids;
   }
 
   // -------------------------------------------------------------------------
@@ -524,12 +578,52 @@ export class GateSideEffects {
 }
 
 /**
+ * The `AR-n` ids a run has already filed, read off the finding TITLES.
+ *
+ * The title prefix is the idempotence key rather than a payload field because
+ * `FindingPayload` has no slot for one, and inventing an untyped key on the
+ * payload would be invisible to every reader. The prefix is stable, visible in
+ * the queue, and the same thing the review doc calls the entry.
+ *
+ * Exported and standalone because there are now TWO writers of these findings —
+ * this module's gate arm and the supervisor's SET-ASIDE sink
+ * (monitorActionSinks.ts), which files the same entry mid-loop and must skip one
+ * a previous round already filed. A second copy of this query is a second way
+ * for the two to disagree, which is the duplicate the dedupe exists to prevent.
+ */
+export function filedAdversarialIds(db: DatabaseLike, runId: string): Set<string> {
+  const ids = new Set<string>();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT title FROM review_items
+            WHERE run_id = ? AND kind = 'finding' AND source = ?`,
+      )
+      .all(runId, ADVERSARIAL_FINDING_SOURCE) as Array<{ title?: unknown }>;
+    for (const row of rows) {
+      if (typeof row.title !== 'string') continue;
+      const m = /^(AR-\d+)\b/.exec(row.title);
+      if (m) ids.add(m[1]);
+    }
+  } catch {
+    // An unreadable history is treated as "nothing filed": a duplicate finding
+    // is recoverable by a human, a dropped one is not.
+  }
+  return ids;
+}
+
+/**
  * The body of an accepted-risk finding: the reviewer's own what/why/fix, then the
  * line that says how this finding came to exist. Without that line the finding
  * reads as a fresh defect report rather than as a risk somebody already weighed
  * and chose to carry.
+ *
+ * Exported for the supervisor's SET-ASIDE sink (monitorActionSinks.ts), which
+ * files the same entry EARLY — mid-loop rather than at the gate — and prefixes
+ * this body with the supervisor's reason. Sharing the renderer is what keeps a
+ * set-aside entry and its eventual gate twin one finding rather than two.
  */
-function renderAcceptedRiskBody(entry: AdversarialFinding): string {
+export function renderAcceptedRiskBody(entry: AdversarialFinding): string {
   const lines: string[] = [];
   if (entry.what !== undefined) lines.push(entry.what);
   if (entry.why !== undefined) lines.push('', `**Why it matters:** ${entry.why}`);

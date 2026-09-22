@@ -45,7 +45,13 @@ import {
   type VerificationPostureDeps,
 } from '../verify/verificationPosture';
 import { sweepBuildBreaks } from './buildBreakDetector';
-import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
+import type {
+  EscalationReviewItemSummary,
+  FanOutDriver,
+  SetAsideFindingInput,
+  StepReport,
+  VisualVerifyGate,
+} from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
@@ -67,9 +73,38 @@ import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
 import { selectFindingForSeed } from '../reviewItemListing';
-import { findingBucket, type FindingTagBucket } from '../../../../shared/types/reviews';
+import {
+  findingBucket,
+  parseGateResolution,
+  type FindingTagBucket,
+} from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
+// ONE reader for the run's design critique — the gate body, the gate-revision
+// quote and the controller's verdict fallback must never disagree about what the
+// artifact says, and only the gate-body copy knows the `reported_at` freshness
+// rule (migration 143). This module used to keep a byte-identical private copy.
+import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
+
+/**
+ * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
+ * imported from `orchestrator/monitorActionSinks` (which builds it): that module
+ * reaches into task listing and gate side-effects, and `programmatic/` must stay
+ * standalone-typecheckable. The production bag satisfies this shape by
+ * construction; a test can satisfy it with five `vi.fn()`s.
+ */
+export interface EscalationSinks {
+  /** This run's review-queue rows for the gate consult (bounded, newest first). */
+  listRunReviewItems(runId: string): Promise<EscalationReviewItemSummary[]>;
+  /** Upsert the supervisor's recommendation section into a PENDING item's body. */
+  annotate(runId: string, input: { reviewItemId: string; markdown: string }): Promise<void>;
+  /** Close one blocking FINDING as the supervisor (item 9). */
+  resolveAsMonitor(runId: string, input: { reviewItemId: string; resolution: string }): Promise<void>;
+  /** Autonomous resolves this run has already spent (the durable cap's counter). */
+  countMonitorResolves(runId: string): Promise<number>;
+  /** Review-write barrier awaited before every step-boundary queue read (CR-3). */
+  awaitWritesSettled(projectId: number): Promise<void>;
+}
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
@@ -241,6 +276,36 @@ export interface DefaultProgrammaticRunnerDeps {
    * always reaches the human's review queue. Absent ⇒ rescues are logged only.
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
+  /**
+   * SUPERVISOR-AUDIT sink (the review loop). Bound in production to the SAME
+   * ReviewItemRouter seam `laneTriageFindingSink` uses, with actor `monitor`, so
+   * an autonomous decision about whether to spend another design lap always
+   * reaches the human's review queue. Absent ⇒ the decision is logged only.
+   */
+  monitorFindingSink?: (
+    runId: string,
+    input: { title: string; body: string; category?: string },
+  ) => Promise<void>;
+  /**
+   * SET-ASIDE sink (the review loop). Files one non-blocking finding per
+   * adversarial-review entry the supervisor excluded from a lap — the thing that
+   * makes a set-aside safe. Bound in production to the same chokepoint, composed
+   * to match the approve-design gate's accepted-risk findings so the gate dedupes
+   * rather than double-files. Absent ⇒ set-aside entries are logged only.
+   */
+  setAsideFindingSink?: (runId: string, input: SetAsideFindingInput) => Promise<void>;
+  /**
+   * LATE-BOUND accessor for the ESCALATION-REVIEW collaborator bag
+   * (`monitorActionSinks.buildGateEscalationSinks`). A getter, not the bag
+   * itself: this runner is constructed EARLY in `initializeServices` while the
+   * bag is built in a later nested block, so the only thing available at
+   * construction time is a way to look it up per run.
+   *
+   * Absent or returning null ⇒ every escalation seam degrades to its pre-seam
+   * posture: an empty queue list, a logged-only recommendation, no autonomous
+   * resolve, and an unbarriered boundary read.
+   */
+  escalationSinks?: () => EscalationSinks | null | undefined;
   /**
    * The project's runbook-status resolver — the SAME closure the scheduler's
    * `runbookStatus` dependency and the verify health panel share (index.ts builds
@@ -516,8 +581,14 @@ export function readSelectedFindingsBlock(
  * offers only Approve / Reject, so `humanGate.parseGateVerdict` string-sniffs the
  * resolution down to approve/reject/revise. The flow's "Pick subset" option is
  * therefore ORCHESTRATED-ONLY. The one trimming signal that survives to `prove`
- * is a qualification a human typed into the note, so the raw string is what we
- * hand over — composeStepPrompt drops it when it is a bare verdict word.
+ * is a qualification a human typed into the note, so the note is what we hand
+ * over.
+ *
+ * PREFIX FIRST: a row written by `composeGateResolution` ('approve: only web')
+ * yields just the NOTE — undefined for a bare verdict, so composeStepPrompt has
+ * nothing to drop. A legacy row (parse returns null) still hands over the raw
+ * string exactly as before, and composeStepPrompt keeps dropping a bare verdict
+ * word there.
  *
  * Fail-soft: a missing review_items table or any thrown query yields undefined.
  */
@@ -532,37 +603,9 @@ export function readApproveRunbookResolution(db: DatabaseLike, runId: string): s
       )
       .get(runId) as { resolution?: string | null } | undefined;
     const resolution = row?.resolution;
-    return typeof resolution === 'string' && resolution.trim().length > 0 ? resolution : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Read the run's `adversarial-review` artifact markdown — the design critique the
- * approve-design gate was composed from.
- *
- * A gate 'revise' sends the design steps back to re-run, and a programmatic step
- * turn is a fresh SDK session that remembers nothing: the re-run agent has never
- * seen the review whose entries it is being asked to address. The artifact is the
- * only durable copy (one per atype per run, ENRICHED by a re-review rather than
- * duplicated), so the revision section quotes it back verbatim.
- *
- * Fail-soft like readProjectBriefMarkdown: a missing table or unparseable payload
- * yields undefined and the revision section simply carries the note alone.
- */
-export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
-  try {
-    const row = db
-      .prepare(
-        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
-      )
-      .get(runId) as { payloadJson?: string | null } | undefined;
-    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
-    const parsed: unknown = JSON.parse(row.payloadJson);
-    if (typeof parsed !== 'object' || parsed === null) return undefined;
-    const markdown = (parsed as { markdown?: unknown }).markdown;
-    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+    if (typeof resolution !== 'string' || resolution.trim().length === 0) return undefined;
+    const parsed = parseGateResolution(resolution);
+    return parsed !== null ? parsed.note : resolution;
   } catch {
     return undefined;
   }
@@ -579,6 +622,11 @@ export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): 
  * Returns undefined for a bare verdict word — rendering "> Revise" as the human's
  * guidance is noise that reads like an instruction when there is none — and for
  * any thrown query.
+ *
+ * PREFIX FIRST: a row written by `composeGateResolution` ('revise: only AR-2
+ * matters') yields just the NOTE, so the human's words survive verbatim even
+ * when they contain a verdict word. Legacy rows keep today's behaviour: a bare
+ * verdict word is dropped by the regex below, any other free text passes through.
  */
 export function readGateResolutionNote(
   db: DatabaseLike,
@@ -596,6 +644,8 @@ export function readGateResolutionNote(
       .get(runId, `gate:human-step:${stepId}`) as { resolution?: string | null } | undefined;
     const resolution = (row?.resolution ?? '').trim();
     if (resolution.length === 0) return undefined;
+    const parsed = parseGateResolution(resolution);
+    if (parsed !== null) return parsed.note;
     return /^(approve|approved|reject|rejected|revise|retry)$/i.test(resolution) ? undefined : resolution;
   } catch {
     return undefined;
@@ -757,8 +807,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // The design critique the approve-design gate reviewed, re-read per step. Only
     // the gate-revision section renders it, and only on a run that reported the
     // artifact — every other prompt is byte-identical.
-    const adversarialReviewMarkdown = (): string | undefined =>
-      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId) : undefined;
+    //
+    // The CALLER supplies the bound. `SpawnStepRunner` passes the revision's
+    // snapshot of the walk's review-freshness instant, so the quote is the same
+    // critique the gate body was composed from: a gate that rendered the "No
+    // adversarial review this round" notice withheld the previous round's
+    // critique from the human, and must not have it threaded back as the
+    // feedback the re-run is told to act on. A revision armed on a walk with no
+    // bound (a resume past the review step) passes none ⇒ unbounded, exactly as
+    // before.
+    const adversarialReviewMarkdown = (opts?: { reportedSinceMs?: number }): string | undefined =>
+      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId, opts) : undefined;
 
     // The human's free-text note on a resolved gate, run-bound for the host. The
     // controller asks for it when a gate 'revise' arms a loopback; the verdict
@@ -809,6 +868,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         // Per-step operator-guidance resolver (RunDirectives live steering): read
         // this step's guidance off the SAME directives object each turn.
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
+        // Per-step SUPERVISOR retry guidance, CONSUMED on read: the entry the
+        // host staged when triage returned 'retry' reaches exactly the one
+        // attempt it was bought for, and a later spawn of the same step (a
+        // loopback, a gate revise, a second triage) starts clean. Deleting here
+        // rather than at the write site is what makes that true regardless of
+        // WHY the step spawns again.
+        retryGuidance: (stepId) => {
+          const g = directives.retryGuidance.get(stepId);
+          if (g !== undefined) directives.retryGuidance.delete(stepId);
+          return g;
+        },
         taskScope,
         runOwnedIdeaIds,
         approveIdeasDecisions,
@@ -881,13 +951,23 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // Optional-human-gate precondition (approve-design): when BOTH design steps
     // self-skipped (no idea carried the UI_PROTOTYPE/ARCH_DESIGN flags), the run
     // has no prototype artifact and no architecture section — the gate would
-    // park the run over an empty review surface. hasReviewableDesignSurface is
-    // fail-open (any read error opens the gate).
-    const humanGateSkip = (step: WorkflowStep): string | null => {
+    // park the run over an empty review surface. A POPULATED adversarial-review
+    // artifact counts as a surface too, so a critique with entries always opens
+    // the gate. hasReviewableDesignSurface is fail-open (any read error opens it).
+    //
+    // `ctx.reviewReportedSinceMs` is the controller's "this round started at"
+    // instant: a critique last reported before it is a PREVIOUS walk's leftover
+    // (the artifact row survives a rewind / Revise) and must not by itself open
+    // the gate over a surface that no longer exists. Absent ctx ⇒ no bound.
+    const humanGateSkip = (step: WorkflowStep, gateCtx?: { reviewReportedSinceMs?: number }): string | null => {
       if (step.id !== 'approve-design' || !this.deps.db) return null;
-      return hasReviewableDesignSurface(this.deps.db, ctx.runId)
+      return hasReviewableDesignSurface(
+        this.deps.db,
+        ctx.runId,
+        gateCtx?.reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs: gateCtx.reviewReportedSinceMs } : undefined,
+      )
         ? null
-        : 'no design surface to review — no prototype artifact and no architecture design section';
+        : 'no design surface to review — no prototype artifact, no architecture design section, and no adversarial-review entries';
     };
 
     // Autonomous LANE-RESCUE collaborators, run-bound here so the host only ever
@@ -897,6 +977,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageTaskReader = this.deps.laneTriageTaskReader;
     const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+    const monitorFindingSink = this.deps.monitorFindingSink;
+    const setAsideFindingSink = this.deps.setAsideFindingSink;
+    const escalationSinks = this.deps.escalationSinks?.() ?? null;
     // Narrowed once here so the two conditional spreads below close over a
     // definitely-defined handle rather than re-narrowing `this.deps` inside a
     // callback (where TS cannot keep the narrowing).
@@ -910,9 +993,27 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       gate: this.deps.gate,
       humanGateSkip,
       ...(gateResolutionNote ? { readGateResolutionNote: gateResolutionNote } : {}),
+      // Same reader the revision prompt uses, handed to the controller so a
+      // review whose final text never arrived still loops on its artifact —
+      // but BOUND here: the controller passes the round's "reported since"
+      // instant so a previous walk's surviving critique reads as absent
+      // instead of arming a phantom loopback.
+      ...(this.deps.db
+        ? {
+            readAdversarialReview: (opts?: { reportedSinceMs?: number }): string | undefined =>
+              readAdversarialReviewMarkdown(this.deps.db!, ctx.runId, opts),
+          }
+        : {}),
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),
+      // The WRITE half of the one-shot retry-guidance channel. The runner owns
+      // `directives`, so it is the only place that can hand the host a setter;
+      // the host stages the supervisor's guidance here and SpawnStepRunner's
+      // consuming thunk above picks it up on the step's next spawn.
+      setRetryGuidance: (stepId: string, text: string) => {
+        directives.retryGuidance.set(stepId, text);
+      },
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
       fanOutDriverProvider,
@@ -931,6 +1032,32 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         ? {
             fileLaneTriageFinding: (input: { title: string; body: string }) =>
               laneTriageFindingSink(ctx.runId, input),
+          }
+        : {}),
+      ...(monitorFindingSink
+        ? {
+            fileMonitorFinding: (input: { title: string; body: string; category?: string }) =>
+              monitorFindingSink(ctx.runId, input),
+          }
+        : {}),
+      ...(setAsideFindingSink
+        ? { fileSetAsideFinding: (input: SetAsideFindingInput) => setAsideFindingSink(ctx.runId, input) }
+        : {}),
+      // ESCALATION REVIEW. No `onGateOpened` is passed: the host builds its own
+      // gate-open hook from `reviewGateEscalation` whenever a capable monitor is
+      // wired, and `args.onGateOpened` stays a test-only override. These five are
+      // the readers/writers that hook — and item 9's step-boundary sibling —
+      // need: the queue list, the annotate, the autonomous resolve, its durable
+      // budget, and the write barrier the boundary reads behind.
+      ...(escalationSinks
+        ? {
+            listRunReviewItems: (runId: string) => escalationSinks.listRunReviewItems(runId),
+            annotateReviewItem: (input: { reviewItemId: string; markdown: string }) =>
+              escalationSinks.annotate(ctx.runId, input),
+            resolveReviewItemAsMonitor: (input: { reviewItemId: string; resolution: string }) =>
+              escalationSinks.resolveAsMonitor(ctx.runId, input),
+            countMonitorResolves: (runId: string) => escalationSinks.countMonitorResolves(runId),
+            awaitReviewWritesSettled: (projectId: number) => escalationSinks.awaitWritesSettled(projectId),
           }
         : {}),
       // F8 "never skip silently" (docs/proposals/visual-verification-brittleness-

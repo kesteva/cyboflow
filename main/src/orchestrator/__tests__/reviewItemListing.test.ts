@@ -17,6 +17,7 @@ import {
   resolveReviewItemById,
   dismissReviewItemById,
   countPendingBlockingReviewItems,
+  selectPendingBlockingItemRows,
   selectPendingBlockingReviewItems,
   selectFindingForSeed,
   selectRunFindings,
@@ -167,6 +168,7 @@ describe('empty-safe defaults when the review_items table is absent', () => {
     const db = dbAdapter(createTestDb());
     expect(countPendingBlockingReviewItems(db, 'run-x')).toBe(0);
     expect(selectPendingBlockingReviewItems(db, 'run-x')).toEqual([]);
+    expect(selectPendingBlockingItemRows(db, 'run-x')).toEqual([]);
     expect(selectFindingForSeed(db, 'rvw_x')).toBeNull();
     expect(selectRunFindings(db, 'run-x')).toEqual([]);
   });
@@ -390,5 +392,69 @@ describe('selectRunFindings', () => {
     expect(withPayload.locations).toEqual([{ path: 'a.ts', line: 5 }]);
     expect(bare).toMatchObject({ id: 'rvw_bare', category: null, blocking: false });
     expect(bare.locations).toBeNull();
+  });
+});
+
+describe('selectPendingBlockingItemRows (the escalation review\'s list)', () => {
+  /** Insert one blocking row with explicit kind/status/audience/body. */
+  const seed = (
+    db: ReturnType<typeof buildReviewInboxDb>,
+    opts: {
+      id: string;
+      runId: string;
+      kind?: string;
+      status?: string;
+      audience?: string;
+      blocking?: number;
+      createdAt?: string;
+    },
+  ): void => {
+    const stamp = opts.createdAt ?? new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, severity,
+          source, created_at, updated_at)
+       VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'error', 'agent:code-review', ?, ?)`,
+    ).run(
+      opts.id,
+      opts.runId,
+      opts.kind ?? 'finding',
+      opts.status ?? 'pending',
+      opts.blocking ?? 1,
+      opts.audience ?? 'human',
+      `title ${opts.id}`,
+      `body ${opts.id}`,
+      stamp,
+      stamp,
+    );
+  };
+
+  it('returns exactly the rows the aggregate-unblock COUNT sees, with their bodies, oldest first', () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-1', 'running');
+    seedInboxRun(db, 'run-2', 'running');
+    seed(db, { id: 'rvw_a', runId: 'run-1', createdAt: '2026-09-01T00:00:00.000Z' });
+    seed(db, { id: 'rvw_b', runId: 'run-1', kind: 'decision', createdAt: '2026-09-02T00:00:00.000Z' });
+    // Out of scope, each for a different reason — and each also invisible to the
+    // count, which is the invariant that matters: the supervisor must never be
+    // offered an item that is not holding the walk.
+    seed(db, { id: 'rvw_resolved', runId: 'run-1', status: 'resolved' });
+    seed(db, { id: 'rvw_nonblocking', runId: 'run-1', blocking: 0 });
+    seed(db, { id: 'rvw_machine', runId: 'run-1', audience: 'machine' });
+    seed(db, { id: 'rvw_other', runId: 'run-2' });
+
+    const rows = selectPendingBlockingItemRows(dbAdapter(db), 'run-1');
+
+    expect(rows.map((r) => r.id)).toEqual(['rvw_a', 'rvw_b']);
+    expect(rows.length).toBe(countPendingBlockingReviewItems(dbAdapter(db), 'run-1'));
+    expect(rows[0]).toEqual({
+      id: 'rvw_a',
+      kind: 'finding',
+      source: 'agent:code-review',
+      severity: 'error',
+      title: 'title rvw_a',
+      body: 'body rvw_a',
+    });
+    expect(rows[1].kind).toBe('decision');
   });
 });

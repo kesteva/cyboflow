@@ -142,6 +142,55 @@ export function sessionDeliveredWork(db: DatabaseLike, sessionId: string): boole
 }
 
 /**
+ * Names of built-in workflows whose steps never touch the git worktree — the
+ * DB-side signal {@link sessionCompletedNoCodeWork} keys on. Planner
+ * decomposes an idea into epics/tasks; Launch interviews the user into a
+ * project brief/idea/epic/task backlog — both write ONLY cyboflow entity rows
+ * via the MCP tools, so the git-side `delivered`/`landed` signals never fire
+ * for them even when the run genuinely completed. A future workflow sharing
+ * that shape should be added here.
+ */
+const NO_CODE_WORKFLOW_NAMES: readonly string[] = ['planner', 'launch'];
+
+/**
+ * Whether this session hosted a COMPLETED run of a workflow that never
+ * touches the repo (see {@link NO_CODE_WORKFLOW_NAMES}) — the DB-only sibling
+ * of {@link sessionDeliveredWork} for the dismiss dialog's third choice. A run
+ * still parked at a gate (`awaiting_review`) or otherwise in flight does NOT
+ * count: only `status = 'completed'` means the run actually produced its
+ * backlog rows and is done.
+ *
+ * Mirrors sessionDeliveredWork's session-shape handling (both the direct
+ * `workflow_runs.session_id` link and the LEGACY `sessions.run_id` shape), so
+ * the two DB-side probes never disagree about which shape they are reading.
+ *
+ * Fail-soft: a query failure reports false, which only ever costs the
+ * operator an extra confirmation.
+ */
+export function sessionCompletedNoCodeWork(db: DatabaseLike, sessionId: string): boolean {
+  try {
+    const placeholders = NO_CODE_WORKFLOW_NAMES.map(() => '?').join(', ');
+    const row = db
+      .prepare(
+        `SELECT 1 AS complete
+           FROM workflow_runs r
+           JOIN workflows w ON w.id = r.workflow_id
+          WHERE (
+                  r.session_id = ?
+                  OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = r.id)
+                )
+            AND r.status = 'completed'
+            AND w.name IN (${placeholders})
+          LIMIT 1`,
+      )
+      .get(sessionId, sessionId, ...NO_CODE_WORKFLOW_NAMES) as { complete: number } | undefined;
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Dismiss the pending review items attached to any run hosted by one session,
  * EXCEPT the findings of a session whose work was delivered (see
  * {@link DELIVERED_SESSION_FINDING_CARVE_OUT}).
@@ -760,6 +809,14 @@ export function stampSessionRunsOutcome(
  * 'merged' / 'integrated' / 'pr_open' keeps its more specific stamp, because
  * those describe HOW it landed and this one only asserts THAT it did.
  *
+ * Matches BOTH session shapes — the direct `workflow_runs.session_id` link and
+ * the LEGACY `sessions.run_id` back-link — the same ownership predicate
+ * {@link sessionDeliveredWork}, {@link sessionCompletedNoCodeWork} and the
+ * archive sweep read. Those probes are what make the dismiss dialog OFFER
+ * Mark complete; a stamp that only saw the direct shape reported success with
+ * zero rows on a legacy-linked run, and the archive that followed swept the
+ * findings the choice was meant to keep.
+ *
  * Returns the number of rows stamped. Pure over {@link DatabaseLike}.
  */
 export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): number {
@@ -767,10 +824,13 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
     .prepare(
       `UPDATE workflow_runs
           SET outcome = 'completed', updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ?
+        WHERE (
+                session_id = ?
+                OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = workflow_runs.id)
+              )
           AND COALESCE(outcome, '') NOT IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}`,
     )
-    .run(sessionId) as { changes: number };
+    .run(sessionId, sessionId) as { changes: number };
   return info.changes;
 }
 

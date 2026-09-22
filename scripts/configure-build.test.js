@@ -9,6 +9,7 @@
  *   Case A: CSC_DISABLE=true       → unsigned posture (hardenedRuntime false, notarize false, no entitlements)
  *   Case B: All Apple env vars set → signed posture (hardenedRuntime true, notarize truthy, entitlements set)
  *   Case C: BUILD_VARIANT=dev      → dev appId / productName / artifactName / publish URL overrides
+ *   Case C2: dev + BUILD_PLATFORM=win → win.icon is the dev variant's .ico
  *   Case D: lean packaging plan    → every foreign Claude/Codex native package and
  *                                    every non-target better-sqlite3 prebuild excluded
  *   Case E: BUILD_ARCH=<host arch> → generated config applies the tested plan
@@ -190,10 +191,57 @@ try {
         'dev publish URL should be applied'
       );
       assert(config.publish.provider === 'generic', 'dev publish should preserve the base provider');
+      // The dev variant must not ship the stable app's icon: a Dock/taskbar that
+      // cannot tell the two installs apart is the whole reason the variant exists.
+      assert(
+        config.mac.icon === 'main/assets/icon-dev.icns',
+        'dev mac icon should be the blue-accented variant, got: ' + config.mac.icon
+      );
+      assert(
+        fs.existsSync(path.join(__dirname, '..', config.mac.icon)),
+        config.mac.icon + ' does not exist — run scripts/generate-icons.sh'
+      );
     }
   );
 } catch (err) {
   console.error('FAIL: Case C — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case C2: the dev icon override on the WINDOWS leg. win.icon is a separate
+  // branch from mac.icon (it is gated on BUILD_PLATFORM=win), so a mac-only dev
+  // case would leave the Windows dev installer shipping the stable orange icon.
+  runCase(
+    'Case C2: BUILD_VARIANT=dev + BUILD_PLATFORM=win (dev win icon)',
+    // No BUILD_ARCH: the lean-packaging plan it turns on demands the win32 agent
+    // binaries, which a macOS host does not install. The icon override is
+    // arch-independent, so the case does not need them.
+    { BUILD_VARIANT: 'dev', BUILD_PLATFORM: 'win', CSC_DISABLE: 'true' },
+    function (config) {
+      assert(
+        config.win && config.win.icon === 'main/assets/icon-dev.ico',
+        'dev win icon should be the blue-accented variant, got: ' + (config.win && config.win.icon)
+      );
+      assert(
+        fs.existsSync(path.join(__dirname, '..', config.win.icon)),
+        config.win.icon + ' does not exist — run scripts/generate-icons.sh'
+      );
+      assert(
+        config.win.artifactName === 'Cyboflow-Dev-${version}-Windows-${arch}.${ext}',
+        'dev win artifactName should still be applied'
+      );
+    },
+    // Same reason as Case F: the real ABI probe needs a native artifact this
+    // host cannot guarantee.
+    function (mod) {
+      mod.__setAbiProbeForTesting(function () {
+        return { ok: true, output: 'stub: artifact loads under the electron ABI' };
+      });
+    }
+  );
+} catch (err) {
+  console.error('FAIL: Case C2 — ' + err.message);
   failed = true;
 }
 

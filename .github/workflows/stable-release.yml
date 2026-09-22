@@ -1,0 +1,314 @@
+name: Stable release
+
+# The stable channel: pushing a `v*` tag rebuilds the STABLE variant at the
+# tagged commit on the same three native runners the dev channel uses, publishes
+# it to updates.cyboflow.com/stable, and cuts the GitHub release.
+#
+# NOT A PROMOTION. Dev and Stable are different binaries — different appId
+# (com.cyboflow.app.dev), productName ("Cyboflow Dev"), feed URL (/dev) and data
+# dir (~/.cyboflow_dev) — so a dev artifact can never become the stable one.
+# The tag is rebuilt from source, exactly as docs/RELEASE-RUNBOOK.md §3 does by
+# hand.
+#
+# VERSION: the tag IS the version. No CYBOFLOW_BUILD_VERSION override — the
+# committed package.json at the tag must already say X.Y.Z (the runbook's §2
+# "chore: release" commit), and the version job refuses the release if it does
+# not. That keeps buildInfo.gitCommit, the artifact names, the manifests and the
+# git tag all naming the same thing.
+#
+# GATE: a stable release must not ship from an ungated commit, so the version
+# job waits for THIS SHA's Code Quality run to conclude. `git push origin main
+# --follow-tags` pushes both refs at once, so that run is usually still in
+# flight when the tag arrives — waiting is the normal path, not an error.
+#
+# ORDER OF OPERATIONS: a tag push runs the workflow file AS IT EXISTS AT THE
+# TAG, not the one on main — so this file must already be in main's history
+# before the release commit is tagged. It is, for every tag cut after the commit
+# that added it.
+#
+# THE DEV FEED IS NOT TOUCHED. It is continuous now (dev-release.yml), so a
+# release no longer hand-builds a Dev twin: dev users sit on X.Y.Z-dev.N at
+# release time and the next push to main moves them to X.Y.(Z+1)-dev.1, which
+# `isNewerVersion` orders above it. They never see the exact release build and
+# are never stranded on an older one.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)release, e.g. v0.4.3'
+        type: string
+        required: true
+      allow_unverified_gate:
+        description: 'Skip the Code Quality gate check (only when the run has aged out)'
+        type: boolean
+        default: false
+
+# Serialize, never cancel: cancelling mid-publish would leave a manifest naming
+# files that were never uploaded.
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve tag + gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read   # the gate check reads quality.yml's runs for this SHA
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve + assert
+        id: resolve
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          sha=$(git rev-parse HEAD)
+
+          # A stable release is `v` + a plain X.Y.Z. A prerelease tag would
+          # produce artifacts the stable feed must never carry, and a tag
+          # without the `v` never matches the push trigger — refuse both here
+          # so a hand dispatch cannot smuggle one through.
+          [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+            || { echo "::error::tag '$tag' is not vX.Y.Z"; exit 1; }
+          version="${BASH_REMATCH[1]}"
+
+          # Only main ships to the stable feed. A tag checkout does not always
+          # leave origin/main behind, so fetch it if it is missing.
+          git rev-parse --verify -q origin/main >/dev/null \
+            || git fetch --no-tags --depth=0 origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$sha" origin/main \
+            || { echo "::error::$sha is not on origin/main"; exit 1; }
+
+          # The tag and the committed version must agree, in all four manifests
+          # — this is what makes the CYBOFLOW_BUILD_VERSION override unnecessary
+          # and keeps the artifact names honest.
+          for f in package.json frontend/package.json main/package.json shared/package.json; do
+            have=$(node -p "require('./$f').version")
+            [ "$have" = "$version" ] \
+              || { echo "::error::$f says $have, tag says $version — run the release bump first"; exit 1; }
+          done
+
+          # The GitHub release notes are sliced out of this heading.
+          grep -qE "^## \[${version//./\\.}\]" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no '## [$version]' section"; exit 1; }
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Stable release $version from ${sha:0:9} (tag $tag)"
+
+      # `--follow-tags` lands main and the tag together, so this SHA's Code
+      # Quality run is usually seconds old and still running. Wait for it.
+      - name: Wait for the Code Quality gate
+        if: ${{ !inputs.allow_unverified_gate }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          API="repos/${{ github.repository }}/actions/workflows/quality.yml/runs?head_sha=$SHA"
+          for i in $(seq 1 90); do   # 90 × 30s = 45 min
+            conclusion=$(gh api "$API" --jq '.workflow_runs[0].conclusion // "pending"' 2>/dev/null || echo pending)
+            case "$conclusion" in
+              success) echo "Code Quality is green for ${SHA:0:9}"; exit 0 ;;
+              pending|null|"") echo "waiting for Code Quality on ${SHA:0:9} ($i/90)"; sleep 30 ;;
+              *) echo "::error::Code Quality concluded '$conclusion' for ${SHA:0:9} — not releasing"; exit 1 ;;
+            esac
+          done
+          echo "::error::Code Quality never concluded for ${SHA:0:9} within 45 min"
+          exit 1
+
+  macos:
+    name: macOS
+    needs: version
+    uses: ./.github/workflows/macos.yml
+    with:
+      variant: stable
+      arch: both
+      ref: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
+  windows:
+    name: Windows
+    needs: version
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      variant: stable
+      ref: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
+  publish:
+    name: Publish to updates.cyboflow.com/stable
+    needs: [version, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      V: ${{ needs.version.outputs.version }}
+      SHA: ${{ needs.version.outputs.sha }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cyboflow-*
+          merge-multiple: true
+          path: dist-electron
+
+      - name: Merge the macOS manifest + assert the file set
+        run: |
+          set -euo pipefail
+          cd dist-electron
+          ls -lh
+          MAC="Cyboflow-$V-macOS"
+          WIN="Cyboflow-$V-Windows-x64.exe"
+          # No *-Dev-* name may appear: a stable feed carrying a Dev binary
+          # would hand every stable user the side-by-side app.
+          if ls | grep -q 'Cyboflow-Dev-'; then echo "::error::dev artifacts in a stable release"; ls; exit 1; fi
+          for f in $MAC-arm64.dmg $MAC-arm64.dmg.blockmap $MAC-arm64.zip $MAC-arm64.zip.blockmap \
+                   $MAC-x64.dmg $MAC-x64.dmg.blockmap $MAC-x64.zip $MAC-x64.zip.blockmap \
+                   $WIN $WIN.blockmap latest.yml min-macos.txt; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          grep -q "url: $WIN" latest.yml || { echo "::error::latest.yml does not name $WIN"; cat latest.yml; exit 1; }
+          grep -q "version: $V" latest.yml || { echo "::error::latest.yml version is not $V"; cat latest.yml; exit 1; }
+          cd ..
+          # arm64 zip first: electron-updater's primary `path` is the first entry.
+          CYBOFLOW_MIN_MACOS="$(cat dist-electron/min-macos.txt)" \
+            node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
+              $MAC-arm64.zip $MAC-arm64.dmg $MAC-x64.zip $MAC-x64.dmg
+          cat dist-electron/latest-mac.yml
+          grep -q "^version: $V$" dist-electron/latest-mac.yml
+          grep -q '^minimumSystemVersion:' dist-electron/latest-mac.yml
+
+      # BUILD_VARIANT is unset → publish-update.mjs defaults to the stable
+      # prefix. PUBLISH_ONLY still pins the exact 12 files.
+      - name: Publish (dry run, then real)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          MAC="Cyboflow-$V-macOS"
+          WIN="Cyboflow-$V-Windows-x64.exe"
+          files=(
+            "$MAC-arm64.dmg" "$MAC-arm64.dmg.blockmap" "$MAC-arm64.zip" "$MAC-arm64.zip.blockmap"
+            "$MAC-x64.dmg"   "$MAC-x64.dmg.blockmap"   "$MAC-x64.zip"   "$MAC-x64.zip.blockmap"
+            latest-mac.yml "$WIN" "$WIN.blockmap" latest.yml
+          )
+          export PUBLISH_ONLY=$(IFS=,; echo "${files[*]}")
+          echo "PUBLISH_ONLY=$PUBLISH_ONLY"
+          UPDATE_DRY_RUN=true pnpm publish:r2
+          pnpm publish:r2
+
+      - name: Verify the live feed
+        run: |
+          set -euo pipefail
+          for f in latest-mac.yml latest.yml; do
+            for i in 1 2 3 4 5 6; do
+              live=$(curl -fsS "https://updates.cyboflow.com/stable/$f" | grep -m1 '^version:' | awk '{print $2}' | tr -d "'\"")
+              [ "$live" = "$V" ] && break
+              echo "$f says $live, want $V — retry $i"; sleep 10
+            done
+            [ "$live" = "$V" ] || { echo "::error::$f still says $live"; exit 1; }
+          done
+          {
+            echo "### Stable release \`$V\` is live"
+            echo
+            echo "- commit \`${SHA:0:9}\`, tag \`${{ needs.version.outputs.tag }}\`"
+            echo "- feed: https://updates.cyboflow.com/stable/latest-mac.yml · https://updates.cyboflow.com/stable/latest.yml"
+            echo "- installers: https://dl.cyboflow.com/Cyboflow-latest-macOS-arm64.dmg · …-x64.dmg · …-Windows-x64.exe"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: GitHub release (archival mirror)
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      V: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cyboflow-*
+          merge-multiple: true
+          path: dist-electron
+
+      - name: Compose the notes
+        run: |
+          set -euo pipefail
+          esc="${V//./\\.}"
+          {
+            awk "/^## \\[$esc\\]/{f=1; next} /^## \\[/{if(f)f=0} f" CHANGELOG.md
+            printf '\n---\n\n### Install\n\n'
+            printf -- '- **New install:** download the DMG for your Mac or the `-Windows-x64.exe` installer below.\n'
+            printf -- '- **Existing install:** auto-updates via `updates.cyboflow.com/stable` (*Settings → Updates*).\n'
+            printf -- '- **Dev channel:** `Cyboflow-Dev-*` installs side-by-side and tracks `updates.cyboflow.com/dev`, which rebuilds on every green push to main — https://dl.cyboflow.com/dev/Cyboflow-Dev-latest-macOS-arm64.dmg\n\n'
+            printf 'macOS builds are signed (Developer ID), notarized, and stapled; Windows installers are Authenticode-signed (Azure Artifact Signing) — SmartScreen may still show a reputation prompt while the publisher is new.\n'
+          } > notes.md
+          test -s notes.md || { echo "::error::empty notes — no CHANGELOG slice for $V"; exit 1; }
+          cat notes.md
+
+      # Assets are uploaded SEPARATELY, one at a time with retries: passing them
+      # to `gh release create` makes a single 5xx delete the whole release.
+      - name: Create the release + upload assets
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists — updating notes"
+            gh release edit "$TAG" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md
+          fi
+          for f in "dist-electron/Cyboflow-$V-macOS-arm64.dmg" \
+                   "dist-electron/Cyboflow-$V-macOS-x64.dmg" \
+                   "dist-electron/Cyboflow-$V-Windows-x64.exe"; do
+            test -f "$f" || { echo "::error::missing asset $f"; exit 1; }
+            for i in 1 2 3; do
+              gh release upload "$TAG" "$f" --clobber && break
+              [ "$i" -eq 3 ] && { echo "::error::could not upload $f"; exit 1; }
+              echo "upload of $f failed — retry $i"; sleep 15
+            done
+          done
+          gh release view "$TAG" --json assets --jq '.assets[].name'
+          echo "### GitHub release [$TAG](https://github.com/${{ github.repository }}/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"

@@ -5,12 +5,17 @@
 > for this runbook. This file is the authoritative procedure and rationale the skill
 > follows; other runtimes (Codex, OMP, pi) work from it directly.
 
-The end-to-end procedure for cutting a Cyboflow release: **gate → version bump +
-changelog → four signed macOS builds + two CI-built Windows installers → verify →
-publish to R2 (the in-app update channel) → push + GitHub release**. Every macOS
-build is signed + notarized + stapled; every Windows installer is
-Authenticode-signed on the CI runner. Nothing is published until the artifacts
-are verified. **The R2 publish
+**Since 2026-09-18 a release is a tag push.** `.github/workflows/stable-release.yml`
+does §1's gate wait, §3's builds, §4's verification, §5's R2 publish and §6's
+GitHub release — see **§0**, which is the whole procedure for a normal release.
+§1–§6 below are the manual recipe it automates: the fallback when CI cannot run,
+and the reference for what each automated step is actually doing.
+
+The end-to-end shape either way: **gate → version bump + changelog → signed macOS
+builds + Azure-signed Windows installer → verify → publish to R2 (the in-app
+update channel) → push + GitHub release**. Every macOS build is signed +
+notarized + stapled; every Windows installer is Authenticode-signed on the CI
+runner. Nothing is published until the artifacts are verified. **The R2 publish
 (§5) is what actually ships the update — the GitHub release is an archival
 mirror the app never reads.**
 
@@ -74,6 +79,57 @@ mirror the app never reads.**
 - For the Windows leg: `gh` logged in, `osslsigncode` installed
   (`brew install osslsigncode`), and the three `AZURE_*` GitHub secrets present
   (`gh secret list | grep AZURE_`) — see `docs/WINDOWS-BUILD.md` → "Code signing".
+
+## 0. The tag-driven release (the default path)
+
+Bump, commit, tag, push. CI does the rest.
+
+```bash
+OLD=0.4.2 NEW=0.4.3
+for f in package.json frontend/package.json main/package.json shared/package.json; do
+  sed -i '' "s/\"version\": \"$OLD\"/\"version\": \"$NEW\"/" "$f"
+done
+# Edit CHANGELOG.md per §2 (the "## [$OLD]" heading must survive the edit).
+git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
+git commit -m "chore: release $NEW"
+git tag "v$NEW"                      # annotate/sign if you prefer; the name is what matters
+git push origin main --follow-tags   # main + the tag in one push
+gh run watch "$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+What the workflow enforces, so you do not have to:
+
+- the tag is `v` + a plain `X.Y.Z` (no prerelease reaches the stable feed);
+- **all four** `package.json` files already say that version, and `CHANGELOG.md`
+  has its `## [X.Y.Z]` section — a forgotten bump fails before anything builds;
+- the commit is an ancestor of `origin/main`;
+- **this SHA's Code Quality run went green.** `--follow-tags` pushes both refs at
+  once, so the gate is usually still running when the tag lands — the workflow
+  waits up to 45 min for it. A red or cancelled gate stops the release.
+
+Then it rebuilds the **stable** variant at the tagged commit on the three native
+runners (arm64 `macos-latest`, x64 `macos-15-intel`, `windows-latest`), runs §4's
+checks as assertions, merges the per-arch `latest-mac.yml`, publishes the 12-file
+set to `stable/`, re-reads both live manifests, and cuts the GitHub release with
+the two stable DMGs and the Windows installer.
+
+> **It is a rebuild, not a promotion.** A dev artifact can never become the
+> stable one — different `appId`, `productName`, feed URL and data dir.
+
+> **The workflow file must already be in main's history when you tag.** A tag
+> push runs the workflow as it exists **at the tag**, not on the default branch.
+
+> **The dev feed is not touched.** It is continuous (`dev-release.yml`), so
+> releases no longer hand-build a Dev twin. Dev users sit on `X.Y.Z-dev.N` at
+> release time and the next push to main moves them to `X.Y.(Z+1)-dev.1`, which
+> `isNewerVersion` orders above it — they never see the exact release build and
+> are never stranded on an older one.
+
+**If it fails after publishing to R2**, the release already shipped: the GitHub
+release is a mirror, so re-run the workflow (`gh workflow run stable-release.yml
+-f tag=vX.Y.Z`) or cut the release by hand per §6. **If it fails before**, fix
+and re-run — nothing partial reaches the feed, because the manifest is uploaded
+with the artifacts in one `PUBLISH_ONLY` allowlist.
 
 ## 1. Full test gate
 
@@ -212,6 +268,11 @@ The DMGs stamp their `buildInfo.gitCommit` from this commit, so **build after
 committing** and **tag this commit** (§5) so the tag matches the artifacts.
 
 ## 3. Four signed macOS builds + two Windows installers
+
+> **Manual fallback.** §0's workflow does all of §3–§6. Work through these by
+> hand only when CI cannot (GitHub down, a runner label retired, a secret
+> rotated mid-release) — or to understand what the workflow is doing.
+
 
 ### Windows installers (hosted runner — start first, runs in parallel)
 

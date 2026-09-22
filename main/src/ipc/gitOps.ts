@@ -38,6 +38,7 @@ import {
   stampSessionRunsPrOpen,
   stampSessionRunsCompleted,
   sessionDeliveredWork,
+  sessionCompletedNoCodeWork,
 } from '../orchestrator/runRecovery';
 import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -1780,19 +1781,30 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   /**
-   * Whether this session's work has been DELIVERED, answered from both sides:
+   * Whether this session's work has been DELIVERED, answered from three sides:
    *
-   *   delivered — a run this session hosted carries a DELIVERED_RUN_OUTCOMES
-   *               stamp (our own merge / create-PR path ran).
-   *   landed    — git says the branch has nothing left to give main
-   *               (WorktreeManager.getBranchLandingState), which is how the
-   *               "the agent merged it in chat" case is visible at all.
+   *   delivered      — a run this session hosted carries a
+   *                     DELIVERED_RUN_OUTCOMES stamp (our own merge /
+   *                     create-PR path ran).
+   *   landed         — git says the branch has nothing left to give main
+   *                     (WorktreeManager.getBranchLandingState), which is how
+   *                     the "the agent merged it in chat" case is visible at
+   *                     all.
+   *   completedNoCode — the session hosted a COMPLETED run of a workflow that
+   *                     never touches the repo (Planner / Launch — see
+   *                     sessionCompletedNoCodeWork) and the worktree has zero
+   *                     own commits. Such a run's "delivery" is the backlog
+   *                     rows it wrote via the MCP tools, so delivered/landed
+   *                     never fire for it even though the run genuinely
+   *                     finished — without this signal it is indistinguishable
+   *                     from a session nobody ever touched.
    *
-   * Read by the dismiss dialog: either signal turns Dismiss into a choice
+   * Read by the dismiss dialog: any of the three turns Dismiss into a choice
    * between Mark complete and dismissing anyway, because dismissing a session
-   * whose code IS in the tree also throws away findings that still apply.
-   * Fail-soft on every axis — an unreadable worktree reports landed=false and
-   * the operator simply gets the plain confirmation.
+   * whose work already landed (in the tree OR the backlog) also throws away
+   * findings that still apply. Fail-soft on every axis — an unreadable
+   * worktree reports landed=false and the operator simply gets the plain
+   * confirmation.
    */
   const getDeliveryState = async ({ sessionId }: OpsInput<'getDeliveryState'>): Promise<OpsResult<'getDeliveryState'>> => {
     try {
@@ -1805,6 +1817,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
       let landed = false;
       let ownCommits = 0;
+      // Whether `ownCommits` is a PROVEN count (the git probe ran and
+      // succeeded) rather than the fail-soft default. `completedNoCode` claims
+      // the run finished with NO repository changes, so it may only fire on a
+      // proven zero — an unreadable worktree, a missing project, or a session
+      // with no worktree path at all falls back to the plain confirmation, as
+      // documented above.
+      let ownCommitsProven = false;
       const project = sessionManager.getProjectForSession(sessionId);
       if (session.worktreePath && project) {
         try {
@@ -1812,12 +1831,20 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
           landed = state.landed;
           ownCommits = state.ownCommits;
+          ownCommitsProven = true;
         } catch (error) {
           console.error(`[IPC:git] landing probe failed for session ${sessionId}:`, error);
         }
       }
 
-      return { success: true, data: { delivered, landed, ownCommits } };
+      // Only meaningful when the worktree PROVABLY has no own commits —
+      // ownCommits > 0 means git already has a real answer via landed/delivered,
+      // and an unproven 0 (probe failed / never ran) must not read as "no code".
+      const completedNoCode = ownCommitsProven
+        && ownCommits === 0
+        && sessionCompletedNoCodeWork(makeDatabaseLike(databaseService), sessionId);
+
+      return { success: true, data: { delivered, landed, ownCommits, completedNoCode } };
     } catch (error: unknown) {
       return {
         success: false,
