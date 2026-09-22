@@ -21,7 +21,11 @@ import {
   resolveVisualVerification,
 } from '../../visualVerificationResolver';
 import { loadVerifyConfig } from '../../verifyConfigLoader';
-import { laneEnqueueKeyFor, prepareVerificationEnqueue } from '../../verify/enqueueFromTask';
+import {
+  laneEnqueueKeyFor,
+  prepareVerificationEnqueue,
+  resolveEnqueueModality,
+} from '../../verify/enqueueFromTask';
 import {
   captureSnapshotSha,
   isRunbookCommittedAtHead,
@@ -40,6 +44,7 @@ import {
   resolveTaskModality,
 } from '../../../../../shared/types/visualVerification';
 import type {
+  VerificationModality,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationType,
@@ -136,6 +141,54 @@ const AWAIT_VERIFICATION_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 //    set the resolver already filtered).
 // --------------------------------------------------------------------------
 
+/** Everything the shared enqueue tail needs, resolved by the handler's validation. */
+interface RequestEnqueueArgs {
+  runId: string;
+  projectId: number;
+  effectiveType: VerificationType;
+  chain: VerifyChainEntry[];
+  task: VerificationTaskV1 | undefined;
+  input: VerificationRequestInput;
+  isQuickRun: boolean;
+  setupProof: boolean;
+  /** A validated setup-proof pin — never set for an ordinary request. */
+  authorizedPin?: { hash: string; localVersion: number };
+  /** Deferred path only: the lane key computed when the request FIRED. */
+  enqueueKey?: string;
+  /** Deferred path only: the modality + tree the bootstrap ran on. */
+  modality?: VerificationModality;
+  probePath?: string;
+}
+
+/** The ordinary `cyboflow_request_verification` ack. */
+interface RequestVerificationAck {
+  requestId: string;
+  type: VerificationType;
+  snapshotSha: string | null;
+  dirtyWorktree: boolean;
+}
+
+/**
+ * The ack for a request held back behind a runbook bootstrap. `requestId` is
+ * null because no row exists yet — it is written when the bootstrap settles,
+ * keyed to the lane attempt that fired, and its verdict drives the lane off
+ * `awaiting-verify` like any other. Deliberately NOT `skipped`: the fan-out
+ * instructions treat `{ skipped: true }` as "continue without parking", which
+ * would integrate the lane before its verification ever ran.
+ */
+interface DeferredVerificationAck {
+  requestId: null;
+  type: VerificationType;
+  deferred: 'runbook-bootstrap';
+  reason: string;
+}
+
+const RUNBOOK_BOOTSTRAP_DEFERRED_REASON =
+  'this project has no proven verification runbook yet, so one is being derived and proven first ' +
+  '(this can take several minutes). The verification request is enqueued automatically when that ' +
+  'finishes and its verdict drives this lane off awaiting-verify as usual — park the lane now, do ' +
+  'not re-fire.';
+
 /**
  * The visual-verification + ad-hoc-eval MCP tool family: `cyboflow_request_verification`,
  * `cyboflow_await_verification`, `cyboflow_get_verifications`,
@@ -152,6 +205,15 @@ export class VerifyToolHandlers {
   private readonly resolveRunWorktree: VerifyToolContext['resolveRunWorktree'];
   private readonly resolveProjectPath: VerifyToolContext['resolveProjectPath'];
   private readonly readExecutionModel: VerifyToolContext['readExecutionModel'];
+  /**
+   * Lane keys whose request is held behind an in-flight runbook bootstrap. A
+   * re-fire for the same lane attempt gets the same deferred ack instead of a
+   * second bootstrap — which would lose the single-flight claim, enqueue at
+   * once, and be skipped for want of the very runbook the first is deriving.
+   * In-memory by design: nothing about a bootstrap in progress survives a
+   * restart anyway (its stamp resumes on the next fire).
+   */
+  private readonly deferredBootstraps = new Set<string>();
 
   constructor(ctx: VerifyToolContext) {
     this.db = ctx.db;
@@ -606,23 +668,68 @@ export class VerifyToolHandlers {
     // revision itself (see the PARSED HERE note above for why that matters).
     const authorizedPin = msg.setupProof === true ? wirePin : undefined;
 
-    const prepared = await prepareVerificationEnqueue({
-      projectId: ctx.projectId,
+    const enqueueArgs: RequestEnqueueArgs = {
       runId: msg.runId,
+      projectId: ctx.projectId,
+      effectiveType,
+      chain,
+      task,
+      input,
+      isQuickRun,
+      setupProof: msg.setupProof === true,
+      ...(authorizedPin !== undefined ? { authorizedPin } : {}),
+    };
+
+    // LANE RUNBOOK BOOTSTRAP on the MCP path (docs/proposals/lane-runbook-bootstrap.md
+    // §12). The controller seam (`enqueueTaskVerification`) derives + proves a
+    // runbook BEFORE writing the row; this path — the ONLY enqueue path on the
+    // orchestrated plane, including a run handed over from programmatic mid-flight —
+    // skipped straight to the §3.2 "no proven runbook" degrade, so a project with no
+    // proven runbook could never earn one from an orchestrated sprint. A bootstrap
+    // takes minutes and this tool is fire-and-continue, so an eligible request is
+    // ACKED as deferred now and enqueued in the background once the bootstrap
+    // settles; its verdict then drives the parked lane exactly like any other.
+    const deferred = await this.deferForRunbookBootstrap(enqueueArgs);
+    if (deferred !== null) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: deferred });
+      return;
+    }
+
+    const result = await this.prepareAndEnqueue(enqueueArgs);
+    this.writeResponse(
+      client,
+      result.ok
+        ? { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: result.data }
+        : { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: result.error },
+    );
+  }
+
+  /**
+   * The shared tail of {@link handleRequestVerification}: §7.2 guard + §5.2
+   * injection, snapshot capture, lane keying and the scheduler enqueue. Split out
+   * so the deferred (post-bootstrap) path runs the IDENTICAL sequence — only
+   * later, after the bootstrap's commits have landed on the branch the snapshot
+   * captures. Never throws; the caller turns the result into the wire reply.
+   */
+  private async prepareAndEnqueue(
+    args: RequestEnqueueArgs,
+  ): Promise<{ ok: true; data: RequestVerificationAck } | { ok: false; error: string }> {
+    const { runId, projectId, effectiveType, chain, authorizedPin } = args;
+    let { task, input } = args;
+    const prepared = await prepareVerificationEnqueue({
+      projectId,
+      runId,
       type: effectiveType,
       ...(task !== undefined ? { task } : {}),
       ...(authorizedPin !== undefined ? { pin: authorizedPin } : {}),
+      // Present only on the deferred (post-bootstrap) path: the SAME modality
+      // and tree the bootstrap ran on, exactly as `enqueueTaskVerification`
+      // threads them. Absent ⇒ the function resolves them itself, as before.
+      ...(args.modality !== undefined ? { modality: args.modality } : {}),
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
       ...(this.logger ? { logger: this.logger } : {}),
     });
-    if (!prepared.ok) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: prepared.error,
-      });
-      return;
-    }
+    if (!prepared.ok) return { ok: false, error: prepared.error };
     // A merged task supersedes both persisted columns, so the legacy input is
     // re-derived from it — `deliverable_json` must never describe a shape
     // `task_json` no longer carries.
@@ -663,18 +770,18 @@ export class VerifyToolHandlers {
     // caller rather than blocking: see `isWorktreeDirty`.
     let dirtyWorktree = false;
     try {
-      snapshotWorktreePath = this.resolveRunWorktree(msg.runId);
+      snapshotWorktreePath = this.resolveRunWorktree(runId);
       if (snapshotWorktreePath === null) {
         this.logger?.warn('[Cyboflow MCP Query] request-verification: no run worktree; enqueuing without a snapshot', {
-          runId: msg.runId,
+          runId,
         });
       } else {
         snapshotSha = await captureSnapshotSha(snapshotWorktreePath);
-        if (isQuickRun) dirtyWorktree = await isWorktreeDirty(snapshotWorktreePath);
+        if (args.isQuickRun) dirtyWorktree = await isWorktreeDirty(snapshotWorktreePath);
       }
     } catch (err) {
       this.logger?.warn('[Cyboflow MCP Query] request-verification: snapshot sha capture failed', {
-        runId: msg.runId,
+        runId,
         worktreePath: snapshotWorktreePath,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -685,53 +792,44 @@ export class VerifyToolHandlers {
     // run's batch (see laneEnqueueKeyFor for why, and for the dedup it implies);
     // anything else enqueues unkeyed as before. A setup proof is never lane
     // traffic, keyed or not.
-    const lanes = msg.setupProof === true || input.taskRef === undefined ? null : this.lanesForRun(msg.runId);
-    const enqueueKey =
-      lanes !== null && input.taskRef !== undefined
-        ? laneEnqueueKeyFor(msg.runId, input.taskRef, lanes)
-        : undefined;
+    //
+    // A DEFERRED enqueue carries the key computed when the lane FIRED: the
+    // bootstrap may take many minutes, and re-reading the lane's attempt now
+    // would stamp a row that belongs to the attempt that fired it with whatever
+    // attempt the lane has moved on to since.
+    const enqueueKey = args.enqueueKey ?? this.laneEnqueueKeyForRequest(runId, input.taskRef, args.setupProof);
 
     try {
       const requestId = VerificationScheduler.getInstance().enqueue({
-        runId: msg.runId,
-        projectId: ctx.projectId,
+        runId,
+        projectId,
         type: effectiveType,
         input,
         chain,
         task,
         snapshotSha,
         ...(enqueueKey !== undefined ? { enqueueKey } : {}),
-        ...(msg.setupProof === true ? { setupProof: true } : {}),
+        ...(args.setupProof ? { setupProof: true } : {}),
         ...(prepared.pin
           ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
           : {}),
       });
-      // Reply SYNCHRONOUSLY (the lane continues), then kick the drain loop. enqueue
+      // The caller replies (the lane continues), then this kick. enqueue
       // already nudges; the extra nudge is harmless (coalesced) and makes the
       // fire-and-continue contract explicit.
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        // `snapshotSha` + `dirtyWorktree` travel WITH the ack so the caller learns
-        // what is actually being verified at the moment it fires, not after the
-        // verdict. A PASS on a dirty tree certifies `snapshotSha`, not the working
-        // copy, and the tool description requires both be stated alongside any
-        // verdict relayed to the user.
-        data: { requestId, type: effectiveType, snapshotSha, dirtyWorktree },
-      });
       VerificationScheduler.getInstance().nudge();
+      // `snapshotSha` + `dirtyWorktree` travel WITH the ack so the caller learns
+      // what is actually being verified at the moment it fires, not after the
+      // verdict. A PASS on a dirty tree certifies `snapshotSha`, not the working
+      // copy, and the tool description requires both be stated alongside any
+      // verdict relayed to the user.
+      return { ok: true, data: { requestId, type: effectiveType, snapshotSha, dirtyWorktree } };
     } catch (err) {
       this.logger?.error('[Cyboflow MCP Query] request-verification enqueue failed', {
-        runId: msg.runId,
+        runId,
         error: err instanceof Error ? err.message : String(err),
       });
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: 'verification_enqueue_failed',
-      });
+      return { ok: false, error: 'verification_enqueue_failed' };
     }
   }
 
@@ -1169,6 +1267,125 @@ export class VerifyToolHandlers {
     if (lanes === null || lanes.length !== 1) return undefined; // multi-lane cannot be defaulted; non-lane run has none
     const only = lanes[0];
     return typeof only.ref === 'string' && only.ref.length > 0 ? only.ref : only.taskId;
+  }
+
+  /**
+   * The lane enqueue key for a request, or undefined when it is not lane traffic:
+   * a setup proof is never lane traffic, and a taskRef that names no lane of the
+   * run's batch (or a run with no batch) enqueues unkeyed.
+   */
+  private laneEnqueueKeyForRequest(runId: string, taskRef: string | undefined, setupProof: boolean): string | undefined {
+    if (setupProof || taskRef === undefined) return undefined;
+    const lanes = this.lanesForRun(runId);
+    return lanes === null ? undefined : laneEnqueueKeyFor(runId, taskRef, lanes);
+  }
+
+  /**
+   * Hold a LANE request behind the runbook bootstrap when the bootstrap preflight
+   * says one should run, mirroring step (3a) of `enqueueTaskVerification`. Returns
+   * the deferred ack (the caller replies with it and stops) or null for "enqueue
+   * now, exactly as before".
+   *
+   * Only lane traffic is eligible — a composed task, no setup proof, a taskRef
+   * naming a lane of this run's batch, a run worktree — because the bootstrap
+   * commits a runbook onto the run's branch under a per-(run, modality) stamp
+   * owned by a lane. Quick chats and legacy intent-only requests keep today's
+   * immediate enqueue. The decision itself is the SAME preflight the controller
+   * consults (`evaluateRunbookBootstrap`), so the two planes cannot disagree about
+   * when a project needs one.
+   *
+   * NEVER THROWS: any failure answers null, which is today's behavior.
+   */
+  private async deferForRunbookBootstrap(args: RequestEnqueueArgs): Promise<DeferredVerificationAck | null> {
+    const { runId, projectId, task, input } = args;
+    if (args.setupProof || task === undefined || input.taskRef === undefined) return null;
+    try {
+      const lanes = this.lanesForRun(runId);
+      const lane =
+        lanes?.find((l) => l.ref === input.taskRef) ?? lanes?.find((l) => l.taskId === input.taskRef);
+      const probePath = this.resolveRunWorktree(runId);
+      const scheduler = VerificationScheduler.tryGetInstance();
+      if (lanes === null || lane === undefined || probePath === null || scheduler === null) return null;
+      const enqueueKey = laneEnqueueKeyFor(runId, input.taskRef, lanes);
+      if (enqueueKey === undefined) return null;
+
+      const ack: DeferredVerificationAck = {
+        requestId: null,
+        type: args.effectiveType,
+        deferred: 'runbook-bootstrap',
+        reason: RUNBOOK_BOOTSTRAP_DEFERRED_REASON,
+      };
+      if (this.deferredBootstraps.has(enqueueKey)) return ack;
+
+      // F5 — the modality resolved ONCE and shared by the preflight, the
+      // bootstrap and the eventual preparation, as the controller seam does.
+      const modality = await resolveEnqueueModality({
+        type: args.effectiveType,
+        task,
+        projectId,
+        runId,
+        probePath,
+        ...(this.logger ? { logger: this.logger } : {}),
+      });
+      const bootstrapArgs = { projectId, runId, laneTaskRef: lane.taskId, modality, task, probePath };
+      const decision = await scheduler.evaluateRunbookBootstrap(bootstrapArgs);
+      if (!decision.proceed) return null;
+
+      this.deferredBootstraps.add(enqueueKey);
+      this.logger?.info('[Cyboflow MCP Query] request-verification deferred behind a runbook bootstrap', {
+        runId,
+        laneTaskRef: input.taskRef,
+        modality,
+      });
+      void this.bootstrapThenEnqueue(scheduler, bootstrapArgs, { ...args, enqueueKey, modality, probePath });
+      return ack;
+    } catch (err) {
+      this.logger?.warn('[Cyboflow MCP Query] request-verification: bootstrap deferral failed; enqueuing now', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * The background half of {@link deferForRunbookBootstrap}. The enqueue runs
+   * WHATEVER the bootstrap concluded: a proven runbook is injected by the
+   * preparation and the lane verifies; anything else reaches the §3.2 gate and is
+   * skipped with the reason naming the situation — which advances the parked
+   * lane. Never enqueuing would strand the lane at `awaiting-verify` forever.
+   */
+  private async bootstrapThenEnqueue(
+    scheduler: VerificationScheduler,
+    bootstrapArgs: Parameters<VerificationScheduler['maybeBootstrapRunbook']>[0],
+    enqueueArgs: RequestEnqueueArgs & { enqueueKey: string },
+  ): Promise<void> {
+    try {
+      const outcome = await scheduler.maybeBootstrapRunbook(bootstrapArgs);
+      this.logger?.info('[Cyboflow MCP Query] runbook bootstrap finished (deferred request)', {
+        runId: enqueueArgs.runId,
+        laneTaskRef: enqueueArgs.input.taskRef,
+        outcome: outcome.kind,
+      });
+    } catch (err) {
+      // maybeBootstrapRunbook never throws by contract; belt for the enqueue below.
+      this.logger?.warn('[Cyboflow MCP Query] deferred runbook bootstrap threw', {
+        runId: enqueueArgs.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      const result = await this.prepareAndEnqueue(enqueueArgs);
+      if (!result.ok) {
+        this.logger?.warn('[Cyboflow MCP Query] deferred verification enqueue failed', {
+          runId: enqueueArgs.runId,
+          laneTaskRef: enqueueArgs.input.taskRef,
+          error: result.error,
+        });
+      }
+    } finally {
+      this.deferredBootstraps.delete(enqueueArgs.enqueueKey);
+    }
   }
 
   /**
