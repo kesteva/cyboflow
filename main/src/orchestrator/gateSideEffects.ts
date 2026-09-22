@@ -54,7 +54,10 @@ import type { ReviewItemRouter } from './reviewItemRouter';
 import { listRunOwnedIdeaIds } from './runEntityOwnership';
 import { bindApprovedDesignsForRun } from './design/flowDesignBinding';
 import { stampSolutionThoroughness, type ProjectSettingsDeps } from './projectSettings';
-import { readAdversarialReviewMarkdown } from './adversarialReviewGateBody';
+import {
+  readAdversarialReviewMarkdown,
+  readAdversarialReviewReportedAtMs,
+} from './adversarialReviewGateBody';
 import {
   parseAdversarialReviewDoc,
   adversarialSeverityToReviewSeverity,
@@ -126,6 +129,46 @@ export interface GateSideEffectArgs {
    * arm learns the human chose "Continue without logging".
    */
   resolution?: string | null;
+  /**
+   * The RESOLVED gate row's id. The approve-design arm reads the
+   * `reviewReportedSince` freshness bound the row was MINTED with (payload_json,
+   * stamped by `HumanStepManager.composeGatePayload`) so the accepted-risk filing
+   * acts on the same critique the human was shown, rather than on whatever the
+   * one-per-run `adversarial-review` artifact happens to hold at resolve time.
+   *
+   * Absent on the ORCHESTRATED-plane arm (that plane has no walk and no bound to
+   * carry) and on legacy rows minted before the stamp ⇒ NO CONSTRAINT, which is
+   * today's behaviour exactly.
+   */
+  reviewItemId?: string;
+}
+
+/**
+ * The adversarial-review freshness bound a resolved gate row was minted with, as
+ * epoch ms — `DecisionPayload.reviewReportedSince` (ISO-8601 UTC, written by
+ * `toISOString()` so it is always zoned and `Date.parse` is the right reader).
+ *
+ * `null` means NO CONSTRAINT and every caller must read it that way. It is
+ * returned for a missing row, a null/malformed payload, a payload without the
+ * field, an unparseable value, or any throw — the bound can only ever SUPPRESS a
+ * filing, so an unreadable one must never be allowed to drop findings a human
+ * actually accepted.
+ */
+export function readGateReviewBoundMs(db: DatabaseLike, reviewItemId: string): number | null {
+  try {
+    const row = db
+      .prepare('SELECT payload_json AS payloadJson FROM review_items WHERE id = ?')
+      .get(reviewItemId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return null;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const raw = (parsed as { reviewReportedSince?: unknown }).reviewReportedSince;
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    const ms = Date.parse(raw);
+    return Number.isNaN(ms) ? null : ms;
+  } catch {
+    return null;
+  }
 }
 
 interface RunMetaRow {
@@ -217,7 +260,7 @@ export class GateSideEffects {
           // it; a plain approve, a legacy free-text 'approve', and every other
           // modifier still file.
           if (parseGateResolution(args.resolution)?.modifier !== GATE_RESOLUTION_MODIFIER_NO_FINDINGS) {
-            await this.fileAcceptedRiskFindings(args.runId, meta.projectId);
+            await this.fileAcceptedRiskFindings(args.runId, meta.projectId, args.reviewItemId);
           } else {
             this.deps.logger?.info('[gateSideEffects] design approved without logging — accepted-risk findings skipped', {
               runId: args.runId,
@@ -378,12 +421,51 @@ export class GateSideEffects {
    * Every write goes through the ReviewItemRouter chokepoint. Without the router
    * wired this arm is a no-op, which is the right failure: findings are entity
    * state, and there is no sanctioned path around the chokepoint.
+   *
+   * FRESHNESS. The artifact is ONE row per run and survives a rewind and a Revise
+   * loopback, so a gate can open over a design whose critique was never re-written
+   * — and filing that survivor's entries would record a previous round's defects
+   * as risks the human accepted about a design that was revised to address them.
+   * `reviewItemId` is the resolved gate row, and the bound it was MINTED with
+   * ({@link readGateReviewBoundMs}) is re-applied here, so this filing reads
+   * exactly the critique the gate BODY was composed from. No id, no bound on the
+   * row, or an unknown artifact age ⇒ no constraint (today's behaviour). A stale
+   * artifact is logged and files nothing; a run with no artifact at all stays the
+   * silent return it has always been.
    */
-  private async fileAcceptedRiskFindings(runId: string, projectId: number): Promise<void> {
+  private async fileAcceptedRiskFindings(
+    runId: string,
+    projectId: number,
+    reviewItemId?: string,
+  ): Promise<void> {
     const router = this.deps.reviewItemRouter;
     if (!router) return;
-    const markdown = readAdversarialReviewMarkdown(this.deps.db, runId);
-    if (markdown === undefined) return;
+    const bound = reviewItemId !== undefined ? readGateReviewBoundMs(this.deps.db, reviewItemId) : null;
+    const markdown = readAdversarialReviewMarkdown(
+      this.deps.db,
+      runId,
+      bound !== null ? { reportedSinceMs: bound } : undefined,
+    );
+    if (markdown === undefined) {
+      // Say WHY nothing was filed when the bound is what suppressed it: an
+      // artifact that exists but predates the gate is the one case an operator
+      // would otherwise read as a lost filing.
+      if (bound !== null) {
+        const reportedAtMs = readAdversarialReviewReportedAtMs(this.deps.db, runId);
+        if (reportedAtMs !== null) {
+          this.deps.logger?.info(
+            "[gateSideEffects] accepted-risk filing skipped — the adversarial-review artifact predates the gate's review bound",
+            {
+              runId,
+              reviewItemId,
+              reportedAt: new Date(reportedAtMs).toISOString(),
+              bound: new Date(bound).toISOString(),
+            },
+          );
+        }
+      }
+      return;
+    }
 
     const { blocking, findings } = parseAdversarialReviewDoc(markdown);
     const entries = [...blocking, ...findings];

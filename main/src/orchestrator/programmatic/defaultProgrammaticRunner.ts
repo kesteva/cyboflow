@@ -806,11 +806,18 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
 
     // The design critique the approve-design gate reviewed, re-read per step. Only
     // the gate-revision section renders it, and only on a run that reported the
-    // artifact — every other prompt is byte-identical. Deliberately UNBOUNDED (no
-    // `reportedSinceMs`): the human just read this critique at the gate, so its
-    // age is not the question — quoting it back is the whole point.
-    const adversarialReviewMarkdown = (): string | undefined =>
-      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId) : undefined;
+    // artifact — every other prompt is byte-identical.
+    //
+    // The CALLER supplies the bound. `SpawnStepRunner` passes the revision's
+    // snapshot of the walk's review-freshness instant, so the quote is the same
+    // critique the gate body was composed from: a gate that rendered the "No
+    // adversarial review this round" notice withheld the previous round's
+    // critique from the human, and must not have it threaded back as the
+    // feedback the re-run is told to act on. A revision armed on a walk with no
+    // bound (a resume past the review step) passes none ⇒ unbounded, exactly as
+    // before.
+    const adversarialReviewMarkdown = (opts?: { reportedSinceMs?: number }): string | undefined =>
+      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId, opts) : undefined;
 
     // The human's free-text note on a resolved gate, run-bound for the host. The
     // controller asks for it when a gate 'revise' arms a loopback; the verdict

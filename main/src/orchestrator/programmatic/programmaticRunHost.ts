@@ -639,6 +639,12 @@ export class ProgrammaticRunHost implements ControllerHost {
       step,
       signal: ctx.signal,
       ...(hook ? { onOpened: (snapshot: HumanGateOpenedSnapshot) => hook(step, ctx, snapshot) } : {}),
+      // The walk's adversarial-review freshness bound, forwarded so the opener can
+      // compose the body from THIS round's critique and stamp the bound on the gate
+      // row. Omitted (not sent as undefined) when the walk holds none.
+      ...(ctx.reviewReportedSinceMs !== undefined
+        ? { reviewReportedSinceMs: ctx.reviewReportedSinceMs }
+        : {}),
     });
   }
 
