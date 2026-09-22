@@ -2718,7 +2718,6 @@ export function selectDailyModelUsage(
     const usage = message.usage;
     if (!isRecord(usage)) continue; // no usage object -> not counted
 
-    runsWithAssistantTokens.add(row.runId);
     const model = typeof message.model === 'string' ? message.model : UNKNOWN_MODEL;
     // SQLite DATETIME is 'YYYY-MM-DD HH:MM:SS' UTC; the first 10 chars are the day.
     const day = row.createdAt.slice(0, 10);
@@ -2731,8 +2730,15 @@ export function selectDailyModelUsage(
     };
     bucket.inputTokens += asNumber(usage.input_tokens);
     bucket.outputTokens += asNumber(usage.output_tokens);
+    // Only a REAL assistant message suppresses the result-usage fallback below —
+    // a subagent_usage-only run (e.g. a Codex/OMP step whose only "assistant-side"
+    // signal is a cumulative subagent snapshot) must still fall through to its
+    // result.usage, exactly like scanRawEventRollups's own fallback guard, which
+    // keys off assistantMessageCount (never incremented by subagent_usage) rather
+    // than "any usage event seen."
     if (row.eventType !== 'subagent_usage') {
       bucket.assistantMessageCount += 1;
+      runsWithAssistantTokens.add(row.runId);
     }
     buckets.set(key, bucket);
   }

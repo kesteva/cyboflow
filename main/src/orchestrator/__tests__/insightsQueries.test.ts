@@ -2410,6 +2410,34 @@ describe('selectDailyModelUsage', () => {
     ]);
   });
 
+  it('does not let a subagent_usage snapshot suppress the same run\'s Codex result.usage fallback (TASK-290)', () => {
+    // A runtime-mix-shaped run: one step reported a nested subagent_usage
+    // snapshot (never counted as an "assistant message"), and the run's
+    // Codex step reports its turn usage on the terminal result — exactly the
+    // combination that a too-broad "any assistant-side usage event"
+    // suppression guard would wrongly drop.
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('claude-sonnet-5', { input: 50, output: 10 }), t0.ts);
+    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ day: t0.day, model: 'claude-sonnet-5', inputTokens: 50, outputTokens: 10 }),
+        expect.objectContaining({ day: t0.day, model: 'codex:gpt-5-codex', inputTokens: 400, outputTokens: 100 }),
+      ]),
+    );
+    expect(points).toHaveLength(2);
+  });
+
   it("falls back to agent_runtime for the codex bucket label when the run pinned no model", () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, {
