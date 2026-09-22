@@ -82,6 +82,28 @@ export interface StepRunResult {
 }
 
 /**
+ * What a systemic pause blocked — threaded controller → host → gate → the pause
+ * item's `DecisionPayload` (gate 'systemic-pause') so the operator's "Switch
+ * runtime & retry" re-targets exactly the agents a retry will spawn.
+ *   - `blockedAgentKeys` — the agents a switch must cover: the failing step's
+ *     agent for a single step; EVERY inner-chain agent for a fan-out (its 'retry'
+ *     replays every parked lane from inner step 0).
+ *   - `blockedProvider` / `blockedRuntime` — what the failing spawn ran on, when
+ *     known (a fan-out whose step-origin lanes disagree leaves them undefined).
+ *   - `origin` — 'step' when a step agent's own spawn died; 'triage' when only
+ *     the lane-triage consult (the run's Claude-only supervisor) died.
+ *   - `fanOut` — the pause parks a whole fan-out (a 'step'-scoped switch is then
+ *     unavailable: the retry replays every lane).
+ */
+export interface SystemicPauseInfo {
+  blockedAgentKeys: readonly string[];
+  blockedProvider?: AgentProvider;
+  blockedRuntime?: string;
+  origin: 'step' | 'triage';
+  fanOut: boolean;
+}
+
+/**
  * A human-gate decision returned by ControllerHost.requestHumanGate.
  *   - 'approve' / 'reject' / 'revise' — the human's verdict (revise loops back).
  *   - 'abort' — the run was CANCELED while parked at the gate (the AbortSignal
@@ -1101,12 +1123,14 @@ export interface ControllerHost {
    * MAX_SYSTEMIC_PAUSES per step id. Absent (tests / hosts built without the
    * gate) ⇒ systemic failures follow the normal failure path (today's behavior).
    * Fail-soft is the host's responsibility; the controller only branches on the
-   * returned verdict.
+   * returned verdict. `info` (optional — a host/test may ignore it) says what
+   * was blocked, so the pause item can offer "Switch runtime & retry".
    */
   awaitSystemicPause?(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    info?: SystemicPauseInfo,
   ): Promise<SystemicPauseVerdict>;
 
   /**

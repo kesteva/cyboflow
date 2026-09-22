@@ -29,12 +29,17 @@ export interface SystemicPauseGateWiringDeps {
   logger?: LoggerLike;
 }
 
-/** Build the production {@link ReviewQueueSystemicPauseGate}. */
+/**
+ * Build the production {@link ReviewQueueSystemicPauseGate}. The `create`
+ * adapter forwards the gate-composed `DecisionPayload` (gate 'systemic-pause':
+ * the blocked step, agent keys, provider, origin) so the pause card can offer a
+ * "Switch runtime & retry" scoped to exactly what was blocked.
+ */
 export function buildSystemicPauseGate(deps: SystemicPauseGateWiringDeps): ReviewQueueSystemicPauseGate {
   return new ReviewQueueSystemicPauseGate({
     items: {
       findPending: (runId, source) => HumanStepManager.getInstance().findPendingItemBySource(runId, source),
-      create: async ({ runId, projectId, title, body, source }) => {
+      create: async ({ runId, projectId, title, body, source, payload }) => {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
           op: 'create',
           actor: 'orchestrator',
@@ -44,6 +49,7 @@ export function buildSystemicPauseGate(deps: SystemicPauseGateWiringDeps): Revie
           blocking: true,
           source,
           runId,
+          ...(payload ? { payload } : {}),
         });
         return reviewItemId;
       },
