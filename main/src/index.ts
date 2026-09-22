@@ -128,7 +128,7 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
+import { buildSystemicPauseGate } from './orchestrator/systemicPauseGateWiring';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
 import {
   DefaultMonitorSession,
@@ -2823,52 +2823,8 @@ async function initializeServices(): Promise<boolean> {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
-    // Systemic-pause gate (the 2026-07-06 planner incident): a step failing with
-    // a usage/session/rate-limit-class error PARKS the run behind a blocking
-    // 'decision' item ("resolve to retry now, dismiss to give up") and
-    // auto-resumes at the parsed limit-reset time, instead of burning the step's
-    // retry / optional-skip / triage budgets on a condition no retry can fix.
-    // Item writes ride the ReviewItemRouter chokepoint (orchestrator actor);
-    // park/resume rides the SAME HumanStepManager primitives as the blocking
-    // gate, so a systemic pause participates in aggregate-unblock.
-    systemicGate: new ReviewQueueSystemicPauseGate({
-      items: {
-        findPending: (runId, source) =>
-          HumanStepManager.getInstance().findPendingItemBySource(runId, source),
-        create: async ({ runId, projectId, title, body, source }) => {
-          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(
-            projectId,
-            {
-              op: 'create',
-              actor: 'orchestrator',
-              kind: 'decision',
-              title,
-              body,
-              blocking: true,
-              source,
-              runId,
-            },
-          );
-          return reviewItemId;
-        },
-        resolve: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'resolve',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-        dismiss: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'dismiss',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-      },
-      parker: HumanStepManager.getInstance(),
+    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
+    systemicGate: buildSystemicPauseGate({
       events: reviewItemChangeEvents,
       channelFor: reviewItemProjectChannel,
       logger: cyboflowLogger,
