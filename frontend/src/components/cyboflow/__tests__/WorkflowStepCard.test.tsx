@@ -226,6 +226,14 @@ describe('WorkflowStepCard', () => {
     expect(row).toHaveAttribute('title', 'executor-agent · Opus 5');
     // Uses the existing non-pending row text color, not a new hardcoded one.
     expect(row).toHaveStyle({ color: '#6a5e44' });
+
+    // The agent name segment must grow into the row's slack (flex: 1 1 auto),
+    // not just be pinned left by justifyContent: space-between — otherwise the
+    // model segment splits off into the middle of the row with a gap on each
+    // side instead of sitting flush against the retries.
+    const agentSegment = row.firstElementChild as HTMLElement;
+    expect(agentSegment).toHaveTextContent('executor-agent');
+    expect(agentSegment).toHaveStyle({ flex: '1 1 auto' });
   });
 
   it('pending status: model label is italic, dot is 45% opacity, and title reads "will run"', () => {
