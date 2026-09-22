@@ -840,18 +840,11 @@ export class GitDiffManager {
    * empty/zeroed result rather than throwing.
    */
   private async resolveRefForDiff(worktreePath: string, ref: string): Promise<string | null> {
-    if (!ref) return null;
-    try {
-      // Belt-and-braces alongside END_OF_OPTIONS below: reject a `-`-prefixed
-      // ref locally rather than relying solely on git's own marker support.
-      assertNotOptionLike(ref, 'diff ref');
-      const resolved = (
-        await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
-      ).trim();
-      return resolved || null;
-    } catch {
-      return null;
-    }
+    // Delegates to the module-scope {@link resolveGitRefToSha} (TASK-273 moved
+    // it into this file for the index.ts size ratchet) rather than repeating
+    // its body: two byte-identical copies of a ref-SAFETY routine is exactly
+    // the shape in which one copy later drifts and loses its hardening.
+    return resolveGitRefToSha(worktreePath, ref);
   }
 
   async getCurrentCommitHash(worktreePath: string): Promise<string> {
@@ -1152,10 +1145,11 @@ export function createUntrackedFileDiffBlock(relPath: string, content: string): 
 /**
  * Resolve a caller-supplied ref (branch, tag, sha) to a concrete commit sha for
  * a run-scoped `gitDiff` context closure (TASK-211), or `null` when the ref is
- * falsy or fails to resolve. Mirrors this class's private `resolveRefForDiff`
- * (TASK-208 ref-safety discipline) rather than reaching into its internals:
- * `END_OF_OPTIONS` forces the ref into a value position and `^{commit}` forces
- * a commit-ish resolution that an option-like string can never satisfy.
+ * falsy or fails to resolve. THE single implementation of the TASK-208
+ * ref-safety discipline in this file — `GitDiffManager.resolveRefForDiff`
+ * delegates here rather than keeping a second copy: `END_OF_OPTIONS` forces
+ * the ref into a value position and `^{commit}` forces a commit-ish
+ * resolution that an option-like string can never satisfy.
  *
  * Lives here (rather than inline at its `main/src/index.ts` call site) so that
  * file stays under its frozen size ratchet (issue #19) — a free function with

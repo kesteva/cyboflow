@@ -385,6 +385,12 @@ export function WorkflowSummaryPanel({
   // resolver not wired — the router throws; leave `stepModels` at its `null`
   // sentinel rather than surfacing the error, so the section just omits itself.
   useEffect(() => {
+    // Reset FIRST on every runId change (mirrors RunCenterPane's rail effect):
+    // this panel is mounted without a `key={activeRunId}`, so switching runs
+    // re-runs the effect on the SAME component instance. Without the reset,
+    // run A's groups keep rendering, attributed to run B, for the whole of
+    // B's in-flight window.
+    setStepModels(null);
     let alive = true;
     trpc.cyboflow.runs.getStepModels
       .query({ runId })
@@ -482,7 +488,11 @@ export function WorkflowSummaryPanel({
   // label's first-seen position exactly once, so its index already IS that
   // tiebreak key.
   const modelGroups = useMemo<ModelGroup[]>(() => {
-    if (stepModels === null || stepModels.length === 0) return [];
+    // `Array.isArray` rather than a `!== null` check: this section is
+    // fail-soft by design (any resolver problem must render nothing, never
+    // throw), so a non-array resolve must degrade to "no data" instead of
+    // exploding on `.length` inside a render-phase memo.
+    if (!Array.isArray(stepModels) || stepModels.length === 0) return [];
     const byLabel = new Map<string, ModelGroup>();
     const order: string[] = [];
     for (const step of stepModels) {
@@ -762,7 +772,9 @@ export function WorkflowSummaryPanel({
                     {group.label} — {group.steps.length} {group.steps.length === 1 ? 'step' : 'steps'}
                   </span>
                 </div>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {/* ml-3.5 = the approved snapshot's 14px chip indent: the
+                    pills hang under their group's label, not under its dot. */}
+                <div className="ml-3.5 mt-1.5 flex flex-wrap gap-1.5">
                   {group.steps.map((step) => (
                     <span
                       key={step.stepId}

@@ -87,7 +87,7 @@ export interface WorkflowCanvasProps {
    * existed. `null`/`undefined` (loading/errored/no-query-yet) is equivalent
    * to an empty map — every card falls back to its pre-existing row.
    */
-  stepModels?: ReadonlyMap<string, { label: string; family: string }> | null;
+  stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +175,17 @@ export const GRAPH_PAPER_BACKGROUND =
   'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
   'var(--color-bg-primary)';
 
-/** Resolves a step's model-family swatch hex from its (string) family bucket. */
-function modelFamilyColorFor(family: string): string {
-  return MODEL_FAMILY_COLORS[family as ModelFamily] ?? MODEL_FAMILY_COLORS.other;
+/**
+ * Resolves a step's model-family swatch hex from its family bucket.
+ *
+ * The `??` is NOT dead despite the narrowed parameter type: `family` arrives
+ * over the tRPC wire from the main process, so a main/renderer version skew
+ * (a family bucket the backend knows and this bundle does not) can still hand
+ * this an unlisted string at runtime. It must fall back to the neutral `other`
+ * swatch, never paint `undefined`.
+ */
+function modelFamilyColorFor(family: ModelFamily): string {
+  return MODEL_FAMILY_COLORS[family] ?? MODEL_FAMILY_COLORS.other;
 }
 
 /** Last path segment of a worktree path, for a compact "folder" chip. */

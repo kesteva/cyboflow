@@ -26,6 +26,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from '../WorkflowCanvas';
 import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
+import type { ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Mock fixture: 2 phases × 2 steps each
@@ -455,7 +456,7 @@ describe('WorkflowCanvas', () => {
   // -------------------------------------------------------------------------
 
   it('threads a stepModels entry into the matching step card as modelLabel/modelFamilyColor', () => {
-    const stepModels = new Map([
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
       ['step-a', { label: 'Opus 5', family: 'opus' }],
       ['step-b', { label: 'Auto', family: 'auto' }],
     ]);
@@ -498,7 +499,11 @@ describe('WorkflowCanvas', () => {
   });
 
   it('falls back to the "other" family swatch for an unrecognized model family bucket', () => {
-    const stepModels = new Map([['step-a', { label: 'Mystery Model', family: 'not-a-real-family' }]]);
+    // Cast: simulates a main/renderer version skew handing the rail a family
+    // bucket this bundle's ModelFamily union does not list.
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      ['step-a', { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
+    ]);
     render(
       <WorkflowCanvas
         definition={MOCK_DEFINITION}
@@ -515,7 +520,7 @@ describe('WorkflowCanvas', () => {
   });
 
   it('threading a stepModels entry does not change the step card/wrapper height or column width (138x120 unchanged)', () => {
-    const stepModels = new Map([
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
       ['step-a', { label: 'Opus 5', family: 'opus' }],
       ['step-b', { label: 'Auto', family: 'auto' }],
     ]);

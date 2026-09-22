@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ScoreSummary, WorkflowSummaryPanel } from '../WorkflowSummaryPanel';
 import type { RunUsageRollup, RunEval } from '../../../../../shared/types/insights';
+import { MODEL_FAMILY_COLORS } from '../../../../../shared/types/agents';
 import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
 
@@ -874,5 +875,66 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
     expect(await screen.findByTestId('run-summary-categories')).toBeInTheDocument();
     await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalled());
     expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument();
+  });
+
+  it('paints each group dot from MODEL_FAMILY_COLORS — the shared swatch source, not a local palette', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', agentKey: 'verifier', label: 'Auto', family: 'auto' },
+    ]);
+    renderPanel();
+
+    const groups = await screen.findAllByTestId('run-summary-step-model-group');
+    // Groups all tie at 1 step, so they keep first-appearance order.
+    const dots = groups.map((g) => g.querySelector('span.rounded-full') as HTMLElement);
+    expect(dots).toHaveLength(4);
+    expect(dots[0]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.opus });
+    expect(dots[1]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.sonnet });
+    expect(dots[2]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.other });
+    expect(dots[3]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.auto });
+    // Distinct swatches, not one repeated fallback.
+    expect(new Set(dots.map((d) => d.style.backgroundColor)).size).toBe(4);
+  });
+
+  it('carries the "not a per-step cost split" disclaimer — the section must never read as cost attribution', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+    ]);
+    renderPanel();
+
+    const section = await screen.findByTestId('run-summary-step-models');
+    expect(section).toHaveTextContent(
+      'Not a per-step cost split — the cost above is reported per run and cannot be attributed to individual steps.',
+    );
+    expect(section).toHaveTextContent('Human review gates are excluded.');
+  });
+
+  it('clears the previous run\'s groups when runId changes (panel is mounted without a key)', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+    ]);
+    const { rerender } = renderPanel();
+    expect(await screen.findByText('Opus 5 — 1 step')).toBeInTheDocument();
+
+    // Run B's query is still in flight. Without a reset-on-runId the panel
+    // keeps rendering run A's "Opus 5" group while the header already reads
+    // run B — the wrong models attributed to the wrong run.
+    getStepModelsQuery.mockReturnValue(new Promise(() => {}));
+    rerender(
+      <WorkflowSummaryPanel
+        runId="run-2"
+        status="awaiting_review"
+        substrate="sdk"
+        workflowLabel="planner"
+        onComplete={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledWith({ runId: 'run-2' }));
+    await waitFor(() =>
+      expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument(),
+    );
   });
 });

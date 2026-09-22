@@ -34,6 +34,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { trpc } from '../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
+import type { ModelFamily } from '../../../../shared/types/agents';
 
 interface RunCenterPaneProps {
   activeRunId: string;
@@ -116,13 +117,21 @@ export function RunCenterPane({
 
   // Per-step resolved model info (IDEA-061 per-step model rail) — fetched ONCE
   // per run id (mirrors the `runs.contextUsage` fetch-once pattern in
-  // RunChatView): a run's effective step→model resolution is fixed for its
-  // lifetime, so there is no polling/subscription here, just a single query
-  // keyed on activeRunId. `null` while loading/errored — WorkflowCanvas treats
-  // that identically to "no data yet" and renders every card's pre-existing row.
+  // RunChatView): one query keyed on activeRunId, no polling/subscription.
+  //
+  // This is a SNAPSHOT taken at mount, not a run-lifetime invariant. The spawn
+  // seam (`programmatic/spawnStepRunner.ts`) deliberately re-resolves each
+  // step's agent runtime/model at that step's spawn, so a workflow- or
+  // project-scoped agent config edited MID-RUN changes what later steps
+  // actually run on while this rail keeps showing the resolution as of mount.
+  // Invalidating on agent-config writes would need a new subscription seam —
+  // tracked as follow-up work, not papered over here.
+  //
+  // `null` while loading/errored — WorkflowCanvas treats that identically to
+  // "no data yet" and renders every card's pre-existing row.
   const [stepModels, setStepModels] = useState<Map<
     string,
-    { label: string; family: string }
+    { label: string; family: ModelFamily }
   > | null>(null);
   useEffect(() => {
     setStepModels(null);

@@ -259,6 +259,69 @@ describe('WorkflowStepCard', () => {
     expect(row).toHaveAttribute('title', 'executor-agent · will run Sonnet 5');
     // Uses the existing pending row text color.
     expect(row).toHaveStyle({ color: '#b3a685' });
+
+    // Same growing-agent-segment geometry as the resolved card — the pending
+    // variant must not lay the row out differently.
+    const agentSegment = row.firstElementChild as HTMLElement;
+    expect(agentSegment).toHaveTextContent('executor-agent');
+    expect(agentSegment).toHaveStyle({ flex: '1 1 auto' });
+  });
+
+  it('model segment is width-capped so a long provider model id cannot spill outside the 138px card', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP}
+        phase={MOCK_PHASE}
+        stepIndex={3}
+        status="running"
+        modelLabel="gpt-5.6-sol-preview-2026-09-01-long"
+        modelFamilyColor="#7a7268"
+      />,
+    );
+
+    const model = screen.getByTestId('step-card-model-implement');
+    expect(model).toHaveStyle({
+      maxWidth: '62px',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    });
+  });
+
+  it('modelLabel without an explicit modelFamilyColor still paints a visible dot', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP}
+        phase={MOCK_PHASE}
+        stepIndex={3}
+        status="running"
+        modelLabel="Opus 5"
+      />,
+    );
+
+    // MODEL_FAMILY_COLORS.other — never an unset/transparent background, which
+    // would reserve the dot's layout while rendering nothing.
+    const dot = screen.getByTestId('step-card-model-dot-implement');
+    expect(dot).toHaveStyle({ backgroundColor: '#7a7268' });
+  });
+
+  it('human step NEVER renders a model segment, even when a caller supplies a label', () => {
+    render(
+      <WorkflowStepCard
+        step={MOCK_STEP_HUMAN}
+        phase={MOCK_PHASE}
+        stepIndex={5}
+        status="running"
+        modelLabel="Opus 5"
+        modelFamilyColor="#c98a2d"
+      />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-human-review')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('step-card-model-dot-human-review')).not.toBeInTheDocument();
+
+    const row = screen.getByTestId('step-card-agent-row-human-review');
+    expect(row).not.toHaveAttribute('title');
+    expect(row).not.toHaveTextContent('Opus 5');
   });
 
   it('no modelLabel: renders exactly today\'s row — no dot, no separator, no title', () => {
@@ -278,6 +341,11 @@ describe('WorkflowStepCard', () => {
     expect(row).not.toHaveAttribute('title');
     expect(row).toHaveTextContent('executor-agent');
     expect(row).toHaveTextContent('×3');
+
+    // The agent segment keeps its flex: 1 1 auto even with no model segment —
+    // the pin must not live only on the model-present path.
+    const agentSegment = row.firstElementChild as HTMLElement;
+    expect(agentSegment).toHaveStyle({ flex: '1 1 auto' });
   });
 
   it('head bar: shows uppercase phase abbreviation and 2-digit step index', () => {
