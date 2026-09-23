@@ -14,8 +14,9 @@
  * ADDITIVE to that raw channel specifically so a tRPC-only consumer can pick
  * ONE live-tail source, see the S0.6 report's deviation 6):
  *
- *   1. `onThreadEvent` (per-thread live-tail, server-throttled ~60ms) is
- *      debounced a further ~150ms client-side before it does anything — a
+ *   1. `onThreadEvent` (per-thread live-tail, server-batched ~60Hz — rate-capped
+ *      but LOSSLESS, see the router's own doc) is debounced a further ~150ms
+ *      client-side before it does anything — a
  *      single agent turn can stream many token deltas, and each debounced
  *      tick both (a) bumps `liveTailTick` (the signal
  *      {@link useUnifiedAgentThreadMessages} watches to refetch the
@@ -82,15 +83,15 @@ const RESUBSCRIBE_DELAY_MS = 1_000;
 const MAX_LIVE_EVENTS = 2000;
 
 /**
- * Narrows onThreadEvent's `unknown` payload to the `{type, payload, timestamp}`
- * envelope shape `AgentThreadService.toEnvelope` produces
- * (main/src/orchestrator/agentThread/agentThreadService.ts ~666) — the router's
- * `onThreadEvent` subscription is typed `AsyncGenerator<unknown>`, so nothing
- * upstream of this guard proves the shape. Structural only (the wrapper's own
- * three fields, not `payload`'s per-`type` correlation) — same audited-boundary
- * posture as the `as StreamEnvelope` cast at runEventBridge.ts:237: the
- * producer's contract, not full runtime validation, is what makes the
- * subsequent `StreamEvent` cast safe.
+ * Narrows one element of onThreadEvent's `unknown[]` batch to the
+ * `{type, payload, timestamp}` envelope shape `AgentThreadService.toEnvelope`
+ * produces (main/src/orchestrator/agentThread/agentThreadService.ts ~666) —
+ * the router's `onThreadEvent` subscription is typed `AsyncGenerator<unknown[]>`,
+ * so nothing upstream of this guard proves any element's shape. Structural
+ * only (the wrapper's own three fields, not `payload`'s per-`type`
+ * correlation) — same audited-boundary posture as the `as StreamEnvelope`
+ * cast at runEventBridge.ts:237: the producer's contract, not full runtime
+ * validation, is what makes the subsequent `StreamEvent` cast safe.
  */
 function isThreadStreamEnvelope(value: unknown): value is StreamEvent {
   if (typeof value !== 'object' || value === null) return false;
@@ -297,25 +298,29 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       };
 
       /**
-       * Capture the raw envelope into `liveEvents` for the progressive-render
-       * tail (AgentThreadView's `reduceLiveTail`). UNTHROTTLED — unlike the
-       * debounced tick/proposals refetch above, the reducer needs every
-       * intermediate delta to reconstruct in-flight text, mirroring
-       * panelLiveEventsStore.appendEvent's reset-on-`result` + cap behavior.
+       * Fold one onThreadEvent batch into `liveEvents` for the progressive-
+       * render tail (AgentThreadView's `reduceLiveTail`) in a SINGLE `set()` —
+       * the server batches (never drops) events per tick specifically so the
+       * reducer sees every intermediate delta it needs to reconstruct
+       * in-flight text, mirroring panelLiveEventsStore.appendEvent's
+       * reset-on-`result` + cap behavior applied across the whole batch (a
+       * `result` mid-batch resets what came before it in the SAME batch too).
        */
-      const captureLiveEvent = (value: unknown): void => {
-        if (!isThreadStreamEnvelope(value)) return;
-        if (value.type === 'result') {
-          set({ liveEvents: [] });
-          return;
-        }
+      const captureLiveEvents = (values: readonly unknown[]): void => {
         set((s) => {
-          const existing = s.liveEvents;
-          const next =
-            existing.length >= MAX_LIVE_EVENTS
-              ? [...existing.slice(existing.length - MAX_LIVE_EVENTS + 1), value]
-              : [...existing, value];
-          return { liveEvents: next };
+          let events = s.liveEvents;
+          for (const value of values) {
+            if (!isThreadStreamEnvelope(value)) continue;
+            if (value.type === 'result') {
+              events = [];
+              continue;
+            }
+            events =
+              events.length >= MAX_LIVE_EVENTS
+                ? [...events.slice(events.length - MAX_LIVE_EVENTS + 1), value]
+                : [...events, value];
+          }
+          return events === s.liveEvents ? {} : { liveEvents: events };
         });
       };
 
@@ -327,13 +332,13 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           set({ thread });
           await refreshProposals(thread.id);
           if (tornDown) return;
-          threadEventSub = openResilientSubscription(
+          threadEventSub = openResilientSubscription<unknown[]>(
             'onThreadEvent',
             (handlers) =>
               trpc.cyboflow.agentThread.onThreadEvent.subscribe({ threadId: thread.id }, handlers),
             {
-              onData: (value) => {
-                captureLiveEvent(value);
+              onData: (values) => {
+                captureLiveEvents(values);
                 scheduleLiveTailRefresh(thread.id);
               },
             },
