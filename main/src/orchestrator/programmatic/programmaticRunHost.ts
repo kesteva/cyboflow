@@ -46,6 +46,7 @@ import type {
   ReviewLoopRequest,
   SetAsideFindingInput,
   StepReport,
+  SystemicPauseInfo,
   SystemicPauseVerdict,
   TriageDecision,
   VerificationPosture,
@@ -1230,10 +1231,11 @@ export class ProgrammaticRunHost implements ControllerHost {
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    info?: SystemicPauseInfo,
   ): Promise<SystemicPauseVerdict> {
     if (!this.args.systemicGate) return 'giveup';
     this.injectMonitorTurn(
-      `⏸ Run paused — step **${step.name}** hit a systemic failure (${(error ?? 'no error text').slice(0, 200)}). It will auto-resume when the limit resets, or resolve the pause item in the review queue to retry now.`,
+      `⏸ Run paused — step **${step.name}** hit a systemic failure (${(error ?? 'no error text').slice(0, 200)}). It will auto-resume when the limit resets. On the pause item: **Retry now**, **Switch runtime & retry** (re-target the blocked agents and retry at once), or **Stop waiting**.`,
     );
     try {
       const verdict = await this.args.systemicGate.awaitClear({
@@ -1241,6 +1243,7 @@ export class ProgrammaticRunHost implements ControllerHost {
         projectId: this.args.projectId,
         step,
         error,
+        ...(info ? { info } : {}),
         signal: ctx.signal,
       });
       if (verdict === 'retry') this.injectMonitorTurn(`▶ Resuming — retrying step **${step.name}**.`);

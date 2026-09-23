@@ -36,12 +36,20 @@
  * by the form; the same question remains waiting in Chat. Terminal/Agent tabs and
  * a collapsed dock keep the strip fallback. Folded-row suppression (#1) still
  * fires whenever the run has a live question.
+ *
+ * Plan v2 (switch runtime/model on a systemic pause): also renders
+ * {@link AgentTargetOverridesChip} above the pending-items list, a one-line
+ * notice + Revert for any run-scoped agent-target overrides a pause's "Switch
+ * runtime & retry" wrote — hidden when the run carries none. Unlike the rest of
+ * this strip it stays mounted (standalone) when nothing is pending, so Revert
+ * survives the pause it was set from clearing.
  */
 import { useEffect, useMemo, type ReactElement } from 'react';
 import { useReviewItemsSlice, pendingReviewItemsForRun } from '../../stores/reviewItemsSlice';
 import { useQuestionStore } from '../../stores/questionStore';
 import { ReviewItemCard } from '../ReviewQueue/ReviewItemCard';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
+import { AgentTargetOverridesChip } from './AgentTargetOverridesChip';
 
 interface RunPendingInputStripProps {
   runId: string;
@@ -106,7 +114,12 @@ export function RunPendingInputStrip({
   }, [items, runId, liveQuestions.length]);
 
   const shownCount = pendingItems.length + stripQuestions.length;
-  if (shownCount === 0) return null;
+  // Nothing needs input — but a run whose agents were switched mid-run must
+  // keep its override notice + Revert reachable, or the affordance would
+  // vanish the moment the pause it was set from clears (which is exactly when
+  // the operator learns whether the switch took). The chip renders null when
+  // the run carries no overrides, so the common case is still an empty strip.
+  if (shownCount === 0) return <AgentTargetOverridesChip runId={runId} standalone />;
 
   return (
     <div
@@ -125,6 +138,7 @@ export function RunPendingInputStrip({
           {shownCount}
         </span>
       </div>
+      <AgentTargetOverridesChip runId={runId} />
       <div className="flex-1 overflow-y-auto" role="list">
         {pendingItems.map((item) => (
           // surface="session": this strip IS the run, so an option-less escalation

@@ -52,6 +52,20 @@ type DetectionResponse =
   | { success: true; data: ProviderDetectionResult }
   | { success: false; error: string };
 
+/**
+ * Run ONE provider's detection probe (installed / signed in). The single entry
+ * the IPC channel below and main-process callers share — e.g. the "Switch
+ * runtime & retry" handler's readiness gate (`state === 'detected'`), which must
+ * refuse a provider whose CLI is enabled but missing rather than let it fail
+ * non-systemically and burn the step's budgets. Uncached, like every probe.
+ */
+export async function detectProvider(
+  provider: AgentProvider,
+  services: AppServices,
+): Promise<ProviderDetectionResult> {
+  return PROVIDER_DETECTION_PROBES[provider](services);
+}
+
 export function registerProviderDetectionHandlers(ipcMain: IpcMain, services: AppServices): void {
   ipcMain.handle(
     PROVIDERS_DETECT_CHANNEL,
@@ -62,7 +76,7 @@ export function registerProviderDetectionHandlers(ipcMain: IpcMain, services: Ap
           error: `Unknown agent provider "${String(provider)}" (expected one of ${AGENT_PROVIDERS.join(', ')}).`,
         };
       }
-      return { success: true, data: await PROVIDER_DETECTION_PROBES[provider](services) };
+      return { success: true, data: await detectProvider(provider, services) };
     },
   );
 

@@ -80,7 +80,18 @@
  *                    surfaces its own pair instead: "Launch a separate planner"
  *                    (runs.launchSeparatePlanner) / "Return to backlog"
  *                    (runs.returnIdeaToBacklog) — both resolve the guard
- *                    server-side, never the generic resolve/dismiss.
+ *                    server-side, never the generic resolve/dismiss. A
+ *                    `gate:'systemic-pause'` decision (plan v2: a
+ *                    programmatic step's agent hit a subscription/session
+ *                    limit) is checked the same way as approve-design — BEFORE
+ *                    the default-actions collapse, on both surfaces — and
+ *                    offers Retry now / Switch runtime & retry (an inline
+ *                    {@link SystemicPauseSwitchForm} in-session, "Switch &
+ *                    retry…" routing to the session from the queue) / Stop
+ *                    waiting, never a resolve(outcome:'reject'). A pause whose
+ *                    payload says `origin: 'triage'` (only the run's Claude-only
+ *                    supervisor hit the limit) offers NO switch — nothing a
+ *                    step-agent switch does can move it.
  *   - human_task   — a free-form action item (blocking per-item). Carries no
  *                    options, so the queue offers the default pair; in-session it
  *                    keeps Resolve / Dismiss / Promote to task.
@@ -110,6 +121,7 @@ import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { SystemicPauseSwitchForm } from './SystemicPauseSwitchForm';
 
 // ---------------------------------------------------------------------------
 // Accept-routing target chip — keyed on the discriminant so a new target breaks
@@ -384,6 +396,62 @@ function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
 }
 
 // ---------------------------------------------------------------------------
+// Plan v2 — switch runtime/model on a systemic pause (subscription/session
+// limit) and retry. `gate:systemic-pause:<stepId>` decision items.
+// ---------------------------------------------------------------------------
+
+/**
+ * True for a systemic-pause decision item — the programmatic run host's
+ * `gate:systemic-pause:<stepId>` gate, opened when a step's agent hits a
+ * subscription/session limit. Keyed on EITHER the source prefix (matches even
+ * a pause re-attached before its payload landed) OR the payload discriminant,
+ * mirroring the dual-discriminant pattern of {@link isApproveIdeasGateItem} /
+ * {@link isApproveDesignGateItem} above. The payload is read through an
+ * `unknown` cast on purpose: a pause item minted before the payload existed
+ * (payload_json NULL) or re-attached across an app restart must still match by
+ * its source prefix, and a malformed payload must never throw out of a card.
+ */
+function isSystemicPauseItem(item: ReviewItem): boolean {
+  if (item.kind !== 'decision') return false;
+  if ((item.source ?? '').startsWith('gate:systemic-pause:')) return true;
+  const payload: unknown = item.payload;
+  if (payload === null || typeof payload !== 'object') return false;
+  const p = payload as { kind?: unknown; gate?: unknown };
+  return p.kind === 'decision' && p.gate === 'systemic-pause';
+}
+
+/**
+ * The systemic-pause payload's `origin` field ('step' | 'triage'), or
+ * undefined when absent/malformed/not a pause item. 'triage' means the run's
+ * Claude-only supervisor (lane triage) hit the limit rather than a step
+ * agent — switching step agents does not move it, hence the note rendered
+ * under the pause card's actions for that case.
+ */
+function systemicPauseOrigin(item: ReviewItem): 'step' | 'triage' | undefined {
+  if (!isSystemicPauseItem(item)) return undefined;
+  const payload: unknown = item.payload;
+  if (payload === null || typeof payload !== 'object') return undefined;
+  const origin = (payload as { origin?: unknown }).origin;
+  return origin === 'step' || origin === 'triage' ? origin : undefined;
+}
+
+/**
+ * The human-readable disposition for a RESOLVED/DISMISSED systemic-pause
+ * item, keyed on the resolution's stable prefix. Dismissed (by status OR a
+ * 'stop waiting' resolution) is checked first — it is the definitive "gave
+ * up" signal; 'retry: switched…' (the switch handler's own resolution, see
+ * plan v2 D3 step 6) names the switch-and-retry path specifically; anything
+ * else that reached a terminal status through a plain resolve() (a bare
+ * retry, or the auto-resume timer's 'auto-retry…') reads as a plain retry.
+ */
+function systemicPauseResolvedLabel(item: ReviewItem): string {
+  const resolution = item.resolution ?? '';
+  if (item.status === 'dismissed' || resolution.startsWith('stop waiting')) return 'Stopped waiting';
+  if (resolution.startsWith('retry: switched')) return 'Switched & retried';
+  return 'Retried';
+}
+
+// ---------------------------------------------------------------------------
 // TASK-277 — eval-sourced finding triage (Address review findings / Log as
 // findings / Dismiss), replacing the legacy Dismiss / Promote-to-task pair.
 // ---------------------------------------------------------------------------
@@ -498,6 +566,10 @@ export function ReviewItemCard({
   const [addressBusy, setAddressBusy] = React.useState(false);
   const [addressError, setAddressError] = React.useState<string | null>(null);
   const [addressEligibility, setAddressEligibility] = React.useState<AddressReviewEligibility>(null);
+  // Plan v2: whether the inline "Switch runtime & retry" form is open for a
+  // systemic-pause item (session surface only — the queue surface routes to
+  // the session instead, see 'pause-switch-open' below).
+  const [showSwitchForm, setShowSwitchForm] = React.useState(false);
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -1068,6 +1140,95 @@ export function ReviewItemCard({
                 >
                   Continue without logging
                 </Button>
+              )}
+            </>
+          );
+        }
+        // Plan v2 (switch runtime/model on a systemic pause, then retry): the
+        // programmatic run host's `gate:systemic-pause:<stepId>` gate, opened
+        // when a step's agent hits a subscription/session limit. Checked
+        // BEFORE `usesDefaultActions` — like approve-design above — so BOTH
+        // surfaces get this gate's real actions instead of the option-less
+        // "Open in session" + Dismiss pair (which would offer no way to
+        // switch runtimes from the queue). Never sends outcome 'reject':
+        // Retry now / Switch & retry both resolve WITHOUT an outcome (a plain
+        // retry — the pause gate reads any resolve as 'retry'), and Stop
+        // waiting dismisses (giveup) instead.
+        if (isSystemicPauseItem(item)) {
+          if (item.status !== 'pending') {
+            return (
+              <span className="text-xs text-text-tertiary" data-testid="pause-resolved">
+                {systemicPauseResolvedLabel(item)}
+              </span>
+            );
+          }
+          const origin = systemicPauseOrigin(item);
+          // A triage-origin pause: only the run's Claude-only supervisor hit the
+          // limit. No step-agent switch moves it (the backend refuses one with
+          // `origin_triage`), so the card offers Retry now / Stop waiting and the
+          // note below — never a switch that would replay every lane for nothing.
+          const switchable = origin !== 'triage';
+          const retryNow = (): void => {
+            void resolve(item.project_id, item.id, { surface }).then((r) => {
+              if (r !== null) {
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'retry', blocking: item.blocking });
+                onResolved?.();
+              }
+            });
+          };
+          const stopWaiting = (): void => {
+            void dismiss(item.project_id, item.id).then((ok) => {
+              if (ok) {
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'stop_waiting', blocking: item.blocking });
+                onResolved?.();
+              }
+            });
+          };
+          return (
+            <>
+              <Button variant="primary" size="sm" disabled={busy} onClick={retryNow} data-testid="pause-retry">
+                Retry now
+              </Button>
+              {switchable && surface === 'session' && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setShowSwitchForm((v) => !v)}
+                  data-testid="pause-switch-toggle"
+                >
+                  Switch runtime &amp; retry
+                </Button>
+              )}
+              {switchable && surface !== 'session' && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={item.run_id === null}
+                  onClick={openInSession}
+                  data-testid="pause-switch-open"
+                >
+                  Switch &amp; retry…
+                </Button>
+              )}
+              <Button variant="secondary" size="sm" disabled={busy} onClick={stopWaiting} data-testid="pause-stop">
+                Stop waiting
+              </Button>
+              {origin === 'triage' && (
+                <p className="w-full text-xs text-text-tertiary" data-testid="pause-triage-note">
+                  The run&apos;s supervisor (always Claude) hit the limit; switching step agents won&apos;t move it.
+                </p>
+              )}
+              {switchable && surface === 'session' && showSwitchForm && (
+                <div className="w-full">
+                  <SystemicPauseSwitchForm
+                    item={item}
+                    onDone={() => {
+                      setShowSwitchForm(false);
+                      onResolved?.();
+                    }}
+                  />
+                </div>
               )}
             </>
           );

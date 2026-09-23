@@ -258,6 +258,24 @@ export interface SpawnStepRunnerOptions {
     | undefined;
 }
 
+/**
+ * Dev lever: with `CYBOFLOW_FAKE_SYSTEMIC_STEP=<stepId>` set, returns the fake
+ * error text a CLAUDE-provider spawn of that step should fail with
+ * (`CYBOFLOW_FAKE_SYSTEMIC_ERROR` overrides the text; the default is the CLI's
+ * epoch-suffixed subscription-limit shape, resetting two hours out so the
+ * auto-resume timer is visibly armed). Null for every other step, for any
+ * non-Claude provider, and whenever the lever is unset — the production path is
+ * byte-identical.
+ */
+function fakeSystemicFailure(stepId: string, provider: string): string | null {
+  const target = process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP;
+  if (!target || target !== stepId || provider !== 'claude') return null;
+  const override = process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR;
+  if (override) return override;
+  const resetEpochSeconds = Math.floor(Date.now() / 1000) + 2 * 60 * 60;
+  return `Claude AI usage limit reached|${resetEpochSeconds}`;
+}
+
 export class SpawnStepRunner implements StepRunner {
   constructor(
     private readonly spawner: ClaudeSpawnerLike,
@@ -445,6 +463,35 @@ export class SpawnStepRunner implements StepRunner {
     // §3c#2) — never captured at construction — so a mid-run mode change is
     // honored on the next step turn.
     const agentPermissionMode = this.opts.agentPermissionMode?.();
+    // One line per PINNED spawn (any per-agent runtime/model/effort — including a
+    // mid-run "Switch runtime & retry" override) so the log shows where each step
+    // actually ran; an unpinned step spawns exactly as the run says and logs nothing.
+    if (stepAgent && (stepAgent.runtime || stepAgent.model || stepAgent.providerModel || stepAgent.effort)) {
+      this.logger?.info(
+        `[SpawnStepRunner] step '${step.id}' spawning on ${effectiveProvider}/${renderCtx.runtime} model=${spawnModel ?? 'run default'} effort=${stepEffort ?? 'default'}`,
+        { runId: this.opts.runId, stepId: step.id },
+      );
+    }
+    // Dev lever (mirrors CYBOFLOW_FAKE_GIT_PREREQ): `CYBOFLOW_FAKE_SYSTEMIC_STEP=<stepId>`
+    // fails that step's CLAUDE spawn with a fake usage-limit error instead of
+    // spawning, so the systemic pause + "Switch runtime & retry" surface can be
+    // exercised without burning a real limit. The text still goes through the real
+    // classifier below; a step switched onto another provider spawns for real,
+    // which is exactly what proves the switch took effect.
+    const fakeError = fakeSystemicFailure(step.id, effectiveProvider);
+    if (fakeError !== null) {
+      this.logger?.warn(`[SpawnStepRunner] CYBOFLOW_FAKE_SYSTEMIC_STEP — step '${step.id}' failing WITHOUT spawning: ${fakeError}`, {
+        runId: this.opts.runId,
+        stepId: step.id,
+      });
+      return {
+        status: 'failed',
+        error: fakeError,
+        ...(isSystemicStepError(fakeError) ? { systemic: true } : {}),
+        provider: effectiveProvider,
+        runtime: stepRuntime ?? baseRenderCtx.runtime,
+      };
+    }
     try {
       const outcome = await this.spawner.spawnCliProcess({
         panelId: this.opts.panelId,
@@ -490,7 +537,15 @@ export class SpawnStepRunner implements StepRunner {
       // Stamp systemic:true when the error text is an environment-level condition
       // (usage/rate limit, overload, auth) so the controller parks-and-retries
       // rather than consuming this step's retry/optional/loopback/triage budget.
-      return { status: 'failed', error, ...(isSystemicStepError(error) ? { systemic: true } : {}) };
+      // provider/runtime: what this attempt ran on, so a systemic pause can name the
+      // blocked provider (the operator's "Switch runtime & retry" scopes off it).
+      return {
+        status: 'failed',
+        error,
+        ...(isSystemicStepError(error) ? { systemic: true } : {}),
+        provider: effectiveProvider,
+        runtime: stepRuntime ?? baseRenderCtx.runtime,
+      };
     }
   }
 }
