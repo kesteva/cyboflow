@@ -22,6 +22,7 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RunCenterPane } from '../RunCenterPane';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
+import { useRunAgentTargetsStore } from '../../../stores/runAgentTargetsStore';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -162,6 +163,7 @@ function makePhaseState(definition: WorkflowDefinition | null): UseWorkflowPhase
 describe('RunCenterPane', () => {
   beforeEach(() => {
     useCenterPaneStore.setState({ bySession: {} });
+    useRunAgentTargetsStore.setState({ versionByRun: {} });
     mockArtifacts = [];
     mockLoaded = true;
     reportBottomTabKind = undefined;
@@ -206,6 +208,47 @@ describe('RunCenterPane', () => {
     );
     await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(2));
     expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-2' });
+  });
+
+  it('re-fetches runs.getStepModels when the run\'s agent-target override layer is bumped (switch/revert), keeping the old map until the new rows resolve', async () => {
+    getStepModelsQuery.mockResolvedValueOnce([{ stepId: 'implement', label: 'Sonnet 5', family: 'sonnet' }]);
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() =>
+      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'Sonnet 5', family: 'sonnet' }),
+    );
+    expect(getStepModelsQuery).toHaveBeenCalledTimes(1);
+
+    // A systemic-pause switch (or its Revert) bumps the run's version — the
+    // pane re-queries WITHOUT first dropping to null (no flicker back to the
+    // model-less row).
+    let resolveSecond: ((rows: unknown[]) => void) | undefined;
+    getStepModelsQuery.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSecond = resolve;
+      }),
+    );
+    act(() => {
+      useRunAgentTargetsStore.getState().bump('run-1');
+    });
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(2));
+    expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-1' });
+    expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'Sonnet 5', family: 'sonnet' });
+
+    await act(async () => {
+      resolveSecond?.([{ stepId: 'implement', label: 'gpt-5.5', family: 'other' }]);
+    });
+    await waitFor(() =>
+      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'gpt-5.5', family: 'other' }),
+    );
+
+    // A bump for a DIFFERENT run is not this pane's signal.
+    act(() => {
+      useRunAgentTargetsStore.getState().bump('run-other');
+    });
+    await waitFor(() => expect(capturedWorkflowCanvasProps).toBeDefined());
+    expect(getStepModelsQuery).toHaveBeenCalledTimes(2);
   });
 
   it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a stepId-keyed Map', async () => {

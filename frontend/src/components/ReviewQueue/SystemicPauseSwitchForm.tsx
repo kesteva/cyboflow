@@ -44,6 +44,7 @@ import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
 import { useProviderModelCatalog } from '../../stores/providerModelCatalogStore';
+import { useRunAgentTargetsStore } from '../../stores/runAgentTargetsStore';
 
 interface SystemicPauseSwitchFormProps {
   item: ReviewItem;
@@ -242,6 +243,9 @@ export function SystemicPauseSwitchForm({ item, onDone }: SystemicPauseSwitchFor
       .then((result) => {
         if ('delivered' in result) {
           trackEvent('review_item_resolved', { kind: item.kind, action: 'switch_agents', blocking: item.blocking });
+          // The override layer changed — the canvas step cards and the
+          // override chip re-fetch on this (see runAgentTargetsStore).
+          if (item.run_id !== null) useRunAgentTargetsStore.getState().bump(item.run_id);
           if (result.retried === false) {
             setNoteMessage(
               result.note ?? "The pause had already cleared; the switch applies from the run's next spawn.",

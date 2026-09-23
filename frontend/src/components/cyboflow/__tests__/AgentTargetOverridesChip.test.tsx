@@ -4,11 +4,13 @@
  *
  * Covers: hidden when the run carries no overrides; grouping several agent
  * keys pinned to an identical target onto one line, with distinct targets on
- * their own; Revert calling clearRunAgentTargets then re-querying.
+ * their own; Revert calling clearRunAgentTargets then bumping the run's
+ * agent-targets version (which re-queries here AND re-fetches the canvas
+ * step models in RunCenterPane); re-querying on an external bump.
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { RunAgentTargetOverrides } from '../../../../../shared/types/workflows';
 
@@ -36,9 +38,11 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 import { AgentTargetOverridesChip } from '../AgentTargetOverridesChip';
+import { useRunAgentTargetsStore } from '../../../stores/runAgentTargetsStore';
 
 beforeEach(() => {
   mockItems = [];
+  useRunAgentTargetsStore.setState({ versionByRun: {} });
   mockRunAgentTargets.mockReset();
   mockClearRunAgentTargets.mockReset();
   mockClearRunAgentTargets.mockResolvedValue({ delivered: true });
@@ -80,19 +84,38 @@ describe('AgentTargetOverridesChip', () => {
     expect(screen.getByTestId('agent-targets-chip').textContent).toContain('implement → same runtime');
   });
 
-  it('Revert calls clearRunAgentTargets then re-queries runAgentTargets', async () => {
+  it('Revert calls clearRunAgentTargets, bumps the run\'s agent-targets version, and re-queries runAgentTargets', async () => {
     mockRunAgentTargets
       .mockResolvedValueOnce({ implement: { runtime: 'codex-sdk' } } satisfies RunAgentTargetOverrides)
       .mockResolvedValueOnce(null);
     render(<AgentTargetOverridesChip runId="run-1" />);
     await waitFor(() => expect(screen.getByTestId('agent-targets-chip')).toBeInTheDocument());
+    expect(useRunAgentTargetsStore.getState().versionByRun['run-1']).toBeUndefined();
 
     fireEvent.click(screen.getByTestId('agent-targets-revert'));
 
     await waitFor(() => expect(mockClearRunAgentTargets).toHaveBeenCalledWith({ runId: 'run-1' }));
+    // The bump is what the canvas step-model rail (RunCenterPane) keys its
+    // re-fetch on — Revert must signal it, not just re-query privately.
+    await waitFor(() => expect(useRunAgentTargetsStore.getState().versionByRun['run-1']).toBe(1));
     await waitFor(() => expect(mockRunAgentTargets).toHaveBeenCalledTimes(2));
     // The re-query resolved null — the chip collapses.
     await waitFor(() => expect(screen.queryByTestId('agent-targets-chip')).not.toBeInTheDocument());
+  });
+
+  it('re-queries when the run\'s agent-targets version is bumped externally (a switch landed)', async () => {
+    mockRunAgentTargets
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ implement: { runtime: 'codex-sdk' } } satisfies RunAgentTargetOverrides);
+    const { container } = render(<AgentTargetOverridesChip runId="run-1" />);
+    await waitFor(() => expect(mockRunAgentTargets).toHaveBeenCalledTimes(1));
+    expect(container).toBeEmptyDOMElement();
+
+    act(() => {
+      useRunAgentTargetsStore.getState().bump('run-1');
+    });
+    await waitFor(() => expect(mockRunAgentTargets).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('agent-targets-chip')).toBeInTheDocument());
   });
 
   it('re-queries when the run pending items change (a new pause / one clearing)', async () => {

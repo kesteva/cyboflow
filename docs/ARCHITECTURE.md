@@ -155,7 +155,12 @@ prompt addenda appended last. It therefore binds on the very next spawn and also
 visual verifier; `visual-verify` is skipped when the target provider has no verify runtime (only
 Claude and Codex have one). A fan-out retry replays every parked lane from inner step 0, so a
 fan-out pause covers EVERY inner-chain agent and offers no step-only scope. The run page's override
-chip reverts via `runs.clearRunAgentTargets`, which takes effect at the next spawn. Two Claude-only
+chip reverts via `runs.clearRunAgentTargets`, which takes effect at the next spawn. The per-step model
+rail on the workflow canvas (`runs.getStepModels`, resolved through the same effective-agent layering)
+is fetched once per run, so a switch and a revert each bump a renderer-side per-run counter
+(`frontend/src/stores/runAgentTargetsStore.ts`) that the run pane and the chip re-fetch on; the step
+cards flip to the switched runtime/model without a main-process subscription, since those two
+mutations are the layer's only writers. Two Claude-only
 surfaces are NOT moved by a switch: the lane-triage consult and the run monitor both run on the
 run's supervisor. An `origin: 'triage'` pause says so, offers no switch (the handler refuses one with
 `origin_triage`), and a monitor "switch agents" chat action was deferred because it could not

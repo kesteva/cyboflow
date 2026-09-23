@@ -4,15 +4,19 @@
  * systemic-pause "Switch runtime & retry" ({@link SystemicPauseSwitchForm}, plan
  * v2 D3/D4). Hidden entirely when the run carries none.
  *
- * Re-queries `runs.runAgentTargets` on mount and whenever the run's PENDING
+ * Re-queries `runs.runAgentTargets` on mount, whenever the run's PENDING
  * review items change (a new pause, or the pause clearing, can mean a fresh or
- * cleared override set) — piggybacking on the SAME `useReviewItemsSlice`
+ * cleared override set — piggybacking on the SAME `useReviewItemsSlice`
  * subscription `RunPendingInputStrip` already keeps alive, rather than opening
- * a second one. Several agent keys pinned to the identical target are grouped
- * onto one line; distinct targets each get their own.
+ * a second one), and whenever the run's override layer is bumped in
+ * runAgentTargetsStore (a switch or revert landed). Its own Revert bumps that
+ * store too, so the canvas step cards drop back to the launch-time models.
+ * Several agent keys pinned to the identical target are grouped onto one line;
+ * distinct targets each get their own.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { useReviewItemsSlice, pendingReviewItemsForRun } from '../../stores/reviewItemsSlice';
+import { useRunAgentTargetsStore, useRunAgentTargetsVersion } from '../../stores/runAgentTargetsStore';
 import { trpc } from '../../trpc/client';
 import { Button } from '../ui/Button';
 import { WORKFLOW_AGENT_RUNTIME_LABELS } from '../../../../shared/types/agentRuntime';
@@ -65,6 +69,8 @@ export function AgentTargetOverridesChip({ runId, standalone = false }: AgentTar
   const items = useReviewItemsSlice((s) => s.items);
   const pendingItems = useMemo(() => pendingReviewItemsForRun(items, runId), [items, runId]);
 
+  const agentTargetsVersion = useRunAgentTargetsVersion(runId);
+
   const [overrides, setOverrides] = useState<RunAgentTargetOverrides | null>(null);
   const [reverting, setReverting] = useState(false);
 
@@ -79,16 +85,21 @@ export function AgentTargetOverridesChip({ runId, standalone = false }: AgentTar
     refetch();
     // Re-query on mount AND whenever this run's pending items change (a fresh
     // pause opening, or one clearing, is exactly when the override set could
-    // have changed) — `refetch` itself only depends on `runId`, so it is
-    // omitted here to keep the dependency to "pending items changed".
+    // have changed) AND whenever the override layer is bumped — `refetch`
+    // itself only depends on `runId`, so it is omitted here to keep the
+    // dependency to those two signals.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingItems]);
+  }, [pendingItems, agentTargetsVersion]);
 
   const handleRevert = (): void => {
     setReverting(true);
     void trpc.cyboflow.runs.clearRunAgentTargets
       .mutate({ runId })
-      .then(() => refetch())
+      .then(() => {
+        // Bumping re-runs the effect above (this chip's own re-query) and the
+        // canvas's `runs.getStepModels` re-fetch in RunCenterPane.
+        useRunAgentTargetsStore.getState().bump(runId);
+      })
       .finally(() => { setReverting(false); });
   };
 
