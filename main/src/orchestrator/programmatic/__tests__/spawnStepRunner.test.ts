@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SpawnStepRunner, programmaticDisallowedTools } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
@@ -927,5 +927,64 @@ describe('SpawnStepRunner — gateRevision review document (CX-4)', () => {
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.prompt).not.toContain('4242');
     expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
+});
+
+// ── CYBOFLOW_FAKE_SYSTEMIC_STEP dev lever ───────────────────────────────────
+describe('SpawnStepRunner — CYBOFLOW_FAKE_SYSTEMIC_STEP dev lever', () => {
+  const saved = { step: process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP, error: process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR };
+  afterEach(() => {
+    if (saved.step === undefined) delete process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP;
+    else process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = saved.step;
+    if (saved.error === undefined) delete process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR;
+    else process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR = saved.error;
+  });
+
+  it('fails the named step as systemic WITHOUT spawning when it would run on Claude', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    delete process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR;
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.systemic).toBe(true);
+    expect(result.provider).toBe('claude');
+    expect(result.runtime).toBe('claude-sdk');
+    expect(result.error).toMatch(/^Claude AI usage limit reached\|\d{10}$/);
+  });
+
+  it('uses CYBOFLOW_FAKE_SYSTEMIC_ERROR verbatim and still runs it through the classifier', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR = 'Command failed: eslint';
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.error).toBe('Command failed: eslint');
+    expect(result.systemic).toBeUndefined();
+  });
+
+  it('spawns for real on every other step and on a step switched onto another provider', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      resolveStepAgent: (key: string) => (key === 'interview' ? { runtime: 'codex-sdk' as const } : undefined),
+    });
+
+    const other = await runner.runStep(step({ id: 'epics', agent: 'epics' }), ctx);
+    const switched = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(other.status).toBe('ok');
+    expect(switched.status).toBe('ok');
+    expect(spawner.spawnCliProcess).toHaveBeenCalledTimes(2);
   });
 });

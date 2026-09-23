@@ -161,7 +161,13 @@ run's supervisor. An `origin: 'triage'` pause says so, offers no switch (the han
 `origin_triage`), and a monitor "switch agents" chat action was deferred because it could not
 execute under a Claude limit. Known gaps: run close-out kills only the
 launch-stamped provider's manager after a mid-run provider flip (pre-existing with per-step mixing),
-and Insights and A/B buckets still key on the launch stamps, not on the agents that actually ran.
+and Insights and A/B buckets still key on the launch stamps, not on the agents that actually ran. Dev lever for smoking the whole path without burning a real limit:
+`CYBOFLOW_FAKE_SYSTEMIC_STEP=<stepId>` (optionally `CYBOFLOW_FAKE_SYSTEMIC_ERROR=<text>`) makes
+`spawnStepRunner.ts` fail that step's CLAUDE spawn with a fake epoch-suffixed usage-limit error
+instead of spawning (the text still goes through the real classifier); a step switched onto
+another provider spawns for real, which is what proves the switch. Live-smoked 2026-09-23 on a
+fresh data dir: pause → switch (provider and step scope) → resume on Codex, revert, Retry now,
+Stop waiting.
 
 #### Visual verification (`main/src/orchestrator/verify/`)
 
