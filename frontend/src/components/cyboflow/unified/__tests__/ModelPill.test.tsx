@@ -66,7 +66,7 @@ describe('ModelPill', () => {
     const onChange = vi.fn();
     render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={onChange} />);
     fireEvent.click(screen.getByText('Sonnet 5 · 1M')); // open the dropdown
-    fireEvent.click(await screen.findByText('Opus 5 · 1M'));
+    fireEvent.click(await screen.findByText('Opus 5.5 · 1M'));
     await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'opus'));
     expect(onChange).toHaveBeenCalledWith('opus');
   });
@@ -176,7 +176,7 @@ describe('ModelPill', () => {
 
   it('disambiguates a bare-family dynamic label from the pinned row via the concrete id', async () => {
     // The SDK hands back displayName "Opus" for the opus[1m] snapshot — which would
-    // collide with the pinned "Opus 5 · 1M". The picker parses the resolved id into
+    // collide with the pinned "Opus 5.5 · 1M". The picker parses the resolved id into
     // "Opus 4.8 · 1M" so the two are distinguishable.
     mockGetClaudeCatalog.mockResolvedValue({
       success: true,

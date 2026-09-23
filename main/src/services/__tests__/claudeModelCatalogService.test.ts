@@ -13,16 +13,18 @@ import {
 describe('projectClaudeModelRows', () => {
   it('drops the four pinned families (by alias value AND by resolved concrete id) and auto/default', () => {
     const rows: RawClaudeModelRow[] = [
-      { value: 'opus', resolvedModel: 'claude-opus-5', displayName: 'Opus' },
-      { value: 'claude-opus-5', displayName: 'Opus 5 (concrete)' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus' },
+      { value: 'claude-opus-5-5', displayName: 'Opus 5.5 (concrete)' },
       { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet' },
       { value: 'fable', resolvedModel: 'claude-fable-5-1', displayName: 'Fable' },
       { value: 'haiku', resolvedModel: 'claude-haiku-4-5', displayName: 'Haiku' },
       { value: 'auto', displayName: 'Auto' },
       { value: 'default', displayName: 'Default' },
+      { value: 'claude-opus-5', displayName: 'Opus 5' },
       { value: 'claude-opus-4-6', displayName: 'Opus 4.6' },
     ];
-    expect(projectClaudeModelRows(rows).map((o) => o.id)).toEqual(['claude-opus-4-6']);
+    // The previous-gen Opus 5 is no longer pinned, so it surfaces as an "Other models" row.
+    expect(projectClaudeModelRows(rows).map((o) => o.id)).toEqual(['claude-opus-5', 'claude-opus-4-6']);
   });
 
   it('projects value/resolvedModel/label/description and falls the label back to the id', () => {
@@ -69,7 +71,7 @@ describe('projectClaudeModelRows', () => {
 
   it('is case-insensitive when excluding pinned ids', () => {
     const rows: RawClaudeModelRow[] = [
-      { value: 'CLAUDE-OPUS-5', displayName: 'Opus 5 shouty' },
+      { value: 'CLAUDE-OPUS-5-5', displayName: 'Opus 5.5 shouty' },
       { value: 'AUTO', displayName: 'Auto shouty' },
       { value: 'claude-keep', displayName: 'Keep' },
     ];

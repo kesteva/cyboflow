@@ -314,7 +314,7 @@ describe('runTypeOverrideChips', () => {
   it('keeps only the differing fields, with the baseline they differ from', () => {
     const chips = runTypeOverrideChips({ model: 'haiku', substrate: 'interactive' }, baseline);
     expect(chips.map((c) => c.field)).toEqual(['model', 'substrate']);
-    expect(chips[0]).toMatchObject({ label: 'Model', baseline: 'Opus 5 · 1M' });
+    expect(chips[0]).toMatchObject({ label: 'Model', baseline: 'Opus 5.5 · 1M' });
     expect(chips[1]).toMatchObject({ value: 'Interactive terminal', baseline: 'SDK' });
     expect(runTypeStatusLabel(chips.length)).toBe('2 overrides');
   });

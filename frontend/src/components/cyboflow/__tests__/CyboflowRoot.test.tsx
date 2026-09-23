@@ -110,6 +110,10 @@ vi.mock('../../../trpc/client', () => ({
         end: { mutate: vi.fn().mockResolvedValue({ ended: true }) },
         // Interactive "request changes" relay (end-of-workflow summary CTA).
         relayInput: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        // Resolved per-step model info (RunCenterPane + WorkflowSummaryPanel both
+        // fetch this on mount). Empty array = "no resolvable step models", the
+        // path under which neither consumer renders anything extra.
+        getStepModels: { query: vi.fn().mockResolvedValue([]) },
       },
       workflows: {
         list: {

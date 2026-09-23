@@ -18,7 +18,7 @@
  *      (no perpetual "Loading…" strand).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RunCenterPane } from '../RunCenterPane';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
@@ -26,6 +26,7 @@ import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhas
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { Artifact } from '../../../../../shared/types/artifacts';
+import type { WorkflowCanvasProps } from '../WorkflowCanvas';
 
 let reportBottomTabKind: ((kind: 'chat' | 'agent' | 'terminal' | 'data-stream') => void) | undefined;
 let pendingStripProps: {
@@ -33,11 +34,26 @@ let pendingStripProps: {
   suppressLiveQuestions?: boolean;
 } | undefined;
 
+// TASK-274: capture the props RunCenterPane threads into WorkflowCanvas — in
+// particular `stepModels`, resolved from the `runs.getStepModels` fetch below —
+// so the prop-threading + fetch-once behavior can be asserted without dragging
+// in the real (heavy) canvas.
+let capturedWorkflowCanvasProps: WorkflowCanvasProps | undefined;
 vi.mock('../WorkflowCanvas', () => ({
-  WorkflowCanvas: () => <div data-testid="mock-workflow-canvas" />,
+  WorkflowCanvas: (props: WorkflowCanvasProps) => {
+    capturedWorkflowCanvasProps = props;
+    return <div data-testid="mock-workflow-canvas" />;
+  },
 }));
+// A sprint/batch run hosts SprintSwimlaneCanvas INSTEAD of WorkflowCanvas, and
+// its PLAN / SPRINT-REVIEW columns are ordinary phases[].steps cards — so they
+// need the same `stepModels` map. Capture its props to pin that threading.
+let capturedSwimlaneProps: { stepModels?: unknown } | undefined;
 vi.mock('../SprintSwimlaneCanvas', () => ({
-  SprintSwimlaneCanvas: () => <div data-testid="mock-swimlane-canvas" />,
+  SprintSwimlaneCanvas: (props: { stepModels?: unknown }) => {
+    capturedSwimlaneProps = props;
+    return <div data-testid="mock-swimlane-canvas" />;
+  },
 }));
 vi.mock('../RunBottomPane', () => ({
   RunBottomPane: ({
@@ -78,6 +94,21 @@ vi.mock('../../../hooks/useArtifactsList', () => ({
 }));
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,
+}));
+// TASK-274: RunCenterPane fetches `runs.getStepModels` once per run id to feed
+// WorkflowCanvas's per-step model rail — stubbed here (mocked WorkflowCanvas
+// above doesn't render it anyway) so this suite's tests don't drag in the real
+// tRPC/electron client. Resolves an empty array by default; individual tests
+// may override via `getStepModelsQuery.mockResolvedValueOnce(...)`.
+const getStepModelsQuery = vi.fn().mockResolvedValue([]);
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        getStepModels: { query: (...a: unknown[]) => getStepModelsQuery(...a) },
+      },
+    },
+  },
 }));
 
 const DEFINITION: WorkflowDefinition = { id: 'planner', phases: [] };
@@ -135,6 +166,82 @@ describe('RunCenterPane', () => {
     mockLoaded = true;
     reportBottomTabKind = undefined;
     pendingStripProps = undefined;
+    capturedWorkflowCanvasProps = undefined;
+    getStepModelsQuery.mockClear();
+    getStepModelsQuery.mockResolvedValue([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-274: runs.getStepModels fetch-once + prop threading into WorkflowCanvas
+  // -------------------------------------------------------------------------
+
+  it('fetches runs.getStepModels exactly once for the active run id (no polling/re-fetch on rerender)', async () => {
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(1));
+    expect(getStepModelsQuery).toHaveBeenCalledWith({ runId: 'run-1' });
+
+    // Re-rendering with the same run id must NOT issue a second query — this is
+    // a fetch-once-per-run, not a subscription/poll.
+    rerender(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(capturedWorkflowCanvasProps).toBeDefined());
+    expect(getStepModelsQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-fetches runs.getStepModels when the active run id changes', async () => {
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <RunCenterPane
+        activeRunId="run-2"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ id: 'run-2' })}
+      />,
+    );
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(2));
+    expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-2' });
+  });
+
+  it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a stepId-keyed Map', async () => {
+    getStepModelsQuery.mockResolvedValueOnce([
+      { stepId: 'implement', label: 'Opus 5', family: 'opus' },
+    ]);
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() =>
+      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({
+        label: 'Opus 5',
+        family: 'opus',
+      }),
+    );
+  });
+
+  it('passes stepModels=null to WorkflowCanvas while the query is unresolved / on failure (fail-soft, no crash)', async () => {
+    let rejectQuery: ((err: Error) => void) | undefined;
+    getStepModelsQuery.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectQuery = reject;
+      }),
+    );
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(capturedWorkflowCanvasProps).toBeDefined());
+    expect(capturedWorkflowCanvasProps?.stepModels).toBeNull();
+
+    // Rejecting must not throw / crash the pane — stepModels stays null.
+    await act(async () => {
+      rejectQuery?.(new Error('boom'));
+    });
+    expect(capturedWorkflowCanvasProps?.stepModels).toBeNull();
+    expect(screen.getByTestId('mock-workflow-canvas')).toBeInTheDocument();
   });
 
   it('renders the tab strip with the pinned Flow tab and the terminal dock', () => {
@@ -225,6 +332,37 @@ describe('RunCenterPane', () => {
     );
     expect(screen.getByTestId('mock-swimlane-canvas')).toBeInTheDocument();
     expect(screen.queryByTestId('mock-workflow-canvas')).not.toBeInTheDocument();
+  });
+
+  it('threads stepModels into SprintSwimlaneCanvas too, not just WorkflowCanvas', async () => {
+    // Regression: a sprint run took the SprintSwimlaneCanvas branch, which was
+    // rendered WITHOUT stepModels — so its PLAN / SPRINT-REVIEW cards showed
+    // `agent ×N` with no model while an identical card on a non-fan-out run
+    // showed one. The map is resolved the same way for both branches.
+    getStepModelsQuery.mockResolvedValue([
+      {
+        stepId: 'analyze-dependencies',
+        stepName: 'Analyze dependencies',
+        phaseId: 'plan',
+        agentKey: 'dependency-analyzer',
+        label: 'Opus 5',
+        family: 'opus',
+      },
+    ]);
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ batch_id: 'batch-1', session_id: 'sess-sprint' })}
+      />,
+    );
+    await waitFor(() => {
+      expect(
+        (capturedSwimlaneProps?.stepModels as Map<string, { label: string }> | null)?.get(
+          'analyze-dependencies',
+        ),
+      ).toEqual({ label: 'Opus 5', family: 'opus' });
+    });
   });
 
   it('renders flowEndSummary in the Flow tab at run-end WITHOUT hiding the chat dock', () => {

@@ -27,6 +27,7 @@
  * better-sqlite3 / concrete-service imports.
  */
 import type { DatabaseLike } from './types';
+import { primaryModelContextWindow } from '../../../shared/utils/primaryModelUsage';
 
 /** The recovered context-usage facts; either side is null when not yet known. */
 export interface RunContextUsage {
@@ -64,17 +65,10 @@ function assistantUsedTokens(payload: unknown): number | null {
   return sum > 0 ? sum : null;
 }
 
-/** Extract the first positive `contextWindow` from a result's `modelUsage`, or null. */
+/** The main model's `contextWindow` from a result's `modelUsage`, or null (see primaryModelUsage.ts). */
 function resultContextWindow(payload: unknown): number | null {
   if (typeof payload !== 'object' || payload === null) return null;
-  const modelUsage = (payload as Record<string, unknown>).modelUsage;
-  if (typeof modelUsage !== 'object' || modelUsage === null) return null;
-  for (const modelData of Object.values(modelUsage)) {
-    if (typeof modelData !== 'object' || modelData === null) continue;
-    const cw = (modelData as Record<string, unknown>).contextWindow;
-    if (typeof cw === 'number' && cw > 0) return cw;
-  }
-  return null;
+  return primaryModelContextWindow((payload as Record<string, unknown>).modelUsage);
 }
 
 /**

@@ -105,7 +105,7 @@ import { LaunchPromptModal } from '../LaunchPromptModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
-import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_OMP_LAUNCH_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
@@ -143,7 +143,7 @@ import { DesignCard } from './DesignCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME, launcherWorkflowMetas } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
-import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
+import { isCodexModelFamily, isCodexModelSelection, isOmpModelFamily } from '../../../../../shared/types/agentModels';
 import {
   AGENT_RUNTIME_LABELS,
   DEFAULT_SESSION_AGENT_RUNTIME,
@@ -164,6 +164,7 @@ import {
 import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
   isCodexRuntime,
+  isOmpRuntime,
   launchRuntimeForPickers,
   providerForRuntime,
   quickSessionRuntimeForLaunch,
@@ -619,9 +620,20 @@ export default function SessionStartWizard(): React.JSX.Element {
       if (!isCodexModelSelection(model)) reseedModel(DEFAULT_CODEX_MODEL);
       return;
     }
-    if (isCodexModelFamily(model)) {
+    // OMP: a Claude alias / Codex id is dropped at spawn (normalizeAgentModelSelection),
+    // so leaving it in place makes the <select> show the catalog's first row over
+    // a launch that runs on something else. Seed OpenRouter's auto-router instead.
+    if (isOmpRuntime(effectiveRuntime)) {
+      if (!isOmpModelFamily(model)) reseedModel(DEFAULT_OMP_LAUNCH_MODEL);
+      return;
+    }
+    if (isCodexModelFamily(model) || isOmpModelFamily(model)) {
       const seededModel = launchDefaults.model;
-      reseedModel(isCodexModelFamily(seededModel) ? DEFAULT_QUICK_MODEL : seededModel);
+      reseedModel(
+        isCodexModelFamily(seededModel) || isOmpModelFamily(seededModel)
+          ? DEFAULT_QUICK_MODEL
+          : seededModel,
+      );
     }
   }, [selection?.kind, agentRuntime, model, launchDefaults.model, reseedModel]);
   // The stored quick-session reasoning-effort default (written only under the

@@ -20,6 +20,7 @@ import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
+import { primaryModelUsageEntry } from '../../shared/utils/primaryModelUsage';
 import { isAgentThreadSpawnId } from '../../shared/types/agentThread';
 
 /**
@@ -128,16 +129,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       return null;
     }
 
-    const modelUsage = data.modelUsage as Record<string, unknown>;
-
-    // Find the first model with contextWindow info
-    for (const modelData of Object.values(modelUsage)) {
-      if (typeof modelData !== 'object' || modelData === null) continue;
-
-      const model = modelData as Record<string, unknown>;
-      const contextWindow = model.contextWindow;
-
-      if (typeof contextWindow !== 'number' || contextWindow <= 0) continue;
+    // The MAIN model's entry — modelUsage also carries Haiku side queries.
+    const model = primaryModelUsageEntry(data.modelUsage);
+    if (model) {
+      const contextWindow = model.contextWindow as number;
 
       // Calculate current context usage from cache tokens
       // cacheReadInputTokens represents tokens read from cache (already in context)

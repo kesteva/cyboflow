@@ -160,7 +160,7 @@ async function mountAtModelStep(
 }
 
 describe('OnboardingGate — Model step (3), Claude', () => {
-  it('seeds Opus 5 + High on a pristine install and opens on the model list', async () => {
+  it('seeds Opus 5.5 + High on a pristine install and opens on the model list', async () => {
     await mountAtModelStep(baseAppConfig(), 'claude');
 
     await waitFor(() => expect(useOnboardingStore.getState().defaultModel).toBe('opus'));
@@ -168,7 +168,7 @@ describe('OnboardingGate — Model step (3), Claude', () => {
     expect(useOnboardingStore.getState().modelPhase).toBe('model');
 
     expect(await screen.findByRole('radiogroup', { name: 'Default model' })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /Opus 5/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('radio', { name: /Opus 5\.5/ })).toHaveAttribute('aria-checked', 'true');
     // The effort question is not asked until a model is settled.
     expect(
       screen.queryByRole('radiogroup', { name: 'Default reasoning effort' }),
@@ -223,7 +223,7 @@ describe('OnboardingGate — Model step (3), Claude', () => {
 
   it('offers Claude’s own effort scale, X-high included, and no Codex-only rung', async () => {
     await mountAtModelStep(baseAppConfig(), 'claude');
-    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5\.5/ }));
 
     const group = await screen.findByRole('radiogroup', { name: 'Default reasoning effort' });
     expect(group).toHaveTextContent('X-high');
@@ -269,7 +269,7 @@ describe('OnboardingGate — Model step (3), Claude', () => {
 
   it('sequences the two writes — the effort op never starts before the model write settles', async () => {
     await mountAtModelStep(baseAppConfig(), 'claude');
-    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5\.5/ }));
 
     let releaseUpdate!: (v: { success: true }) => void;
     configUpdate.mockReturnValue(new Promise((resolve) => { releaseUpdate = resolve; }));
@@ -300,7 +300,7 @@ describe('OnboardingGate — Model step (3), Claude', () => {
   it('advances anyway when both writes fail (non-fatal — Settings still owns them)', async () => {
     configUpdate.mockRejectedValue(new Error('disk full'));
     await mountAtModelStep(baseAppConfig(), 'claude');
-    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5\.5/ }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
@@ -310,7 +310,7 @@ describe('OnboardingGate — Model step (3), Claude', () => {
   it('prevents a duplicate submit from a rapid double-click', async () => {
     let releaseUpdate!: (v: { success: true }) => void;
     await mountAtModelStep(baseAppConfig(), 'claude');
-    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /Opus 5\.5/ }));
     configUpdate.mockReturnValue(new Promise((resolve) => { releaseUpdate = resolve; }));
 
     const nextButton = screen.getByRole('button', { name: 'Next →' });
