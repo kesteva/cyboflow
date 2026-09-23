@@ -72,8 +72,10 @@ vi.mock('../../../stores/providerModelCatalogStore', () => ({
 }));
 
 import { SystemicPauseSwitchForm } from '../SystemicPauseSwitchForm';
+import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../../shared/types/agents';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
 import { useConfigStore } from '../../../stores/configStore';
+import { useRunAgentTargetsStore } from '../../../stores/runAgentTargetsStore';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -241,7 +243,9 @@ describe('SystemicPauseSwitchForm', () => {
     const optionLabels = within(modelSelect)
       .getAllByRole('option')
       .map((o) => o.textContent);
-    expect(optionLabels).toEqual(['(inherit)', 'Fable 5.1', 'Opus 5', 'Sonnet 5', 'Haiku 4.5']);
+    // Through AGENT_MODEL_LABELS, not literals — the alias→label pin moves
+    // with model bumps (Opus 5 → 5.5) and this test is about the SHAPE.
+    expect(optionLabels).toEqual(['(inherit)', ...AGENT_MODEL_ALIASES.map((a) => AGENT_MODEL_LABELS[a])]);
   });
 
   it('the model control is the provider catalog select once a Codex runtime is chosen', async () => {
@@ -351,6 +355,25 @@ describe('SystemicPauseSwitchForm', () => {
     await waitFor(() => expect(screen.getByTestId('pause-switch-error')).toHaveTextContent(sentence));
     // A refused switch never collapses the form.
     expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('bumps the run\'s agent-targets version once the switch is delivered (canvas + chip re-fetch on it), not on a noOp', async () => {
+    mockDetectStates({ claude: 'detected', codex: 'unavailable', omp: 'unavailable' });
+    useRunAgentTargetsStore.setState({ versionByRun: {} });
+    mockSwitchPausedStepAgents.mockResolvedValueOnce({ noOp: 'item_not_pending' });
+    const { unmount } = render(
+      <SystemicPauseSwitchForm item={makePauseItem({ id: 'rvw_bump_noop' })} onDone={vi.fn()} />,
+    );
+    await waitForReadiness();
+    fireEvent.click(screen.getByTestId('pause-switch-submit'));
+    await waitFor(() => expect(screen.getByTestId('pause-switch-error')).toBeInTheDocument());
+    expect(useRunAgentTargetsStore.getState().versionByRun['run-1']).toBeUndefined();
+    unmount();
+
+    render(<SystemicPauseSwitchForm item={makePauseItem({ id: 'rvw_bump_ok' })} onDone={vi.fn()} />);
+    await waitForReadiness();
+    fireEvent.click(screen.getByTestId('pause-switch-submit'));
+    await waitFor(() => expect(useRunAgentTargetsStore.getState().versionByRun['run-1']).toBe(1));
   });
 
   it('shows the note and still calls onDone when the switch delivered but did not retry', async () => {
