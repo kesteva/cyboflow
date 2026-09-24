@@ -20,7 +20,7 @@ import type {
   AgentThreadStoreLike,
   AgentProposalExecutorLike,
 } from '../../context';
-import { agentThreadProposalEvents, type AgentProposalUpdateEvent } from '../agentThread';
+import { agentThreadProposalEvents, agentThreadEvents, type AgentProposalUpdateEvent } from '../agentThread';
 import type { DatabaseLike, PreparedStatement } from '../../../types';
 import type {
   AgentProposal,
@@ -464,6 +464,55 @@ describe('cyboflow.agentThread.onProposalUpdate', () => {
     setImmediate(() => agentThreadProposalEvents.emit('update', payload));
 
     expect(await resultPromise).toEqual(payload);
+  });
+});
+
+describe('cyboflow.agentThread.onThreadEvent', () => {
+  it('batches multiple same-tick envelopes into one emission — nothing dropped (regression: was throttleAsyncIterator, which coalesced to latest and silently dropped in-between deltas)', async () => {
+    const caller = appRouter.createCaller(createContext({}));
+    const subscription = await caller.cyboflow.agentThread.onThreadEvent({ threadId: 'thread-1' });
+
+    const batchPromise = (async () => {
+      for await (const batch of subscription as AsyncIterable<unknown[]>) {
+        return batch;
+      }
+      return undefined;
+    })();
+
+    // Three envelopes for this thread, emitted synchronously (same tick
+    // window) — a coalescing throttle would drop the first two.
+    setImmediate(() => {
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 1 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 2 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 3 } });
+    });
+
+    const batch = await batchPromise;
+    expect(batch).toEqual([
+      { type: 'stream_event', seq: 1 },
+      { type: 'stream_event', seq: 2 },
+      { type: 'stream_event', seq: 3 },
+    ]);
+  });
+
+  it('excludes events for a different thread', async () => {
+    const caller = appRouter.createCaller(createContext({}));
+    const subscription = await caller.cyboflow.agentThread.onThreadEvent({ threadId: 'thread-1' });
+
+    const batchPromise = (async () => {
+      for await (const batch of subscription as AsyncIterable<unknown[]>) {
+        return batch;
+      }
+      return undefined;
+    })();
+
+    setImmediate(() => {
+      agentThreadEvents.emit('message', { threadId: 'thread-OTHER', envelope: { type: 'stream_event', seq: 1 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 2 } });
+    });
+
+    const batch = await batchPromise;
+    expect(batch).toEqual([{ type: 'stream_event', seq: 2 }]);
   });
 });
 

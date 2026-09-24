@@ -155,7 +155,7 @@ import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
-import { createGitOps } from './ipc/gitOps';
+import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
@@ -1936,7 +1936,6 @@ async function initializeServices(): Promise<boolean> {
     executionTracker,
     getMainWindow: () => mainWindow
   });
-
 
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
@@ -4184,6 +4183,7 @@ app.whenReady().then(async () => {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
     }
 
+    await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
     // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
     // a previous process (state intent/snapshotted/folded) forward through the SAME
     // step functions the first-run approve uses — a crash after the body fold cannot

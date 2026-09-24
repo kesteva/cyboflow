@@ -879,6 +879,82 @@ describe('reconcile-by-id against the subscription (no duplicate/flicker)', () =
 });
 
 // ---------------------------------------------------------------------------
+// seedCompoundingFromFindingIds (TASK-291 — Code-Quality drill-down bulk seed)
+// ---------------------------------------------------------------------------
+
+describe('seedCompoundingFromFindingIds', () => {
+  it('approves an untriaged eligible row into READY then selects it', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['f1']);
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.triageState).toBe('ready');
+    expect(row?.selected).toBe(true);
+    expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'f1' });
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['f1'],
+      selected: true,
+    });
+  });
+
+  it('selects an already-ready-but-unselected row without re-approving', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['f1']);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['f1'],
+      selected: true,
+    });
+  });
+
+  it('skips ids with no matching triageFindings row (resolved/dismissed/orphaned)', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['not-a-triage-row']);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op for an empty id list', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds([]);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('scopes selection to the FIRST eligible row project (single-project invariant)', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'p1', project_id: 1, staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+      makeReviewItem({ id: 'p2', project_id: 2, staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['p1', 'p2']);
+
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['p1'],
+      selected: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // UI toggles
 // ---------------------------------------------------------------------------
 

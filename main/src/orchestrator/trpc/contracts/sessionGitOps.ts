@@ -280,25 +280,46 @@ export interface SessionGitOpsLike {
    * and the worktree has zero own commits — the DB-only sibling of
    * `delivered`/`landed` for a run whose "delivery" is backlog rows, not code.
    * Read by the dismiss dialog, which offers Mark complete when ANY of the
-   * three is true.
+   * three is true. `integratedLaneCount` (TASK-296) is how many integrated
+   * sprint-lane tasks have not yet reached Done — 0 unless `landed`, since only
+   * a landed branch's Mark-complete actually moves them; the dialog uses it for
+   * the button copy ("Mark complete (moves N tasks to Done)").
    */
   getDeliveryState(request: {
     sessionId: string;
   }): Promise<
     | {
         success: true;
-        data: { delivered: boolean; landed: boolean; ownCommits: number; completedNoCode: boolean };
+        data: {
+          delivered: boolean;
+          landed: boolean;
+          ownCommits: number;
+          completedNoCode: boolean;
+          integratedLaneCount?: number;
+        };
       }
     | SessionGitError
   >;
 
   /**
-   * Mirrors legacy `sessions:mark-complete`. Bookkeeping stamp ONLY — archives
-   * nothing and touches no git.
+   * Mirrors legacy `sessions:mark-complete`. NOT a bookkeeping-only stamp
+   * (TASK-296): re-probes delivery state server-side (the same landing probe
+   * `getDeliveryState` uses) and, when the branch has ALREADY landed on main
+   * (merged/rebased by hand outside the app), runs the FULL sprint close-out
+   * an in-app merge performs — integrated lanes -> Done (`tasksMovedToDone`),
+   * batch -> terminal, outcome='merged' stamped with main's own tip as
+   * `merge_sha`. Only when the branch has NOT landed does it fall back to the
+   * old bookkeeping stamp (outcome='completed', no git, no lane close-out); in
+   * that case, if the session has real own commits sitting on a sprint batch,
+   * `laneTasksLeftOpen` reports how many integrated-lane tasks were left
+   * untouched.
    */
   markComplete(request: {
     sessionId: string;
-  }): Promise<{ success: true; data: { stamped: number } } | SessionGitError>;
+  }): Promise<
+    | { success: true; data: { stamped: number; laneTasksLeftOpen?: number; tasksMovedToDone?: number } }
+    | SessionGitError
+  >;
 
   /**
    * Mirrors legacy `sessions:get-branch-commit-subjects`. Subjects of the
