@@ -109,7 +109,7 @@ const REFRESH_DEBOUNCE_MS = 2000;
  * hard cap (a project with substantially more open findings than that needs a
  * paginated/backend-aggregated fetch, out of this task's frontend-only scope).
  */
-const QUALITY_FINDINGS_LIMIT = 500;
+export const QUALITY_FINDINGS_LIMIT = 500;
 
 /**
  * Cap on the number of workflows fanned out for the per-workflow stepTokens +
@@ -988,11 +988,24 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       }
 
       // Re-read post-approval state; select single-project (mirrors the tray's
-      // own invariant) — every row sharing the FIRST eligible row's project that
-      // is not already selected.
-      const lockProjectId = eligible[0].project_id;
+      // own invariant). Honor an EXISTING selection lock (a READY finding already
+      // selected elsewhere) rather than always taking the first eligible row's
+      // project — otherwise seeding from a different project's drill-down would
+      // select cross-project rows that `selectLockProjectId` then hides from the
+      // visible surface. Only rows that actually made it to READY (an approve
+      // failure above leaves one behind as 'untriaged') are eligible for
+      // selection — including a stray untriaged id would make the batched
+      // `setSelected` call reject and roll back every id in it, including the
+      // ones that DID approve successfully.
+      const lockProjectId = selectLockProjectId(get().triageFindings) ?? eligible[0].project_id;
       const toSelect = get()
-        .triageFindings.filter((f) => idSet.has(f.id) && f.project_id === lockProjectId && !f.selected)
+        .triageFindings.filter(
+          (f) =>
+            idSet.has(f.id) &&
+            f.project_id === lockProjectId &&
+            f.triageState === 'ready' &&
+            !f.selected,
+        )
         .map((f) => f.id);
       if (toSelect.length === 0) return;
       await applySelection(lockProjectId, toSelect, true);

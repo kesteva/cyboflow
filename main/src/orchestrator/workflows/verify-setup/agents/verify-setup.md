@@ -242,7 +242,7 @@ failed draft rather than a creative one:
 | `http-endpoint` | `urlPath: string` | `web` | The serve step exposes a route; the driver GETs `http://localhost:$VERIFY_PORT<urlPath>` and the body must contain the per-request nonce. Needs a live, classic (non-attach) serve. |
 | `dom-marker` | `selector: string` | `web` | An element's text or `data-*` attribute in the rendered DOM carries the nonce — for a deliverable that cannot add a server-side route. |
 | `cdp-token` | `expression: string`, `expected: string` | `cdp-app` | `Runtime.evaluate(expression)` over the CDP session equals `expected`, an immutable build-stamped global. The ONLY channel that works in attach mode, where the driver never navigates. |
-| `window-identity` | `titlePattern: string`, `app: string` | `native-screen` | The application named by `app` has an OS window whose title matches. `app` is required — there is no host-wide window listing, and "some window on this machine matches" would not be an identity check. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
+| `window-identity` | `titlePattern: string`, `app: string` | `native-screen` | The application named by `app` has an OS window whose title matches. `app` is required and MUST be a bundle id (e.g. `com.example.MyApp`) or `PID:<n>`, never a bare application name — peekaboo resolves `--app` by fuzzy match over both the display name and the bundle id, which can silently bind an unrelated app or fail with `Ambiguous application identifier` at app-resolution time, before `titlePattern` gets a chance to discriminate. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
 | `file-identity` | *(none)* | degenerate pre-live `htmlPath` | Identity BY CONSTRUCTION: the runner itself writes and owns the path it opens. No live process, nothing to race. |
 | `bundle-identity` | `bundleId: string` | `mobile` | After the session the harness re-hashes the executable inside the installed app container and requires it to be byte-identical to the exactly-one product staged under this request's DerivedData, carrying that `CFBundleIdentifier`. Must equal `app.bundleId`. It proves the identity of what was STAGED, not who compiled it — the agent runs `xcodebuild` itself through Bash, exactly as it runs a web build — so record that limit rather than calling it build provenance. |
 
@@ -251,7 +251,7 @@ project ACTUALLY exposes — these are shapes, not fixed values):
 `{"kind":"http-endpoint","urlPath":"/__verify__"}`,
 `{"kind":"dom-marker","selector":"[data-verify-build]"}`,
 `{"kind":"cdp-token","expression":"window.__BUILD_SHA__","expected":"<the literal this build bakes in>"}`,
-`{"kind":"window-identity","titlePattern":"Cyboflow — .*","app":"Cyboflow"}`,
+`{"kind":"window-identity","titlePattern":"Cyboflow — .*","app":"com.github.Electron"}`,
 `{"kind":"file-identity"}`,
 `{"kind":"bundle-identity","bundleId":"com.example.MyApp"}`.
 

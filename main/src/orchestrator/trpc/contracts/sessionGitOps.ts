@@ -32,7 +32,7 @@
  * which `rebaseMainIntoWorktree` calls directly.
  */
 import type { GitStatus } from '../../../types/session';
-import type { WorktreeStatusPayload, DiffGroupScope } from '../../../../../shared/types/runFiles';
+import type { ComparisonBases, WorktreeStatusPayload, DiffGroupScope } from '../../../../../shared/types/runFiles';
 
 /** The failure half every one of these envelopes shares. */
 export type SessionGitError = { success: false; error: string };
@@ -50,8 +50,10 @@ export interface SessionGitDiffStats {
 
 /**
  * Structural mirror of GitDiffManager's `GitDiffResult` (source of truth:
- * main/src/services/gitDiffManager.ts). The wire twin the renderer already
- * declares is frontend/src/types/diff.ts `GitDiffResult`.
+ * main/src/services/gitDiffManager.ts). The renderer's legacy wire twin is
+ * frontend/src/types/diff.ts `GitDiffResult`, which declares the Seam B
+ * fields below as OPTIONAL — CombinedDiffView, its only consumer, never reads
+ * them; the Diff-tab panels take this shape via tRPC inference instead.
  *
  * `resolvedBase` and `worktree` are Seam B (TASK-212) additions, both
  * REQUIRED — a loud exhaustive tripwire rather than an optional field an
@@ -425,15 +427,7 @@ export interface SessionGitOpsLike {
    *     is null or there is no such origin ref.
    */
   getComparisonBases(request: { sessionId: string }): Promise<
-    | {
-        success: true;
-        data: {
-          branchPoint: { ref: string; shortSha: string } | null;
-          defaultBranch: string | null;
-          localDefault: { ref: string; behind: number } | null;
-          originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
-        };
-      }
+    | { success: true; data: ComparisonBases }
     | SessionGitError
   >;
 

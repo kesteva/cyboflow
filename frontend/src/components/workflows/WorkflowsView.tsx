@@ -25,6 +25,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { useWorkflowsStore } from '../../stores/workflowsStore';
+import { useErrorStore } from '../../stores/errorStore';
 import { API } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { trackEvent } from '../../utils/telemetry';
@@ -382,6 +383,10 @@ export function WorkflowsView(): React.JSX.Element {
         await useWorkflowsStore.getState().refresh();
       } catch (err: unknown) {
         console.warn('[WorkflowsView] Archive workflow failed', err);
+        useErrorStore.getState().showError({
+          title: 'Archive failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         archiveInFlightRef.current = false;
       }
@@ -398,6 +403,10 @@ export function WorkflowsView(): React.JSX.Element {
         await useWorkflowsStore.getState().refresh();
       } catch (err: unknown) {
         console.warn('[WorkflowsView] Unarchive workflow failed', err);
+        useErrorStore.getState().showError({
+          title: 'Unarchive failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         unarchiveInFlightRef.current = false;
       }
@@ -684,7 +693,7 @@ export function WorkflowsView(): React.JSX.Element {
           <div className="pointer-events-auto">
             <SessionActionToast
               message={savedFlowNotice}
-              isVisible={savedFlowNotice !== null}
+              isVisible
               onDismiss={() => setSavedFlowNotice(null)}
             />
           </div>

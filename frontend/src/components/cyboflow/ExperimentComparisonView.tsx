@@ -1010,14 +1010,19 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 const PREFERENCE_LABEL: Record<'A' | 'B' | 'tie', string> = { A: 'Prefers A', B: 'Prefers B', tie: 'Tie' };
 
 function nonBlank(value: string | null | undefined): string | null {
-  return value === undefined || value === null || value === '' ? null : value;
+  if (value === undefined || value === null) return null;
+  return value.trim() === '' ? null : value;
+}
+
+function judgeModelFallback(sample: PairwiseSample, verdictModel: string | null): string {
+  return nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown';
 }
 
 function judgeAttribution(sample: PairwiseSample, verdictModel: string | null): { compact: string; full: string } {
-  const model = nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown';
+  const model = judgeModelFallback(sample, verdictModel);
   const name = nonBlank(sample.judgeName);
   return {
-    compact: name ?? nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown',
+    compact: name ?? model,
     full: name === null ? model : `${name} · ${model}`,
   };
 }
@@ -1120,6 +1125,13 @@ function VerdictCard({
                 key={s.sampleIndex}
                 sample={s}
                 ordinal={i + 1}
+                // `?.` here is NOT a real null case — `payload.verdict` was
+                // already narrowed non-null by the ternary guard above. It is
+                // TS's control-flow analysis not extending a property-access
+                // narrowing into this nested .map() callback:
+                // `payload.verdict.judgeModel` alone fails to typecheck here
+                // even though every sibling access in this block (outside the
+                // callback) uses it unguarded.
                 verdictModel={payload.verdict?.judgeModel ?? null}
               />
             ))}

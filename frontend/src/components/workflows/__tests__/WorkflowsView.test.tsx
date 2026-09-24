@@ -564,6 +564,46 @@ describe('WorkflowsView archive/unarchive wiring', () => {
     await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
   });
 
+  it('an Archive failure surfaces via the error store instead of failing silently (rvw_67cf8ae9)', async () => {
+    const { useErrorStore } = await import('../../../stores/errorStore');
+    useErrorStore.getState().clearError();
+    mockArchive.mockRejectedValueOnce(new Error('network hiccup'));
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-archive-wf-planner'));
+    await waitFor(() =>
+      expect(useErrorStore.getState().currentError).toMatchObject({
+        title: 'Archive failed',
+        error: 'network hiccup',
+      }),
+    );
+    // Archive is best-effort — the store is NOT refreshed on failure.
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
+  it('an Unarchive failure surfaces via the error store instead of failing silently (rvw_67cf8ae9)', async () => {
+    mockWorkflows = [
+      buildWorkflowEntry({
+        row: { ...buildWorkflowEntry().row, archived_at: '2026-06-12T00:00:00.000Z' },
+      }),
+    ];
+    const { useErrorStore } = await import('../../../stores/errorStore');
+    useErrorStore.getState().clearError();
+    mockUnarchive.mockRejectedValueOnce(new Error('network hiccup'));
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-unarchive-wf-planner'));
+    await waitFor(() =>
+      expect(useErrorStore.getState().currentError).toMatchObject({
+        title: 'Unarchive failed',
+        error: 'network hiccup',
+      }),
+    );
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
   it('the "Show archived" toggle reflects showArchived and calls toggleShowArchived on click', async () => {
     render(<WorkflowsView />);
     await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());

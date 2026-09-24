@@ -35,6 +35,7 @@
  */
 import React from 'react';
 import { trpc } from '../../trpc/client';
+import { useErrorStore } from '../../stores/errorStore';
 import { trackEvent } from '../../utils/telemetry';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { isSystemicPauseItem, systemicPauseOrigin } from '../../utils/systemicPause';
@@ -185,9 +186,22 @@ function QuickSessionAsk({
     setBusy(true);
     void trpc.cyboflow.sessions.dismissAsk
       .mutate({ sessionId: row.sessionId })
-      .then(() => onDismissed())
-      .catch(() => {
-        // Best-effort — leave the card in place on error, matching ApprovalAsk.
+      .then((result) => {
+        // dismissAsk RESOLVES (never throws) with { success: false, error }
+        // on a validation/not-found failure — only a truthy success should
+        // fire the board refresh; a resolved failure must still leave the
+        // card in place and surface the error, like the rejection branch.
+        if (result.success) {
+          onDismissed();
+        } else {
+          useErrorStore.getState().showError({ title: 'Dismiss failed', error: result.error });
+        }
+      })
+      .catch((err: unknown) => {
+        useErrorStore.getState().showError({
+          title: 'Dismiss failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
       })
       .finally(() => setBusy(false));
   };

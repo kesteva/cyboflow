@@ -188,6 +188,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useEditWorkflowShortcut(handleOpenEditor, { enabled: canEditWorkflow });
 
+  // Declared ahead of handleEditorSaved (below), which closes over the setter —
+  // keeps the ordering use-before-define-clean even though the callback only
+  // ever runs post-render, when the const binding is already initialized.
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
   const handleEditorSaved = useCallback((_workflowId: string, savedAsNewScopeNote?: string) => {
     setIsEditorOpen(false);
     // Force the canvas to re-resolve its phase state: clear + reselect the run so
@@ -226,7 +231,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // End-workflow confirm — the human gate that returns a finished (completed /
   // failed) run's centre pane to the session's resting QuickSessionCanvas.
   const [isEndOpen, setIsEndOpen] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Return the centre pane to the session's resting view (QuickSessionCanvas):
   // drop the active-run overlay while preserving its parent session selection

@@ -225,7 +225,7 @@ function WorkflowCard({
         )}
       </div>
       <div className="mt-3">
-        <Sparkline points={trendPoints} strokeClass="text-interactive" />
+        <Sparkline points={trendPoints} strokeClass="stroke-interactive" />
       </div>
     </button>
   );

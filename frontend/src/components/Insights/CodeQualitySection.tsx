@@ -50,7 +50,7 @@
  * compile time (per CODE-PATTERNS "Label maps for shared-type discriminants").
  */
 import { useMemo, useState } from 'react';
-import { useInsightsStore } from '../../stores/insightsStore';
+import { useInsightsStore, QUALITY_FINDINGS_LIMIT } from '../../stores/insightsStore';
 import {
   classifyQualityFinding,
   POST_MERGE_FINDING_CATEGORY,
@@ -530,6 +530,11 @@ export function CodeQualitySection(): React.JSX.Element {
     setPage(0);
   };
 
+  // A row count exactly at the fetch cap means the query most likely truncated
+  // silently (the store's QUALITY_FINDINGS_LIMIT) — every tally below is then
+  // computed over a sample, not the whole inbox, with no other signal of that.
+  const isTruncated = qualityFindings.length >= QUALITY_FINDINGS_LIMIT;
+
   return (
     <div data-testid="code-quality-section">
       <header className="flex flex-wrap items-baseline gap-2 border-b border-border-primary pb-2">
@@ -538,6 +543,17 @@ export function CodeQualitySection(): React.JSX.Element {
           — flagged in-flow · caught at verify · found after merge
         </span>
       </header>
+
+      {isTruncated && (
+        <p
+          className="mt-2 text-[11px] text-status-warning"
+          data-testid="quality-truncated-notice"
+          title={`Only the most recent ${QUALITY_FINDINGS_LIMIT} findings are fetched — tallies below are a sample, not the whole project.`}
+        >
+          Showing the {QUALITY_FINDINGS_LIMIT} most recent findings — totals below may be
+          incomplete for larger projects.
+        </p>
+      )}
 
       {filter !== null ? (
         <DrillDownPanel
@@ -612,11 +628,17 @@ export function CodeQualitySection(): React.JSX.Element {
                   <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Opened</div>
                   <Sparkline
                     points={tally.weeklyTrend.map((p) => p.opened)}
-                    strokeClass="text-interactive"
+                    strokeClass="stroke-interactive"
                   />
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Resolved</div>
+                  <div
+                    className="text-[10px] uppercase tracking-wider text-text-tertiary"
+                    data-testid="quality-trend-resolved-label"
+                    title="Counted by the week a finding was OPENED, not the week it was actually resolved, and includes dismissals — QualityFinding carries no resolution timestamp today."
+                  >
+                    Resolved*
+                  </div>
                   <Sparkline
                     points={tally.weeklyTrend.map((p) => p.resolved)}
                     strokeClass="stroke-status-success"

@@ -166,7 +166,7 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
-import { providerForRuntime } from '../../shared/types/agentRuntime';
+import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
 import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
@@ -1069,6 +1069,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // CustomWidgetServerLike's shape, so no adapter is needed.
         customWidgetServer: customWidgetServerManager ?? undefined,
         resolveRunEffectiveAgents: createRunEffectiveAgentsResolver(() => databaseService.getDb()),
+        stepModelGates: { isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p), isModelUsable },
       }),
   });
 }
@@ -2744,11 +2745,9 @@ async function initializeServices(): Promise<boolean> {
       // reach here even though the editor hides it. Drop just the runtime pin
       // (keeping model/effort) so the step falls back to the run-level provider,
       // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
-      const pinnedRuntime =
-        a.runtime && !configManager.isAgentProviderEnabled(providerForRuntime(a.runtime))
-          ? undefined
-          : a.runtime;
+      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
+      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
+      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
       if (a.runtime && pinnedRuntime === undefined) {
         cyboflowLogger.warn(
           `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,

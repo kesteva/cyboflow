@@ -37,7 +37,7 @@ import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
-import { modelFamilyColor, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
 import { DesignAffordance } from './DesignAffordance';
 import {
   SPRINT_LANE_STEP_IDS,
@@ -67,7 +67,7 @@ export interface SprintSwimlaneCanvasProps {
   projectId?: number | null;
   sessionKey?: string;
   /**
-   * Resolved per-step models, keyed by step id — the same map (and the same
+   * Resolved per-step models, keyed by `stepModelKey(phaseId, stepId)` — the same map (and the same
    * `runs.getStepModels` fetch) WorkflowCanvas receives, so a sprint run's
    * PLAN and SPRINT-REVIEW cards show their model exactly as a non-fan-out
    * run's cards do.
@@ -632,7 +632,7 @@ export function SprintSwimlaneCanvas({
             <div data-testid="swimlane-plan">
               {(() => {
                 const planStep = planPhase.steps[0];
-                const model = stepModels?.get(planStep.id);
+                const model = stepModels?.get(stepModelKey(planPhase.id, planStep.id));
                 return (
                   <WorkflowStepCard
                     step={planStep}
@@ -824,7 +824,7 @@ export function SprintSwimlaneCanvas({
 
             {verifyPhase.steps.map((step, stepInPhase) => {
               const flatIdx = verifyFlatStart + stepInPhase;
-              const model = stepModels?.get(step.id);
+              const model = stepModels?.get(stepModelKey(verifyPhase.id, step.id));
               return (
                 <div key={step.id} style={{ height: 86, position: 'relative' }}>
                   <WorkflowStepCard

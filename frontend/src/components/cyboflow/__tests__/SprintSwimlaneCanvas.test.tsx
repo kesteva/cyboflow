@@ -60,7 +60,7 @@ vi.mock('../../../trpc/client', () => ({
 
 // Import after mocks so vi.mock hoisting is in effect.
 import { SprintSwimlaneCanvas } from '../SprintSwimlaneCanvas';
-import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../../shared/types/agents';
+import { MODEL_FAMILY_COLORS, stepModelKey, type ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -386,8 +386,8 @@ describe('SprintSwimlaneCanvas — summary, merge gate, plan + verify columns', 
     // cards are ordinary phases[].steps that getStepModels already resolves.
     await renderCanvas({
       stepModels: new Map([
-        ['analyze-dependencies', { label: 'Opus 5', family: 'opus' as const }],
-        ['sprint-verify', { label: 'Sonnet 5', family: 'sonnet' as const }],
+        [stepModelKey('plan', 'analyze-dependencies'), { label: 'Opus 5', family: 'opus' as const }],
+        [stepModelKey('verify', 'sprint-verify'), { label: 'Sonnet 5', family: 'sonnet' as const }],
       ]),
     });
 

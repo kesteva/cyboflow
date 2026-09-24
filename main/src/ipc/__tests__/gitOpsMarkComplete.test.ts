@@ -65,6 +65,10 @@ import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { WorktreeManager } from '../../services/worktreeManager';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
+// Real-git suite (temp repo + worktree per case, ~2-3s each alone): time out
+// on a genuine hang, not on machine load under the 5s vitest default.
+vi.setConfig({ testTimeout: 60_000 });
+
 // ---------------------------------------------------------------------------
 // DB fixture — mirrors taskChangeRouter.test.ts's buildDb() (the proven
 // migration chain TaskChangeRouter.applyChange needs) plus the session_id /
@@ -134,7 +138,15 @@ async function makeTaskWithEntry(db: Database.Database, router: TaskChangeRouter
 /** Seed a sprint-batch run hosted by `sessionId`, with `outcome`/`mergeSha` as given. */
 function seedSprintRun(
   db: Database.Database,
-  opts: { runId: string; batchId: string; sessionId: string; outcome?: string | null; mergeSha?: string | null },
+  opts: {
+    runId: string;
+    batchId: string;
+    sessionId: string;
+    outcome?: string | null;
+    mergeSha?: string | null;
+    /** SQLite UTC timestamp; defaults to CURRENT_TIMESTAMP (i.e. post-cutoff). */
+    updatedAt?: string;
+  },
 ): void {
   db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`).run();
   db.prepare(`INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`).run(
@@ -144,7 +156,13 @@ function seedSprintRun(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, session_id, outcome, merge_sha)
      VALUES (?, 'wf-1', 1, 'completed', 'default', ?, ?, ?, ?)`,
   ).run(opts.runId, opts.batchId, opts.sessionId, opts.outcome ?? null, opts.mergeSha ?? null);
+  if (opts.updatedAt) {
+    db.prepare('UPDATE workflow_runs SET updated_at = ? WHERE id = ?').run(opts.updatedAt, opts.runId);
+  }
 }
+
+/** A pre-TASK-296 stamp time — before LANDED_CLOSE_OUT_BACKFILL_CUTOFF. */
+const LEGACY_STAMP_AT = '2026-09-18 12:00:00';
 
 function seedLane(db: Database.Database, batchId: string, taskId: string, status: 'queued' | 'running' | 'integrated' | 'failed' | 'blocked'): void {
   db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, ?)`).run(batchId, taskId, status);
@@ -313,6 +331,43 @@ describe('gitOps.markComplete — TASK-296 sprint close-out', () => {
     });
   });
 
+  it('landed: a run that already recorded a NON-delivery outcome (canceled) is still stamped merged — not skipped by an outcome-IS-NULL guard', async () => {
+    await withTempDir('gitops-markcomplete-landed-canceled-', async (repo) => {
+      initRepo(repo);
+      const manager = new WorktreeManager();
+      const { worktreePath } = await manager.createWorktree(repo, 'feature');
+      commitFile(worktreePath, 'feature.txt', 'feature work\n', 'feat: sprint work');
+      git('merge --ff-only feature', repo);
+      const mainHead = git('rev-parse main', repo);
+
+      const router = TaskChangeRouter.getInstance();
+      const tInt = await makeTaskWithEntry(db, router, 'Integrated A');
+      // A sprint run reads 'canceled' after its worktree was torn down.
+      seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'canceled' });
+      seedLane(db, 'bat-1', tInt, 'integrated');
+      // A LEGACY-linked run: no workflow_runs.session_id, only the
+      // sessions.run_id back-link.
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, outcome)
+         VALUES ('r-legacy', 'wf-1', 1, 'completed', 'default', 'interrupted')`,
+      ).run();
+      db.prepare(`INSERT INTO sessions (id, status, run_id) VALUES (?, 'stopped', 'r-legacy')`).run(SESSION_ID);
+      // An already-delivered run keeps its more specific stamp.
+      seedSprintRun(db, { runId: 'r-pr', batchId: 'bat-2', sessionId: SESSION_ID, outcome: 'pr_open' });
+
+      const ops = createGitOps(makeServices({ sessionId: SESSION_ID, worktreePath, repoPath: repo, db }));
+      const result = await ops.markComplete({ sessionId: SESSION_ID });
+
+      expect(result.success).toBe(true);
+      if (!result.success) throw new Error('expected success');
+      expect(result.data.stamped).toBe(2);
+      expect(readRun(db, 'r1')).toEqual({ outcome: 'merged', merge_sha: mainHead });
+      expect(readRun(db, 'r-legacy')).toEqual({ outcome: 'merged', merge_sha: mainHead });
+      expect(readRun(db, 'r-pr')).toEqual({ outcome: 'pr_open', merge_sha: null });
+      expect(readTaskStage(db, tInt)).toBe(stageId(9));
+    });
+  });
+
   it('DB-only run (no batch) — unchanged behavior, stamps outcome=completed with no laneTasksLeftOpen', async () => {
     await withTempDir('gitops-markcomplete-dbonly-', async (repo) => {
       initRepo(repo);
@@ -368,7 +423,7 @@ describe('backfillLandedSprintCloseOuts — TASK-296 boot backfill', () => {
     // The exact Sep-18 shape: outcome already 'completed' (the old
     // bookkeeping-only markComplete stamp), merge_sha never set, integrated
     // lanes whose tasks never moved off Ready-for-dev.
-    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null });
+    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null, updatedAt: LEGACY_STAMP_AT });
     seedLane(db, 'bat-1', tInt1, 'integrated');
     seedLane(db, 'bat-1', tInt2, 'integrated');
     seedLane(db, 'bat-1', tFailed, 'failed');
@@ -396,7 +451,7 @@ describe('backfillLandedSprintCloseOuts — TASK-296 boot backfill', () => {
   it('is a no-op (and idempotent) when there is nothing left to fix', async () => {
     const router = TaskChangeRouter.getInstance();
     const tInt1 = await makeTaskWithEntry(db, router, 'Integrated A');
-    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null });
+    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null, updatedAt: LEGACY_STAMP_AT });
     seedLane(db, 'bat-1', tInt1, 'integrated');
 
     const databaseServiceLike = { getDb: () => db } as unknown as DatabaseService;
@@ -408,10 +463,38 @@ describe('backfillLandedSprintCloseOuts — TASK-296 boot backfill', () => {
     expect(second).toEqual({ sessionsFixed: 0, tasksMoved: 0 });
   });
 
+  it('does NOT close out a run the NEW non-landed markComplete stamped — its lane tasks stay open across the next boot', async () => {
+    await withTempDir('gitops-backfill-unlanded-', async (repo) => {
+      initRepo(repo);
+      const manager = new WorktreeManager();
+      const { worktreePath } = await manager.createWorktree(repo, 'feature');
+      commitFile(worktreePath, 'feature.txt', 'feature work\n', 'feat: sprint work');
+      // Deliberately NOT merged into main.
+
+      const router = TaskChangeRouter.getInstance();
+      const tInt = await makeTaskWithEntry(db, router, 'Integrated A');
+      seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: null });
+      seedLane(db, 'bat-1', tInt, 'integrated');
+
+      const ops = createGitOps(makeServices({ sessionId: SESSION_ID, worktreePath, repoPath: repo, db }));
+      const result = await ops.markComplete({ sessionId: SESSION_ID });
+      if (!result.success) throw new Error('expected success');
+      expect((result.data as { laneTasksLeftOpen?: number }).laneTasksLeftOpen).toBe(1);
+
+      // The next app start's boot sweep.
+      const databaseServiceLike = { getDb: () => db } as unknown as DatabaseService;
+      const backfill = await backfillLandedSprintCloseOuts(databaseServiceLike);
+
+      expect(backfill).toEqual({ sessionsFixed: 0, tasksMoved: 0 });
+      expect(readTaskStage(db, tInt)).toBe(stageId(6)); // still open
+      expect(readBatchStatus(db, 'bat-1')).toBe('running'); // NOT terminal
+    });
+  });
+
   it('skips a session that is still live (a non-terminal run for the same session)', async () => {
     const router = TaskChangeRouter.getInstance();
     const tInt1 = await makeTaskWithEntry(db, router, 'Integrated A');
-    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null });
+    seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: 'completed', mergeSha: null, updatedAt: LEGACY_STAMP_AT });
     seedLane(db, 'bat-1', tInt1, 'integrated');
     // A second, still-running run for the SAME session — the session is live.
     db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-2', 1, 'sprint', '{}')`).run();

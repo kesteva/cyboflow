@@ -39,6 +39,7 @@ import {
   stampSessionRunsOutcome,
   stampSessionRunsPrOpen,
   stampSessionRunsCompleted,
+  stampSessionRunsLanded,
   sessionDeliveredWork,
   sessionCompletedNoCodeWork,
 } from '../orchestrator/runRecovery';
@@ -311,9 +312,14 @@ export async function recomputeSessionRunTaskStages(databaseService: DatabaseSer
  *
  *   1. finalizeSprintLanesOnSessionMerge — integrated lanes -> Done stage,
  *      batch -> 'completed' terminal.
- *   2. stampSessionRunsOutcome(sessionId, 'merged', mergeSha) — outcome IS
- *      NULL guard, so a run that already recorded its own decision is never
- *      clobbered.
+ *   2. stamp outcome='merged' + merge_sha. The in-app merge handlers use
+ *      stampSessionRunsOutcome (outcome IS NULL guard, so a run that already
+ *      recorded its own decision is never clobbered). `markComplete` passes
+ *      `overrideUndelivered` to use stampSessionRunsLanded instead — the
+ *      human is asserting delivery, and the runs that action exists for
+ *      usually already read 'canceled'/'interrupted' (and may be linked only
+ *      by the legacy `sessions.run_id` back-link), where the NULL guard would
+ *      stamp zero rows and the follow-up archive would sweep the findings.
  *   3. recomputeSessionRunTaskStages — re-derives the board stage a DIRECT
  *      task-linked run drove, and reverts non-integrated batch lanes off
  *      'In development' now the runs are terminal.
@@ -324,12 +330,15 @@ export async function recomputeSessionRunTaskStages(databaseService: DatabaseSer
 export async function closeOutSessionAfterLanding(
   databaseService: DatabaseService,
   sessionId: string,
-  opts: { mergeSha?: string },
+  opts: { mergeSha?: string; overrideUndelivered?: boolean },
 ): Promise<{ stampedRuns: number }> {
   await finalizeSprintLanesOnSessionMerge(databaseService, sessionId);
   let stampedRuns = 0;
   try {
-    stampedRuns = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'merged', opts.mergeSha);
+    const dbLike = makeDatabaseLike(databaseService);
+    stampedRuns = opts.overrideUndelivered
+      ? stampSessionRunsLanded(dbLike, sessionId, opts.mergeSha)
+      : stampSessionRunsOutcome(dbLike, sessionId, 'merged', opts.mergeSha);
   } catch (error) {
     console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
   }
@@ -379,6 +388,14 @@ export function countIntegratedLaneTasksNotYetDone(databaseService: DatabaseServ
 }
 
 /**
+ * `workflow_runs.updated_at` (SQLite UTC 'YYYY-MM-DD HH:MM:SS') before which a
+ * `completed` sprint run may have been stamped by the PRE-TASK-296
+ * markComplete (TASK-296 landed 2026-09-21). See
+ * {@link backfillLandedSprintCloseOuts}.
+ */
+export const LANDED_CLOSE_OUT_BACKFILL_CUTOFF = '2026-09-21 00:00:00';
+
+/**
  * Boot backfill (TASK-296): before this task, `markComplete` on a session
  * whose branch had ALREADY landed (merged/rebased by hand outside the app)
  * only stamped `outcome='completed'` — it never ran the lane-finalize
@@ -390,8 +407,16 @@ export function countIntegratedLaneTasksNotYetDone(databaseService: DatabaseServ
  *
  * Trigger, DB-only (cheaper and good-enough per the task spec — no git
  * re-probe at boot): a run with `outcome='completed'`, a `batch_id`,
- * `merge_sha IS NULL`, and at least one 'integrated' lane whose task has not
- * reached the board's Done stage yet. Re-runs ONLY the lane/task side
+ * `merge_sha IS NULL`, at least one 'integrated' lane whose task has not
+ * reached the board's Done stage yet, AND `updated_at` before
+ * {@link LANDED_CLOSE_OUT_BACKFILL_CUTOFF}. The cutoff is load-bearing: since
+ * TASK-296 the landed markComplete arm stamps 'merged', so every NEW
+ * `completed`+batch+`merge_sha IS NULL` row is one the non-landed arm wrote
+ * DELIBERATELY leaving its lane tasks open ("NOT marked done because the
+ * branch isn't on main"). Without the cutoff the next boot would move those
+ * exact tasks to Done, undoing that decision. Only rows stamped under the old
+ * behaviour are ambiguous enough to heal; a later write that bumps a legacy
+ * row's `updated_at` just excludes it (fail-closed — no unearned Done). Re-runs ONLY the lane/task side
  * (finalizeSprintLanesOnSessionMerge + recomputeSessionRunTaskStages) —
  * deliberately does NOT touch `outcome`: 'completed' is already a
  * DELIVERED_RUN_OUTCOMES value, and rewriting it to 'merged' at boot would be
@@ -430,6 +455,7 @@ export async function backfillLandedSprintCloseOuts(
           WHERE wr.outcome = 'completed'
             AND wr.batch_id IS NOT NULL
             AND wr.merge_sha IS NULL
+            AND wr.updated_at < ?
             AND wr.session_id IS NOT NULL
             AND sbt.status = 'integrated'
             AND t.stage_id != bs.id
@@ -444,7 +470,7 @@ export async function backfillLandedSprintCloseOuts(
                  AND wr2.status NOT IN ('completed', 'failed', 'canceled')
             )`,
       )
-      .all() as Array<{ sessionId: string }>;
+      .all(LANDED_CLOSE_OUT_BACKFILL_CUTOFF) as Array<{ sessionId: string }>;
     if (candidates.length === 0) return empty;
 
     let sessionsFixed = 0;
@@ -776,9 +802,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
    * (TASK-212 wire field — resolved to a SHA via the TASK-208 resolver before
    * it can reach any git argv; an unresolvable ref falls back to the session
    * default rather than throwing), else the session's recorded branch point
-   * (`session.baseCommit`), else the comparison branch
-   * getSessionCommitHistory already derives (remote/local/main-branch
-   * fallback chain). Returns the resolved 40-char SHA, or null when nothing
+   * (`session.baseCommit`), else the merge-base of HEAD and the comparison
+   * branch getSessionCommitHistory already derives (remote/local/main-branch
+   * fallback chain) — the branch point, never the raw default-branch tip. Returns the resolved 40-char SHA, or null when nothing
    * resolves — the caller then has no base to diff since (the
    * working-dir-vs-HEAD rung).
    */
@@ -800,7 +826,22 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
     try {
       const { comparisonBranch } = await getSessionCommitHistory(session, 50);
-      return await resolveSessionDiffBaseRef(worktreePath, [comparisonBranch]);
+      const tip = await resolveSessionDiffBaseRef(worktreePath, [comparisonBranch]);
+      if (!tip) return null;
+      // Anchor on the branch point, not the default-branch TIP: a two-dot
+      // `git diff <tip>` against an advanced default branch carries reverse
+      // hunks for files HEAD never touched, and would disagree with the
+      // Committed group (getCommittedGroup takes the same merge-base). No
+      // common ancestor (unrelated histories) keeps the tip — the Committed
+      // group then reports itself unavailable on its own.
+      try {
+        const mergeBase = (
+          await runGitAsync(worktreePath, ['merge-base', END_OF_OPTIONS, tip, 'HEAD'])
+        ).trim();
+        return (await resolveSessionDiffBaseRef(worktreePath, [mergeBase])) ?? tip;
+      } catch {
+        return tip;
+      }
     } catch (error) {
       console.warn(`[IPC:git] Could not resolve a comparison branch for session ${session.id}:`, error);
       return null;
@@ -812,12 +853,11 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
    * corresponding getDiffGroups rollup uses (TASK-212 spec item 5): plain
    * `git diff` for unstaged, `--cached` for staged, `<merge-base>..HEAD` for
    * committed, the synthesized untracked block for untracked.
-   * GitDiffManager's own per-scope helpers (getStagedGroup / getUnstagedGroup
-   * / getCommittedGroup / getUntrackedGroup / createDiffForUntrackedFiles)
-   * are private and gitDiffManager.ts is do-not-touch for this task (widening
-   * its GitDiffResult would drag in executionTracker.ts) — the argv/blob
-   * construction is small enough to mirror here rather than adding a new
-   * public seam to that file.
+   * GitDiffManager's per-scope group helpers compute `--numstat` ROLLUPS, not
+   * blobs, so only the scope's argv (pathspec filters, merge-base anchoring)
+   * is mirrored here — keep the two in step. The untracked blob reuses
+   * gitDiffManager.ts's exported readUntrackedFileContent /
+   * createUntrackedFileDiffBlock rather than re-synthesizing it.
    */
   const buildScopedDiff = async (
     worktreePath: string,
@@ -2066,7 +2106,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
    *     and `merge_sha` = main's own current tip (there is no merge commit WE
    *     made; main's tip IS where this session's code already lives).
    *     Integrated sprint lanes move to Done, the batch goes terminal, and the
-   *     runs are stamped 'merged'.
+   *     runs are stamped 'merged' via stampSessionRunsLanded (not-already-
+   *     delivered guard, both session link shapes — a 'canceled' sprint run
+   *     is corrected too, not skipped by an `outcome IS NULL` guard).
    *   - otherwise: the pre-existing bookkeeping stamp — outcome='completed'
    *     via stampSessionRunsCompleted (reusing its "not already delivered"
    *     guard so a run that recorded a more specific outcome is never
@@ -2121,7 +2163,10 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         // is idempotent and would read 0 afterward) so the response can report
         // how many integrated-lane tasks it is ABOUT to move to Done.
         const tasksMovedToDone = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
-        const { stampedRuns } = await closeOutSessionAfterLanding(databaseService, sessionId, { mergeSha });
+        const { stampedRuns } = await closeOutSessionAfterLanding(databaseService, sessionId, {
+          mergeSha,
+          overrideUndelivered: true,
+        });
         console.log(
           `[IPC:git] Mark complete: session ${sessionId}'s branch already landed on ${mainBranch} — ran the full close-out (stamped ${stampedRuns} run(s) outcome='merged', moved ${tasksMovedToDone} task(s) to Done)`,
         );

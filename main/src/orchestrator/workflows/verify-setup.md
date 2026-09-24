@@ -382,10 +382,15 @@ running app. There are **exactly six** kinds, and a seventh is a parse error:
   in attach mode, where the driver never navigates and there is no HTTP status to
   check.
 - `native-screen` → `{ "kind": "window-identity", "titlePattern": "...", "app":
-  "<the application name>" }`. `app` is REQUIRED: peekaboo has no host-wide
-  window listing, and a match against any window on the machine would not be an
-  identity check. Record that it is the WEAKEST channel; a window title is
-  spoofable and coincidental in a way an in-page nonce is not.
+  "<bundle id, e.g. com.example.MyApp, or PID:<n>>" }`. `app` is REQUIRED and
+  MUST be a bundle id or `PID:<n>`, never a bare application name: peekaboo
+  resolves `--app` by fuzzy match over both the display name and the bundle
+  id, which has produced both a false positive (matched an unrelated app whose
+  bundle id happens to contain the name) and a hard `Ambiguous application
+  identifier` failure — at app-resolution time, before `titlePattern` gets a
+  chance to discriminate. A bundle id or PID resolves exactly. Record that
+  this is still the WEAKEST channel; a window title is spoofable and
+  coincidental in a way an in-page nonce is not.
 - `mobile` → `{ "kind": "bundle-identity", "bundleId": "com.example.MyApp" }` —
   after the session the harness re-hashes the executable inside the installed
   app container and requires it to be byte-identical to the exactly-one product

@@ -1703,7 +1703,24 @@ export class TaskChangeRouter {
     // the post-commit rollup hook can re-derive the epic the task LEFT (not just
     // the one it joined). Stays null when the change is not an actual re-parent.
     let previousParentEpicId: string | null = null;
+    // Resolved BEFORE the write txn opens, mirroring how the delete path
+    // resolves its cascade's artifactRunIds ahead of its own transaction: this
+    // is a stage MOVE, not a delete, so the runs still exist post-commit, and
+    // the idea arm of listRunIdsForEntity issues ~5 queries (including a full
+    // seed_idea_ids scan) that have no reason to hold the write lock. Re-reads
+    // (locateEntity/lookupStage) redo cheap, cached-column-check SELECTs
+    // rather than the real ones below — harmless when the update ultimately
+    // fails validation, since this value is then simply never read.
     let wontDoRunIds: string[] | undefined;
+    if (change.stageId !== undefined) {
+      const targetStageForWontDo = this.lookupStage(change.stageId);
+      if (targetStageForWontDo && targetStageForWontDo.position === WONT_DO_POSITION) {
+        const preLocated = this.locateEntity(projectId, taskId, change.entityType);
+        if (preLocated) {
+          wontDoRunIds = listRunIdsForEntity(this.db, preLocated.type, taskId);
+        }
+      }
+    }
     // Hoisted out of the txn closure (mirrors previousParentEpicId/wontDoRunIds
     // above) so the STALENESS post-commit hook in applyChange can act on this
     // update's `body` delta — deltas itself is txn-closure-local and never
@@ -1797,7 +1814,11 @@ export class TaskChangeRouter {
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
         action = 'stageMoved';
-        if (targetStage.position === WONT_DO_POSITION) {
+        // wontDoRunIds is already resolved above, BEFORE this txn opened — this
+        // guard only covers the defensive case where that pre-read somehow
+        // missed it (it can't, in practice: an entity readable here was
+        // readable by the identical pre-txn locateEntity call too).
+        if (targetStage.position === WONT_DO_POSITION && wontDoRunIds === undefined) {
           wontDoRunIds = listRunIdsForEntity(this.db, type, taskId);
         }
 

@@ -29,6 +29,7 @@ import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhas
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { Artifact } from '../../../../../shared/types/artifacts';
+import { stepModelKey } from '../../../../../shared/types/agents';
 import type { WorkflowCanvasProps } from '../WorkflowCanvas';
 
 let reportBottomTabKind: ((kind: 'chat' | 'agent' | 'terminal' | 'data-stream') => void) | undefined;
@@ -115,6 +116,7 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 const DEFINITION: WorkflowDefinition = { id: 'planner', phases: [] };
+const IMPLEMENT_KEY = stepModelKey('execute', 'implement');
 
 /** Minimal Artifact row for the auto-open / strand tests. */
 function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
@@ -214,12 +216,12 @@ describe('RunCenterPane', () => {
   });
 
   it('re-fetches runs.getStepModels when the run\'s agent-target override layer is bumped (switch/revert), keeping the old map until the new rows resolve', async () => {
-    getStepModelsQuery.mockResolvedValueOnce([{ stepId: 'implement', label: 'Sonnet 5', family: 'sonnet' }]);
+    getStepModelsQuery.mockResolvedValueOnce([{ stepId: 'implement', phaseId: 'execute', label: 'Sonnet 5', family: 'sonnet' }]);
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     await waitFor(() =>
-      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'Sonnet 5', family: 'sonnet' }),
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'Sonnet 5', family: 'sonnet' }),
     );
     expect(getStepModelsQuery).toHaveBeenCalledTimes(1);
 
@@ -237,13 +239,13 @@ describe('RunCenterPane', () => {
     });
     await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(2));
     expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-1' });
-    expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'Sonnet 5', family: 'sonnet' });
+    expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'Sonnet 5', family: 'sonnet' });
 
     await act(async () => {
-      resolveSecond?.([{ stepId: 'implement', label: 'gpt-5.5', family: 'other' }]);
+      resolveSecond?.([{ stepId: 'implement', phaseId: 'execute', label: 'gpt-5.5', family: 'other' }]);
     });
     await waitFor(() =>
-      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({ label: 'gpt-5.5', family: 'other' }),
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'gpt-5.5', family: 'other' }),
     );
 
     // A bump for a DIFFERENT run is not this pane's signal.
@@ -305,15 +307,15 @@ describe('RunCenterPane', () => {
     await waitFor(() => expect(capturedSwimlaneProps?.pausedStepId).toBe('implement'));
   });
 
-  it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a stepId-keyed Map', async () => {
+  it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a (phaseId, stepId)-keyed Map', async () => {
     getStepModelsQuery.mockResolvedValueOnce([
-      { stepId: 'implement', label: 'Opus 5', family: 'opus' },
+      { stepId: 'implement', phaseId: 'execute', label: 'Opus 5', family: 'opus' },
     ]);
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     await waitFor(() =>
-      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({
         label: 'Opus 5',
         family: 'opus',
       }),
@@ -441,7 +443,6 @@ describe('RunCenterPane', () => {
         stepId: 'analyze-dependencies',
         stepName: 'Analyze dependencies',
         phaseId: 'plan',
-        agentKey: 'dependency-analyzer',
         label: 'Opus 5',
         family: 'opus',
       },
@@ -456,7 +457,7 @@ describe('RunCenterPane', () => {
     await waitFor(() => {
       expect(
         (capturedSwimlaneProps?.stepModels as Map<string, { label: string }> | null)?.get(
-          'analyze-dependencies',
+          stepModelKey('plan', 'analyze-dependencies'),
         ),
       ).toEqual({ label: 'Opus 5', family: 'opus' });
     });

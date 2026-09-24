@@ -371,20 +371,28 @@ Not required for this feature.
   `frontend/src/hooks/useSessionMetrics.ts:207-235`'s visibility handling.
   (Reads are pure; §2.6's cooldown makes stale-read-triggered catch-up
   bounded regardless of poll cadence.)
-- `frontend/src/components/cyboflow/QuickSessionCanvas.tsx`:
-  - Summary block inside the SESSION node (`data-testid="quick-session-node"`,
-    lines 557-719), inserted after the cost row (~line 717): top-border
-    divider + `SUMMARY` eyebrow, styled like the Token-usage sub-block
-    (mirror lines 646-668). Render nothing until a summary exists or when
-    `enabled` is false. `data-testid="quick-session-summary"`.
-  - History card as a sibling below the SESSION node: wrap the node in a
-    `flex-direction: column` container; switch the body row (~line 546) from
-    `alignItems: 'center'` to `'flex-start'` so the Add-a-workflow card
-    (lines 749-826) and dashed edge (lines 722-746) are untouched. Disclosure
-    lifted verbatim from the `▸/▾ + count` pattern
-    (`ArtifactTabRenderer.tsx:1050-1150`, `FeedbackDocPanel.tsx:480-510`):
-    collapsed = `▸ History (N)`; expanded = chronological list (oldest first)
-    with date labels, capped height + scroll.
+- `frontend/src/components/cyboflow/QuickSessionCanvas.tsx` (superseded by a
+  later TASK-144 mandate — summary and history moved OUT of the session node
+  into their own node in the resting-layout chain, expanded by default; the
+  bullets below describe the CURRENT shape, not the original one):
+  - The SESSION node (`data-testid="quick-session-node"`) carries only stats
+    + the token/cost breakdown; it does not render the summary itself.
+  - Summary + history live in a sibling **Summary & History** node
+    (`QuickSessionSummaryHistoryNode`, `data-testid="quick-session-summary-history"`)
+    joined to the session node — and, in turn, to the add-workflow node — by
+    the same dashed `QuickSessionEdge` used elsewhere in the chain (no
+    `flex-direction: column` wrapper). The node itself is gated on
+    `hasSummary || hasHistory` and hidden entirely (with its leading edge)
+    until one of them has content.
+  - Summary well: top-border-free, left-accent block with a `SUMMARY` eyebrow;
+    `data-testid="quick-session-summary"`. Render nothing until a summary
+    exists or `enabled` is false.
+  - History: disclosure lifted verbatim from the `▸/▾ + count` pattern
+    (`ArtifactTabRenderer.tsx:1050-1150`, `FeedbackDocPanel.tsx:480-510`),
+    **expanded by default** (TASK-144, reversing this section's original
+    "collapsed = `▸ History (N)`"): expanded = chronological list (oldest
+    first) with date labels, capped height + scroll; a hairline divider
+    separates it from the summary well only when both are present.
     `data-testid="quick-session-history-toggle"` / `"-list"`.
 
 ## 8. Tests (AC gate: `pnpm test:unit`)

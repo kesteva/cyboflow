@@ -503,8 +503,9 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
 
       // Resolve the LIVE worktree branch once per session (worktree-level,
       // not per-panel) — falls back to the stored baseBranch only when the
-      // worktree is unreadable or in a detached HEAD state (getCurrentBranch
-      // returns null). baseBranch itself is untouched below.
+      // worktree is unreadable or has no resolvable ref (getCurrentBranch
+      // returns null — a detached HEAD does NOT: it resolves to the short
+      // commit sha). baseBranch itself is untouched below.
       const liveBranch = getCurrentBranch(session.worktreePath);
       const resolvedBranch = liveBranch ?? (session.baseBranch || 'main');
 
@@ -633,7 +634,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
           duration: duration,
           worktreePath: session.worktreePath,
           // Live worktree branch (resolved once above), falling back to
-          // baseBranch only on detached HEAD / unreadable worktree.
+          // baseBranch only when no ref resolves / unreadable worktree.
           branch: resolvedBranch
         },
         tokens: {
