@@ -94,6 +94,9 @@ interface AppServerThreadConfigurationParams {
   config?: Record<string, AppServerJsonValue> | null;
   baseInstructions?: string | null;
   developerInstructions?: string | null;
+  // Omitted inherits `service_tier` from config.toml; 'default' (or null) pins
+  // the standard tier (verified on 0.153.3: thread/start echoes 'default').
+  serviceTier?: string | null;
 }
 
 export interface AppServerThreadStartParams extends AppServerThreadConfigurationParams {

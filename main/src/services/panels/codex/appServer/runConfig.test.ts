@@ -152,6 +152,25 @@ describe('Codex app-server run configuration', () => {
     });
   });
 
+  it('pins the standard service tier on start AND resume only when the spawn asks for it', () => {
+    // An omitted serviceTier inherits `service_tier` from ~/.codex/config.toml
+    // (verified on 0.153.3: a user's `priority` rode onto every workflow lane).
+    const base = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    };
+    const pinned = { ...base, standardServiceTier: true };
+
+    expect(buildCodexAppServerThreadStartParams('run-1', pinned, runtimeConfig).serviceTier).toBe('default');
+    expect(buildCodexAppServerThreadResumeParams('run-1', 'thread-1', pinned, runtimeConfig).serviceTier)
+      .toBe('default');
+    expect(buildCodexAppServerThreadStartParams('run-1', base, runtimeConfig)).not.toHaveProperty('serviceTier');
+    expect(buildCodexAppServerThreadResumeParams('run-1', 'thread-1', base, runtimeConfig))
+      .not.toHaveProperty('serviceTier');
+  });
+
   it('keeps workflow turns in normal execution mode while resolving the model', () => {
     const base = {
       panelId: 'run-1',

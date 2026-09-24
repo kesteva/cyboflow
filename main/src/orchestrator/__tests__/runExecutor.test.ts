@@ -832,6 +832,22 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
     expect(opts.hidePromptFromTranscript).toBe(false);
   });
 
+  it('(e-tier) every workflow turn asks for the standard service tier', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+
+    await executor.execute(run.id);
+
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.standardServiceTier).toBe(true);
+  });
+
   it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/my/worktree',

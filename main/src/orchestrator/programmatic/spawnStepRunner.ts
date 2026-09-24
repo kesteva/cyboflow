@@ -486,6 +486,7 @@ export class SpawnStepRunner implements StepRunner {
         worktreePath: this.opts.worktreePath,
         prompt,
         hidePromptFromTranscript: true,
+        standardServiceTier: true,
         agentInvocationStepId: step.id,
         // When the CONTROLLER owns the visual-verification enqueue (the agentless
         // visual-verify step), NO step turn may fire the request itself — the

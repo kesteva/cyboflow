@@ -40,6 +40,9 @@ export interface CodexIsolationConfig {
 
 type ThreadConfiguration = Omit<AppServerThreadStartParams, 'ephemeral' | 'experimentalRawEvents'>;
 
+/** The standard-speed tier id — the protocol's documented "use 'default' for standard speed". */
+export const CODEX_STANDARD_SERVICE_TIER = 'default';
+
 function buildMcpConfig(
   runId: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
@@ -252,6 +255,11 @@ export function buildCodexAppServerThreadConfiguration(
     },
     ...(model ? { model } : {}),
     ...instructions,
+    // Workflow spawns only (see ClaudeSpawnerOptions.standardServiceTier): an
+    // explicit tier overrides config.toml, so a user's `priority` stops riding
+    // onto every lane. Part of the thread configuration, so it is resumed with
+    // the thread and hashed into the warm fingerprint.
+    ...(options.standardServiceTier ? { serviceTier: CODEX_STANDARD_SERVICE_TIER } : {}),
   };
 }
 
