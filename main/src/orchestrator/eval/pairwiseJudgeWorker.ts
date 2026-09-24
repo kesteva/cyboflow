@@ -72,6 +72,12 @@ export const DEFAULT_PAIRWISE_MAX_RETRIES = 2;
 export const MAX_PAIRWISE_BACKFILL_DRAWS = 2;
 /** Cap on a per-slot failure message folded into the persisted degradation note. */
 export const MAX_PAIRWISE_SLOT_ERROR_CHARS = 200;
+/**
+ * Small back-off before a slot's single retry, mirroring EvalWorker's
+ * JUDGE_RETRY_BACKOFF_MS: an instantly-repeated retry tends to hit the same
+ * upstream blip that caused the first (non-deterministic) failure.
+ */
+export const PAIRWISE_JUDGE_RETRY_BACKOFF_MS = 250;
 
 /** Truncate a judge failure message for the durable one-line degradation note. */
 function truncateSlotError(message: string): string {
@@ -477,6 +483,16 @@ export class PairwiseJudgeWorker {
       return;
     }
 
+    if (this.deps.panel.length === 0) {
+      // Misconfigured wiring, not a judge outage: an empty panel would otherwise
+      // fall through collectSamples' `if (!slot) continue` loop and surface as
+      // "every slot failed deterministically", which misdescribes the cause and
+      // is not something a whole-comparison retry can fix.
+      throw new PairwiseNonRetryableError(
+        'pairwise judge panel is empty — no judge slots configured, so there is nothing to grade',
+      );
+    }
+
     const projectId = this.resolveProjectId(experimentId, row.run_id_a);
     // `judge_model` is a back-compat SCALAR (and the per-sample fallback for legacy
     // rows), so it stamps the FIRST Claude slot's model — never a composite, never the
@@ -523,7 +539,7 @@ export class PairwiseJudgeWorker {
 
     const suggested =
       verdict.preference === 'A' ? row.run_id_a : verdict.preference === 'B' ? row.run_id_b : null;
-    await this.mintDecisionAndEmit(projectId, experimentId, verdict.preference, suggested, 'complete');
+    await this.mintDecisionAndEmit(projectId, experimentId, verdict.preference, suggested, 'complete', degradation);
 
     this.logger?.info('[pairwise] complete', {
       experimentId,
@@ -665,11 +681,8 @@ export class PairwiseJudgeWorker {
 
   /** Prefer the judge's live resolved model; fall back to the slot's declared one. */
   private resolveSlotModel(slot: PairwisePanelSlot): string | null {
-    if ('resolvedModel' in slot.judge) {
-      const resolvedModel = (slot.judge as { resolvedModel?: unknown }).resolvedModel;
-      if (typeof resolvedModel === 'string' && resolvedModel.length > 0) return resolvedModel;
-    }
-    return slot.model;
+    const resolvedModel = slot.judge.resolvedModel;
+    return resolvedModel && resolvedModel.length > 0 ? resolvedModel : slot.model;
   }
 
   /**
@@ -733,6 +746,10 @@ export class PairwiseJudgeWorker {
             error: lastError,
           };
         }
+        // Small back-off before the single retry: this failure was transient
+        // (non-deterministic), and retrying instantly tends to hit the same
+        // upstream blip. Only pause when another attempt actually follows.
+        if (tries === 0) await this.sleep(PAIRWISE_JUDGE_RETRY_BACKOFF_MS);
       }
     }
     return { status: 'failed', retryable: true, ...(lastError ? { error: lastError } : {}) };
@@ -877,6 +894,15 @@ export class PairwiseJudgeWorker {
     preference: PairwisePreference,
     suggestedWinnerRunId: string | null,
     status: ComparisonStatus,
+    /**
+     * The same one-line note persisted to the row's `error` column, when the
+     * panel was degraded (a dropped slot and/or a backfilled sample). Without
+     * this, a backfilled ballot — e.g. two of three samples drawn from the same
+     * Claude slot because Codex was unavailable — reads in the decision item
+     * exactly like a genuine multi-provider consensus. `null` for a clean pass
+     * or a short-circuit that never ran a judge.
+     */
+    degradation: string | null = null,
   ): Promise<void> {
     const existing = this.db
       .prepare('SELECT decision_review_item_id AS id FROM experiment_comparisons WHERE experiment_id = ?')
@@ -887,7 +913,7 @@ export class PairwiseJudgeWorker {
       return;
     }
 
-    const summary =
+    const baseSummary =
       status === 'failed'
         ? 'An arm did not complete — decide from the diffs.'
         : status === 'skipped'
@@ -895,6 +921,10 @@ export class PairwiseJudgeWorker {
           : preference === 'tie'
             ? 'The two arms graded as a tie.'
             : `Arm ${preference} is preferred.`;
+    const degradationClause = degradation
+      ? ` (${degradation.replace(/^pairwise panel degraded: /, 'Judge panel degraded — ')}.)`
+      : '';
+    const summary = `${baseSummary}${degradationClause}`;
 
     const change: ReviewItemCreate = {
       op: 'create',
