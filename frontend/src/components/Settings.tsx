@@ -28,6 +28,7 @@ import {
   SPRINT_BATCH_MAX_TASKS_DEFAULTS,
 } from '../../../shared/types/sprintBatch';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../shared/types/visualVerification';
+import { WEB_VIEWER_DEFAULTS } from '../../../shared/types/webViewer';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
@@ -254,6 +255,18 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // above. Pushed into keyboardShortcutsStore (the live global key-handler's
   // source of truth) after a successful save, not on every keystroke here.
   const [keyboardShortcuts, setKeyboardShortcuts] = useState<KeyboardShortcutOverrides>({});
+  // Native web viewer (shared/types/webViewer.ts). Human browsing defaults ON,
+  // every agent capability defaults OFF — the initial state here mirrors
+  // WEB_VIEWER_DEFAULTS so a slow config load never renders an agent capability
+  // as enabled. `enabled` is the master switch: it disables the three below.
+  const [webViewerEnabled, setWebViewerEnabled] = useState(WEB_VIEWER_DEFAULTS.enabled);
+  const [webViewerAgentObserve, setWebViewerAgentObserve] = useState(
+    WEB_VIEWER_DEFAULTS.agentObserve,
+  );
+  const [webViewerAgentDrive, setWebViewerAgentDrive] = useState(WEB_VIEWER_DEFAULTS.agentDrive);
+  const [webViewerPersistLogin, setWebViewerPersistLogin] = useState(
+    WEB_VIEWER_DEFAULTS.persistLogin,
+  );
   const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
@@ -342,6 +355,14 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setVisualVerifyEnabled(data.visualVerify?.enabled ?? VISUAL_VERIFY_DEFAULTS.enabled);
       setAutoBootstrapRunbook(
         data.visualVerify?.autoBootstrapRunbook ?? VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook,
+      );
+      setWebViewerEnabled(data.webViewer?.enabled ?? WEB_VIEWER_DEFAULTS.enabled);
+      setWebViewerAgentObserve(
+        data.webViewer?.agentObserve ?? WEB_VIEWER_DEFAULTS.agentObserve,
+      );
+      setWebViewerAgentDrive(data.webViewer?.agentDrive ?? WEB_VIEWER_DEFAULTS.agentDrive);
+      setWebViewerPersistLogin(
+        data.webViewer?.persistLogin ?? WEB_VIEWER_DEFAULTS.persistLogin,
       );
       setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
       setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
@@ -449,6 +470,14 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
           ..._config?.visualVerify,
           enabled: visualVerifyEnabled,
           autoBootstrapRunbook,
+        },
+        // Native web viewer. All four members are sent together; the main-side
+        // boundary (ipc/configOps.ts) validates and deep-merges them.
+        webViewer: {
+          enabled: webViewerEnabled,
+          agentObserve: webViewerAgentObserve,
+          agentDrive: webViewerAgentDrive,
+          persistLogin: webViewerPersistLogin,
         },
         // Idle-session auto-review. A non-positive/NaN threshold floors to 5 on
         // the main side too, but clamp here so the persisted value stays sane.
@@ -911,6 +940,14 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onVisualVerifyEnabledChange={setVisualVerifyEnabled}
               autoBootstrapRunbook={autoBootstrapRunbook}
               onAutoBootstrapRunbookChange={setAutoBootstrapRunbook}
+              webViewerEnabled={webViewerEnabled}
+              onWebViewerEnabledChange={setWebViewerEnabled}
+              webViewerAgentObserve={webViewerAgentObserve}
+              onWebViewerAgentObserveChange={setWebViewerAgentObserve}
+              webViewerAgentDrive={webViewerAgentDrive}
+              onWebViewerAgentDriveChange={setWebViewerAgentDrive}
+              webViewerPersistLogin={webViewerPersistLogin}
+              onWebViewerPersistLoginChange={setWebViewerPersistLogin}
               idleReviewEnabled={idleReviewEnabled}
               onIdleReviewEnabledChange={setIdleReviewEnabled}
               idleReviewThresholdMinutes={idleReviewThresholdMinutes}

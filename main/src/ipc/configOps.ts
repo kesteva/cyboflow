@@ -13,6 +13,11 @@ import {
   SHORTCUT_ACTIONS,
   type KeyboardShortcutOverrides,
 } from '../../../shared/types/keyboardShortcuts';
+import {
+  isWebViewerConfigValue,
+  WEB_VIEWER_CONFIG_KEYS,
+  type WebViewerConfig,
+} from '../../../shared/types/webViewer';
 
 /**
  * Concrete implementation of {@link ConfigOpsLike}, backing the `config`
@@ -119,6 +124,53 @@ export function createConfigOps(
           normalized = {
             ...normalized,
             keyboardShortcuts: Object.keys(clean).length === 0 ? undefined : clean,
+          };
+        }
+
+        // The web-viewer block is the one NESTED config object that must survive
+        // a PARTIAL write. ConfigManager.updateConfig is a shallow top-level
+        // spread, so `{ webViewer: { agentDrive: true } }` would REPLACE the whole
+        // block — dropping an explicit `enabled: false` back to its `true` floor
+        // and silently re-enabling a feature the user turned off. So: validate
+        // strictly (booleans only, unknown keys rejected — the config tRPC input
+        // accepts any plain object, and a string "false" would read as truthy
+        // downstream), then MERGE the patch over the stored block rather than
+        // replacing it.
+        //
+        // Merging over the STORED block, not the resolved one, keeps config.json
+        // sparse; the two are observationally identical because an absent member
+        // floors to the same value on read either way.
+        if (updates.webViewer !== undefined) {
+          const patch: unknown = updates.webViewer;
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            return { success: false, error: 'Invalid webViewer payload' };
+          }
+          const raw = patch as Record<string, unknown>;
+          for (const key of Object.keys(raw)) {
+            if (!(WEB_VIEWER_CONFIG_KEYS as readonly string[]).includes(key)) {
+              return { success: false, error: `Unknown webViewer key: ${key}` };
+            }
+          }
+          const merged: WebViewerConfig = { ...(oldConfig.webViewer ?? {}) };
+          for (const key of WEB_VIEWER_CONFIG_KEYS) {
+            if (!(key in raw)) continue;
+            const value = raw[key];
+            // undefined / null clears the member back to its floor, matching the
+            // sprintMaxTasks and keyboardShortcuts boundaries above.
+            if (value === undefined || value === null) {
+              delete merged[key];
+              continue;
+            }
+            if (!isWebViewerConfigValue(value)) {
+              return { success: false, error: `Invalid webViewer.${key}: expected a boolean` };
+            }
+            merged[key] = value;
+          }
+          // An empty merged block is stored as absent, not `{}` — the block is
+          // sparse by contract (main/src/types/config.ts).
+          normalized = {
+            ...normalized,
+            webViewer: Object.keys(merged).length === 0 ? undefined : merged,
           };
         }
 

@@ -8,6 +8,7 @@ import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardSh
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
+import type { WebViewerConfig } from '../../../shared/types/webViewer';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 export interface AppConfig {
@@ -130,6 +131,11 @@ export interface AppConfig {
   // Layered visual verification settings (see shared/types/visualVerification.ts).
   // Master switch defaults OFF; the ConfigManager getter applies floors.
   visualVerify?: VisualVerifyConfig;
+  // Native web viewer settings (see shared/types/webViewer.ts). `enabled`
+  // floors to TRUE (human browsing is the feature); agentObserve / agentDrive
+  // floor to FALSE. The main side applies the floors — read the resolved block
+  // rather than these raw members.
+  webViewer?: WebViewerConfig;
   // Auto-surface idle PTY quick sessions into the human review queue. A blocking
   // human_task is minted for an interactive quick session that finished a turn
   // and has sat unviewed longer than thresholdMinutes. Absent members floor to

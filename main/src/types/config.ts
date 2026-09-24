@@ -8,6 +8,7 @@ import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
+import type { WebViewerConfig } from '../../../shared/types/webViewer';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 /**
@@ -212,6 +213,17 @@ export interface AppConfig {
   // other globals, intentionally NOT seeded into constructor defaults so existing
   // config.json files stay byte-identical; the ConfigManager getter applies floors.
   visualVerify?: VisualVerifyConfig;
+  // Native web viewer settings (see shared/types/webViewer.ts and
+  // docs/proposals/native-web-viewer.md). `enabled` is the master kill switch
+  // and floors to TRUE — human browsing IS the feature — while every agent
+  // capability (agentObserve / agentDrive) floors to FALSE, so an install that
+  // never opts in can browse but exposes nothing to agents. Absent members
+  // floor to WEB_VIEWER_DEFAULTS via getWebViewerConfig(). NOT seeded into
+  // constructor defaults, so existing config.json files stay byte-identical.
+  // Partial updates DEEP-MERGE at the config boundary (ipc/configOps.ts) — a
+  // shallow spread would let `{ agentDrive: true }` drop an explicit
+  // `enabled: false` and silently re-enable a feature the user turned off.
+  webViewer?: WebViewerConfig;
   // Auto-surface idle PTY quick sessions into the human review queue (see
   // IdleSessionReviewConfig). A blocking human_task is minted for an interactive
   // quick session that finished a turn and has sat unviewed longer than
@@ -364,6 +376,9 @@ export interface UpdateConfigRequest {
   artifactCommitDir?: string;
   // Layered visual verification settings (see AppConfig.visualVerify).
   visualVerify?: VisualVerifyConfig;
+  // Native web viewer settings (see AppConfig.webViewer). Kept in parity with
+  // AppConfig on purpose: a field missing here cannot be written.
+  webViewer?: WebViewerConfig;
   // Idle PTY quick-session auto-review settings (see AppConfig.idleSessionReview).
   idleSessionReview?: IdleSessionReviewConfig;
   theme?: 'paper' | 'light' | 'dark';

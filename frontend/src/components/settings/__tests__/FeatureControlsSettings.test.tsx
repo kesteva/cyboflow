@@ -1,6 +1,6 @@
 /**
  * FeatureControlsSettings — the AI tab's "Feature controls" group (is the
- * capability available at all). Pins the six sections the user-approved
+ * capability available at all). Pins the seven sections the user-approved
  * classification assigns to this group, and that every control is a pure
  * props-in/callback-out surface (no local state, no config round trip of its own
  * — `Settings.tsx` still owns the state and the save).
@@ -29,6 +29,14 @@ function renderGroup(over: Partial<FeatureControlsSettingsProps> = {}) {
     onVisualVerifyEnabledChange: vi.fn(),
     autoBootstrapRunbook: false,
     onAutoBootstrapRunbookChange: vi.fn(),
+    webViewerEnabled: true,
+    onWebViewerEnabledChange: vi.fn(),
+    webViewerAgentObserve: false,
+    onWebViewerAgentObserveChange: vi.fn(),
+    webViewerAgentDrive: false,
+    onWebViewerAgentDriveChange: vi.fn(),
+    webViewerPersistLogin: true,
+    onWebViewerPersistLoginChange: vi.fn(),
     idleReviewEnabled: true,
     onIdleReviewEnabledChange: vi.fn(),
     idleReviewThresholdMinutes: 5,
@@ -46,11 +54,12 @@ const FEATURE_CONTROL_SECTIONS = [
   'Computed Run Cost',
   'Artifact Commit Location',
   'Visual Verification',
+  'Web Viewer',
   'Idle Session Review',
 ] as const;
 
 describe('FeatureControlsSettings', () => {
-  it('renders exactly the six Feature-control sections', () => {
+  it('renders exactly the seven Feature-control sections', () => {
     renderGroup();
 
     for (const title of FEATURE_CONTROL_SECTIONS) {
@@ -125,5 +134,38 @@ describe('FeatureControlsSettings', () => {
     renderGroup({ idleReviewEnabled: false });
 
     expect(screen.getByLabelText('Idle threshold (minutes)')).toBeDisabled();
+  });
+});
+
+describe('FeatureControlsSettings — web viewer', () => {
+  it('gates every agent capability behind the master switch', () => {
+    renderGroup({ webViewerEnabled: false });
+
+    // The master switch itself stays operable; the three below do not, so a
+    // disabled viewer cannot have an agent capability toggled on from the UI.
+    expect(screen.getByLabelText('Enable the web viewer')).toBeEnabled();
+    for (const label of [
+      'Let agents read web tabs',
+      'Let agents drive web tabs',
+      'Stay signed in between launches',
+    ]) {
+      expect(screen.getByLabelText(label)).toBeDisabled();
+    }
+  });
+
+  it('reports each web-viewer toggle through its own callback', () => {
+    const props = renderGroup({ webViewerEnabled: true });
+
+    fireEvent.click(screen.getByLabelText('Let agents read web tabs'));
+    expect(props.onWebViewerAgentObserveChange).toHaveBeenCalledWith(true);
+
+    fireEvent.click(screen.getByLabelText('Let agents drive web tabs'));
+    expect(props.onWebViewerAgentDriveChange).toHaveBeenCalledWith(true);
+
+    fireEvent.click(screen.getByLabelText('Stay signed in between launches'));
+    expect(props.onWebViewerPersistLoginChange).toHaveBeenCalledWith(false);
+
+    fireEvent.click(screen.getByLabelText('Enable the web viewer'));
+    expect(props.onWebViewerEnabledChange).toHaveBeenCalledWith(false);
   });
 });
