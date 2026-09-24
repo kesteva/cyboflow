@@ -46,7 +46,7 @@
  * Design hex → EXISTING semantic tokens (styles/tokens/colors.css):
  *   terracotta → interactive, gold → status-warning, green → status-success.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Kanban, List, Plus, Archive, ChevronDown, FolderOpen, Search, Check, ArrowUpDown } from 'lucide-react';
 import { useBacklogStore } from '../stores/backlogStore';
 import type { BacklogProjectRef } from '../stores/backlogStore';
@@ -530,7 +530,9 @@ function BacklogBoard({
   launchingTaskId: string | null;
   now: number;
 }): React.JSX.Element {
-  const buckets = bucketByStage(tasks, stages, sortMode);
+  // Re-sorts every bucket — memoized so a render that only flips layoutMode
+  // (Kanban <-> List) or another unrelated prop doesn't redo it.
+  const buckets = useMemo(() => bucketByStage(tasks, stages, sortMode), [tasks, stages, sortMode]);
   if (layoutMode === 'kanban') {
     return (
       <KanbanView
@@ -606,26 +608,35 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
     return unsubscribe;
   }, []);
 
-  // Only "no projects exist at all" is empty — an empty BOARD still renders
-  // its columns (and the + New affordance).
-  if (loaded && projects.length === 0) {
-    return <EmptyBacklogView />;
-  }
-
   // filterTasks (project + archive visibility) -> deriveMembershipOptions
   // (options snapshot BEFORE search/membership narrow the tree, so the option
   // list doesn't shrink as the user types/selects) -> applySearchAndMembership
   // (search + "In sprint"/"In experiment" narrowing, recursive at arbitrary
   // depth) -> unifiedStages / bucketByStage (inside BacklogBoard, sortMode-
   // aware). Header counts + both Kanban/List read the FINAL narrowed list.
-  const filteredTasks = filterTasks(tasks, filterProjectId, showArchived);
-  const membershipOptions = deriveMembershipOptions(filteredTasks);
-  const visibleTasks = applySearchAndMembership(
-    filteredTasks,
-    searchQuery,
-    selectedSprintIds,
-    selectedExperimentIds,
+  //
+  // Memoized: every backlogStore update (including each live TaskChangedEvent)
+  // otherwise re-ran this whole chain — two recursive full-tree walks plus a
+  // per-retained-node shallow copy — on a pane that stays open during flow
+  // runs. Keyed on exactly the inputs the chain reads. Computed ABOVE the
+  // EmptyBacklogView early return below so these hooks run unconditionally
+  // (Rules of Hooks) even though their result goes unused on that path.
+  const filteredTasks = useMemo(
+    () => filterTasks(tasks, filterProjectId, showArchived),
+    [tasks, filterProjectId, showArchived],
   );
+  const membershipOptions = useMemo(() => deriveMembershipOptions(filteredTasks), [filteredTasks]);
+  const visibleTasks = useMemo(
+    () => applySearchAndMembership(filteredTasks, searchQuery, selectedSprintIds, selectedExperimentIds),
+    [filteredTasks, searchQuery, selectedSprintIds, selectedExperimentIds],
+  );
+
+  // Only "no projects exist at all" is empty — an empty BOARD still renders
+  // its columns (and the + New affordance).
+  if (loaded && projects.length === 0) {
+    return <EmptyBacklogView />;
+  }
+
   const stages = unifiedStages(boards, filterProjectId, showArchived);
   const archivedCount = countArchived(tasks, filterProjectId);
 

@@ -2213,6 +2213,44 @@ describe('InteractiveClaudeManager', () => {
 
       void spawn;
     });
+
+    it('does not fire the deferred \'\\r\' into a REPLACED PTY under the same panelId (process-identity guard, parity with CodexPtyManager/TASK-206)', async () => {
+      // If continuePanel/restart tears down and respawns this panelId within
+      // the SUBMIT_DELAY_MS window, a presence-only `processes.has()` check
+      // would pass (the key exists again, now pointing at the FRESH process)
+      // and let the old turn's Enter land in a REPL that never received the
+      // body. The guard must compare process IDENTITY instead.
+      const panelId = 'panel-relay-swap';
+      const firstSpawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-relay-swap-1', worktreePath: '/tmp/wt-rs', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+      const originalPty = mgr.ptys[0];
+
+      mgr.relayUserTurn(panelId, 'turn for the old process');
+      expect(originalPty.writes).toContain('turn for the old process');
+
+      // Tear down + respawn the SAME panelId before the deferred Enter fires
+      // (the real continuePanel/restart shape: kill, then spawnCliProcess).
+      // killProcess() kills the FakePty WITHOUT firing its onExit listeners
+      // (that needs the explicit fireExit() test driver), so firstSpawn's
+      // promise — which resolves only from that onExit path — never settles;
+      // left dangling below like the sibling teardown test above.
+      await mgr.killProcess(panelId);
+      const secondSpawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-relay-swap-2', worktreePath: '/tmp/wt-rs', prompt: 'go again' });
+      await waitFor(() => mgr.ptys.length > 1 && mgr.fakeSources.length > 1 && mgr.fakeSources[1].started);
+      const replacementPty = mgr.ptys[1];
+
+      await new Promise((r) => setTimeout(r, 450));
+
+      // Neither the old process (torn down) nor the new one (never received
+      // the body) gets the stray Enter.
+      expect(originalPty.writes).not.toContain('\r');
+      expect(replacementPty.writes).not.toContain('\r');
+
+      mgr.ptys[1].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await secondSpawn;
+      void firstSpawn;
+    });
   });
 
   // -------------------------------------------------------------------------
