@@ -37,6 +37,7 @@ import { definitionHasControllerVisualVerify } from '../laneChainResolution';
 import { providerForRuntime, type WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { normalizeEffortSelection, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { resolveStepSpawnTarget } from '../stepSpawnTarget';
 import {
   renderWorkflowPromptForRuntime,
   type WorkflowPromptRenderContext,
@@ -368,36 +369,21 @@ export class SpawnStepRunner implements StepRunner {
     // resolver is never consulted for.
     const agentKey = resolveStepAgentKey(step.id, step.agent);
     const stepAgent = agentKey ? this.opts.resolveStepAgent?.(agentKey) : undefined;
+    // The provider + model this step ACTUALLY spawns on — the per-step runtime
+    // override's provider when present, else the run-level provider, and a model
+    // that BELONGS to that provider (the per-agent pin for the matching provider,
+    // else the run model only when the step stays on the run's provider; a step
+    // that FLIPS provider never inherits the other provider's concrete id). The
+    // rule lives in stepSpawnTarget.ts so the per-step model rail
+    // (runStepModels.ts) reports exactly what this seam spawns.
     const stepRuntime = stepAgent?.runtime;
     const stepProvider = stepRuntime ? providerForRuntime(stepRuntime) : undefined;
-    // The provider this step ACTUALLY spawns under: the per-step runtime override's
-    // provider when present, else the run-level provider.
     const runProvider = this.opts.promptRenderContext?.provider ?? 'claude';
-    const effectiveProvider = stepProvider ?? runProvider;
-    // Resolve the spawn model to one that BELONGS to the effective provider. The
-    // per-agent pin is consulted for the matching provider only (the resolved
-    // provider's own model for a matching step, the Claude alias for a Claude
-    // step). The run-level model is inherited ONLY when the step stays on the
-    // run's provider — a step that FLIPS provider must never inherit the other
-    // provider's concrete id (a claude-* id into a non-Claude spawn, or a
-    // provider-specific id into a Claude spawn), which would reject or misroute
-    // the turn; a flipped step with no matching per-agent model omits `model` so
-    // the provider default applies. (Without this, a per-agent Claude model pin —
-    // including a legacy model-only override — would override the model on a
-    // whole-run non-Claude programmatic run.)
-    //
-    // Which model FIELD a provider's per-agent pin lives on is keyed on the
-    // CLAUDE branch, never the non-Claude one: Claude keeps its own alias field
-    // (`model`), and EVERY other provider — Codex today, any future provider —
-    // shares the generic `providerModel` field. A ternary on `'codex'` would
-    // silently misroute a later provider's pin to the wrong (Claude) field.
-    // `providerModel ?? codexModel` re-applies the read-seam normalization here
-    // too: `resolveStepAgent` is an injected thunk, and a caller that has not
-    // migrated to the new field name may still return only the deprecated alias.
-    const perAgentModel =
-      effectiveProvider === 'claude' ? stepAgent?.model : stepAgent?.providerModel ?? stepAgent?.codexModel;
-    const spawnModel =
-      perAgentModel ?? (effectiveProvider === runProvider ? this.opts.model : undefined);
+    const { provider: effectiveProvider, model: spawnModel } = resolveStepSpawnTarget(
+      stepAgent,
+      runProvider,
+      this.opts.model,
+    );
     // Normalize the per-agent effort against the provider this step actually spawns
     // under. A value outside that provider's scale is dropped here (see
     // normalizeEffortSelection), never forwarded to a spawn that rejects it.

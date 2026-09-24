@@ -37,7 +37,7 @@ import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
-import { modelFamilyColor, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,7 +91,8 @@ export interface WorkflowCanvasProps {
   sessionKey?: string | null;
   /**
    * Per-step resolved model info (IDEA-061 per-step model rail), keyed by
-   * step id — from `runs.getStepModels` via RunCenterPane. A step with no
+   * `stepModelKey(phaseId, stepId)` (a step id is unique only within its
+   * phase) — from `runs.getStepModels` via RunCenterPane. A step with no
    * entry (a human/gate step the backend omits, or the query hasn't
    * resolved yet) renders its card's agent row exactly as before this prop
    * existed. `null`/`undefined` (loading/errored/no-query-yet) is equivalent
@@ -585,7 +586,7 @@ export function WorkflowCanvas({
                   const flatIdx = phaseFlatStart + stepInPhase;
                   const derivedStatus = statusFor(flatIdx);
                   const globalStepIndex = flatIdx + 1; // 1-based
-                  const modelEntry = stepModels?.get(step.id);
+                  const modelEntry = stepModels?.get(stepModelKey(phase.id, step.id));
 
                   return (
                     <div

@@ -3899,7 +3899,7 @@ export const runsRouter = router({
    * never fabricated a model), and labels/colors it via
    * `runStepModels.resolveRunStepModels` — see that module for the full
    * inherit/pin precedence. Returns ONLY the `StepModelInfo` wire shape
-   * (stepId/stepName/phaseId/agentKey/label/family); no effective-agent
+   * (stepId/stepName/phaseId/label/family); no effective-agent
    * internals (systemPrompt/tools/mcp*) ever leak into the response.
    *
    * Same PRECONDITION_FAILED / NOT_FOUND contract as `getPhaseState` for the
@@ -3924,7 +3924,7 @@ export const runsRouter = router({
         });
       }
       try {
-        return resolveRunStepModels(ctx.db, input.runId, ctx.resolveRunEffectiveAgents);
+        return resolveRunStepModels(ctx.db, input.runId, ctx.resolveRunEffectiveAgents, ctx.stepModelGates);
       } catch (err) {
         if (err instanceof RunNotFoundError || err instanceof RunDefinitionNotFoundError) {
           throw new TRPCError({ code: 'NOT_FOUND', message: err.message });

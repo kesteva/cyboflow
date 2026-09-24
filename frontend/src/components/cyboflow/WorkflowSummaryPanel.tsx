@@ -19,7 +19,8 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
 import { computeSessionCostUsd } from '../../utils/modelPricing';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
-import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
+import { useRunStepModels, type StepModelRow } from '../../hooks/useRunStepModels';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import type { ExperimentArm, ComparisonStatus } from '../../../../shared/types/experiments';
@@ -60,15 +61,9 @@ function formatCost(n: number | null): string {
   return n === null ? '—' : `$${n.toFixed(2)}`;
 }
 
-/**
- * One flattened step's resolved model, as returned by `runs.getStepModels`
- * (TASK-273 — `main/src/orchestrator/runStepModels.ts`). Inferred off the
- * tRPC client rather than imported from `main/src/orchestrator/*` directly —
- * the frontend tsconfig only includes `src` and `../shared`, so the wire
- * shape is read back through `AppRouter` type inference instead of crossing
- * that boundary.
- */
-type StepModelInfo = Awaited<ReturnType<typeof trpc.cyboflow.runs.getStepModels.query>>[number];
+/** One flattened step's resolved model, as returned by `runs.getStepModels`
+ * (via {@link useRunStepModels}). */
+type StepModelInfo = StepModelRow;
 
 /** One distinct-label group of {@link StepModelInfo} for the "Models used" section. */
 interface ModelGroup {
@@ -246,7 +241,8 @@ export function WorkflowSummaryPanel({
   // "Models used" configuration section (TASK-275). `null` is the sentinel for
   // "not available yet, or the query failed" — never rendered as an error, just
   // as "nothing to show" (see the guard on `modelGroups.length > 0` below).
-  const [stepModels, setStepModels] = useState<StepModelInfo[] | null>(null);
+  // Shared with RunCenterPane's canvas rail (one fetch, deduped in flight).
+  const stepModels = useRunStepModels(runId);
   const computeCostFromRates = useConfigStore(
     (state) => state.config?.computeCostFromRates ?? false,
   );
@@ -374,31 +370,6 @@ export function WorkflowSummaryPanel({
       })
       .catch(() => {
         if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [runId]);
-
-  // One-shot fetch of per-step configured models (TASK-275). On ANY failure —
-  // db not wired, run not found, no resolvable definition, the effective-agents
-  // resolver not wired — the router throws; leave `stepModels` at its `null`
-  // sentinel rather than surfacing the error, so the section just omits itself.
-  useEffect(() => {
-    // Reset FIRST on every runId change (mirrors RunCenterPane's rail effect):
-    // this panel is mounted without a `key={activeRunId}`, so switching runs
-    // re-runs the effect on the SAME component instance. Without the reset,
-    // run A's groups keep rendering, attributed to run B, for the whole of
-    // B's in-flight window.
-    setStepModels(null);
-    let alive = true;
-    trpc.cyboflow.runs.getStepModels
-      .query({ runId })
-      .then((r) => {
-        if (alive) setStepModels(r);
-      })
-      .catch(() => {
-        if (alive) setStepModels(null);
       });
     return () => {
       alive = false;
@@ -766,7 +737,7 @@ export function WorkflowSummaryPanel({
                 <div className="flex items-center gap-2">
                   <span
                     className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
-                    style={{ backgroundColor: MODEL_FAMILY_COLORS[group.family] }}
+                    style={{ backgroundColor: modelFamilyColor(group.family) }}
                   />
                   <span className="text-sm text-text-secondary" data-testid="run-summary-step-model-group-label">
                     {group.label} — {group.steps.length} {group.steps.length === 1 ? 'step' : 'steps'}
@@ -777,7 +748,7 @@ export function WorkflowSummaryPanel({
                 <div className="ml-3.5 mt-1.5 flex flex-wrap gap-1.5">
                   {group.steps.map((step) => (
                     <span
-                      key={step.stepId}
+                      key={stepModelKey(step.phaseId, step.stepId)}
                       data-testid="run-summary-step-model-chip"
                       className="rounded-button border border-border-primary px-2 py-0.5 text-xs text-text-secondary"
                     >

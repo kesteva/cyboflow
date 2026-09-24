@@ -66,6 +66,13 @@ const TEST_SPEC = {
         // model===null inherit — this is the fourth combination of the
         // {runtime, model} pair the precedence chain must handle).
         { id: 'claude-runtime-and-model-step', name: 'Claude runtime + model', agent: 'claude-interactive-sonnet-agent' },
+        // providerModel pinned WITHOUT a runtime pin — meaningful only on a
+        // run whose own provider is non-Claude (spawn-seam precedence).
+        { id: 'provider-model-only-step', name: 'Provider model only', agent: 'provider-model-only-agent' },
+        // Non-Claude runtime pinned with NO providerModel.
+        { id: 'codex-runtime-only-step', name: 'Codex runtime only', agent: 'codex-runtime-only-agent' },
+        // `human: true` with a non-'human' agent — still a gate, omitted.
+        { id: 'flagged-human-step', name: 'Flagged human', agent: 'opus-agent', human: true },
       ],
     },
   ],
@@ -120,6 +127,8 @@ const FAKE_EFFECTIVE_AGENTS: EffectiveAgent[] = [
     model: 'sonnet',
     runtime: 'claude-interactive',
   }),
+  effectiveAgent({ agentKey: 'provider-model-only-agent', model: null, providerModel: 'gpt-5.6-sol' }),
+  effectiveAgent({ agentKey: 'codex-runtime-only-agent', model: null, runtime: 'codex-sdk' }),
   // 'inherit-agent' deliberately absent — a step whose agentKey has no
   // effective-agent row at all must still resolve (fully inherits).
 ];
@@ -244,6 +253,101 @@ describe('resolveRunStepModels', () => {
     expect(step?.family).toBe('other');
   });
 
+  // -- Spawn-seam parity (stepSpawnTarget.resolveStepSpawnTarget) ----------
+
+  it('a Claude-runtime pin on a Codex run spawns the Claude default, never the run\'s Codex model id', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-flip-to-claude', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-flip-to-claude', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'claude-runtime-only-step');
+
+    expect(step?.label).toBe('Auto');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('a Claude alias pin with no runtime on a Codex run is ignored at spawn -> inherits the run model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-alias-on-codex', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-alias-on-codex', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'opus-step');
+
+    expect(step?.label).toBe('gpt-5.6-sol');
+    expect(step?.family).toBe('other');
+  });
+
+  it('a Codex runtime pin with no providerModel on a Codex run inherits the run model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-inherit', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-inherit', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-runtime-only-step');
+
+    expect(step?.label).toBe('gpt-5.6-sol');
+    expect(step?.family).toBe('other');
+  });
+
+  it('a Codex runtime pin with no providerModel on a Claude run is the Codex default, family "auto"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-default', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-default', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-runtime-only-step');
+
+    expect(step?.label).toBe('Codex SDK');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('a providerModel-only pin never renders the "inherits run model" sentinel as a model name', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-pm-only-claude', { model: 'haiku', agentProvider: 'claude' });
+    seedStepModelsRun(db, 'run-pm-only-codex', { model: 'gpt-5.5', agentProvider: 'codex' });
+
+    const onClaude = resolveRunStepModels(dbAdapter(db), 'run-pm-only-claude', fakeResolveEffectiveAgents).find(
+      (s) => s.stepId === 'provider-model-only-step',
+    );
+    const onCodex = resolveRunStepModels(dbAdapter(db), 'run-pm-only-codex', fakeResolveEffectiveAgents).find(
+      (s) => s.stepId === 'provider-model-only-step',
+    );
+
+    // Claude run: a provider model id is meaningless -> inherits the run model.
+    expect(onClaude?.label).toBe(AGENT_MODEL_LABELS.haiku);
+    expect(onClaude?.family).toBe('haiku');
+    // Codex run: the spawn seam reads providerModel for the run's provider.
+    expect(onCodex?.label).toBe('gpt-5.6-sol');
+    expect(onCodex?.family).toBe('other');
+  });
+
+  it('a concrete Claude snapshot id on the run is labeled by family/version, never as the raw wire id', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-concrete-claude', { model: 'claude-opus-4-8[1m]', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-concrete-claude', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('Opus 4.8 · 1M');
+    expect(step?.family).toBe('opus');
+  });
+
+  it('applies the spawn gates: a disabled provider drops the runtime pin, an unusable guarded model falls back', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-gated', { model: 'fable', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-gated', fakeResolveEffectiveAgents, {
+      isProviderEnabled: (p) => p !== 'codex',
+      isModelUsable: () => false,
+    });
+
+    // Codex disabled -> the codex-sdk pin is dropped; the step falls back to the
+    // run's Claude provider, whose Fable model is unavailable -> Opus.
+    const codexStep = result.find((s) => s.stepId === 'codex-step');
+    expect(codexStep?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(codexStep?.family).toBe('opus');
+    const inheritStep = result.find((s) => s.stepId === 'inherit-step');
+    expect(inheritStep?.family).toBe('opus');
+  });
+
   it('omits the human-gate step entirely, while keeping every other step', () => {
     const db = makeDb();
     seedStepModelsRun(db, 'run-human-gate', { model: 'sonnet', agentProvider: 'claude' });
@@ -251,6 +355,7 @@ describe('resolveRunStepModels', () => {
     const result = resolveRunStepModels(dbAdapter(db), 'run-human-gate', fakeResolveEffectiveAgents);
 
     expect(result.some((s) => s.stepId === 'human-gate')).toBe(false);
+    expect(result.some((s) => s.stepId === 'flagged-human-step')).toBe(false);
     expect(result.map((s) => s.stepId).sort()).toEqual(
       [
         'inherit-step',
@@ -258,6 +363,8 @@ describe('resolveRunStepModels', () => {
         'opus-step',
         'codex-step',
         'claude-runtime-and-model-step',
+        'provider-model-only-step',
+        'codex-runtime-only-step',
       ].sort(),
     );
   });
@@ -269,10 +376,10 @@ describe('resolveRunStepModels', () => {
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const phaseState = await caller.cyboflow.runs.getPhaseState({ runId: 'run-parity' });
     const allFlattenedSteps = phaseState.definition.phases.flatMap((p) =>
-      p.steps.map((s) => ({ stepId: s.id, agent: s.agent })),
+      p.steps.map((s) => ({ stepId: s.id, agent: s.agent, human: s.human })),
     );
     const expectedNonHumanIds = allFlattenedSteps
-      .filter((s) => resolveStepAgentKey(s.stepId, s.agent) !== null)
+      .filter((s) => resolveStepAgentKey(s.stepId, s.agent) !== null && s.human !== true)
       .map((s) => s.stepId);
 
     const result = resolveRunStepModels(dbAdapter(db), 'run-parity', fakeResolveEffectiveAgents);
@@ -312,7 +419,7 @@ describe('resolveRunStepModels', () => {
     expect(result.length).toBeGreaterThan(0);
     for (const info of result) {
       expect(Object.keys(info).sort()).toEqual(
-        ['agentKey', 'family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
+        ['family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
       );
       expect(JSON.stringify(info)).not.toContain('SECRET_SYSTEM_PROMPT_SHOULD_NEVER_LEAK');
     }
@@ -338,7 +445,7 @@ describe('cyboflow.runs.getStepModels', () => {
     expect(opusStep?.label).toBe(AGENT_MODEL_LABELS.opus);
     for (const info of result) {
       expect(Object.keys(info).sort()).toEqual(
-        ['agentKey', 'family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
+        ['family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
       );
     }
   });

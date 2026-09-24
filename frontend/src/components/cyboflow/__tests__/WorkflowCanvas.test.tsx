@@ -26,7 +26,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from '../WorkflowCanvas';
 import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
-import type { ModelFamily } from '../../../../../shared/types/agents';
+import { stepModelKey, type ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Mock fixture: 2 phases × 2 steps each
@@ -491,8 +491,8 @@ describe('WorkflowCanvas', () => {
 
   it('threads a stepModels entry into the matching step card as modelLabel/modelFamilyColor', () => {
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Opus 5', family: 'opus' }],
-      ['step-b', { label: 'Auto', family: 'auto' }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Opus 5', family: 'opus' }],
+      [stepModelKey('phase-1', 'step-b'), { label: 'Auto', family: 'auto' }],
     ]);
     render(
       <WorkflowCanvas
@@ -518,6 +518,18 @@ describe('WorkflowCanvas', () => {
     expect(screen.queryByTestId('step-card-model-step-c')).not.toBeInTheDocument();
   });
 
+  it('keys stepModels by (phaseId, stepId): an entry for the same step id in ANOTHER phase does not paint this card', () => {
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      // Same step id, different phase — must not leak onto phase-1's step-a.
+      [stepModelKey('phase-2', 'step-a'), { label: 'Haiku 4.5', family: 'haiku' }],
+    ]);
+    render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" stepModels={stepModels} />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+  });
+
   it('omitting stepModels (undefined/null) renders every card without a model segment, unbroken', () => {
     const { rerender } = render(
       <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" />,
@@ -536,7 +548,7 @@ describe('WorkflowCanvas', () => {
     // Cast: simulates a main/renderer version skew handing the rail a family
     // bucket this bundle's ModelFamily union does not list.
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
     ]);
     render(
       <WorkflowCanvas
@@ -555,8 +567,8 @@ describe('WorkflowCanvas', () => {
 
   it('threading a stepModels entry does not change the step card/wrapper height or column width (138x120 unchanged)', () => {
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Opus 5', family: 'opus' }],
-      ['step-b', { label: 'Auto', family: 'auto' }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Opus 5', family: 'opus' }],
+      [stepModelKey('phase-1', 'step-b'), { label: 'Auto', family: 'auto' }],
     ]);
     render(
       <WorkflowCanvas

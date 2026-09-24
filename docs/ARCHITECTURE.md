@@ -87,6 +87,16 @@ without transitive imports from `electron`, `better-sqlite3`, or any service in
 `main/src/services/*`. This keeps the orchestrator extractable to a standalone Node process
 for the team-tier v2 target (ROADMAP-001 §6.3).
 
+**Injected collaborators.** When orchestrator/tRPC code needs a `services/*` collaborator, its
+shape is declared as a structural mirror under `main/src/orchestrator/trpc/contracts/*` (e.g.
+`sessionOps.ts`, `effectiveAgents.ts`), the concrete implementation is bound once in
+`main/src/index.ts` onto `ContextDeps` (`trpc/context.ts`), and procedures read it off `ctx`
+with a PRECONDITION_FAILED guard when unwired. Example: `runs.getStepModels`
+(`orchestrator/runStepModels.ts`, the per-step model rail) receives
+`ctx.resolveRunEffectiveAgents` + `ctx.stepModelGates`, and reduces each step through
+`orchestrator/stepSpawnTarget.ts` — the same pure function the programmatic spawn seam uses —
+so the rail reports what actually spawns.
+
 **Frozen exemptions.** `standaloneInvariant.test.ts` holds the exact set of files still allowed
 to import `electron` or a `services/*` value at value position — a list that may shrink but not
 grow (a stale entry fails the test). `runEventBridge.ts` is NOT on it: its former

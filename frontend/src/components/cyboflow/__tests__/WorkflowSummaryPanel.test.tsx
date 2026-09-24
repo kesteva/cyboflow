@@ -807,11 +807,11 @@ describe('WorkflowSummaryPanel — dismiss / continue-in-chat controls', () => {
 describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)', () => {
   it('groups steps by label, sorted by descending count with first-appearance tiebreak', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
-      { stepId: 's5', stepName: 'Final gate', phaseId: 'p3', agentKey: 'gate', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's5', stepName: 'Final gate', phaseId: 'p3', label: 'Opus 5', family: 'opus' },
     ]);
     renderPanel();
 
@@ -828,9 +828,9 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('uses singular "1 step" and plural "N steps" correctly', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
     ]);
     renderPanel();
 
@@ -843,10 +843,10 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('renders exactly as many chips as returned step-model entries', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
     ]);
     renderPanel();
 
@@ -879,10 +879,10 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('paints each group dot from MODEL_FAMILY_COLORS — the shared swatch source, not a local palette', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
-      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', agentKey: 'verifier', label: 'Auto', family: 'auto' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', label: 'Auto', family: 'auto' },
     ]);
     renderPanel();
 
@@ -900,7 +900,7 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('carries the "not a per-step cost split" disclaimer — the section must never read as cost attribution', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
     ]);
     renderPanel();
 
@@ -913,7 +913,7 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('clears the previous run\'s groups when runId changes (panel is mounted without a key)', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
     ]);
     const { rerender } = renderPanel();
     expect(await screen.findByText('Opus 5 — 1 step')).toBeInTheDocument();

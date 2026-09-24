@@ -14,69 +14,69 @@
  * already renders. A human-gate step (`resolveStepAgentKey` -> null) is
  * OMITTED entirely — never fabricate a model for a step nobody's agent runs.
  *
- * PRECEDENCE (per step):
+ * PRECEDENCE (per step) — the SPAWN SEAM's, not a restatement of it:
  *   1. Resolve the step's `agentKey`, then its `EffectiveAgent` (project
  *      overrides + workflow agentConfigs + variant deltas — the SAME layering
  *      `agentOverlayWriter.resolveRunEffectiveAgents` materializes to disk).
  *      A step with no effective-agent entry is treated as fully inheriting
  *      (no pin) — a missing row is not a broken row.
- *   2. INHERIT the run-level model when every one of
- *      `{runtime, model, providerModel}` is unset, OR when `runtime` is a
- *      CLAUDE-family runtime but `model` is unset (an agent that only pins a
- *      Claude transport, not a specific model, still inherits the run's model
- *      choice) -> `workflow_runs.model` / `.agent_provider` via
- *      {@link runModelLabel}.
- *   3. Otherwise the step is PINNED -> {@link agentRunTargetLabel}.
+ *   2. Apply the spawn-time gates `main/src/index.ts`'s `resolveStepAgent`
+ *      applies (when injected): a runtime pin on a provider switched off in
+ *      Settings is dropped ({@link gateRuntimePin}), and an unavailable guarded
+ *      model alias is swapped for its fallback ({@link usableModelAlias}).
+ *   3. Reduce pin + run provider/model through {@link resolveStepSpawnTarget}
+ *      — the very function `programmatic/spawnStepRunner.ts` spawns with — and
+ *      label the result: a `'pin'` via the Claude alias label or the verbatim
+ *      provider model id, a `'run'` inherit via {@link runModelLabel}, and a
+ *      `'provider-default'` (the step flipped provider with no pin for the new
+ *      one) as that provider's default.
  *
  * DEPENDENCY INJECTION, NOT A DIRECT IMPORT. This file lives under
  * `main/src/orchestrator/`, which `__tests__/standaloneInvariant.test.ts`
  * forbids from importing `main/src/services/*` at runtime (the tree is meant
  * to lift out of Electron as a plain Node service — see
- * docs/ARCHITECTURE.md -> "Team-tier v2"). The one collaborator this module
- * needs from outside that boundary —
- * `services/panels/claude/agentOverlayWriter.resolveRunEffectiveAgents` — is
- * therefore threaded in as `resolveEffectiveAgents`, exactly the shape that
- * function already has. The concrete function is bound once, from
- * `main/src/index.ts`, onto `ContextDeps.resolveRunEffectiveAgents` (mirrors
- * the existing `gitDiff` closure in `trpc/context.ts`).
+ * docs/ARCHITECTURE.md -> "Team-tier v2"). The collaborators this module
+ * needs from outside that boundary — `resolveRunEffectiveAgents` and the
+ * spawn gates — are declared as structural contracts in
+ * `trpc/contracts/effectiveAgents.ts` and bound once, from `main/src/index.ts`,
+ * onto `ContextDeps` (mirrors the existing `gitDiff` closure in
+ * `trpc/context.ts`).
  *
  * No caching layer: this resolves fresh on every call (already invoked at
  * most once per tRPC request).
  */
-import type { DatabaseLike, LoggerLike } from './types';
+import type { DatabaseLike } from './types';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { resolveWorkflowDefinition, type WorkflowDefinition } from '../../../shared/types/workflows';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
-import { providerForRuntime } from '../../../shared/types/agentRuntime';
 import {
-  agentRunTargetLabel,
+  isAgentProvider,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+  type AgentProvider,
+} from '../../../shared/types/agentRuntime';
+import {
+  AGENT_MODEL_LABELS,
+  claudeModelFamily,
+  claudeModelIdLabel,
   runModelLabel,
   isAgentModelAlias,
-  type AgentModelAlias,
   type ModelFamily,
 } from '../../../shared/types/agents';
 import type { EffectiveAgent } from './agents/effectiveAgents';
-import type { WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
+import { gateRuntimePin, resolveStepSpawnTarget, usableModelAlias } from './stepSpawnTarget';
 
-/**
- * The shape of `agentOverlayWriter.resolveRunEffectiveAgents` — declared here
- * (not imported) so this file never takes a runtime edge into `services/*`.
- * See the module doc's "DEPENDENCY INJECTION" note.
- */
-export type EffectiveAgentsResolver = (
-  db: DatabaseLike,
-  runId: string,
-  logger?: LoggerLike,
-) => EffectiveAgent[];
+export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/effectiveAgents';
 
 /** One flattened step's resolved model. Never carries agent internals
  * (systemPrompt/tools/mcp*) — this is the wire shape `runs.getStepModels`
- * returns verbatim. */
+ * returns verbatim. `WorkflowStep.id` is unique only WITHIN its phase, so
+ * consumers key on `(phaseId, stepId)` — see `stepModelKey` in
+ * `shared/types/agents.ts`. */
 export interface StepModelInfo {
   stepId: string;
   stepName: string;
   phaseId: string;
-  agentKey: string;
   label: string;
   family: ModelFamily;
 }
@@ -102,26 +102,23 @@ interface RunRow {
 }
 
 /**
- * Derive the {@link ModelFamily} for an INHERITED (run-level) model.
- *
- * Provider is NOT consulted first: a recognized Claude-family alias always
- * wins regardless of `agent_provider`, an unset/empty/`'auto'` model is
- * always `'auto'` regardless of provider (so an inherited non-Claude run
- * with no model pinned still reads as "auto", not "other"), and only a
- * concrete non-Claude model string (e.g. a verbatim Codex model id) falls
- * through to `'other'`.
+ * Derive the {@link ModelFamily} for an INHERITED (run-level) model: a Claude
+ * alias is its own family; an unset/empty/`'auto'` model is `'auto'` regardless
+ * of provider (a non-Claude run with no model pinned reads as "auto", not
+ * "other"); a concrete Claude snapshot id on a Claude run (a launch-picker
+ * "Other models" pick, e.g. `claude-opus-4-8[1m]`) buckets by its family; and
+ * any other concrete id (a verbatim Codex/OMP model id) is `'other'`.
  */
-function inheritedFamily(model: string | null): ModelFamily {
+function inheritedFamily(model: string | null, provider: AgentProvider): ModelFamily {
   if (model !== null && isAgentModelAlias(model)) return model;
   if (model === null || model === '' || model === 'auto') return 'auto';
-  return 'other';
+  return provider === 'claude' ? (claudeModelFamily(model) ?? 'other') : 'other';
 }
 
-/** Derive the {@link ModelFamily} for a PINNED (per-agent) model. */
-function pinnedFamily(runtime: WorkflowAgentRuntime | null, model: AgentModelAlias | null): ModelFamily {
-  if (runtime !== null && providerForRuntime(runtime) !== 'claude') return 'other';
-  if (model !== null && isAgentModelAlias(model)) return model;
-  return 'auto';
+/** Label + family for a step's resolved Claude PIN (an alias, or a concrete id). */
+function claudePinLabel(model: string): { label: string; family: ModelFamily } {
+  if (isAgentModelAlias(model)) return { label: AGENT_MODEL_LABELS[model], family: model };
+  return { label: claudeModelIdLabel(model) ?? model, family: claudeModelFamily(model) ?? 'other' };
 }
 
 /**
@@ -169,50 +166,67 @@ function resolveEffectiveDefinition(
  *
  * @param resolveEffectiveAgents Injected `agentOverlayWriter.resolveRunEffectiveAgents`
  *   (see the module doc's "DEPENDENCY INJECTION" note) — called exactly once.
+ * @param gates Injected spawn-seam gates. Omitted (unit tests) ⇒ every provider
+ *   is treated as enabled and every model as usable.
  */
 export function resolveRunStepModels(
   db: DatabaseLike,
   runId: string,
   resolveEffectiveAgents: EffectiveAgentsResolver,
-  logger?: LoggerLike,
+  gates?: StepModelGates,
 ): StepModelInfo[] {
-  const { definition, runModel, runProvider } = resolveEffectiveDefinition(db, runId);
+  const { definition, runModel: rawRunModel, runProvider: rawRunProvider } = resolveEffectiveDefinition(db, runId);
+  const runProvider: AgentProvider = isAgentProvider(rawRunProvider) ? rawRunProvider : 'claude';
+  // The run-level spawn applies the same guarded-model fallback to a Claude run.
+  const runModel =
+    gates && runProvider === 'claude' ? usableModelAlias(rawRunModel, gates.isModelUsable) : rawRunModel;
 
   const effectiveByKey = new Map<string, EffectiveAgent>(
-    resolveEffectiveAgents(db, runId, logger).map((a) => [a.agentKey, a] as const),
+    resolveEffectiveAgents(db, runId).map((a) => [a.agentKey, a] as const),
   );
 
   const out: StepModelInfo[] = [];
   for (const phase of definition.phases) {
     for (const step of phase.steps) {
       const agentKey = resolveStepAgentKey(step.id, step.agent);
-      // Human gate — never fabricate a model for a step no agent runs.
-      if (agentKey === null) continue;
+      // Human gate — never fabricate a model for a step no agent runs. The
+      // `human` flag is honored too, so a custom spec that sets it without
+      // `agent: 'human'` is still treated as a gate (the canvas card keys off
+      // the flag, the backend off the agent key — both must agree).
+      if (agentKey === null || step.human === true) continue;
 
-      // Coalesce "no effective-agent row at all" and "a row with this field
-      // left unset" to the SAME null — both mean "no pin" for that field.
       const effective = effectiveByKey.get(agentKey);
-      const runtime: WorkflowAgentRuntime | null = effective?.runtime ?? null;
-      const model: AgentModelAlias | null = effective?.model ?? null;
-      const providerModel: string | null = effective?.providerModel ?? null;
+      const runtime = gates
+        ? gateRuntimePin(effective?.runtime, gates.isProviderEnabled)
+        : effective?.runtime ?? undefined;
+      const claudeModel = effective?.model ?? null;
+      const target = resolveStepSpawnTarget(
+        {
+          runtime,
+          model: gates ? usableModelAlias(claudeModel, gates.isModelUsable) : claudeModel,
+          providerModel: effective?.providerModel ?? null,
+        },
+        runProvider,
+        runModel,
+      );
 
-      const isInherit =
-        (runtime === null && model === null && providerModel === null) ||
-        (runtime !== null && providerForRuntime(runtime) === 'claude' && model === null);
+      let label: string;
+      let family: ModelFamily;
+      if (target.source === 'run') {
+        label = runModelLabel(runModel, runProvider);
+        family = inheritedFamily(runModel, runProvider);
+      } else if (target.source === 'pin' && target.model !== undefined) {
+        ({ label, family } =
+          target.provider === 'claude' ? claudePinLabel(target.model) : { label: target.model, family: 'other' });
+      } else {
+        // Flipped provider with no pin for it — that provider's own default:
+        // 'Auto' for Claude (the CLI default, as runModelLabel names it), else
+        // the runtime's label ("Codex SDK") — no single model id to name.
+        label = target.provider === 'claude' || !runtime ? 'Auto' : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
+        family = 'auto';
+      }
 
-      const label = isInherit
-        ? runModelLabel(runModel, runProvider)
-        : agentRunTargetLabel({ runtime, model, providerModel });
-      const family = isInherit ? inheritedFamily(runModel) : pinnedFamily(runtime, model);
-
-      out.push({
-        stepId: step.id,
-        stepName: step.name,
-        phaseId: phase.id,
-        agentKey,
-        label,
-        family,
-      });
+      out.push({ stepId: step.id, stepName: step.name, phaseId: phase.id, label, family });
     }
   }
 

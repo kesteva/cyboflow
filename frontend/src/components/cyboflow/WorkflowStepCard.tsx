@@ -141,15 +141,17 @@ export function WorkflowStepCard({
         : '#c8bea3';
 
   // ── Agent short name — resolved canonical key (legacy labels mapped) ───────
-  const agentShortName = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
+  const agentKey = resolveStepAgentKey(step.id, step.agent);
+  const agentShortName = agentKey ?? step.agent;
 
   // ── Model segment gate ─────────────────────────────────────────────────────
   // A human/gate step NEVER renders a model segment — the approved design
   // calls that a hard rule, not a data accident. `runs.getStepModels` already
-  // omits gate steps (resolveStepAgentKey -> null), so this is the card-local
+  // omits gate steps by the SAME two-part predicate (`human: true` OR an agent
+  // that resolves to no key, i.e. `agent: 'human'`), so this is the card-local
   // enforcement of the same rule: even if a caller hands a human step a label,
   // neither the segment nor the "· model" title appears.
-  const showModel = !isHuman && Boolean(modelLabel);
+  const showModel = !isHuman && agentKey !== null && Boolean(modelLabel);
 
   return (
     <div style={rootStyle} data-testid={`step-card-${step.id}`}>
@@ -226,7 +228,7 @@ export function WorkflowStepCard({
           title={
             showModel
               ? isPending
-                ? `${agentShortName} · will run ${modelLabel}`
+                ? `${agentShortName} · configured to run ${modelLabel}`
                 : `${agentShortName} · ${modelLabel}`
               : undefined
           }
@@ -277,7 +279,19 @@ export function WorkflowStepCard({
                 }}
                 data-testid={`step-card-model-dot-${step.id}`}
               />
-              <span style={{ fontStyle: isPending ? 'italic' : 'normal' }}>{modelLabel}</span>
+              {/* The ellipsis must live on the TEXT span: the capped
+                  inline-flex parent can only clip its child, not ellipsise it. */}
+              <span
+                style={{
+                  fontStyle: isPending ? 'italic' : 'normal',
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+                data-testid={`step-card-model-label-${step.id}`}
+              >
+                {modelLabel}
+              </span>
             </span>
           )}
           <span style={{ flexShrink: 0 }}>×{step.retries}</span>

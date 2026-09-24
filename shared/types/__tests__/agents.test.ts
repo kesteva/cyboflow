@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { runModelLabel, AGENT_MODEL_LABELS, MODEL_FAMILY_COLORS } from '../agents';
+import {
+  runModelLabel,
+  claudeModelFamily,
+  claudeModelIdLabel,
+  stepModelKey,
+  AGENT_MODEL_LABELS,
+  MODEL_FAMILY_COLORS,
+} from '../agents';
 
 describe('runModelLabel', () => {
   it('inherit case: null model on Claude -> Auto', () => {
@@ -59,5 +66,31 @@ describe('MODEL_FAMILY_COLORS', () => {
     for (const color of Object.values(MODEL_FAMILY_COLORS)) {
       expect(color).toMatch(/^#[0-9a-f]{6}$/);
     }
+  });
+});
+
+describe('concrete Claude model ids', () => {
+  it('runModelLabel never shows a raw Claude wire id — it parses family/version/window', () => {
+    expect(runModelLabel('claude-opus-4-8[1m]', 'claude')).toBe('Opus 4.8 · 1M');
+    expect(runModelLabel('claude-haiku-4-5-20251001', 'claude')).toBe('Haiku 4.5');
+  });
+
+  it('claudeModelIdLabel returns null for a non-Claude or unparseable id', () => {
+    expect(claudeModelIdLabel('gpt-5.6-sol')).toBeNull();
+    expect(claudeModelIdLabel('claude-mystery')).toBeNull();
+  });
+
+  it('claudeModelFamily buckets aliases and concrete ids by substring, null otherwise', () => {
+    expect(claudeModelFamily('opus')).toBe('opus');
+    expect(claudeModelFamily('claude-opus-4-8[1m]')).toBe('opus');
+    expect(claudeModelFamily('claude-fable-5-1')).toBe('fable');
+    expect(claudeModelFamily('gpt-5.6-sol')).toBeNull();
+    expect(claudeModelFamily(null)).toBeNull();
+  });
+});
+
+describe('stepModelKey', () => {
+  it('distinguishes the same step id in different phases', () => {
+    expect(stepModelKey('a', 'human-review')).not.toBe(stepModelKey('b', 'human-review'));
   });
 });
