@@ -6,6 +6,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled Codex CLI upgraded 0.153.3 → 0.156.1** (`@openai/codex`). The server only offers the
+  GPT-6 family (`gpt-6-sol`, `gpt-6-luna`) to 0.156+ clients, so they now appear in the Codex model
+  picker. The app-server protocol change is additive for every method Cyboflow uses (the unused
+  `thread/rollback` was removed; `personality` is deprecated).
+
 ## [0.4.3] — 2026-09-21
 
 ### Added
