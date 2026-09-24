@@ -3,7 +3,7 @@
  * role="status" for the shared auto-dismissing toast.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SessionActionToast } from '../SessionActionToast';
 
@@ -37,9 +37,21 @@ describe('SessionActionToast', () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
-  it('has role="status" so the message is announced', () => {
+  it('has role="status" so the message is announced', async () => {
     render(<SessionActionToast message="Saved" isVisible onDismiss={vi.fn()} />);
-    expect(screen.getByRole('status')).toHaveTextContent('Saved');
+    // The live region is present synchronously but starts EMPTY, and the text
+    // lands one tick later as a mutation on the already-mounted node — see
+    // SessionActionToast's `liveRegionRef` doc: a live region inserted
+    // together with its own text is commonly never announced by screen
+    // readers.
+    expect(screen.getByRole('status')).toHaveTextContent('');
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved'));
+  });
+
+  it('mounts the role="status" live region even before the toast becomes visible', () => {
+    render(<SessionActionToast message="Saved" isVisible={false} onDismiss={vi.fn()} />);
+    expect(screen.getByRole('status')).toHaveTextContent('');
+    expect(screen.queryByTestId('session-action-toast')).not.toBeInTheDocument();
   });
 
   it('defaults durationMs to 3000 and auto-dismisses at exactly that delay', () => {
@@ -47,10 +59,14 @@ describe('SessionActionToast', () => {
     const onDismiss = vi.fn();
     render(<SessionActionToast message="Saved" isVisible onDismiss={onDismiss} />);
 
-    vi.advanceTimersByTime(2999);
+    act(() => {
+      vi.advanceTimersByTime(2999);
+    });
     expect(onDismiss).not.toHaveBeenCalled();
 
-    vi.advanceTimersByTime(1);
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
@@ -59,10 +75,14 @@ describe('SessionActionToast', () => {
     const onDismiss = vi.fn();
     render(<SessionActionToast message="Saved" isVisible onDismiss={onDismiss} durationMs={9000} />);
 
-    vi.advanceTimersByTime(8999);
+    act(() => {
+      vi.advanceTimersByTime(8999);
+    });
     expect(onDismiss).not.toHaveBeenCalled();
 
-    vi.advanceTimersByTime(1);
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
@@ -84,17 +104,25 @@ describe('SessionActionToast', () => {
     const toast = screen.getByTestId('session-action-toast');
 
     // Reach for the toast just before it would dismiss.
-    vi.advanceTimersByTime(2500);
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
     fireEvent.mouseEnter(toast);
 
     // Well past the original deadline — paused, so no dismiss yet.
-    vi.advanceTimersByTime(5000);
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
     expect(onDismiss).not.toHaveBeenCalled();
 
     fireEvent.mouseLeave(toast);
-    vi.advanceTimersByTime(2999);
+    act(() => {
+      vi.advanceTimersByTime(2999);
+    });
     expect(onDismiss).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
@@ -128,14 +156,20 @@ describe('SessionActionToast', () => {
 
     const button = screen.getByTestId('session-action-toast-action');
 
-    vi.advanceTimersByTime(2500);
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
     fireEvent.focus(button);
 
-    vi.advanceTimersByTime(5000);
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
     expect(onDismiss).not.toHaveBeenCalled();
 
     fireEvent.blur(button);
-    vi.advanceTimersByTime(3000);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });

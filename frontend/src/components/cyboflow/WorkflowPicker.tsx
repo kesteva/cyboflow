@@ -762,6 +762,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       undefined,
       providerForRuntime(sessionRuntime),
       sessionRuntime,
+      // This surface has no effort control (see isSaveDefaultDirty's comment
+      // above), so there is nothing to honor a "touched" override for — the
+      // stored/global quick effort resolved by `quickDefaults` above is
+      // forwarded verbatim, matching useQuickSession.startWithDefaults and
+      // SessionStartWizard's other quick-launch paths.
+      quickDefaults.reasoningEffort,
     );
   }, [
     agentRuntime,
@@ -973,7 +979,13 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           size="sm"
           fullWidth
           onClick={handleSaveDefault}
-          disabled={isSavingDefault}
+          // Gated the same as Start Run: a runtime this flow cannot actually
+          // launch on (e.g. Codex PTY) must not be persisted as its default —
+          // the launcher would refuse it on every future launch, and the
+          // Settings detail screen's runtime <select> has no matching option
+          // to even show it back (agentRuntimeOptions narrows to
+          // WORKFLOW_AGENT_RUNTIMES for a `workflow:<id>` key).
+          disabled={isSavingDefault || workflowRuntimeBlocked}
           data-testid="workflow-picker-save-default"
         >
           Save as default for {selectedWorkflowTitle}

@@ -92,6 +92,14 @@ export interface SessionSettingsProps {
   onCodeReviewEvalEnabledChange: (enabled: boolean) => void;
   autoGradeVariantRuns: boolean;
   onAutoGradeVariantRunsChange: (enabled: boolean) => void;
+  /**
+   * Bubbled straight from `RunTypeOverridesSection`'s `onDetailScreenOpenChange`
+   * — see that prop's doc. `Settings.tsx` uses it to disable the modal's shared
+   * footer Save while a `RunTypeOverrideDetail` draft is in progress, since that
+   * footer's `handleSubmit` neither includes `runTypeDefaults` in its payload
+   * nor knows the sub-screen exists.
+   */
+  onRunTypeOverrideDetailOpenChange?: (open: boolean) => void;
 }
 
 export function SessionSettings({
@@ -118,6 +126,7 @@ export function SessionSettings({
   onCodeReviewEvalEnabledChange,
   autoGradeVariantRuns,
   onAutoGradeVariantRunsChange,
+  onRunTypeOverrideDetailOpenChange,
 }: SessionSettingsProps): React.JSX.Element {
   // Two independent reasons to omit a runtime. `selectableInPickers` is the
   // capability answer to "may ANY picker offer this?" — false for a runtime with
@@ -666,7 +675,7 @@ export function SessionSettings({
             the dedicated `applyRunTypeDefault` IPC op rather than this group's
             props-in/callback-out contract — see RunTypeOverrideDetail's module
             doc for why Settings.tsx's shared handleSubmit is the wrong channel. */}
-        <RunTypeOverridesSection />
+        <RunTypeOverridesSection onDetailScreenOpenChange={onRunTypeOverrideDetailOpenChange} />
       </CollapsibleCard>
     </section>
   );

@@ -24,8 +24,12 @@ export interface AppConfig {
   // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
   // synthetic global `quick` key. This field is intentionally NOT seeded into
   // ConfigManager's constructor defaults, so config.json stays byte-identical
-  // for users who never touch it. It is omitted from UpdateConfigRequest:
-  // writes use the dedicated IPC operation so the two channels cannot race.
+  // for users who never touch it. Writes use the dedicated
+  // config.applyRunTypeDefault mutation, not the generic config.update, so the
+  // two channels cannot race — enforced on the frontend side by
+  // `UpdateAppConfigRequest` below (the type configStore.updateConfig actually
+  // takes), and on main's side by `UpdateConfigRequest`
+  // (main/src/types/config.ts), which omits this field from its own shape.
   runTypeDefaults?: Record<string, RunTypeDefaults>;
   // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
   // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to the app's default model.
@@ -189,3 +193,16 @@ export interface AppConfig {
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
 }
+
+/**
+ * The type frontend callers of the generic `config:update` channel are typed
+ * against (configStore.updateConfig, and transitively API.config.update).
+ * Excludes `runTypeDefaults`: that field's exclusive write channel is
+ * `config.applyRunTypeDefault` (see AppConfig.runTypeDefaults above), so a
+ * caller typed against the full `AppConfig` could otherwise compile a write
+ * that clobbers the whole map through this generic channel instead — the
+ * exact race the dedicated operation exists to prevent. Mirrors main's
+ * `UpdateConfigRequest` (main/src/types/config.ts) on the other side of the
+ * IPC boundary.
+ */
+export type UpdateAppConfigRequest = Omit<AppConfig, 'runTypeDefaults'>;
