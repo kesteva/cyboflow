@@ -22,6 +22,7 @@ import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
+import { WebViewTab } from './WebViewTab';
 import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
@@ -249,6 +250,9 @@ export function RunCenterPane({
           scope={activeTab.scope}
         />
       );
+    }
+    if (activeTab.kind === 'web') {
+      return <WebViewTab tab={activeTab} />;
     }
     if (activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (

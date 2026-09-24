@@ -50,6 +50,7 @@ import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
+import { WebViewTab } from './WebViewTab';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
@@ -151,6 +152,9 @@ export function QuickSessionCenterPane({
           scope={activeTab.scope}
         />
       );
+    }
+    if (activeTab && activeTab.kind === 'web') {
+      return <WebViewTab tab={activeTab} />;
     }
     if (activeTab && activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (

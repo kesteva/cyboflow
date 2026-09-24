@@ -3,13 +3,16 @@
  * "Tabbed center pane").
  *
  * Per running session the center column holds a strip of tabs over a content
- * area, with a collapsible terminal dock pinned below. There are three tab kinds:
+ * area, with a collapsible terminal dock pinned below. The tab kinds are:
  *   - `flow`     — the pinned, non-closeable home tab (workflow graph / sprint
  *                  swimlanes). Exactly one per session.
  *   - `file`     — a file/diff opened from the File Explorer (closeable). Carries
  *                  the run worktree path + git status letter.
  *   - `artifact` — a run deliverable (idea spec, stories, screenshots, ui
  *                  prototype, …) rendered as a template or a live canvas.
+ *   - `web`      — a web page rendered by a main-process WebContentsView, opened
+ *                  from a chat/transcript link or by an agent (closeable). See
+ *                  docs/proposals/native-web-viewer.md.
  *
  * Tab state is per-session and IN-MEMORY only (a Zustand slice; no DB / no
  * localStorage). It persists across sequential runs within a session and resets
@@ -27,10 +30,18 @@ import { isPerEntityArtifact, type ArtifactType } from './artifacts';
 import type { DiffGroupScope } from './runFiles';
 
 /** Tab kind discriminant. */
-export type TabKind = 'flow' | 'file' | 'artifact' | 'approved-design';
+export type TabKind = 'flow' | 'file' | 'artifact' | 'approved-design' | 'web';
 
 /** Which right-rail tab is showing (Workflow steps vs. Artifacts). */
 export type RightRailTab = 'steps' | 'arts';
+
+/**
+ * Who opened a web tab. Load-bearing well past presentation: it selects the
+ * cookie partition (persistent for `user`, per-session ephemeral for `agent`)
+ * and, with {@link TabItem.openedByRunId} and {@link TabItem.humanTouched},
+ * decides whether an agent may read the tab without asking.
+ */
+export type WebTabOpener = 'user' | 'agent';
 
 /** Git status letter for a file tab's glyph (Modified / Added / other). */
 export type FileTabStatus = 'M' | 'A' | '?';
@@ -41,6 +52,8 @@ export type FileTabStatus = 'M' | 'A' | '?';
  *   - `file`             → `filePath`, `worktreePath`, `status`.
  *   - `artifact`         → `atype`, `artifactId`, `committed`.
  *   - `approved-design`  → `ideaId`, `ideaRef`.
+ *   - `web`              → `initialUrl`, `currentUrl`, `openedBy`,
+ *                          `openedByRunId`, `humanTouched`.
  * `isNew` (artifact tabs) drives the pulsing rust dot until the tab is focused.
  */
 export interface TabItem {
@@ -105,6 +118,43 @@ export interface TabItem {
   ideaId?: string;
   /** The idea's display ref (e.g. `IDEA-014`), shown in the tab header. */
   ideaRef?: string;
+
+  // --- web tabs ---
+  /**
+   * The URL the tab was OPENED with (web tabs). Immutable for the life of the
+   * tab, and what a restore re-navigates to — unlike {@link TabItem.currentUrl},
+   * which the page itself moves.
+   */
+  initialUrl?: string;
+  /**
+   * Where the tab is NOW (web tabs) — rewritten on `did-navigate`,
+   * `did-navigate-in-page` and restore. In-page navigation matters here:
+   * `history.pushState` and hash changes do not fire `did-navigate`, so without
+   * tracking them separately this silently goes stale while the visible route
+   * moves (and the route can carry the sensitive part of the URL).
+   */
+  currentUrl?: string;
+  /** Who opened this tab (web tabs) — selects the cookie partition. */
+  openedBy?: WebTabOpener;
+  /**
+   * The run that opened this tab (web tabs), when `openedBy === 'agent'`.
+   *
+   * This is the OWNER, and it is why free agent observation is safe: pages in
+   * one partition share a session, so without an owner any run could read any
+   * historical agent tab — and a human who authenticated inside an agent tab
+   * would expose that origin to every other run sharing the jar. Only the
+   * owning run observes its own tab for free; every other run reads it under
+   * the human-tab (consent-gated) rules.
+   */
+  openedByRunId?: string;
+  /**
+   * Set once a real user input lands in this view (web tabs), and persisted.
+   *
+   * The human-interaction tripwire: from then on EVERY agent read is
+   * consent-gated regardless of `openedBy`, because the user may have just
+   * typed a credential into an agent-opened tab.
+   */
+  humanTouched?: boolean;
 }
 
 /** Per-session center-pane state. */
@@ -152,6 +202,26 @@ export function artifactTabId(atype: ArtifactType, artifactId?: string, external
     return `art:${atype}:${artifactId}`;
   }
   return `art:${atype}`;
+}
+
+/**
+ * Mint a web tab id. Deliberately OPAQUE — a random uuid, not a function of the
+ * URL, unlike every other helper here.
+ *
+ * `fileTabId`, `artifactTabId` and `approvedDesignTabId` all key on something
+ * immutable. A web tab's URL is not: the first click moves it. Keying on the URL
+ * would mean the tab's identity drifted out from under the manager's map, the
+ * `session_web_tabs` row, the consent grants and the telemetry cursor — all of
+ * which correlate on THIS id. It is minted once, at open, and reused verbatim on
+ * restore; re-minting would orphan every one of those.
+ */
+export function makeWebTabId(): string {
+  return `web:${crypto.randomUUID()}`;
+}
+
+/** Whether a tab id was minted by {@link makeWebTabId}. */
+export function isWebTabId(id: string): boolean {
+  return id.startsWith('web:');
 }
 
 /**

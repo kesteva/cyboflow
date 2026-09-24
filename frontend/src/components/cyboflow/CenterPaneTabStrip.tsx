@@ -38,6 +38,14 @@ const STATUS_A = 'var(--color-status-success)';
 // ARTIFACT_COLORS/ARTIFACT_GLYPHS.
 const DESIGN_ACCENT = '#b2478a';
 const DESIGN_GLYPH = '◈';
+// web tabs have no atype either. NO FAVICON in v1, deliberately: the strip is
+// text glyphs by design, and the packaged renderer CSP's `img-src` would block a
+// remote favicon — dev would look right and every shipped build would not.
+const WEB_ACCENT = 'var(--color-status-info)';
+const WEB_GLYPH = '◍';
+// An agent-opened tab is visually distinct: the user did not open it, so the
+// strip says so rather than letting it pass for one of their own tabs.
+const WEB_AGENT_GLYPH = '◎';
 
 interface CenterPaneTabStripProps {
   tabs: TabItem[];
@@ -51,6 +59,7 @@ function edgeColor(tab: TabItem): string {
   if (tab.kind === 'flow') return INK;
   if (tab.kind === 'file') return FILE_EDGE;
   if (tab.kind === 'approved-design') return DESIGN_ACCENT;
+  if (tab.kind === 'web') return WEB_ACCENT;
   return ARTIFACT_COLORS[tab.atype ?? 'generic'];
 }
 
@@ -59,6 +68,7 @@ function tabGlyph(tab: TabItem, canvas: boolean): string {
   if (tab.kind === 'flow') return '▦';
   if (tab.kind === 'file') return tab.status ?? '·';
   if (tab.kind === 'approved-design') return DESIGN_GLYPH;
+  if (tab.kind === 'web') return tab.openedBy === 'agent' ? WEB_AGENT_GLYPH : WEB_GLYPH;
   return canvas ? '◳' : ARTIFACT_GLYPHS[tab.atype ?? 'generic'];
 }
 
@@ -95,11 +105,12 @@ export function CenterPaneTabStrip({
           const edge = edgeColor(tab);
           const isArtifact = tab.kind === 'artifact';
           const isDesign = tab.kind === 'approved-design';
+          const isWeb = tab.kind === 'web';
           const canvas = isArtifact && isCanvasArtifact(tab.atype ?? 'generic');
           const ephemeral = isArtifact && !tab.committed;
           const glyph = tabGlyph(tab, canvas);
 
-          const labelColor = active ? (isArtifact || isDesign ? edge : INK) : FAINT;
+          const labelColor = active ? (isArtifact || isDesign || isWeb ? edge : INK) : FAINT;
 
           const wrapStyle: React.CSSProperties = {
             display: 'flex',
@@ -127,9 +138,10 @@ export function CenterPaneTabStrip({
             ...(ephemeral ? { fontStyle: 'italic' } : null),
           };
 
-          // Artifact / approved-design glyphs render inside an 18×18 chip
-          // (solid=template, dashed=canvas; approved-design is always solid).
-          const glyphStyle: React.CSSProperties = isArtifact || isDesign
+          // Artifact / approved-design / web glyphs render inside an 18×18 chip
+          // (solid=template, dashed=canvas; approved-design and web are always
+          // solid — `canvas` is false for both, since it reads `tab.atype`).
+          const glyphStyle: React.CSSProperties = isArtifact || isDesign || isWeb
             ? {
                 flexShrink: 0,
                 fontSize: '10px',
