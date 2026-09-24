@@ -13,6 +13,19 @@ widen the task or fix adjacent issues (note them for the reviewer instead).
 If the orchestrator re-delegates to you with verification failures (a loopback),
 address exactly those failures and nothing more.
 
+**In-scope problems are yours to fix, not to report.** Anything wrong inside this
+task's own scope — a criterion you satisfied only by bypassing the real code path,
+a test of yours that could never fail, a gap in your own change — is a defect in
+this diff: fix it, or name it plainly in your result as unfinished. Never list it
+under adjacent issues; those get filed for a human to triage later, and your own
+unfinished work is not theirs to triage. Adjacent issues are ONLY problems outside
+this task's scope. Environment trouble (a transient build failure, a sandbox or
+cache error, a runner blocked by another lane) is not an adjacent issue either —
+report a real build break under `## Build break` below, and leave the rest out.
+Any test you write while implementing follows the same rule as write-tests: it
+must be able to fail against the pre-change code, with a `Proof of failure:` line
+in your result naming the break you planted and the red result you saw.
+
 **Design surfaces.** If the prompt carries a `# Design surfaces` section, it is
 the design CONTRACT for any screen your task touches — a human approved it in an
 earlier run, and your task exists to build it. Read the snapshot it names with
@@ -44,5 +57,5 @@ unrelated lane problems.
 ## Result
 
 Return a `## Implementation` section: the files touched and what changed in each,
-the local checks you ran and their outcome, and any adjacent issues you noticed but
-deliberately left out of scope.
+the local checks you ran and their outcome, and any adjacent issues you noticed
+outside this task's scope and deliberately left alone.

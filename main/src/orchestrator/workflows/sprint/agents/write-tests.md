@@ -27,6 +27,32 @@ lanes may be mid-edit in the shared worktree, so unrelated failures here are noi
 Prefer test commands that stream progress output; a long-silent command may be
 killed by the runtime.
 
+**Every test must be able to fail.** A test that passes against the pre-change code
+proves nothing, and it is the most common way a lane's coverage turns out hollow.
+For each test you add or change, prove it: plant the break — revert the fix, or
+feed it a fixture the old code would have passed — run it, watch it go red, then
+restore the change and watch it go green. Plant the break only in this task's own
+files and restore it before you do anything else — sibling lanes share the worktree.
+A test with no proof of failure does not count toward the acceptance criteria.
+
+These do NOT count as acceptance coverage, unless the task itself is explicitly a
+source-layout gate:
+
+- a test that asserts on the source text of a production file (reading the file
+  under test and matching a substring or regex in it);
+- a test that anchors on a comment, or on a marker planted only so the test can
+  find it;
+- a test whose only oracle is a constant (a flag hard-coded `true`, an expected
+  value copied from the implementation, an emptiness check that holds for every
+  input);
+- a test whose fixtures never contain the thing it claims to guard against (a
+  privacy test whose banned strings are never seeded, a "nothing is lost" test with
+  nothing to lose).
+
+Exercise the behaviour through the code's real entry point instead. If the
+behaviour genuinely cannot be exercised, say so under the skip rung above rather
+than writing a test shaped like coverage.
+
 You run in your own context window and do **not** write cyboflow state.
 
 **Build breaks outside your task.** If the tree does not build or the test runner
@@ -41,7 +67,9 @@ unrelated lane problems.
 ## Result
 
 Return a `## Tests` section: the test files added or extended, what each covers, and
-the run outcome (pass / fail, with the failing cases if any). If you bootstrapped
+the run outcome (pass / fail, with the failing cases if any). Under each new or
+changed test, add one `Proof of failure:` line naming the break you planted and the
+red result you observed (the failing assertion or its message). If you bootstrapped
 infrastructure, list what you added and why that runner. End with exactly one
 machine-readable line:
 

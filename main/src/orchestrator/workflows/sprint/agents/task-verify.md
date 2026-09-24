@@ -25,6 +25,17 @@ shared worktree, so full-suite results here are noise). On a loopback re-verify
 a fix that satisfies the failed criterion but breaks the task's tests is still a
 `FAIL`, with that breakage in the fix guidance.
 
+**Hollow tests are not evidence.** A criterion whose only evidence is a test that
+would pass against the pre-change code is `not met`. That includes a test asserting
+on the source text of a production file, one anchored on a comment or planted
+marker, one whose only oracle is a constant, and one whose fixtures never contain
+what it claims to guard against — unless the criterion is itself a source-layout
+gate. When a test is your evidence, check the `Proof of failure:` line write-tests
+reported for it. If there is none, or the planted break does not touch the
+behaviour the criterion names, mark the criterion `not met` and say in the fix
+guidance which test needs a real proof of failure. Do not plant breaks yourself —
+you never edit the shared worktree.
+
 **Design surfaces.** When the prompt carries a `# Design surfaces` section whose
 screens this task touches, add TWO criteria to your `## Criteria` section
 regardless of what the task text says — the design was approved by a human and the
