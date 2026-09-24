@@ -547,7 +547,11 @@ socket as JSON and is re-typed by a blind `parsed as McpQueryMessage` cast, so b
 a mis-renamed camelCase key compiled and arrived at the handler as `undefined`. The
 declaration/validation/dispatch lockstep is held by
 `mcpServer/__tests__/toolRegistryRatchet.test.ts`. Adding a tool means adding one entry; see
-`docs/CODE-PATTERNS.md` → "`cyboflow_*` MCP tools are declared ONCE".
+`docs/CODE-PATTERNS.md` → "`cyboflow_*` MCP tools are declared ONCE". On the orchestrator side
+`McpQueryHandler` only dispatches: each tool family's handler bodies live in
+`mcpServer/handlers/` (one class per family, composed with the handler's shared run guards as
+closures), so a new tool's handler goes in its family's file, not back into `mcpQueryHandler.ts`
+(its size is capped by `main/src/__tests__/fileSizeRatchet.test.ts`).
 
 ### Telemetry (`main/src/services/telemetry/`)
 
