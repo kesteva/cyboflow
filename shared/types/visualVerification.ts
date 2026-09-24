@@ -1470,7 +1470,9 @@ export interface VisualVerifyConfig {
   mobileDeadlineFloorMs?: number;
   /**
    * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time,
-   * measured from `enqueued_at` (redesign §5.6). A row that has not acquired its
+   * measured from max(enqueue, last drain progress) and hard-capped at
+   * ceiling + 2 × AGENT_REQUEST_TIMEOUT_CEILING_MS from enqueue (redesign §5.6;
+   * main/src/orchestrator/verify/queuedAgeDeadline.ts). A row that has not acquired its
    * lease within this window is terminalized 'skipped' (fail-open, concrete lease
    * reason) instead of sitting `queued` forever while a merge-gate lane waits.
    * Default 15 min ({@link DEFAULT_QUEUED_AGE_CEILING_MS}).
@@ -1559,11 +1561,17 @@ export interface ResolvedVisualVerifyConfig {
 export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [29260, 29262, 29264, 29266, 29268] as const;
 
 /**
- * The default enqueue-age ceiling — 15 minutes covering a request's QUEUED +
- * lease-wait time (redesign §5.6). Sized above the 10-minute default agent
- * deadline (a request that DID lease its slot may legitimately run ~10 min), so
- * this ceiling only bites a row that never got a lease at all (persistent
- * contention / a wedged pool) rather than one that is simply running long.
+ * The default queued-age ceiling — 15 minutes a `queued` request may wait
+ * without the scheduler making progress (redesign §5.6, amended by
+ * runbook-optional-verification A9). The clock runs from max(enqueue, the last
+ * drain pass that settled in-flight work), not from enqueue alone: an agent
+ * request may hold its slot for up to the 20-minute
+ * AGENT_REQUEST_TIMEOUT_CEILING_MS, longer than this ceiling, so an
+ * enqueue-anchored clock expired the rows queued behind it at the very pass
+ * that freed their lease. The 15 minutes are therefore sized against a WEDGED
+ * pool (no pass settles anything), not against run length. An outer hard cap
+ * of this ceiling + 2 × that agent ceiling (55 min by default), measured from
+ * enqueue, bounds a row that keeps losing its lease while other traffic moves.
  */
 export const DEFAULT_QUEUED_AGE_CEILING_MS = 15 * 60 * 1000;
 

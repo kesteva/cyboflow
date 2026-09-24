@@ -541,8 +541,10 @@ export interface VerificationSchedulerDeps {
   portFreeProbe?: (port: number) => Promise<boolean>;
   /**
    * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time
-   * (redesign §5.6). A row whose `enqueued_at` is older than this at drain time —
-   * i.e. it never acquired a lease within the window — is terminalized 'skipped'
+   * (redesign §5.6), measured from max(enqueue, last drain progress) and
+   * hard-capped at ceiling + 2 × AGENT_REQUEST_TIMEOUT_CEILING_MS from enqueue
+   * (queuedAgeDeadline.ts). A row past it at drain time — i.e. it never acquired
+   * a lease within the window — is terminalized 'skipped'
    * (fail-open, concrete lease reason) through the normal delivery path so a
    * merge-gate lane parked at awaiting-verify is never wedged behind a starved
    * request. Defaults to config.queuedAgeCeilingMs (15 min). Tests pass a small

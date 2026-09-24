@@ -91,6 +91,7 @@ import type {
   VerificationRequestSummary,
 } from './verificationRequestRows';
 import { TerminalDelivery } from './terminalDelivery';
+import { QueuedAgeDeadline } from './queuedAgeDeadline';
 import { CapturePipeline } from './capturePipeline';
 import { AgentEngine } from './agentEngine';
 
@@ -192,7 +193,6 @@ export class VerificationScheduler {
   private readonly requestTimeoutMs: number;
   private readonly devServerContextResolver?: DevServerContextResolver;
   private readonly now: () => number;
-  private readonly queuedAgeCeilingMs: number;
   private readonly legacyKillSwitch: () => boolean;
   private readonly runbookStatus: (
     projectId: number,
@@ -203,14 +203,13 @@ export class VerificationScheduler {
   private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
-   * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
-   * fires nudge() at the earliest queued-age expiry so a starved row is terminalized
-   * even when NO lease release / enqueue would otherwise wake the drain (the
-   * hasQueuedRequests re-nudge only fires when this pass leased in-flight work). One
-   * timer at a time — re-armed at the end of every drain pass, cleared when the
-   * queue empties. Never a second drain loop; it merely wakes the existing one.
+   * The §5.6 queued-age deadline — its progress-aware anchor (A9) and the single
+   * COALESCED fallback timer that nudge()s the drain at the earliest expiry, so a
+   * starved row is terminalized even when NO lease release / enqueue would wake the
+   * drain (the hasQueuedRequests re-nudge only fires when a pass leased work). Owned
+   * by {@link QueuedAgeDeadline} (queuedAgeDeadline.ts); the SELECTs stay here.
    */
-  private queuedAgeTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly queuedAge: QueuedAgeDeadline;
 
   /**
    * Terminal write + verdict delivery (§5.6 delivery outbox), including the
@@ -274,7 +273,10 @@ export class VerificationScheduler {
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.devServerContextResolver = deps.devServerContextResolver;
     this.now = deps.now ?? (() => Date.now());
-    this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
+    this.queuedAge = new QueuedAgeDeadline({
+      ceilingMs: deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs,
+      now: this.now,
+    });
     this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
@@ -1039,9 +1041,9 @@ export class VerificationScheduler {
    */
   async drain(): Promise<void> {
     // §5.6 queued-age deadline: BEFORE lease selection, terminalize any queued row
-    // whose enqueue-age exceeds the ceiling (it never leased in time). Runs every
-    // pass so a released-lease re-nudge OR the fallback timer both expire starved
-    // rows through the normal delivery path. Expired rows drop out of selectQueued.
+    // that has aged past the ceiling (it never leased in time). Runs every pass so
+    // a released-lease re-nudge OR the fallback timer both expire starved rows
+    // through the normal delivery path. Expired rows drop out of selectQueued.
     await this.expireOverAgeQueued();
 
     // §5.4 priority classes, applied to the FIFO SELECT rather than folded into
@@ -1067,6 +1069,9 @@ export class VerificationScheduler {
     }
     if (inFlight.length > 0) {
       await Promise.allSettled(inFlight);
+      // A9: the pool moved, so every still-queued row's ceiling restarts from here —
+      // a row queued behind a long run is not expired at the boundary that frees it.
+      this.queuedAge.markProgress();
       // RE-NUDGE ON LEASE RELEASE (R1 #2): the in-flight work we just awaited has
       // released its lease(s). A row left 'queued' this pass may have been blocked
       // ONLY on a lease that just freed (lease contention — e.g. two lanes wanting
@@ -1091,33 +1096,29 @@ export class VerificationScheduler {
   }
 
   /**
-   * Terminalize every 'queued' row whose enqueue-age exceeds `queuedAgeCeilingMs`
-   * (§5.6) as 'skipped' (fail-open) with the concrete lease/queue reason, through
-   * the NORMAL markTerminalAndDeliver path (never a silent UPDATE) so its parked
-   * merge-gate lane is driven off awaiting-verify with a non-blocking finding.
-   * Returns the count expired. Fail-soft per row: a delivery throw is swallowed by
-   * markTerminalAndDeliver's own wrapper. The cancel-guarded markTerminal means a
-   * row swept concurrently to 'timeout' is a 0-change no-op (no double delivery).
+   * Terminalize every 'queued' row past its queued-age deadline (§5.6; the anchor
+   * and hard cap are {@link QueuedAgeDeadline}'s) as 'skipped' (fail-open) with the
+   * concrete lease/queue reason, through the NORMAL markTerminalAndDeliver path
+   * (never a silent UPDATE) so its parked merge-gate lane is driven off
+   * awaiting-verify with a non-blocking finding. Returns the count expired.
+   * Fail-soft per row: a delivery throw is swallowed by markTerminalAndDeliver's
+   * own wrapper. The cancel-guarded markTerminal means a row swept concurrently to
+   * 'timeout' is a 0-change no-op (no double delivery).
    */
   private async expireOverAgeQueued(): Promise<number> {
     const nowMs = this.now();
     const rows = this.selectQueued();
     let expired = 0;
     for (const row of rows) {
-      const enqueuedMs = Date.parse(row.enqueued_at);
-      // An unparseable enqueued_at (should not happen — the column is a DB default
-      // ISO string) is treated as NOT expired so a clock/parse glitch never mass-
-      // skips the live backlog.
-      if (!Number.isFinite(enqueuedMs)) continue;
-      const ageMs = nowMs - enqueuedMs;
-      if (ageMs < this.queuedAgeCeilingMs) continue;
+      // null ⇒ within its deadline, or an unparseable enqueued_at (never mass-skip).
+      const error = this.queuedAge.overAgeError(row, nowMs);
+      if (error === null) continue;
       const input = parseRequestInput(row.deliverable_json) ?? undefined;
-      const ageMin = Math.round(ageMs / 60000);
       await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         {
-          error: `queued-age deadline exceeded — request never acquired a lease within ${ageMin} min (persistent resource contention or a wedged pool)`,
+          error,
           ...(this.isAgentEngineRequest(row) ? { captureOrigin: 'agent' as const } : {}),
         },
         undefined,
@@ -1135,32 +1136,15 @@ export class VerificationScheduler {
   /**
    * Arm the single coalesced queued-age fallback timer at the EARLIEST remaining
    * queued-age expiry, or clear it when nothing is queued (§5.6). Re-armed at the
-   * end of every drain pass — cheap (one min-scan + one setTimeout). On fire it
-   * calls nudge(), funneling into the EXISTING drain loop (no second loop); the
-   * next drain's expireOverAgeQueued does the terminalization. `unref`ed so it
-   * never keeps the process alive.
+   * end of every drain pass — cheap (one index-only scan + one setTimeout). On fire
+   * it calls nudge(), funneling into the EXISTING drain loop (no second loop); the
+   * next drain's expireOverAgeQueued does the terminalization, on the same anchor.
    */
   private armQueuedAgeTimer(): void {
-    if (this.queuedAgeTimer !== null) {
-      clearTimeout(this.queuedAgeTimer);
-      this.queuedAgeTimer = null;
-    }
-    const row = this.db
-      .prepare(`SELECT MIN(enqueued_at) AS earliest FROM verification_requests WHERE status = 'queued'`)
-      .get() as { earliest: string | null } | undefined;
-    const earliest = row?.earliest ?? null;
-    if (earliest === null) return; // nothing queued — no timer
-    const earliestMs = Date.parse(earliest);
-    if (!Number.isFinite(earliestMs)) return;
-    const delay = Math.max(0, earliestMs + this.queuedAgeCeilingMs - this.now());
-    const timer = setTimeout(() => {
-      this.queuedAgeTimer = null;
-      this.nudge();
-    }, delay);
-    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
-      (timer as { unref: () => void }).unref();
-    }
-    this.queuedAgeTimer = timer;
+    const rows = this.db
+      .prepare(`SELECT enqueued_at FROM verification_requests WHERE status = 'queued'`)
+      .all() as Array<{ enqueued_at: string | null }>;
+    this.queuedAge.arm(rows, () => this.nudge());
   }
 
   /** True when at least one request row is still awaiting a drain ('queued'). */
