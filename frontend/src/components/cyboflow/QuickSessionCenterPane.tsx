@@ -51,6 +51,7 @@ import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
 import { WebViewTab } from './WebViewTab';
+import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
@@ -138,6 +139,10 @@ export function QuickSessionCenterPane({
   // resting quick session is visually unchanged from before.
   const showStrip = pane.tabs.length > 1;
 
+  // Native web viewer: relay chords swallowed by a focused view, turn page
+  // popups into tabs, and follow main's teardown. See useWebViewerBridge.
+  useWebViewerBridge(sessionKey);
+
   const renderActiveTab = (): ReactElement => {
     if (activeTab && activeTab.kind === 'file' && activeTab.filePath) {
       // The diff/content source is the pane's session key; an optional
@@ -154,7 +159,7 @@ export function QuickSessionCenterPane({
       );
     }
     if (activeTab && activeTab.kind === 'web') {
-      return <WebViewTab tab={activeTab} />;
+      return <WebViewTab tab={activeTab} sessionKey={sessionKey} active />;
     }
     if (activeTab && activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (

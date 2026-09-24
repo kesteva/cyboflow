@@ -23,6 +23,7 @@ import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
 import { WebViewTab } from './WebViewTab';
+import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
@@ -237,6 +238,10 @@ export function RunCenterPane({
     );
   };
 
+  // Native web viewer: relay chords swallowed by a focused view, turn page
+  // popups into tabs, and follow main's teardown. See useWebViewerBridge.
+  useWebViewerBridge(sessionKey);
+
   const renderActiveTab = (): ReactElement => {
     if (!activeTab || activeTab.kind === 'flow') return renderFlow();
     if (activeTab.kind === 'file' && activeTab.filePath) {
@@ -252,7 +257,7 @@ export function RunCenterPane({
       );
     }
     if (activeTab.kind === 'web') {
-      return <WebViewTab tab={activeTab} />;
+      return <WebViewTab tab={activeTab} sessionKey={sessionKey} active />;
     }
     if (activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (

@@ -318,6 +318,7 @@ import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
+import { composeWebViewer } from './webViewerComposition';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -949,6 +950,15 @@ let sessionGitOps: SessionGitOpsLike | undefined;
 let sessionOps: SessionOpsLike | undefined;
 
 /**
+ * The native web viewer's manager + event channels (webViewerComposition.ts).
+ * Same lazy-holder reason as the two above: composed inside initializeServices
+ * (it needs configManager + sessionManager), read per request by the context
+ * factory. Undefined ⇒ the webViewer router reports PRECONDITION_FAILED and its
+ * subscriptions complete immediately.
+ */
+let webViewerComposition: ReturnType<typeof composeWebViewer> | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -981,6 +991,8 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         db,
         configOps,
         gitPrerequisiteOps,
+        webViewer: webViewerComposition?.webViewer,
+        webViewerEvents: webViewerComposition?.webViewerEvents,
         claudeAuthOps: claudeAuthOps ?? undefined,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
@@ -2289,6 +2301,17 @@ async function initializeServices(): Promise<boolean> {
     emptyWorktreeStatus: EMPTY_WORKTREE_STATUS,
     appVersion: app.getVersion(),
     runbookBootstrapStamps,
+  });
+
+  // Native web viewer — the WebContentsView manager, its context menu and its
+  // teardown hooks (docs/proposals/native-web-viewer.md). Composed in
+  // webViewerComposition.ts (a sibling, like verifyComposition above: it imports
+  // electron and concrete services, so it may not live under orchestrator/**).
+  webViewerComposition = composeWebViewer({
+    configManager,
+    sessionManager,
+    getMainWindow: () => mainWindow,
+    devMode: !app.isPackaged,
   });
 
   // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically

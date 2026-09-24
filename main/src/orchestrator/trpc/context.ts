@@ -36,6 +36,7 @@ import type {
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
+import type { WebViewerEventsLike, WebViewerLike } from './contracts/webViewerOps';
 import type { ClaudeAuthOpsLike } from './contracts/claudeAuthOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
@@ -554,6 +555,23 @@ export interface ContextDeps {
   gitPrerequisiteOps?: GitPrerequisiteOpsLike;
 
   /**
+   * The native web viewer's view manager (the `webViewer` router's business
+   * logic — docs/proposals/native-web-viewer.md). Injected from
+   * `main/src/webViewerComposition.ts`; the narrow {@link WebViewerLike} keeps
+   * the standalone-typecheck invariant, since the concrete manager imports
+   * `electron`. `undefined` (the unit-test default, and the default whenever the
+   * viewer is disabled) ⇒ PRECONDITION_FAILED.
+   */
+  webViewer?: WebViewerLike;
+
+  /**
+   * The viewer's event channels, bridged into the router's subscriptions. Absent
+   * ⇒ the subscriptions complete immediately rather than throwing, so a build
+   * with the viewer off has no open streams.
+   */
+  webViewerEvents?: WebViewerEventsLike;
+
+  /**
    * The in-app Claude sign-in (the `claudeAuth` router's business logic —
    * `claude auth login` driven from the chat's sign-in card). Injected from
    * `main/src/index.ts` via `createClaudeAuthOps()`; `undefined` (the
@@ -713,6 +731,8 @@ export function createContext(deps: ContextDeps = {}): {
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
   gitPrerequisiteOps?: GitPrerequisiteOpsLike;
+  webViewer?: WebViewerLike;
+  webViewerEvents?: WebViewerEventsLike;
   claudeAuthOps?: ClaudeAuthOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
@@ -742,6 +762,8 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     gitPrerequisiteOps,
+    webViewer,
+    webViewerEvents,
     claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,
@@ -778,6 +800,8 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     gitPrerequisiteOps,
+    webViewer,
+    webViewerEvents,
     claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,

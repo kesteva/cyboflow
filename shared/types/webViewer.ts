@@ -6,6 +6,8 @@
  * built-ins, pure types plus a runtime guard. See
  * docs/proposals/native-web-viewer.md.
  */
+import type { WebTabOpener } from './centerPane';
+import type { ReservedChordAction } from './reservedChords';
 
 /**
  * Stored shape of the `webViewer` config block. Every member is optional and
@@ -73,4 +75,95 @@ export type WebViewerConfigKey = (typeof WEB_VIEWER_CONFIG_KEYS)[number];
  */
 export function isWebViewerConfigValue(value: unknown): value is boolean {
   return typeof value === 'boolean';
+}
+
+// ===========================================================================
+// Wire shapes (main ↔ renderer). Also Electron-free — these cross the tRPC
+// boundary and are read by the Vite renderer.
+// ===========================================================================
+
+
+/**
+ * A tab's lifecycle state, reported verbatim to the renderer AND to agents.
+ *
+ * Every state here is one an agent could otherwise mistake for a blank page:
+ * `hidden` (loaded but not painting), `evicted` (destroyed to stay under the
+ * cap; a read re-navigates), `crashed` (the renderer died — every capture,
+ * navigate and evaluate call would fail inconsistently), and the two fail-closed
+ * blocks, `auth_required` (HTTP Basic) and `certificate_error`.
+ */
+export type WebTabState =
+  | 'live'
+  | 'hidden'
+  | 'evicted'
+  | 'crashed'
+  | 'auth_required'
+  | 'certificate_error';
+
+/** Rect for the native view, in renderer CSS pixels (main scales by zoom). */
+export interface WebTabBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The renderer's view of one tab. Carries the FULL `currentUrl`: this is the
+ * human's own UI, which is exactly the surface the agent-facing redaction
+ * (webViewerGuard.redactToOrigin) exists to keep URLs away from.
+ */
+export interface WebTabSnapshot {
+  tabId: string;
+  sessionId: string;
+  state: WebTabState;
+  currentUrl: string | null;
+  title: string | null;
+  openedBy: WebTabOpener;
+  openedByRunId: string | null;
+  humanTouched: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  loading: boolean;
+  /** Set when `state` is `'certificate_error'` / `'auth_required'`. */
+  blockedReason: string | null;
+}
+
+/** Push payload for the `onTabState` subscription. */
+export interface WebTabStateEvent {
+  sessionId: string;
+  snapshot: WebTabSnapshot;
+}
+
+/** Push payload for the `onTabClosed` subscription (crash recovery, eviction). */
+export interface WebTabClosedEvent {
+  sessionId: string;
+  tabId: string;
+  /** Why it went away, so the strip can distinguish an evict from a close. */
+  reason: 'closed' | 'evicted' | 'crashed' | 'disposed';
+}
+
+/**
+ * Push payload for the `onReservedChord` subscription: a chord the app owns that
+ * was pressed while a native view had focus, resolved in main and reported as a
+ * SEMANTIC ACTION. Never a synthetic key event — replaying one into the renderer
+ * would be indistinguishable from a real keystroke to every other listener and
+ * would fire twice if the view ever stopped swallowing it.
+ */
+export interface WebViewerChordEvent {
+  sessionId: string;
+  tabId: string;
+  action: ReservedChordAction;
+}
+
+/**
+ * Push payload for the `onPopupRequested` subscription. A viewer page asked to
+ * open a window; the renderer mints a tab id and opens it as another viewer tab.
+ * `openerTabId` is the tab that asked, so the new tab can inherit its session
+ * and sit next to it.
+ */
+export interface WebViewerPopupEvent {
+  sessionId: string;
+  openerTabId: string;
+  url: string;
 }
