@@ -30,11 +30,13 @@ would pass against the pre-change code is `not met`. That includes a test assert
 on the source text of a production file, one anchored on a comment or planted
 marker, one whose only oracle is a constant, and one whose fixtures never contain
 what it claims to guard against — unless the criterion is itself a source-layout
-gate. When a test is your evidence, check the `Proof of failure:` line write-tests
-reported for it. If there is none, or the planted break does not touch the
-behaviour the criterion names, mark the criterion `not met` and say in the fix
-guidance which test needs a real proof of failure. Do not plant breaks yourself —
-you never edit the shared worktree.
+gate. Judge this by reading the test against the pre-change code the diff shows
+you; do not depend on any earlier stage's output reaching you. A `Proof of
+failure:` line, when the orchestrator passes one along, is supporting evidence —
+but its absence alone is never grounds for `not met`, and its presence never
+excuses a test that visibly cannot fail. When you mark a criterion `not met` for
+this reason, name the test and the behaviour it fails to discriminate in the fix
+guidance. Do not plant breaks yourself — you never edit the shared worktree.
 
 **Design surfaces.** When the prompt carries a `# Design surfaces` section whose
 screens this task touches, add TWO criteria to your `## Criteria` section

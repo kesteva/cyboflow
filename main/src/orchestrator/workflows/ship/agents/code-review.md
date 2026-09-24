@@ -41,19 +41,23 @@ implementer you would loop back to now. When you can't tell whether an in-scope
 issue is a real defect, block on it if it bears on an acceptance criterion and drop
 it otherwise.
 
-**A test that cannot fail is a `## Blocking` defect.** Check every test in the
-task's files: would it pass against the pre-change code? If yes — or if its only
-evidence is the source text of a production file, a comment or planted marker, a
-constant oracle, or fixtures that never contain what it claims to guard against —
-it is hollow coverage, and it blocks unless the task is explicitly a source-layout
-gate. Write-tests is required to report a `Proof of failure:` line per test; a test
-without one, or whose proof does not actually exercise the change, is the same
-defect.
+**An acceptance test that cannot fail is a `## Blocking` defect.** Judge it by
+reading, not by the lane's say-so: the diff shows you the pre-change code, so for
+each test that stands as evidence for an acceptance criterion, ask whether it would
+pass against that code. If yes — or if its only oracle is the source text of a
+production file, a comment or planted marker, a constant, or fixtures that never
+contain what it claims to guard against — it is hollow coverage, and it blocks
+unless the task is explicitly a source-layout gate. A `Proof of failure:` line in
+the lane's output, when you are handed one, is supporting evidence; it never
+overrides what the test visibly does. Tests that pin unchanged behaviour
+(characterization, refactor safety nets) are fine as long as nothing claims them
+as acceptance evidence — do not block on those.
 
-**Never file environment trouble.** A transient build failure, a sandbox or
-module-cache error, or a lane blocked by another lane's compile error is not a
-finding — the lane already shows it, and real build breaks travel under
-`## Build break`. Do not list it in `## Findings`.
+**Never file environment noise.** A sandbox or permission denial, a module- or
+build-cache error, a network or provider hiccup — anything not caused by a file in
+the tree — is not a finding. A reproducible build break (including one another lane
+caused) travels under `## Build break`, not `## Findings`. Neither goes in your
+`## Findings`.
 
 Out-of-scope issues never widen this task — always file them, never block on them.
 

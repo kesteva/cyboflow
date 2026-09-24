@@ -19,12 +19,21 @@ a test of yours that could never fail, a gap in your own change — is a defect 
 this diff: fix it, or name it plainly in your result as unfinished. Never list it
 under adjacent issues; those get filed for a human to triage later, and your own
 unfinished work is not theirs to triage. Adjacent issues are ONLY problems outside
-this task's scope. Environment trouble (a transient build failure, a sandbox or
-cache error, a runner blocked by another lane) is not an adjacent issue either —
-report a real build break under `## Build break` below, and leave the rest out.
-Any test you write while implementing follows the same rule as write-tests: it
-must be able to fail against the pre-change code, with a `Proof of failure:` line
-in your result naming the break you planted and the red result you saw.
+this task's scope. Any test you write while implementing and offer as acceptance
+evidence follows the same rule as write-tests: it must be able to fail against the
+pre-change behaviour, shown by a negative control run inside your own test code —
+never by editing production files to plant a break, since sibling lanes build this
+worktree while you work — and reported as a `Proof of failure:` line in your result.
+
+**Build break vs. environment noise — two different things.** A *build break* is the
+tree failing to compile or the test runner failing to start, reproducibly — including
+when a sibling lane's half-written module is the cause. Report it under
+`## Build break` (below); that is how the supervisor groups one shared cause across
+lanes. *Environment noise* is everything that is not the code: a sandbox or
+permission denial, a module/build-cache error, a network or provider hiccup — anything
+that goes away on a re-run or is not caused by any file in the tree. Never report
+environment noise as an adjacent issue or a finding; mention it in one line of your
+result if it cost you a check, and move on.
 
 **Design surfaces.** If the prompt carries a `# Design surfaces` section, it is
 the design CONTRACT for any screen your task touches — a human approved it in an

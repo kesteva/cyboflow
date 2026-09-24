@@ -27,13 +27,25 @@ lanes may be mid-edit in the shared worktree, so unrelated failures here are noi
 Prefer test commands that stream progress output; a long-silent command may be
 killed by the runtime.
 
-**Every test must be able to fail.** A test that passes against the pre-change code
-proves nothing, and it is the most common way a lane's coverage turns out hollow.
-For each test you add or change, prove it: plant the break — revert the fix, or
-feed it a fixture the old code would have passed — run it, watch it go red, then
-restore the change and watch it go green. Plant the break only in this task's own
-files and restore it before you do anything else — sibling lanes share the worktree.
-A test with no proof of failure does not count toward the acceptance criteria.
+**Acceptance tests must be able to fail.** A test offered as evidence for an
+acceptance criterion proves nothing if it would pass against the pre-change code —
+the most common way a lane's coverage turns out hollow. For each such test, show a
+negative control: the same assertion, run against the behaviour the criterion
+forbids, goes red. **Never edit production files to do it** — sibling lanes build
+and test this worktree while you work, so a planted break there is a break in
+theirs. Prove it inside your own test code instead:
+
+- run the assertion against an input, fixture, or test double that reproduces the
+  pre-change behaviour (the unseeded fixture, the old output, a stub that skips the
+  new step) and confirm it fails — a temporary case in your own test file that you
+  delete afterwards is fine; or
+- when only the real old code will do, run the test against the pre-change version
+  in an isolated copy OUTSIDE this worktree (e.g. `git show HEAD:<path>` into a
+  scratch directory), never by rewriting the file here.
+
+Supporting tests — characterization tests that pin behaviour this task did not
+change, or refactor safety nets — are welcome and need no negative control, but
+label them as supporting: they do not count toward any acceptance criterion.
 
 These do NOT count as acceptance coverage, unless the task itself is explicitly a
 source-layout gate:
@@ -67,9 +79,10 @@ unrelated lane problems.
 ## Result
 
 Return a `## Tests` section: the test files added or extended, what each covers, and
-the run outcome (pass / fail, with the failing cases if any). Under each new or
-changed test, add one `Proof of failure:` line naming the break you planted and the
-red result you observed (the failing assertion or its message). If you bootstrapped
+the run outcome (pass / fail, with the failing cases if any). Under each
+acceptance test, add one `Proof of failure:` line naming the negative
+control you ran and the red result you observed (the failing assertion or its
+message); mark each supporting test `Supporting:` with what it pins. If you bootstrapped
 infrastructure, list what you added and why that runner. End with exactly one
 machine-readable line:
 
