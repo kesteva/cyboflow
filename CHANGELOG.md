@@ -12,6 +12,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   GPT-6 family (`gpt-6-sol`, `gpt-6-luna`) to 0.156+ clients, so they now appear in the Codex model
   picker. The app-server protocol change is additive for every method Cyboflow uses (the unused
   `thread/rollback` was removed; `personality` is deprecated).
+- The runtime-mix tier map now sends Opus- and Fable-tier steps to `gpt-6-sol` (was `gpt-5.6-sol`). Mixed runs
+  launched after this fork a new spec revision.
 
 ## [0.4.3] — 2026-09-21
 
