@@ -96,7 +96,8 @@ import { TaskChangeError, TaskChangeRouter } from '../taskChangeRouter';
 import type { TaskActor, TaskChange } from '../taskChangeRouter';
 import { ReviewItemError, ReviewItemRouter } from '../reviewItemRouter';
 import type { ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
-import { selectFindingForSeed, selectRunFindingsForRuns } from '../reviewItemListing';
+import { selectFindingForSeed, selectProjectFindings, selectRunFindingsForRuns } from '../reviewItemListing';
+import { isChatSentinelRun, resolveFindingTargetScope } from './findingTriageScope';
 import { selectSessionRunScope } from '../sessionRunScope';
 import { selectEvalReadout } from '../evalReadout';
 import {
@@ -2338,7 +2339,7 @@ export class McpQueryHandler {
    * A read cannot corrupt a settled run, so the only checks kept are the two that
    * say the request is meaningless: the 'orchestrator' sentinel (no run row at
    * all) and an unknown id. Writes keep the full guard — see
-   * {@link resolveTargetInScope} for how a chat still resolves a settled sibling
+   * findingTriageScope.resolveFindingTargetScope for how a chat still resolves a settled sibling
    * run's finding without reviving that run.
    */
   private resolveReadOnlyRunContext(
@@ -2758,6 +2759,27 @@ export class McpQueryHandler {
     // rather than infer it from an empty list.
     const runScope = selectSessionRunScope(this.db, msg.runId);
 
+    // scope:'project' — the whole project's open findings, chats only (the
+    // same entitlement resolveFindingTargetScope's project arm grants).
+    if (msg.scope === 'project') {
+      if (!isChatSentinelRun(this.db, msg.runId)) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: 'project_scope_requires_chat',
+        });
+        return;
+      }
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { findings: selectProjectFindings(this.db, ctx.projectId), scope: 'project', runScope },
+      });
+      return;
+    }
+
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
@@ -2778,7 +2800,7 @@ export class McpQueryHandler {
    * action lands (NOT batched at run end); the RunExecutor terminal-seam close-out
    * is the safety net for whatever was missed.
    *
-   * SCOPE-GUARDED (see resolveTargetInScope): the router validates only
+   * SCOPE-GUARDED (see findingTriageScope.resolveFindingTargetScope): the router validates only
    * (projectId, status='pending'), so without this check a single mistyped or
    * hallucinated id would silently close ANY pending item in the project — an
    * unrelated run's finding, a `decision` gate row, a `human_task`. That was
@@ -2786,79 +2808,6 @@ export class McpQueryHandler {
    * sprint/ship address-review step now calls it N times per run with ids the
    * model transcribed from a list, so the blast radius is no longer theoretical.
    */
-  /**
-   * Guard `resolve_finding`'s target: it must be a `kind='finding'` row that
-   * THIS run is entitled to close. Three disjoint entitlements, matching the
-   * tool's legitimate callers:
-   *
-   *  - the run FILED it (`run_id = runId`) — sprint/ship's address-review closing
-   *    out its own code-review findings;
-   *  - the run was SEEDED with it (`workflow_runs.seed_finding_ids`) — a compound
-   *    run acting on findings a human selected, which by definition belong to
-   *    EARLIER runs. This arm is why an ownership check cannot simply be
-   *    `run_id = runId`: that would break compound entirely; or
-   *  - a run in the caller's OWN SESSION filed it — a chat turn closing out the
-   *    findings of the flow run it is sitting on top of. Without this arm the
-   *    widened read is half a loop: the agent can now SEE the flow run's
-   *    findings, fix them, and then be refused `finding_not_in_run_scope` on
-   *    every single resolve, because a chat's run id is the `__quick__` sentinel
-   *    and never the run that filed them.
-   *
-   * The third arm deliberately does NOT relax the CALLER's liveness check in
-   * {@link handleResolveFinding}: the caller is the sentinel, which
-   * chatSentinelProvider revives to 'running' for the turn, so a chat resolves a
-   * settled sibling run's finding without that run being revived or written to.
-   * Session membership is the entitlement, session-mate liveness is not.
-   *
-   * Anything else — another run's finding, a `decision` gate, a `human_task`, a
-   * missing id — is refused rather than silently closed. Read-only; the actual
-   * status transition stays the router's job.
-   */
-  private resolveTargetInScope(
-    runId: string,
-    reviewItemId: string,
-  ): { ok: true } | { ok: false; error: string } {
-    const row = this.db
-      .prepare(`SELECT kind, run_id AS runId FROM review_items WHERE id = ?`)
-      .get(reviewItemId) as { kind?: string; runId?: string | null } | undefined;
-
-    // Keep the router's existing 'not_found' code for a missing id — agents and
-    // tests already key on it; only the NEW refusals get new codes.
-    if (row === undefined) return { ok: false, error: 'not_found' };
-    if (row.kind !== 'finding') return { ok: false, error: 'not_a_finding' };
-    if (row.runId === runId) return { ok: true };
-
-    // Same-session arm. Checked before the seed arm because it is the common
-    // case for a chat turn and needs no JSON parse.
-    if (
-      typeof row.runId === 'string' &&
-      row.runId.length > 0 &&
-      selectSessionRunScope(this.db, runId).includes(row.runId)
-    ) {
-      return { ok: true };
-    }
-
-    // Seeded arm: the compound path. Unparseable / absent seed json ⇒ no
-    // entitlement (fail closed), mirroring handleGetSelectedFindings' fail-soft
-    // read but in the refusing direction, since this one is a WRITE.
-    const runRow = this.db
-      .prepare('SELECT seed_finding_ids AS seedFindingIds FROM workflow_runs WHERE id = ?')
-      .get(runId) as { seedFindingIds?: unknown } | undefined;
-    const seedJson =
-      typeof runRow?.seedFindingIds === 'string' && runRow.seedFindingIds.length > 0
-        ? runRow.seedFindingIds
-        : null;
-    if (seedJson !== null) {
-      try {
-        const parsed: unknown = JSON.parse(seedJson);
-        if (Array.isArray(parsed) && parsed.includes(reviewItemId)) return { ok: true };
-      } catch {
-        // fall through to refusal
-      }
-    }
-    return { ok: false, error: 'finding_not_in_run_scope' };
-  }
-
   private async handleResolveFinding(
     msg: Extract<McpQueryMessage, { type: 'mcp-resolve-finding' }>,
     client: net.Socket,
@@ -2874,7 +2823,7 @@ export class McpQueryHandler {
       return;
     }
 
-    const scope = this.resolveTargetInScope(msg.runId, msg.reviewItemId);
+    const scope = resolveFindingTargetScope(this.db, msg.runId, msg.reviewItemId);
     if (!scope.ok) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
@@ -2888,8 +2837,11 @@ export class McpQueryHandler {
     // Build the resolution from the matching prefix const. 'promoted' carries the
     // minted task id (mirrors the promote-to-task path); 'fixed'/'triaged' carry
     // the optional free-text note (e.g. 'compound') when present.
+    // 'dismissed' routes the router's dismiss op; its note is the plain reason.
     let resolution: string;
-    if (msg.resolutionKind === 'promoted') {
+    if (msg.resolutionKind === 'dismissed') {
+      resolution = msg.note ?? '';
+    } else if (msg.resolutionKind === 'promoted') {
       const tail = msg.taskId ?? msg.note ?? '';
       resolution = `${RESOLUTION_PREFIX_PROMOTED}${tail}`;
     } else if (msg.resolutionKind === 'fixed') {
@@ -2899,7 +2851,7 @@ export class McpQueryHandler {
     }
 
     const triage: ReviewItemTriage = {
-      op: 'resolve',
+      op: msg.resolutionKind === 'dismissed' ? 'dismiss' : 'resolve',
       actor: ctx.actor,
       reviewItemId: msg.reviewItemId,
       resolution,
@@ -2914,7 +2866,7 @@ export class McpQueryHandler {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { resolved: true, review_item_id: msg.reviewItemId },
+        data: { resolved: true, status: triage.op === 'dismiss' ? 'dismissed' : 'resolved', review_item_id: msg.reviewItemId },
       });
     } catch (err) {
       this.writeReviewItemError(client, msg.requestId, err);
