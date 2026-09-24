@@ -952,6 +952,46 @@ describe('seedCompoundingFromFindingIds', () => {
       selected: true,
     });
   });
+
+  it('honors an EXISTING selection lock instead of the seeded ids’ own project, refusing a cross-project select', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      // Already selected+ready in project 1 — this is the active lock.
+      makeReviewItem({ id: 'locked', project_id: 1, staged_at: '2026-06-06T00:00:00.000Z', selected: true }),
+      // The drill-down being seeded is entirely in a DIFFERENT project.
+      makeReviewItem({ id: 'p2', project_id: 2, staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['p2']);
+
+    // p2 is still approved into READY (approving is not project-scoped)...
+    expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 2, reviewItemId: 'p2' });
+    // ...but never selected: selecting it would hide it behind the project-1
+    // lock (selectLockProjectId still resolves to 1) rather than surface it.
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('excludes an id whose approve failed from the batch select, so it cannot poison the others’ transaction', async () => {
+    mockApproveMutate.mockImplementation(({ reviewItemId }: { reviewItemId: string }) =>
+      reviewItemId === 'bad' ? Promise.reject(new Error('approve boom')) : Promise.resolve({ reviewItemId, staged: true }),
+    );
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'good', project_id: 1, staged_at: null, selected: false }),
+      makeReviewItem({ id: 'bad', project_id: 1, staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['good', 'bad']);
+
+    const s = useInsightsStore.getState();
+    expect(s.triageFindings.find((f) => f.id === 'good')?.triageState).toBe('ready');
+    expect(s.triageFindings.find((f) => f.id === 'bad')?.triageState).toBe('untriaged');
+    // Only the successfully-approved row is selected — 'bad' staying untriaged
+    // must never reach setSelected, where it would reject the whole batch.
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['good'],
+      selected: true,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

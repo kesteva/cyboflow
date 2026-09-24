@@ -81,7 +81,9 @@ vi.mock('../../../stores/insightsStore', () => {
   const useInsightsStore = (selector: (s: ReturnType<typeof snapshot>) => unknown) =>
     selector(snapshot());
   useInsightsStore.getState = () => snapshot();
-  return { useInsightsStore };
+  // Mirrors the real store's export (see insightsStore.ts) — CodeQualitySection,
+  // mounted inside InsightsView, imports this constant directly.
+  return { useInsightsStore, QUALITY_FINDINGS_LIMIT: 500 };
 });
 
 // ---------------------------------------------------------------------------
