@@ -27,6 +27,7 @@
  * (64%)"), or null when there is not yet enough info (→ ChatMetaStrip "--%").
  */
 import type { StreamEvent } from '../../../utils/cyboflowApi';
+import { primaryModelContextWindow } from '../../../../../shared/utils/primaryModelUsage';
 
 /** Format a token count like the backend extractor: ">=1000 → Nk". */
 function formatTokenCount(count: number): string {
@@ -81,19 +82,10 @@ export function deriveRunContextUsageParts(events: readonly StreamEvent[]): RunC
       // are cumulative over the whole run (not the live prompt size), so we do
       // NOT touch `used` here — that comes solely from per-turn `assistant`
       // usage above. See the file header for why.
-      const mu = ev.payload.modelUsage;
-      if (mu === undefined) continue;
-      // modelUsage is keyed by model name; take the first model that reports a
-      // context window (the run is single-model in practice). camelCase fields
-      // are the documented wire casing — see ResultEvent in claudeStream.ts.
-      for (const modelData of Object.values(mu)) {
-        if (modelData === null || typeof modelData !== 'object') continue;
-        const m = modelData as Record<string, unknown>;
-        const cw = m.contextWindow;
-        if (typeof cw !== 'number' || cw <= 0) continue;
-        contextWindow = cw;
-        break;
-      }
+      // modelUsage is keyed by model name and also carries Claude Code's Haiku
+      // side queries — take the MAIN model's window (see primaryModelUsage.ts).
+      const cw = primaryModelContextWindow(ev.payload.modelUsage);
+      if (cw !== null) contextWindow = cw;
     }
   }
 
@@ -145,16 +137,9 @@ export function stepRunContextUsageParts(
   if (event.type === 'result') {
     // A `result` carries the context WINDOW only (see the full-scan branch): its
     // cumulative token counts are NOT a live snapshot, so `used` is untouched.
-    const mu = event.payload.modelUsage;
-    if (mu === undefined) return prev;
-    for (const modelData of Object.values(mu)) {
-      if (modelData === null || typeof modelData !== 'object') continue;
-      const cw = (modelData as Record<string, unknown>).contextWindow;
-      if (typeof cw !== 'number' || cw <= 0) continue;
-      if (cw === prev.contextWindow) return prev;
-      return { used: prev.used, contextWindow: cw };
-    }
-    return prev;
+    const cw = primaryModelContextWindow(event.payload.modelUsage);
+    if (cw === null || cw === prev.contextWindow) return prev;
+    return { used: prev.used, contextWindow: cw };
   }
 
   return prev;

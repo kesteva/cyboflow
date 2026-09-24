@@ -64,7 +64,7 @@ export function isAgentModelAlias(value: unknown): value is AgentModelAlias {
 /** Human labels for each pinnable model, kept in sync with the picker snapshots. */
 export const AGENT_MODEL_LABELS: Record<AgentModelAlias, string> = {
   fable: 'Fable 5.1',
-  opus: 'Opus 5',
+  opus: 'Opus 5.5',
   sonnet: 'Sonnet 5',
   haiku: 'Haiku 4.5',
 };
@@ -119,6 +119,69 @@ export function agentRunTargetLabel(cfg: AgentRunTarget): string {
       : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
   }
   return model === null ? WORKFLOW_AGENT_RUNTIME_LABELS[runtime] : AGENT_MODEL_LABELS[model];
+}
+
+/**
+ * The six-way bucket the per-step model rail colors by (IDEA-061 — "Workflow
+ * summary should show which model is running at each stage"): the four Claude
+ * aliases from {@link AGENT_MODEL_ALIASES} plus `'other'` (a pinned non-Claude
+ * runtime's verbatim provider model id) and `'auto'` (no pin — the run's own,
+ * or that provider's own, default). Derived from `AgentModelAlias` rather than
+ * restated as its own literal tuple so the two can never drift apart.
+ */
+export type ModelFamily = AgentModelAlias | 'other' | 'auto';
+
+/**
+ * Swatch color per {@link ModelFamily} — the single source the workflow-canvas
+ * rail and the post-run summary panel both paint from, so the two surfaces
+ * can never disagree about what "opus" (say) looks like.
+ */
+export const MODEL_FAMILY_COLORS: Record<ModelFamily, string> = {
+  fable: '#8a6fb0',
+  opus: '#c98a2d',
+  sonnet: '#4a7ea8',
+  haiku: '#5a8f6f',
+  other: '#7a7268',
+  auto: '#b3a685',
+};
+
+/**
+ * Swatch hex for a resolved model's family — the single lookup every surface
+ * that paints a family dot goes through (the live workflow canvas, the sprint
+ * swimlane canvas, the summary panel's "Models used" groups), so a card's dot
+ * can always be matched to a summary group by eye.
+ *
+ * The `??` is NOT dead despite `family` being typed: it crosses the tRPC wire
+ * from the main process, so a main/renderer version skew can deliver a bucket
+ * this build's map has no key for. Falling back to `other` keeps a real dot on
+ * screen instead of an invisible one holding its layout.
+ */
+export function modelFamilyColor(family: ModelFamily): string {
+  return MODEL_FAMILY_COLORS[family] ?? MODEL_FAMILY_COLORS.other;
+}
+
+/**
+ * Display label for a run/agent's RESOLVED model — the inherit-case sibling of
+ * {@link agentRunTargetLabel} (which only ever names a PIN). Importable from
+ * main-process code, unlike the frontend-only `modelDisplayLabel`, so a
+ * backend resolver (e.g. `main/src/orchestrator/runStepModels.ts`) can compute
+ * the same label a renderer would show without duplicating the precedence.
+ *
+ * `model`/`provider` are read straight off `workflow_runs` (or an effective
+ * agent's pin) with no alias validation performed upstream, so this accepts
+ * ANY string:
+ *   - a Claude alias (a key of {@link AGENT_MODEL_LABELS}) -> that label.
+ *   - any other non-empty, non-`'auto'` string (a non-Claude provider's
+ *     verbatim model id, e.g. `'gpt-5.6-sol'`) -> returned verbatim.
+ *   - `null` / `''` / `'auto'` -> `'Auto'` for the Claude provider (mirrors
+ *     {@link INHERIT_RUN_MODEL_LABEL}'s intent), else `'Auto/default'` — there
+ *     is no single concrete "auto" default to name for a provider whose model
+ *     picker Cyboflow does not own.
+ */
+export function runModelLabel(model: string | null, provider: string | null): string {
+  if (model !== null && isAgentModelAlias(model)) return AGENT_MODEL_LABELS[model];
+  if (model !== null && model !== '' && model !== 'auto') return model;
+  return provider === 'claude' ? 'Auto' : 'Auto/default';
 }
 
 export interface AgentUsageStep {

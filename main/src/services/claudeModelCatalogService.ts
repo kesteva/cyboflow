@@ -58,7 +58,7 @@ const PROBE_TIMEOUT_MS = 15_000;
  *
  * BOTH window forms of each pinned id are excluded — the `[1m]`-suffixed spawn id
  * AND its bare snapshot ({@link bareModelId}). A pinned alias that carries a window
- * marker (e.g. `opus` → `claude-opus-5[1m]`) would otherwise fail to match the SDK's
+ * marker (e.g. `opus` → `claude-opus-5-5[1m]`) would otherwise fail to match the SDK's
  * dynamic row for the same family, which reports the BARE id, and the pinned family
  * would appear a second time under "Other models".
  */

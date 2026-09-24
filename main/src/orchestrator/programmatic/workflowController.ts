@@ -25,7 +25,8 @@
  */
 import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
-import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
+import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import {
   AWAITING_VERIFY_STEP,
   SPRINT_CODE_REVIEW_STEP,
@@ -63,6 +64,7 @@ import type {
   StepReport,
   StepRunner,
   SupervisorEvent,
+  SystemicPauseInfo,
   TriageDecision,
   VerificationPosture,
   VisualGateOutcome,
@@ -347,12 +349,67 @@ export const SAME_ERROR_COHORT_MAX_MS = 120_000;
  * stamped onto a lane that did nothing wrong; every other failing arm has
  * already written (either itself or, at the merge gate, via the gate driver) and
  * is therefore not a corroboration candidate.
+ *
+ * A `systemic` outcome says WHERE the environment condition hit: `origin: 'step'`
+ * — the inner step agent's own spawn died (`stepId` + the `provider`/`runtime` it
+ * ran on, from the failed StepRunResult); `origin: 'triage'` — only the
+ * lane-triage consult died, which runs on the run's Claude-only supervisor, not on
+ * any step agent (`stepId` is kept for logging only). The park uses it to tell
+ * the pause item what a "Switch runtime & retry" can actually move.
  */
 type LaneWalkOutcome =
   | { kind: 'done' }
   | { kind: 'aborted' }
-  | { kind: 'systemic'; error?: string }
+  | {
+      kind: 'systemic';
+      error?: string;
+      origin: 'step' | 'triage';
+      stepId?: string;
+      provider?: AgentProvider;
+      runtime?: string;
+    }
   | { kind: 'failed'; error?: string; persisted: boolean };
+
+/**
+ * The wave loop's open systemic park: the parked lanes plus what their outcomes
+ * said was blocked (origins, and — for step-origin lanes — the providers/runtimes
+ * their failed spawns ran on).
+ */
+interface ParkPending {
+  error?: string;
+  items: Set<string>;
+  origins: Set<'step' | 'triage'>;
+  providers: Set<AgentProvider>;
+  runtimes: Set<string>;
+}
+
+/**
+ * What a fan-out park blocked. A 'retry' replays EVERY parked lane from inner
+ * step 0, so a "Switch runtime & retry" must cover EVERY inner-chain agent (not
+ * just the one whose spawn died) — de-duplicated, in chain order. `origin` is
+ * 'triage' only when NO parked lane failed at its own step (any real step
+ * failure wins); the provider/runtime is reported only when every step-origin
+ * lane agrees on it.
+ */
+function fanOutPauseInfo(
+  inner: ReadonlyArray<{ id: string; agent: string }>,
+  park: ParkPending,
+): SystemicPauseInfo {
+  const keys: string[] = [];
+  for (const innerStep of inner) {
+    const key = resolveStepAgentKey(innerStep.id, innerStep.agent);
+    if (key !== null && !keys.includes(key)) keys.push(key);
+  }
+  const provider = park.providers.size === 1 ? [...park.providers][0] : undefined;
+  const runtime = park.runtimes.size === 1 ? [...park.runtimes][0] : undefined;
+  return {
+    blockedAgentKeys: keys,
+    ...(provider !== undefined ? { blockedProvider: provider } : {}),
+    ...(runtime !== undefined ? { blockedRuntime: runtime } : {}),
+    origin: park.origins.has('step') ? 'step' : 'triage',
+    fanOut: true,
+  };
+}
 
 /**
  * Walk-scoped bookkeeping for autonomous lane rescue. Created once per `run()`
@@ -843,9 +900,10 @@ export class WorkflowController {
                 signal,
                 attempt: 1,
                 ...(escalation !== undefined ? { escalation } : {}),
+                ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
               });
               escalation = undefined; // consumed by this gate
-              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
+              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, 1, reviewReportedSinceMs);
               if (next.terminal) return this.finish(next.result, runId);
               i = next.i;
               continue;
@@ -927,9 +985,10 @@ export class WorkflowController {
             ...baseCtx,
             attempt: 1,
             ...(escalation !== undefined ? { escalation } : {}),
+            ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
           });
           escalation = undefined; // consumed by this gate
-          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i);
+          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, 1, reviewReportedSinceMs);
           if (next.terminal) return this.finish(next.result, runId);
           // Every gate decision REPLACES the pending revision: a revise-with-target
           // arms a fresh one, and anything else (approve, or a revise that only
@@ -994,7 +1053,17 @@ export class WorkflowController {
                 'warn',
                 `step '${step.id}' hit a systemic failure; pausing the run: ${result.error ?? '(no error text)'}`,
               );
-              const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt }, result.error);
+              // What was blocked, for the pause item's "Switch runtime & retry": this
+              // step's agent on the provider/runtime the failed attempt ran on.
+              const blockedKey = resolveStepAgentKey(step.id, step.agent);
+              const info: SystemicPauseInfo = {
+                blockedAgentKeys: blockedKey ? [blockedKey] : [],
+                ...(result.provider ? { blockedProvider: result.provider } : {}),
+                ...(result.runtime ? { blockedRuntime: result.runtime } : {}),
+                origin: 'step',
+                fanOut: false,
+              };
+              const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt }, result.error, info);
               if (verdict === 'canceled' || signal?.aborted) {
                 aborted = true;
                 break;
@@ -1131,9 +1200,10 @@ export class WorkflowController {
               ...baseCtx,
               attempt,
               ...(escalation !== undefined ? { escalation } : {}),
+              ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
             });
             escalation = undefined; // consumed by this gate
-            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt);
+            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, reviewRounds, remainingCompleted, steps, i, attempt, reviewReportedSinceMs);
             if (next.terminal) return this.finish(next.result, runId);
             pendingGateRevision = next.gateRevision;
             i = next.i;
@@ -2172,7 +2242,14 @@ export class WorkflowController {
           // loop parks the whole fan-out and re-dispatches once the condition clears.
           if (result.systemic === true) {
             this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' hit a systemic failure; pausing`);
-            return { kind: 'systemic', ...(result.error !== undefined ? { error: result.error } : {}) };
+            return {
+              kind: 'systemic',
+              ...(result.error !== undefined ? { error: result.error } : {}),
+              origin: 'step',
+              stepId: innerStep.id,
+              ...(result.provider ? { provider: result.provider } : {}),
+              ...(result.runtime ? { runtime: result.runtime } : {}),
+            };
           }
           if (innerStep.optional === true) {
             this.host.log?.('warn', `fan-out item '${itemId}': optional step '${innerStep.id}' failed; skipping`);
@@ -2202,7 +2279,7 @@ export class WorkflowController {
           // row has NOT been written 'failed' at this arm, so bubble up and let
           // the wave loop park the whole fan-out (and re-dispatch on 'retry').
           if (rescueTarget !== null && typeof rescueTarget === 'object') {
-            return { kind: 'systemic', error: rescueTarget.systemic };
+            return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
           }
           if (rescueTarget !== null) {
             k = rescueTarget - 1; // The loop's k++ lands on the target next.
@@ -2282,7 +2359,7 @@ export class WorkflowController {
               );
               // Nothing is persisted at this arm yet — park, don't fail.
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
-                return { kind: 'systemic', error: rescueTarget.systemic };
+                return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
               }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
@@ -2361,7 +2438,7 @@ export class WorkflowController {
               const rescueTarget = await rescueLaneOrNull(innerStep.id, 'task-verify', resultText);
               // Nothing is persisted at this arm yet — park, don't fail.
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
-                return { kind: 'systemic', error: rescueTarget.systemic };
+                return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
               }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
@@ -2606,7 +2683,14 @@ export class WorkflowController {
      * corroboration), waiting for the pool to quiesce so the human is asked once.
      * They stay in `remaining`, uncounted, and re-dispatch on 'retry'.
      */
-    let parkPending: { error?: string; items: Set<string> } | undefined;
+    let parkPending: ParkPending | undefined;
+    /** A fresh park accumulator (items + what the parked lanes say was blocked). */
+    const newPark = (): ParkPending => ({
+      items: new Set<string>(),
+      origins: new Set(),
+      providers: new Set(),
+      runtimes: new Set(),
+    });
     /** No new lane may be dispatched: a systemic park is open, or the walk is aborting. */
     let holdDispatch = false;
     /** A lane returned 'aborted', or the signal fired — the walk is terminal. */
@@ -2805,7 +2889,12 @@ export class WorkflowController {
               'warn',
               `fan-out '${step.id}' hit a systemic failure on ${parked.length} lane(s); pausing the run: ${parkError ?? '(no error text)'}`,
             );
-            const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, parkError);
+            const verdict = await this.host.awaitSystemicPause(
+              step,
+              { ...baseCtx, attempt: 1 },
+              parkError,
+              fanOutPauseInfo(inner, parkPending),
+            );
             if (verdict === 'canceled' || signal?.aborted) return { terminal: true, incompleteCount };
             if (verdict === 'retry') {
               // Un-park: the still-in-`remaining` items re-dispatch next iteration.
@@ -2884,8 +2973,13 @@ export class WorkflowController {
         sawAborted = true;
         holdDispatch = true;
       } else if (outcome.kind === 'systemic') {
-        const park = parkPending ?? { items: new Set<string>() };
+        const park = parkPending ?? newPark();
         park.items.add(settledId);
+        park.origins.add(outcome.origin);
+        if (outcome.origin === 'step') {
+          if (outcome.provider !== undefined) park.providers.add(outcome.provider);
+          if (outcome.runtime !== undefined) park.runtimes.add(outcome.runtime);
+        }
         // Prefer a genuinely systemic lane's own text for the park (last wins,
         // as the wave loop's reduce did); a corroborated group only fills in
         // below when no systemic lane supplied one.
@@ -2949,11 +3043,14 @@ export class WorkflowController {
       for (const [text, group] of groups) {
         if (group.items.length === 0) continue;
         if (group.systemic === 0 && group.items.length < SAME_ERROR_CORROBORATION_MIN) continue;
-        const park = parkPending ?? { items: new Set<string>() };
+        const park = parkPending ?? newPark();
         for (const itemId of group.items) {
           deferred.delete(itemId);
           park.items.add(itemId);
         }
+        // A corroborated lane failed at its own inner step (the generic
+        // exhaustion arm) — a STEP-origin failure whose provider is unknown here.
+        park.origins.add('step');
         park.error ??= text;
         parkPending = park;
         holdDispatch = true;
@@ -3098,12 +3195,18 @@ export class WorkflowController {
     steps: StepReport[],
     i: number,
     attempts = 1,
+    reviewReportedSinceMs?: number,
   ):
     | { terminal: true; result: ControllerResult }
     | {
         terminal: false;
         i: number;
-        gateRevision?: { gateStepId: string; note?: string; round?: number };
+        gateRevision?: {
+          gateStepId: string;
+          note?: string;
+          round?: number;
+          reviewReportedSinceMs?: number;
+        };
       } {
     if (decision === 'approve') {
       this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
@@ -3176,6 +3279,14 @@ export class WorkflowController {
         gateStepId: step.id,
         ...(trimmed.length > 0 ? { note: trimmed } : {}),
         ...(round !== undefined ? { round } : {}),
+        // SNAPSHOT the walk's review-freshness bound as it stood when this gate
+        // was presented, so the re-run's gate-revision quote is read under the
+        // same bound the gate body was composed from. Without it a gate that
+        // told the human "No adversarial review this round" would still thread
+        // that previous round's critique into the re-run as the feedback to act
+        // on. Snapshotted rather than read live at spawn time because the review
+        // step re-stamps the bound when the revision re-drives it.
+        ...(reviewReportedSinceMs !== undefined ? { reviewReportedSinceMs } : {}),
       },
     };
   }

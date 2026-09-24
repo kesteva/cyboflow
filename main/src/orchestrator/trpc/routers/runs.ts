@@ -86,6 +86,16 @@ import {
   type PauseRunResult,
 } from '../../pauseRunHandler';
 import {
+  clearRunAgentTargets,
+  readRunAgentTargets,
+  switchRunAgentsHandler,
+  type ClearRunAgentTargetsResult,
+  type SwitchRunAgentsDeps,
+  type SwitchRunAgentsResult,
+} from '../../switchRunAgentsHandler';
+import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
+import type { RunAgentTargetOverrides } from '../../../../../shared/types/workflows';
+import {
   resumeRunHandler,
   type ResumeRunDeps,
   type ResumeRunResult,
@@ -107,6 +117,12 @@ import {
   type RewindRunResult,
 } from '../../rewindRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
+import {
+  resolveRunStepModels,
+  RunNotFoundError,
+  RunDefinitionNotFoundError,
+  type StepModelInfo,
+} from '../../runStepModels';
 import {
   updateSessionAgentPermissionMode,
   type SessionAgentPermissionModeDeps,
@@ -189,6 +205,29 @@ let pauseRunDeps: PauseRunDeps | null = null;
  */
 export function setPauseRunDeps(deps: PauseRunDeps): void {
   pauseRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// switch-run-agents dependency bag ("Switch runtime & retry" on a limit-paused
+// programmatic run)
+//
+// Backs switchPausedStepAgents + clearRunAgentTargets. The provider checks, the
+// effective-agent listing, and the pause-item adapters are injected at boot by
+// main/src/index.ts (switchRunAgentsHandler.ts stays standalone-typecheckable).
+// Until wired both mutations throw METHOD_NOT_SUPPORTED — same stub pattern as
+// the other dep-bags.
+// ---------------------------------------------------------------------------
+
+let switchRunAgentsDeps: SwitchRunAgentsDeps | null = null;
+
+/**
+ * Wire up the real collaborators for `switchPausedStepAgents` /
+ * `clearRunAgentTargets`. Called once at boot by main/src/index.ts after
+ * HumanStepManager + ReviewItemRouter are initialized. Until this is called both
+ * mutations throw METHOD_NOT_SUPPORTED.
+ */
+export function setSwitchRunAgentsDeps(deps: SwitchRunAgentsDeps): void {
+  switchRunAgentsDeps = deps;
 }
 
 let resumeRunDeps: ResumeRunDeps | null = null;
@@ -2503,6 +2542,76 @@ export const runsRouter = router({
     }),
 
   /**
+   * "Switch runtime & retry" on a limit-paused PROGRAMMATIC run: write the run's
+   * agent-target overrides for the blocked agents (scope 'provider' = every agent
+   * on the blocked provider; 'step' = exactly the pause's agents, single-step
+   * pauses only), then resolve the pending systemic pause so the step retries on
+   * the new target. Every refusal is decided BEFORE the write; after it the
+   * result is always `delivered` (a lost race with the auto-resume timer reports
+   * `retried: false` + a note). See switchRunAgentsHandler.ts.
+   *
+   * Returns `{ delivered: true, agentKeys, target, retried, note? }` or
+   * `{ noOp: reason }`. METHOD_NOT_SUPPORTED until setSwitchRunAgentsDeps().
+   */
+  switchPausedStepAgents: protectedProcedure
+    .input(
+      z.object({
+        runId: z.string().min(1),
+        reviewItemId: z.string().min(1).optional(),
+        scope: z.enum(['provider', 'step']),
+        target: z.object({
+          runtime: z.enum(WORKFLOW_LAUNCHABLE_RUNTIMES).optional(),
+          model: z.enum(AGENT_MODEL_ALIASES).nullable().optional(),
+          providerModel: z.string().min(1).nullable().optional(),
+          effort: z.string().nullable().optional(),
+        }),
+      }),
+    )
+    .mutation(async ({ input }): Promise<SwitchRunAgentsResult> => {
+      if (!switchRunAgentsDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'switch-run-agents deps not wired yet. Call setSwitchRunAgentsDeps() at boot.',
+        });
+      }
+      return switchRunAgentsHandler(input, switchRunAgentsDeps);
+    }),
+
+  /**
+   * Revert every run-level agent-target override (the override chip's "Revert").
+   * Takes effect at the next spawn; a running step is untouched. Returns
+   * `{ delivered: true }` or `{ noOp: 'not_found' | 'not_programmatic' }`.
+   * METHOD_NOT_SUPPORTED until setSwitchRunAgentsDeps().
+   */
+  clearRunAgentTargets: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(({ input }): Promise<ClearRunAgentTargetsResult> => {
+      if (!switchRunAgentsDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'switch-run-agents deps not wired yet. Call setSwitchRunAgentsDeps() at boot.',
+        });
+      }
+      return clearRunAgentTargets(input, switchRunAgentsDeps);
+    }),
+
+  /**
+   * The run's live agent-target overrides (agentKey → target), or null when none
+   * are set (or on a DB predating migration 144). Feeds the override chip.
+   */
+  runAgentTargets: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ ctx, input }): RunAgentTargetOverrides | null => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return readRunAgentTargets(ctx.db, input.runId);
+    }),
+
+  /**
    * SDK-only Resume of a paused workflow run (session<->run restructure, Phase 4b).
    *
    * Flips the run paused -> running and re-drives execute(runId) with the executor
@@ -3779,6 +3888,49 @@ export const runsRouter = router({
       }
 
       return { definition, currentStepId, stepStates };
+    }),
+
+  /**
+   * Per-step resolved model info (IDEA-061 — "Workflow summary should show
+   * which model is running at each stage"). Flattens the run's effective
+   * workflow definition the SAME way `getPhaseState` does (same frozen-spec
+   * resolution + fallback, same phase/step declaration order), resolves each
+   * step's agentKey via `resolveStepAgentKey` (a human gate step is OMITTED,
+   * never fabricated a model), and labels/colors it via
+   * `runStepModels.resolveRunStepModels` — see that module for the full
+   * inherit/pin precedence. Returns ONLY the `StepModelInfo` wire shape
+   * (stepId/stepName/phaseId/agentKey/label/family); no effective-agent
+   * internals (systemPrompt/tools/mcp*) ever leak into the response.
+   *
+   * Same PRECONDITION_FAILED / NOT_FOUND contract as `getPhaseState` for the
+   * "db not wired" / "run not found" / "no workflow definition" failures.
+   * Additionally throws PRECONDITION_FAILED when
+   * `ctx.resolveRunEffectiveAgents` is not wired (unit tests that omit it) —
+   * this procedure has no fallback for that collaborator, mirroring `gitDiff`.
+   */
+  getStepModels: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(({ ctx, input }): StepModelInfo[] => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      if (!ctx.resolveRunEffectiveAgents) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'resolveRunEffectiveAgents not wired into tRPC context',
+        });
+      }
+      try {
+        return resolveRunStepModels(ctx.db, input.runId, ctx.resolveRunEffectiveAgents);
+      } catch (err) {
+        if (err instanceof RunNotFoundError || err instanceof RunDefinitionNotFoundError) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: err.message });
+        }
+        throw err;
+      }
     }),
 
   /**

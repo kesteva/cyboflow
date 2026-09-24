@@ -24,18 +24,19 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * The bundled Claude Agent SDK (0.2.x) resolves a bare alias like `'opus'` to a
  * PREVIOUS-generation snapshot, so a user who picks "Opus" silently runs an
  * older Opus. Pinning the alias to the current concrete id at the spawn seam
- * takes the resolution out of the SDK's hands: Opus 5 and Sonnet 5 are both
+ * takes the resolution out of the SDK's hands: Opus 5.5 and Sonnet 5 are both
  * 1M-context at standard pricing.
  *
  * The families reach their 1M window differently:
- *   - Opus 5 needs the `[1m]` suffix on THIS plane. Anthropic's published API
+ *   - Opus 5.x needs the `[1m]` suffix on THIS plane. Anthropic's published API
  *     docs say Opus 5 is 1M by default and maximum, with no suffix or beta — and
  *     that is true of the raw API. It is NOT true of the plane the bundled CLI
  *     talks to under a Claude Code login, which reports a 200K window for the
  *     bare id and a 1M window for `claude-opus-5[1m]` (measured 2026-07-28; the
- *     same discrepancy is reported against the CLI generally). Do NOT "correct"
- *     this back to the bare id on the strength of the API docs — verify against
- *     a live `modelUsage.contextWindow` first. The suffix is passed through
+ *     same discrepancy is reported against the CLI generally). Opus 5.5 keeps the
+ *     same shape — `claude-opus-5-5[1m]` is the id Claude Code itself runs it
+ *     as. Do NOT "correct" this back to the bare id on the strength of the API
+ *     docs — verify against a live `modelUsage.contextWindow` first. The suffix is passed through
  *     verbatim by {@link sdkModelAndBetas} with no beta, exactly as the previous
  *     `claude-opus-4-8[1m]` pin was. The legacy `opus-250k` alias still maps to
  *     the older default-window `claude-opus-4-8` for back-compat (a stored
@@ -59,7 +60,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
   fable: 'claude-fable-5-1',
-  opus: 'claude-opus-5[1m]',
+  opus: 'claude-opus-5-5[1m]',
   'opus-250k': 'claude-opus-4-8',
   sonnet: 'claude-sonnet-5',
   'sonnet-250k': 'claude-sonnet-5',
@@ -92,7 +93,7 @@ export function resolveModelAlias(model?: string | null): string | undefined {
  * singleton), so this stays a pure, unit-testable transform with no service
  * dependency. When a guarded model is unavailable, its fallback alias is resolved
  * back through {@link resolveModelAlias} so the return value is a real spawn-seam id
- * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-5[1m]'`, which
+ * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-5-5[1m]'`, which
  * {@link sdkModelAndBetas} / {@link interactiveModelArg} then translate normally.
  */
 export function applyModelAvailabilityFallback(
@@ -138,7 +139,7 @@ export function resolveUnavailableDefaultModelFallback(
  *
  * The beta is a Sonnet 4.x ONLY mechanism, so we gate strictly on explicit
  * `claude-sonnet-4-*` ids. Everything else returns false — including
- * `claude-sonnet-5`, whose 1M window is NATIVE, and `claude-opus-5[1m]`, whose
+ * `claude-sonnet-5`, whose 1M window is NATIVE, and `claude-opus-5-5[1m]`, whose
  * 1M is unlocked by the suffix in the id rather than by a beta (see
  * {@link MODEL_ALIAS_TO_ID}). `'auto'`/undefined also return false:
  * the resolved model is unknown, so requesting the Sonnet-only beta could land
@@ -210,7 +211,7 @@ export function interactiveModelArg(resolvedId?: string | null): string | undefi
  *
  * A subagent `.md` is read by the bundled CLI but its `model:` field cannot carry
  * a context-window beta, and the `[1m]` marker is a cyboflow-internal id form, so
- * we emit the plain snapshot (`opus` → `claude-opus-5`,
+ * we emit the plain snapshot (`opus` → `claude-opus-5-5`,
  * `sonnet` → `claude-sonnet-5`, `haiku` → `claude-haiku-4-5`). The agent editor
  * offers only bare families (no per-window choice), so "Opus" means the current
  * Opus at its default window — exactly this. `auto`/undefined pass through.

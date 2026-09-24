@@ -175,7 +175,7 @@ describe('ClaudeCodeManager — mid-call model fallback', () => {
     // query() invoked twice: first on Fable, then retried on Opus.
     expect(h.calls).toHaveLength(2);
     expect(h.calls[0].model).toBe(FABLE);
-    expect(h.calls[1].model).toBe('claude-opus-5[1m]');
+    expect(h.calls[1].model).toBe('claude-opus-5-5[1m]');
 
     // Fable was marked unavailable (greys the pickers + pre-falls-back later spawns).
     expect(ModelAvailabilityService.getInstance().isUsable(FABLE)).toBe(false);
@@ -252,6 +252,6 @@ describe('ClaudeCodeManager — mid-call model fallback', () => {
     });
 
     expect(h.calls).toHaveLength(1);
-    expect(h.calls[0].model).toBe('claude-opus-5[1m]');
+    expect(h.calls[0].model).toBe('claude-opus-5-5[1m]');
   });
 });

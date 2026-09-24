@@ -6,6 +6,105 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-21
+
+### Added
+
+- **Mobile verification tier.** Verification runbooks can now target an iOS Simulator instead of a
+  desktop browser. A shared toolchain probe (Xcode, `simctl`, an optional Maestro on PATH) is
+  composed once and read by the scheduler gate, the driver runner and the Health panel, so all three
+  agree on whether the host can run mobile at all; registration refuses a mobile runbook whose build
+  step is not isolated or whose Apple dependencies are missing, rather than failing at drive time.
+  The runner leases one simulator per request from a bounded slot pool, exports the mobile
+  environment, and attests the bundle identity it actually installed. The driver CLI gains an
+  `install` / `launch` / `observe` / `drive` command family, verify prompts learned the modality, and
+  `register_verify_runbook` admits it through the shared enum. No port lease is taken — a simulator
+  is not a CDP endpoint. Migration 139 clears the legacy "mobile deferred" capability marks.
+- **A supervisor runs the adversarial review loop.** Blocking review verdicts no longer stall or
+  loop blind: the supervisor reviews blocking findings at the step boundary behind a write barrier,
+  steers or stops each lap, and the automatic cap rises from 1 to 3. Re-review is scoped — frozen
+  finding ids, a prior-entries ledger and round threading, so lap N+1 grades the repair rather than
+  re-litigating the original text. Human gates carry a supervisor recommendation (with a chip in the
+  UI) and a lazily-built run digest; every monitor prompt carries the supervisor charter, embedded
+  documents are fenced with a run longer than anything inside them, and each supervised triage retry
+  files a non-blocking audit finding. Review items gained an `annotate` op and a gate-open snapshot
+  hook.
+- **Ship and Launch loop their adversarial review back once** on a blocking verdict, matching the
+  behaviour Planner gained for its refine phase; the loop's verdict falls back to the review artifact
+  when the reviewer's text is ambiguous.
+- **Three more assistant proposal kinds.** `triage-findings` (TASK-292, migration 141) lets the
+  assistant triage review items in bulk; `start-quick-session` (TASK-295, migration 142) opens a
+  quick session seeded with a brief; and `launch-run` (TASK-294) now accepts custom workflows,
+  seeding by shape rather than by name and refusing a stamped workflow archived after the proposal
+  was drafted. `cyboflow_queue` returns compact rows with filters, paging and a summary mode
+  (TASK-293). Proposal cards resolve ids to refs, titles and stage labels.
+- **Continuous dev channel.** Every green push to `main` now rebuilds the Cyboflow Dev variant on
+  hosted runners and publishes it to `updates.cyboflow.com/dev` as `X.Y.Z-dev.<n>`, so dev users
+  move forward without a hand-cut release. `CYBOFLOW_BUILD_VERSION` stamps a build without editing
+  `package.json`, the macOS and Windows installer builds became reusable workflows, and the updater
+  orders prerelease versions per semver instead of falling through to a bare inequality.
+- **A stable release is a tag push.** Pushing `vX.Y.Z` rebuilds the **stable** variant at the tagged
+  commit on the same three native runners, publishes `updates.cyboflow.com/stable`, and cuts the
+  GitHub release. It refuses to ship a commit that is not on `origin/main`, whose four
+  `package.json` files disagree with the tag, whose `CHANGELOG.md` has no section, or whose Code
+  Quality run is not green.
+- **Workflow editor save-as-new picks a scope.** Saving a flow under a new name now offers Global vs
+  project scope, with the guard errors shown inside the dialog and the scope notice surfaced from
+  the picker.
+- **`artifacts.reported_at`** is stamped on every report (migration 143), so a review artifact
+  reported before the step started is recognised as a previous round's rather than graded as this
+  one's.
+- **The Cyboflow Dev variant has its own blue app icon**, packed by a new dependency-free `.ico`
+  packer, so the side-by-side install is distinguishable in the Dock and taskbar.
+- **Sidebar badge on collapsed projects** shows the open session count in the terracotta accent,
+  sitting beside the project name.
+
+### Changed
+
+- **Planner has a single terminal gate.** The archive-idea gate is merged into `approve-plan`, which
+  is now terminal for Planner and Launch and mid-run for Ship. Gate bodies report an honest revision
+  count and drop the fake deadline copy; a human note is carried on a design-gate Revise.
+- **Eval findings get Address / Log / Dismiss** in place of Dismiss / Promote-to-task, and
+  `address-review` may start despite the blocking eval finding it exists to repair.
+- **Needs-your-input dismisses stale quick-session asks**, and the dismiss dialog offers *Mark
+  complete* for DB-only Planner and Launch runs that produced no code.
+- **`revise` is no longer part of the supervisor recommendation vocabulary** — an off-menu choice
+  writes no recommendation at all instead of a misleading one.
+- The landing merge button is relabelled **Merge**; programmatic human gates are titled with the
+  flow's own gate header; the stale "after you save" note is gone from Code Review Eval settings.
+- **Issue #19 file-size ratchet, steps 4–8.** `index.ts`'s verify and eval composition moved to
+  sibling modules; `verificationScheduler.ts` lost its preamble, its terminal write and delivery
+  (`TerminalDelivery`), its legacy capture engine (`CapturePipeline`) and its agent engine
+  (`AgentEngine`). Behaviour is unchanged; the caps moved down with the files.
+- Report-only coverage moved off the release path into a nightly workflow, so a coverage hiccup can
+  no longer block the dev channel.
+
+### Fixed
+
+- **Transcripts under paths containing `_` were never discovered.** Claude Code now maps `_` to `-`
+  in its encoded-cwd directory names; `encodeCwd` was still preserving the underscore.
+- **`start-quick-session` failures were silent** — PTY spawn failures are surfaced, a post-create
+  throw is compensated, and git-invalid slugs are rejected up front (TASK-295).
+- Landing triage no longer misclassifies a session that has a live flow run.
+- Proposal label resolution is scoped to the project, with the opaque run-id fallback dropped.
+- A text-sourced blocking verdict steers from the reviewer's text when the artifact belongs to a
+  previous round; blocking-item verdicts are discarded after a mid-consult cancel; no triage consult
+  runs past the retry budget; a failed set-aside write keeps the entry in the lap instead of dropping
+  it from the run; malformed verdict entries no longer burn an item's slot; and an autonomous resolve
+  is audited first.
+- The gate consult lists only pending findings, the run digest is built lazily, and the
+  "no findings" path is limited to the programmatic design gate. Run-digest truncation counts its
+  own marker against both the item and total caps.
+- `review-item` create strips a caller-supplied supervisor-recommendation section.
+- The `approve-design` gate skip respects a populated review, the leaked revision flag is cleared,
+  and an operator-skipped gate clears the gate revision; the parser resyncs fence state on a section
+  heading.
+- The verification query never auto-approves an `mcp__` tool — each call is denied individually.
+- A registered runbook draft is proved before it is derived from, and draft timeouts are reported
+  honestly; the pending Xcode first-launch install is named when `simctl` cannot answer.
+- Windows CI: the mobile tier's three darwin-simulating suites are skipped on `win32` instead of
+  measuring the runner's path separator.
+
 ## [0.4.2] — 2026-09-17
 
 ### Added

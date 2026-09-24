@@ -30,7 +30,7 @@ import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import type { DecisionPayload } from '../../../shared/types/reviews';
-import type { HumanGateItemSnapshot } from './programmatic/humanGate';
+import type { HumanGateItemSnapshot, HumanGateOpenOptions } from './programmatic/humanGate';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
@@ -126,6 +126,14 @@ export class HumanStepManager {
    * that AskUserQuestion header, so both planes show one title for one decision.
    * Falls back to `stepName` for callers that only have the name.
    *
+   * `opts.reviewReportedSinceMs` is the caller's adversarial-review FRESHNESS
+   * bound for this walk (see {@link HumanGateOpenOptions}). It shapes an
+   * `approve-design` gate two ways, both inside the same transaction: the body is
+   * composed from a critique reported at or after that instant only, and the
+   * bound is stamped on the row's payload so the resolve-time side effects can
+   * re-apply the very same constraint. Absent ⇒ no constraint (today's
+   * behaviour), and no other gate reads it.
+   *
    * @returns the minted review-item id, or null when the gate was not opened
    *   (run not running, table absent, or the gate is already open for this step).
    */
@@ -134,6 +142,7 @@ export class HumanStepManager {
     stepId: string,
     stepName: string,
     gateHeader?: string,
+    opts?: HumanGateOpenOptions,
   ): Promise<string | null> {
     if (!hasReviewItemsTable(this.db)) return null;
 
@@ -199,9 +208,9 @@ export class HumanStepManager {
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
           title: `Human gate: ${gateHeader ?? stepName}`,
-          body: this.composeGateBody(runId, stepId, enrichedBody),
+          body: this.composeGateBody(runId, stepId, enrichedBody, opts),
           source: this.sourceForStep(stepId),
-          payload: this.composeGatePayload(runId, stepId),
+          payload: this.composeGatePayload(runId, stepId, opts),
           now,
         });
       });
@@ -497,23 +506,25 @@ export class HumanStepManager {
    * pause is neither failed nor resting, so retryRunHandler refuses it as
    * not_retryable — the host instead RESOLVES this item, which the
    * ReviewQueueSystemicPauseGate settles as a 'retry' verdict and the walk
-   * re-runs the interrupted step. Read-only; no transition. Fail-soft when the
-   * inbox table is absent.
+   * re-runs the interrupted step. Also backs the "Switch runtime & retry"
+   * handler, which reads the gate-minted `payloadJson` (raw, unparsed — the
+   * wiring module narrows it) for the blocked agents/provider. Read-only; no
+   * transition. Fail-soft when the inbox table is absent.
    */
   async findPendingSystemicPauseItem(
     runId: string,
-  ): Promise<{ reviewItemId: string; projectId: number } | null> {
+  ): Promise<{ reviewItemId: string; projectId: number; payloadJson: string | null } | null> {
     if (!hasReviewItemsTable(this.db)) return null;
     const row = this.db
       .prepare(
-        `SELECT id, project_id FROM review_items
+        `SELECT id, project_id, payload_json FROM review_items
           WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND source LIKE ? LIMIT 1`,
       )
       .get(runId, `${SYSTEMIC_PAUSE_SOURCE}:%`) as
-      | { id?: string; project_id?: number | null }
+      | { id?: string; project_id?: number | null; payload_json?: string | null }
       | undefined;
     if (!row?.id || row.project_id === null || row.project_id === undefined) return null;
-    return { reviewItemId: row.id, projectId: row.project_id };
+    return { reviewItemId: row.id, projectId: row.project_id, payloadJson: row.payload_json ?? null };
   }
 
   /**
@@ -543,7 +554,10 @@ export class HumanStepManager {
    * Three layers, most specific first:
    *   1. `approve-design` — the adversarial reviewer's counts, blocking titles,
    *      revisions taken so far, and what each button actually does
-   *      (adversarialReviewGateBody.ts). Null when the run has no critique.
+   *      (adversarialReviewGateBody.ts). Null when the run has no critique. Under
+   *      an `opts.reviewReportedSinceMs` bound it is composed from THIS round's
+   *      critique only, and a surviving previous-round artifact yields the
+   *      "no adversarial review this round" notice instead of its counts.
    *   2. A sprint/ship run's partial-lane summary (`partialSprintGateSummary`),
    *      already composed by the caller and passed in.
    *   3. The generic "this step requires a human decision" fallback.
@@ -558,9 +572,22 @@ export class HumanStepManager {
    * degrades to "say less". This runs INSIDE the gate-open transaction, so a throw
    * would mean a run that cannot pause for its human at all.
    */
-  private composeGateBody(runId: string, stepId: string, partialSprintBody: string | null): string {
+  private composeGateBody(
+    runId: string,
+    stepId: string,
+    partialSprintBody: string | null,
+    opts?: HumanGateOpenOptions,
+  ): string {
     const lead =
-      (stepId === APPROVE_DESIGN_STEP_ID ? composeAdversarialReviewGateBody(this.db, runId) : null) ??
+      (stepId === APPROVE_DESIGN_STEP_ID
+        ? composeAdversarialReviewGateBody(
+            this.db,
+            runId,
+            opts?.reviewReportedSinceMs !== undefined
+              ? { reportedSinceMs: opts.reviewReportedSinceMs }
+              : undefined,
+          )
+        : null) ??
       partialSprintBody ??
       `Workflow step '${stepId}' requires a human decision before the run can advance.`;
 
@@ -569,7 +596,38 @@ export class HumanStepManager {
     return `${lead}\n\n**Pending findings:** ${pending} finding${pending === 1 ? '' : 's'} filed by this run still await triage.`;
   }
 
-  private composeGatePayload(runId: string, stepId: string): DecisionPayload | null {
+  /**
+   * The decision payload a gate row mints with — null for most gates.
+   *
+   * Two arms:
+   *   - `approve-ideas` — the batch's idea refs, which the resolve validates the
+   *     submitted per-idea verdict map against. Null when the batch is empty
+   *     (nothing to validate, so nothing to carry).
+   *   - `approve-design` UNDER A FRESHNESS BOUND — the bound itself, as an
+   *     ISO-8601 UTC instant. It is stamped here, at gate-open, because this is
+   *     the only moment the walk's bound and the gate row exist together: the
+   *     resolve-time side effects run from a review-item id with no walk in
+   *     scope, and re-deriving the bound there is impossible. Persisting it makes
+   *     the accepted-risk filing act on the SAME critique the body was composed
+   *     from, across a restart, a monitor-driven resolve, or any other path.
+   *     An approve-design gate opened WITHOUT a bound keeps today's null payload.
+   *
+   * `ReviewItemRouter.runTriage` MERGES `{resolvedOutcome, resolvedSurface}` into
+   * whatever payload the gate minted with, so this field survives the resolve.
+   */
+  private composeGatePayload(
+    runId: string,
+    stepId: string,
+    opts?: HumanGateOpenOptions,
+  ): DecisionPayload | null {
+    if (stepId === APPROVE_DESIGN_STEP_ID) {
+      if (opts?.reviewReportedSinceMs === undefined) return null;
+      return {
+        kind: 'decision',
+        gate: 'approve-design',
+        reviewReportedSince: new Date(opts.reviewReportedSinceMs).toISOString(),
+      };
+    }
     if (stepId !== 'approve-ideas') return null;
     const ideaRefs = listApproveIdeasBatchRows(this.db, runId).map((row) => row.ref);
     if (ideaRefs.length === 0) return null;

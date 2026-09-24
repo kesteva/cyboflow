@@ -14,7 +14,7 @@
  * terminal dock collapses via display:none and NEVER unmounts RunBottomPane, so
  * the live interactive xterm survives a collapse (see TerminalDock).
  */
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane, type RunBottomTabKind } from './RunBottomPane';
@@ -31,8 +31,11 @@ import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
 import { pathBasename } from '../../utils/pathBasename';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useRunAgentTargetsVersion } from '../../stores/runAgentTargetsStore';
+import { trpc } from '../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
+import type { ModelFamily } from '../../../../shared/types/agents';
 
 interface RunCenterPaneProps {
   activeRunId: string;
@@ -113,6 +116,51 @@ export function RunCenterPane({
   // useArtifactTabsSync for the focus-steal / loading-vs-deleted-flicker fixes.
   useArtifactTabsSync(sessionKey, visibleArtifacts, loaded);
 
+  // Per-step resolved model info (IDEA-061 per-step model rail) — fetched ONCE
+  // per run id (mirrors the `runs.contextUsage` fetch-once pattern in
+  // RunChatView): one query keyed on activeRunId, no polling/subscription —
+  // plus ONE re-fetch each time the run's agent-target override layer changes
+  // (a systemic-pause "Switch runtime & retry" or its "Revert", signalled via
+  // runAgentTargetsStore), so the cards flip to the switched runtime/model
+  // instead of showing the launch-time resolution for the rest of the run.
+  //
+  // Otherwise this is a SNAPSHOT, not a run-lifetime invariant. The spawn seam
+  // (`programmatic/spawnStepRunner.ts`) deliberately re-resolves each step's
+  // agent runtime/model at that step's spawn, so a workflow- or project-scoped
+  // agent config edited MID-RUN changes what later steps actually run on while
+  // this rail keeps showing the resolution as of mount. Invalidating on THOSE
+  // writes would need a new subscription seam — tracked as follow-up work.
+  //
+  // `null` while loading/errored — WorkflowCanvas treats that identically to
+  // "no data yet" and renders every card's pre-existing row. A version-bump
+  // re-fetch keeps the previous map until the new one resolves (no flicker
+  // back to the model-less row).
+  const [stepModels, setStepModels] = useState<Map<
+    string,
+    { label: string; family: ModelFamily }
+  > | null>(null);
+  const agentTargetsVersion = useRunAgentTargetsVersion(activeRunId);
+  const stepModelsRunRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (stepModelsRunRef.current !== activeRunId) {
+      stepModelsRunRef.current = activeRunId;
+      setStepModels(null);
+    }
+    let alive = true;
+    trpc.cyboflow.runs.getStepModels
+      .query({ runId: activeRunId })
+      .then((rows) => {
+        if (!alive) return;
+        setStepModels(new Map(rows.map((r) => [r.stepId, { label: r.label, family: r.family }])));
+      })
+      .catch(() => {
+        // Fail-soft: cards simply render without the model segment.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeRunId, agentTargetsVersion]);
+
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
   // Active bottom-dock surface (RunBottomPane opens on Chat). The question strip
@@ -155,6 +203,7 @@ export function RunCenterPane({
           sprintStatus={activeRun?.status}
           projectId={projectId}
           sessionKey={sessionKey}
+          stepModels={stepModels}
         />
       );
     }
@@ -169,6 +218,7 @@ export function RunCenterPane({
         paused={activeRun?.status === 'paused'}
         status={activeRun?.status}
         sessionKey={sessionKey}
+        stepModels={stepModels}
       />
     );
   };

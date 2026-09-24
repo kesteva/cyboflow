@@ -63,7 +63,7 @@ describe('modelContext', () => {
       // MODEL_ALIAS_TO_ID); the legacy -250k variant still maps to the older
       // default-window Opus 4.8. Sonnet 5 IS 1M-native, so neither sonnet alias
       // carries a marker.
-      expect(resolveModelAlias('opus')).toBe('claude-opus-5[1m]');
+      expect(resolveModelAlias('opus')).toBe('claude-opus-5-5[1m]');
       expect(resolveModelAlias('opus-250k')).toBe('claude-opus-4-8');
       expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-5');
       expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-5');
@@ -80,7 +80,7 @@ describe('modelContext', () => {
     });
 
     it('matches aliases case/space-insensitively', () => {
-      expect(resolveModelAlias('Opus')).toBe('claude-opus-5[1m]');
+      expect(resolveModelAlias('Opus')).toBe('claude-opus-5-5[1m]');
       expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-5');
     });
 
@@ -102,7 +102,7 @@ describe('modelContext', () => {
     });
 
     it('the pinned default aliases need no 1M beta', () => {
-      // sonnet→claude-sonnet-5 is 1M-native and opus→claude-opus-5[1m] reaches 1M
+      // sonnet→claude-sonnet-5 is 1M-native and opus→claude-opus-5-5[1m] reaches 1M
       // via the id marker, so NEITHER needs the Sonnet-4.x beta: the gate returns
       // false for both.
       expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
@@ -125,7 +125,7 @@ describe('modelContext', () => {
       // and NOT stripped — the suffixed id is what the SDK is asked to spawn, which
       // is what actually returns a 1M contextWindow on this plane.
       expect(sdkModelAndBetas(resolveModelAlias('opus'))).toEqual({
-        model: 'claude-opus-5[1m]',
+        model: 'claude-opus-5-5[1m]',
         betas: [],
       });
     });
@@ -166,7 +166,7 @@ describe('modelContext', () => {
 
   describe('interactiveModelArg — CLI --model', () => {
     it('keeps Opus 5’s [1m] marker (only a [1m] Sonnet is stripped)', () => {
-      expect(interactiveModelArg(resolveModelAlias('opus'))).toBe('claude-opus-5[1m]');
+      expect(interactiveModelArg(resolveModelAlias('opus'))).toBe('claude-opus-5-5[1m]');
     });
 
     it('passes Sonnet 5 through unchanged (no marker to strip)', () => {
@@ -195,7 +195,7 @@ describe('modelContext', () => {
     it('swaps an unavailable guarded model for its fallback family (Fable → Opus)', () => {
       // The fallback alias is re-resolved, so the result is a real spawn-seam id.
       expect(applyModelAvailabilityFallback(resolveModelAlias('fable'), noneUsable)).toBe(
-        'claude-opus-5[1m]',
+        'claude-opus-5-5[1m]',
       );
     });
 
@@ -222,7 +222,7 @@ describe('modelContext', () => {
     });
 
     it('returns the resolved Opus fallback when the guarded default is unavailable', () => {
-      expect(resolveUnavailableDefaultModelFallback(() => false)).toBe('claude-opus-5[1m]');
+      expect(resolveUnavailableDefaultModelFallback(() => false)).toBe('claude-opus-5-5[1m]');
     });
 
     it('only consults the predicate for the guarded concreteId', () => {
@@ -237,13 +237,13 @@ describe('modelContext', () => {
 
   describe('bareModelId — optional availability fallback', () => {
     it('resolves the bare snapshot with no predicate (unchanged legacy behavior)', () => {
-      expect(bareModelId('opus')).toBe('claude-opus-5');
+      expect(bareModelId('opus')).toBe('claude-opus-5-5');
       expect(bareModelId('fable')).toBe('claude-fable-5-1');
       expect(bareModelId(null)).toBeUndefined();
     });
 
     it('falls back to the bare Opus id when a pinned Fable is unavailable', () => {
-      expect(bareModelId('fable', () => false)).toBe('claude-opus-5');
+      expect(bareModelId('fable', () => false)).toBe('claude-opus-5-5');
       // usable predicate keeps Fable
       expect(bareModelId('fable', () => true)).toBe('claude-fable-5-1');
     });

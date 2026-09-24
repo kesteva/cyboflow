@@ -3283,9 +3283,9 @@ describe('WorkflowController — gate revision threading', () => {
 
   /** Records the gateRevision each step turn actually received. */
   function recordingRunner(): StepRunner & {
-    seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }>;
+    seen: Array<{ id: string; gateRevision?: ControllerStepContext['gateRevision'] }>;
   } {
-    const seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }> = [];
+    const seen: Array<{ id: string; gateRevision?: ControllerStepContext['gateRevision'] }> = [];
     return {
       seen,
       async runStep(s, ctx) {
@@ -3321,10 +3321,20 @@ describe('WorkflowController — gate revision threading', () => {
     expect(runner.seen[0].gateRevision).toBeUndefined();
     expect(runner.seen[1].gateRevision).toBeUndefined();
     for (const turn of runner.seen.slice(2)) {
-      expect(turn.gateRevision).toEqual({
+      expect(turn.gateRevision).toMatchObject({
         gateStepId: 'approve-design',
         note: 'the spend screen has no way back to Home',
       });
+      // The walk's review-freshness bound rides along (FB-9b) so the re-run's
+      // artifact quote is read under the same bound the gate body was composed
+      // from. It is the walk-entry instant here (no review step ran), so assert
+      // its type and the exact key set rather than a wall-clock value.
+      expect(typeof turn.gateRevision?.reviewReportedSinceMs).toBe('number');
+      expect(Object.keys(turn.gateRevision ?? {}).sort()).toEqual([
+        'gateStepId',
+        'note',
+        'reviewReportedSinceMs',
+      ]);
     }
   });
 
@@ -3531,7 +3541,13 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     expect(runner.seen[3].gateRevision?.source).toBe('adversarial-review');
     // Human revise after the lap: two reviews have completed — round 3 next. The
     // count is attributed to the phase's REVIEW step, not to the gate.
-    expect(runner.seen[6].gateRevision).toEqual({ gateStepId: 'approve-design', round: 2 });
+    expect(runner.seen[6].gateRevision).toMatchObject({ gateStepId: 'approve-design', round: 2 });
+    // Plus the walk's review-freshness bound (FB-9b) — and nothing else.
+    expect(Object.keys(runner.seen[6].gateRevision ?? {}).sort()).toEqual([
+      'gateStepId',
+      'reviewReportedSinceMs',
+      'round',
+    ]);
     expect(runner.seen[8].gateRevision?.round).toBe(2);
     // Approve clears it.
     expect(runner.seen[9].gateRevision).toBeUndefined();
@@ -3551,8 +3567,14 @@ describe('WorkflowController — adversarial-review automatic revision', () => {
     const result = await new WorkflowController(runner, host).run('run-ar-noreview', noReview);
     expect(result.outcome).toBe('completed');
     // The re-driven step learns WHICH gate sent it back and nothing more — no
-    // invented round.
-    expect(runner.seen[1].gateRevision).toEqual({ gateStepId: 'approve-design' });
+    // invented round. (The walk's review-freshness bound rides along as always;
+    // a def with no review step still has one, and it bounds the artifact quote
+    // to this walk exactly as the gate body is bounded.)
+    expect(runner.seen[1].gateRevision).toMatchObject({ gateStepId: 'approve-design' });
+    expect(Object.keys(runner.seen[1].gateRevision ?? {}).sort()).toEqual([
+      'gateStepId',
+      'reviewReportedSinceMs',
+    ]);
   });
 
   it('falls through to the human gate when the second round is still blocking (bounded to one automatic lap)', async () => {
@@ -4404,5 +4426,160 @@ describe('WorkflowController — adversarial-review freshness bound (FB-9)', () 
 
     expect(runner.seen).toContain('adversarial-review');
     expect(ctxs).toEqual([{ reviewReportedSinceMs: 2000 }]);
+  });
+
+  // ── The bound reaching the GATE OPENER (the gate body + Approve's filing) ────
+  // Same instant, same walk: whatever `shouldSkipHumanGate` was asked about the
+  // surface, `requestHumanGate` must be handed about the critique — otherwise the
+  // gate is skipped on this round's evidence but composed from a previous one's.
+
+  it("the gate's ctx carries the SAME bound shouldSkipHumanGate was handed", async () => {
+    const skipBounds: Array<{ reviewReportedSinceMs?: number } | undefined> = [];
+    const gateBounds: Array<number | undefined> = [];
+    const runner = runnerFor([CLEAN]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.shouldSkipHumanGate = (s, _runId, ctx) => {
+      if (s.id === 'approve-design') skipBounds.push(ctx);
+      return null; // do not skip — the gate opens
+    };
+    host.requestHumanGate = async (s, ctx) => {
+      if (s.id === 'approve-design') gateBounds.push(ctx.reviewReportedSinceMs);
+      return 'approve';
+    };
+
+    await new WorkflowController(runner, host).run('run-fb9-gatectx', freshnessDef(true));
+
+    expect(skipBounds).toEqual([{ reviewReportedSinceMs: 2000 }]);
+    expect(gateBounds).toEqual([2000]);
+  });
+
+  it("omits the bound from the gate's ctx when the review step completed BEFORE this walk", async () => {
+    const gateCtxs: Array<Record<string, unknown>> = [];
+    const runner = runnerFor([]);
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+    host.requestHumanGate = async (s, ctx) => {
+      if (s.id === 'approve-design') gateCtxs.push(ctx as unknown as Record<string, unknown>);
+      return 'approve';
+    };
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9-gate-resume',
+      freshnessDef(),
+      undefined,
+      undefined,
+      new Set(['expand-spec', 'adversarial-review']),
+    );
+
+    expect(runner.seen).not.toContain('adversarial-review');
+    expect(gateCtxs).toHaveLength(1);
+    // The KEY is absent, not present-and-undefined — the opener keys on
+    // `!== undefined` and an explicit undefined would still be no constraint, but
+    // the ctx must not grow a key the resume path never means to set.
+    expect(gateCtxs[0]).not.toHaveProperty('reviewReportedSinceMs');
+  });
+
+  it("never puts the bound on an AGENT step's ctx (prompts stay byte-identical)", async () => {
+    const agentCtxs: Array<Record<string, unknown>> = [];
+    const runner: StepRunner & { seen: string[] } = {
+      seen: [],
+      async runStep(s, ctx) {
+        (runner as { seen: string[] }).seen.push(s.id);
+        agentCtxs.push(ctx as unknown as Record<string, unknown>);
+        if (s.id === 'adversarial-review') return { status: 'ok', resultText: CLEAN };
+        return { status: 'ok' };
+      },
+    };
+    const host = makeHost({ 'approve-design': ['approve'] });
+    host.now = tickingNow();
+
+    await new WorkflowController(runner, host).run('run-fb9-agentctx', freshnessDef());
+
+    // Every agent step ran, and not one of them was handed the bound — including
+    // the review step itself, whose visit is what SETS it.
+    expect(runner.seen).toEqual(expect.arrayContaining(['expand-spec', 'adversarial-review', 'epics']));
+    expect(agentCtxs.length).toBeGreaterThan(0);
+    for (const ctx of agentCtxs) expect(ctx).not.toHaveProperty('reviewReportedSinceMs');
+  });
+
+  // ── The bound reaching the GATE-REVISION quote ──────────────────────────────
+  // A gate whose body was the "No adversarial review this round" notice withheld
+  // the previous round's critique from the human. Revise must not then thread
+  // that same document into the re-run as the feedback to act on, so the
+  // revision carries the gate's bound down to the step runner's artifact read.
+
+  /** Records each step turn's `ctx.gateRevision`, in visit order. */
+  function revisionRecordingRunner(
+    reviewResults: (string | null)[],
+  ): StepRunner & { seen: string[]; revisions: Array<Record<string, unknown> | undefined> } {
+    const seen: string[] = [];
+    const revisions: Array<Record<string, unknown> | undefined> = [];
+    const queue = [...reviewResults];
+    return {
+      seen,
+      revisions,
+      async runStep(s, ctx) {
+        seen.push(s.id);
+        revisions.push(ctx.gateRevision as unknown as Record<string, unknown> | undefined);
+        if (s.id === 'adversarial-review') {
+          return { status: 'ok', resultText: queue.length > 0 ? queue.shift()! : CLEAN };
+        }
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it("a gate REVISE snapshots the gate's bound onto gateRevision for every re-driven step", async () => {
+    const runner = revisionRecordingRunner([CLEAN, CLEAN]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+    host.now = tickingNow();
+
+    const result = await new WorkflowController(runner, host).run('run-fb9b-revise', freshnessDef());
+
+    expect(result.outcome).toBe('completed');
+    // Walk entry takes tick 1000; the FIRST review visit takes 2000, so the gate
+    // that then opened was composed under 2000.
+    expect(runner.seen).toEqual([
+      'expand-spec',
+      'adversarial-review',
+      'expand-spec',
+      'adversarial-review',
+      'epics',
+    ]);
+    // Pre-revise turns carry no revision at all.
+    expect(runner.revisions[0]).toBeUndefined();
+    expect(runner.revisions[1]).toBeUndefined();
+    // Every re-driven turn carries the gate's instant — INCLUDING the review
+    // step's own re-run, whose visit re-stamps the controller's live bound to
+    // 3000 before it spawns. A live read there would hand the reviewer a bound
+    // nothing can satisfy; the snapshot keeps the quote the gate's.
+    expect(runner.revisions[2]).toMatchObject({
+      gateStepId: 'approve-design',
+      reviewReportedSinceMs: 2000,
+    });
+    expect(runner.revisions[3]).toMatchObject({ reviewReportedSinceMs: 2000 });
+  });
+
+  it('omits the bound from gateRevision when the walk holds none (resume past the reviewer)', async () => {
+    const runner = revisionRecordingRunner([CLEAN]);
+    const host = makeHost({ 'approve-design': ['revise', 'approve'] });
+    host.now = tickingNow();
+
+    await new WorkflowController(runner, host).run(
+      'run-fb9b-revise-resume',
+      freshnessDef(),
+      undefined,
+      undefined,
+      new Set(['expand-spec', 'adversarial-review']),
+    );
+
+    // The gate opened first (both earlier steps were fast-forwarded), revised
+    // back to expand-spec, and that re-driven turn is the first one recorded.
+    expect(runner.seen[0]).toBe('expand-spec');
+    expect(runner.revisions[0]).toMatchObject({ gateStepId: 'approve-design' });
+    // The KEY is absent, not present-and-undefined: no bound means no constraint,
+    // and the step runner's artifact read must stay byte-identical to before.
+    expect(runner.revisions[0]).not.toHaveProperty('reviewReportedSinceMs');
   });
 });

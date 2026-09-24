@@ -11,7 +11,7 @@ import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
 import { ConfigManager, readTelemetryConfigSync } from './services/configManager';
 import { WorktreeManager } from './services/worktreeManager';
-import { GitDiffManager } from './services/gitDiffManager';
+import { GitDiffManager, resolveGitRefToSha, EMPTY_WORKTREE_STATUS } from './services/gitDiffManager';
 import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { ModelAvailabilityService, isModelUsable } from './services/modelAvailabilityService';
@@ -74,7 +74,7 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
+import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
@@ -128,7 +128,8 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
+import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
 import {
   DefaultMonitorSession,
@@ -157,7 +158,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -166,7 +167,7 @@ import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
 import { providerForRuntime } from '../../shared/types/agentRuntime';
-import { setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
+import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
@@ -219,7 +220,6 @@ import { approvalEvents, questionEvents, runStatusEvents, stuckEvents } from './
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
 import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
-import type { WorktreeStatusPayload } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
@@ -313,7 +313,7 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from './utils/runGit';
+import { runGitAsync } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
@@ -950,46 +950,6 @@ let sessionGitOps: SessionGitOpsLike | undefined;
 let sessionOps: SessionOpsLike | undefined;
 
 /**
- * Resolve a caller-supplied ref (branch, tag, sha) to a concrete commit sha for
- * the run-scoped `gitDiff` context closure (TASK-211), or `null` when the ref is
- * falsy or fails to resolve. Mirrors GitDiffManager's private
- * `resolveRefForDiff` (TASK-208 ref-safety discipline) rather than reaching into
- * that class's internals: `END_OF_OPTIONS` forces the ref into a value position
- * and `^{commit}` forces a commit-ish resolution that an option-like string can
- * never satisfy.
- */
-async function resolveGitRefToSha(worktreePath: string, ref: string | undefined): Promise<string | null> {
-  if (!ref) return null;
-  try {
-    assertNotOptionLike(ref, 'diff ref');
-    const resolved = (
-      await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
-    ).trim();
-    return resolved || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * A `WorktreeStatusPayload` stub for callers that capture a `RunGitDiff` but
- * have no meaningful worktree status to report (e.g. the eval snapshot's
- * fail-soft closure, TASK-211). Still declares all four `DiffGroupScope`
- * groups (zeroed) per WorktreeStatusPayload's fixed-shape doc comment, rather
- * than an empty `groups` array.
- */
-const EMPTY_WORKTREE_STATUS: WorktreeStatusPayload = {
-  entries: [],
-  groups: [
-    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
-    { scope: 'staged', files: [], additions: 0, deletions: 0 },
-    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
-    { scope: 'committed', files: [], additions: 0, deletions: 0 },
-  ],
-  committedUnavailable: true,
-};
-
-/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -1108,6 +1068,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // pattern). CustomWidgetServerManager.ensure/stop already match
         // CustomWidgetServerLike's shape, so no adapter is needed.
         customWidgetServer: customWidgetServerManager ?? undefined,
+        resolveRunEffectiveAgents: createRunEffectiveAgentsResolver(() => databaseService.getDb()),
       }),
   });
 }
@@ -2777,7 +2738,7 @@ async function initializeServices(): Promise<boolean> {
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
       // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
       // written by the MCP workflow-config tools as well as the editor, so a pin
       // naming a provider the user switched off in Settings → Integrations can
@@ -2796,7 +2757,7 @@ async function initializeServices(): Promise<boolean> {
       }
       // bareModelId resolves the alias to the current concrete snapshot at the
       // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
-      // `opus` pin spawns `claude-opus-5` (default window), matching the
+      // `opus` pin spawns `claude-opus-5-5` (default window), matching the
       // orchestrated overlay's `model:` frontmatter semantics (modelContext.ts),
       // NOT the 1M variant a run-level `opus` picker would select. Intentional:
       // per-agent pins are window-agnostic and consistent across both planes.
@@ -2823,52 +2784,8 @@ async function initializeServices(): Promise<boolean> {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
-    // Systemic-pause gate (the 2026-07-06 planner incident): a step failing with
-    // a usage/session/rate-limit-class error PARKS the run behind a blocking
-    // 'decision' item ("resolve to retry now, dismiss to give up") and
-    // auto-resumes at the parsed limit-reset time, instead of burning the step's
-    // retry / optional-skip / triage budgets on a condition no retry can fix.
-    // Item writes ride the ReviewItemRouter chokepoint (orchestrator actor);
-    // park/resume rides the SAME HumanStepManager primitives as the blocking
-    // gate, so a systemic pause participates in aggregate-unblock.
-    systemicGate: new ReviewQueueSystemicPauseGate({
-      items: {
-        findPending: (runId, source) =>
-          HumanStepManager.getInstance().findPendingItemBySource(runId, source),
-        create: async ({ runId, projectId, title, body, source }) => {
-          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(
-            projectId,
-            {
-              op: 'create',
-              actor: 'orchestrator',
-              kind: 'decision',
-              title,
-              body,
-              blocking: true,
-              source,
-              runId,
-            },
-          );
-          return reviewItemId;
-        },
-        resolve: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'resolve',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-        dismiss: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'dismiss',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-      },
-      parker: HumanStepManager.getInstance(),
+    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
+    systemicGate: buildSystemicPauseGate({
       events: reviewItemChangeEvents,
       channelFor: reviewItemProjectChannel,
       logger: cyboflowLogger,
@@ -3714,6 +3631,17 @@ async function initializeServices(): Promise<boolean> {
   // mutations are ops closures over this very services object now, not
   // ipcMain.handle registrations.
   sessionOps = createSessionOps(services);
+  // "Switch runtime & retry" on a limit-paused programmatic run (switchRunAgentsHandler.ts).
+  // Wired HERE, not beside setPauseRunDeps: its readiness probe needs this services object.
+  setSwitchRunAgentsDeps({
+    db: cyboflowDb,
+    isProviderEnabled: isAgentProviderAllowed,
+    isProviderReady: async (p) => (await detectProvider(p, services)).state === 'detected',
+    listRunAgentTargets: (runId) => listRunAgentTargets(rawDb, runId, cyboflowLogger),
+    findPendingPause: findPendingSystemicPause,
+    resolveItem: resolveSystemicPauseItem,
+    logger: cyboflowLogger,
+  });
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);

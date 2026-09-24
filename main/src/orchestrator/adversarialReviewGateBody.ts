@@ -236,17 +236,86 @@ function renderBudget(used: number): string | null {
 }
 
 /**
+ * The "what each button DOES" footer, shared by BOTH bodies this module composes.
+ *
+ * One function, not two copies, so the choices cannot drift apart the moment one
+ * is reworded. `stale` selects the wording for the stale-notice body: the buttons
+ * are the same, but there are no findings above to feed back or to log, and a
+ * footer that promised "every finding above is logged" under a lead that just
+ * said Approve files nothing would state two opposite things in one body.
+ */
+function renderChoicesFooter(stale = false): string[] {
+  return [
+    '',
+    '**Your two choices:**',
+    '',
+    stale
+      ? '- **Revise** — rerun planning. The design steps run again and the reviewer re-reviews the result. Use this when the design has to change before anything is built.'
+      : '- **Revise** — rerun planning. The design steps run again with these findings as feedback, and the reviewer re-reviews the result. Use this when a blocking defect has to be fixed before anything is built.',
+    stale
+      ? "- **Approve** — continue. The previous round's critique is not logged as accepted risks; the run moves on."
+      : '- **Approve** — continue. Every finding above is logged as a non-blocking accepted-risk finding in the review queue, linked to the Adversarial review tab, so nothing is lost — it just stops holding the run up.',
+  ];
+}
+
+/**
+ * The body a gate opens with when the run's critique is STALE — an artifact
+ * exists, but it was last reported BEFORE this round's freshness bound.
+ *
+ * This case cannot be answered with `null` (the "no critique at all" answer).
+ * The artifact row is one-per-run and survives every rewind and Revise loopback,
+ * so the Adversarial review TAB is still sitting there showing the previous
+ * round's verdict next to a design that has since been revised. A human reading
+ * a generic gate body beside that tab would reasonably take it as this round's.
+ * So the body says, in as many words, that the tab is out of date and that
+ * Approve will file nothing from it — which is exactly what
+ * `GateSideEffects.fileAcceptedRiskFindings` does under the same bound.
+ */
+function composeStaleReviewGateBody(db: DatabaseLike, runId: string): string {
+  const lines: string[] = [
+    "**No adversarial review this round.** The reviewer did not report a critique for the design you are looking at. The Adversarial review tab still shows the previous round's critique, which does not describe the current design, and Approve files no accepted-risk findings from it.",
+  ];
+  const budget = renderBudget(countApproveDesignRevisionsUsed(db, runId));
+  if (budget !== null) lines.push('', budget);
+  lines.push(...renderChoicesFooter(true));
+  return lines.join('\n');
+}
+
+/**
  * Compose the `approve-design` gate body from this run's adversarial review.
  *
- * Returns null when the run has NO adversarial-review artifact, which is the
- * honest answer for a run whose optional review step self-skipped: the caller then
- * keeps whatever body it would otherwise have used. A review that raised nothing
- * still returns a body — "the reviewer found nothing blocking" is information the
- * human is entitled to before approving.
+ * Returns null when the run has NO adversarial-review artifact AT ALL, which is
+ * the honest answer for a run whose optional review step self-skipped: the caller
+ * then keeps whatever body it would otherwise have used. A review that raised
+ * nothing still returns a body — "the reviewer found nothing blocking" is
+ * information the human is entitled to before approving.
+ *
+ * FRESHNESS (`opts.reportedSinceMs`, the walk's "this round started at" instant).
+ * An artifact whose `reported_at` is KNOWN and EARLIER than the bound belongs to
+ * a previous round, and returns the {@link composeStaleReviewGateBody} notice
+ * rather than null: null would silently fall back to the generic gate body while
+ * the Adversarial review tab kept showing the previous round's critique beside
+ * it, and the human must be told the tab is out of date rather than left to
+ * infer it. An unknown age and an absent `opts` are both NO CONSTRAINT, so the
+ * bodies below are byte-identical to before for every unbounded caller.
  */
-export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string): string | null {
-  const markdown = readAdversarialReviewMarkdown(db, runId);
-  if (markdown === undefined) return null;
+export function composeAdversarialReviewGateBody(
+  db: DatabaseLike,
+  runId: string,
+  opts?: { reportedSinceMs?: number },
+): string | null {
+  const markdown = readAdversarialReviewMarkdown(db, runId, opts);
+  if (markdown === undefined) {
+    // Distinguish "stale" from "absent": only a run that HAS a readable critique
+    // of known age older than the bound gets the notice. Everything else (no row,
+    // unknown age, a row whose payload holds no markdown — there is no previous
+    // round's critique in the tab to warn about) keeps today's null.
+    if (opts?.reportedSinceMs === undefined) return null;
+    const reportedAtMs = readAdversarialReviewReportedAtMs(db, runId);
+    if (reportedAtMs === null || reportedAtMs >= opts.reportedSinceMs) return null;
+    if (readAdversarialReviewMarkdown(db, runId) === undefined) return null;
+    return composeStaleReviewGateBody(db, runId);
+  }
 
   const { blocking, findings, prior } = parseAdversarialReviewDoc(markdown);
   const lines: string[] = [];
@@ -273,13 +342,7 @@ export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string
   const budget = renderBudget(countApproveDesignRevisionsUsed(db, runId));
   if (budget !== null) lines.push('', budget);
 
-  lines.push(
-    '',
-    '**Your two choices:**',
-    '',
-    '- **Revise** — rerun planning. The design steps run again with these findings as feedback, and the reviewer re-reviews the result. Use this when a blocking defect has to be fixed before anything is built.',
-    '- **Approve** — continue. Every finding above is logged as a non-blocking accepted-risk finding in the review queue, linked to the Adversarial review tab, so nothing is lost — it just stops holding the run up.',
-  );
+  lines.push(...renderChoicesFooter());
 
   return lines.join('\n');
 }

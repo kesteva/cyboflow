@@ -892,11 +892,16 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('host resolves that pause');
   });
 
-  it('offers switch_to_orchestrated with the explicit-confirmation + one-way framing', () => {
+  it('attaches switch_to_orchestrated on the same turn when the user explicitly asks, and keeps the one-way framing', () => {
     const history: MonitorHistory = { conversation: [], steps: [] };
     const p = buildActionAnswerPrompt(ctx, 'fix the conflict by hand then continue', history);
     expect(p).toContain('switch_to_orchestrated');
-    expect(p).toContain('EXPLICIT confirmation'); // must wait for a later-turn confirmation
+    // An explicit ask is actuated immediately — no confirmation of a request just made.
+    expect(p).toContain('ATTACH IT ON THAT SAME TURN');
+    expect(p).toContain('do NOT ask them to confirm a request they just made');
+    // The later-turn confirmation survives ONLY for an unprompted offer.
+    expect(p).toContain('proposing the handover UNPROMPTED');
+    expect(p).toContain('EXPLICIT confirmation');
     expect(p).toContain('ONE-WAY'); // the run does not return to step-by-step execution
     expect(p).toContain('reason'); // attach a faithful summary
     // Existing framing stays intact: explicit-ask-only + never-claim-success.
@@ -1001,7 +1006,7 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('host-staged behind the confirm/cancel gate');
     // retry_step / switch_to_orchestrated keep their own stricter, explicit-only contracts.
     expect(p).toContain('must NEVER be attached proactively');
-    expect(p).toContain('"switch_to_orchestrated" also keeps its own stricter contract');
+    expect(p).toContain('"switch_to_orchestrated" is the other exception');
   });
 
   it('notes that sprint-lane failures are auto-triaged by the host, so the monitor should not promise manual intervention or duplicate a rescue', () => {

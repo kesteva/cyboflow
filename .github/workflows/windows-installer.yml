@@ -25,6 +25,10 @@ on:
         description: 'Git ref to build; empty = the ref that triggered the caller'
         type: string
         default: ''
+      require_signed:
+        description: 'Fail unless the installer and app exe carry a valid Authenticode signature from the release identity. Set by the two publishing callers; left off for smoke builds, which may legitimately run without the AZURE_* secrets.'
+        type: boolean
+        default: false
     secrets:
       AZURE_TENANT_ID:
         required: false
@@ -117,6 +121,44 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           APTABASE_APP_KEY: ${{ secrets.APTABASE_APP_KEY }}
         timeout-minutes: 40
+
+      # The Windows twin of macos.yml's spctl/stapler assertions. The build
+      # above deliberately produces a valid UNSIGNED installer when the AZURE_*
+      # secrets are absent (fork PRs, smoke builds) — which also means a
+      # publishing run whose secrets went missing would ship unsigned with
+      # every step green. This step closes that: it always reports what it
+      # finds, and fails when the caller set require_signed (the dev and
+      # stable release workflows) and anything is unsigned, untrusted, not
+      # timestamped, or signed by an identity other than the release one.
+      # Checks the installer AND the packaged app exe, since electron-builder
+      # signs them separately.
+      - name: Verify Authenticode signature
+        shell: pwsh
+        env:
+          REQUIRE_SIGNED: ${{ inputs.require_signed }}
+          # docs/WINDOWS-BUILD.md → certificate subject. Changes only with a
+          # new signing identity, and should fail loudly when it does.
+          EXPECTED_SIGNER: 'CN=Raimundo Esteva, O=Raimundo Esteva'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = $env:REQUIRE_SIGNED -eq 'true'
+          $files = @(Get-ChildItem dist-electron -Filter *-Windows-*.exe -File) +
+                   @(Get-ChildItem dist-electron/win-unpacked -Filter *.exe -File -ErrorAction SilentlyContinue)
+          if ($files.Count -ne 2) { throw "expected the installer and the app exe, found: $($files.Name -join ', ')" }
+          $bad = @()
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $f.FullName
+            $subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '(none)' }
+            $stamped = [bool]$sig.TimeStamperCertificate
+            Write-Host "$($f.Name): status=$($sig.Status) signer=$subject timestamped=$stamped"
+            if ($sig.Status -ne 'Valid') { $bad += "$($f.Name): $($sig.Status) — $($sig.StatusMessage)" }
+            elseif (-not $subject.StartsWith($env:EXPECTED_SIGNER)) { $bad += "$($f.Name): signed by '$subject', expected '$($env:EXPECTED_SIGNER)…'" }
+            elseif (-not $stamped) { $bad += "$($f.Name): not timestamped (the signature dies with the 3-day certificate)" }
+          }
+          if ($bad.Count -eq 0) { Write-Host 'all signatures valid'; exit 0 }
+          $msg = "Authenticode check failed:`n  " + ($bad -join "`n  ")
+          if ($required) { Write-Host "::error::$($msg -replace "`n", '%0A')"; exit 1 }
+          Write-Host "::warning::unsigned build (require_signed is off — expected without the AZURE_* secrets)%0A$($msg -replace "`n", '%0A')"
 
       # Artifact name carries the variant so a stable and a dev run on the same
       # ref never overwrite each other; the stable name is unchanged for the

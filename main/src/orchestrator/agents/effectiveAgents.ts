@@ -27,7 +27,7 @@ import { isWorkflowLaunchableRuntime } from '../../../../shared/types/agentRunti
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../../shared/types/reasoningEffort';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
-import type { WorkflowAgentConfig } from '../../../../shared/types/workflows';
+import type { RunAgentTargetOverrides, WorkflowAgentConfig } from '../../../../shared/types/workflows';
 import { ensureResultSection, isGrantableMcpServer } from './agentValidation';
 import type { BuiltInAgent } from './agentCatalogue';
 
@@ -393,6 +393,75 @@ export function applyWorkflowAgentConfigs(
       providerModel,
       codexModel: providerModel,
       effort,
+      source,
+    };
+  });
+}
+
+/**
+ * Apply a RUN's operator-written agent-target overrides
+ * (workflow_runs.agent_target_overrides_json — the "Switch runtime & retry"
+ * action on a limit-paused programmatic run) ON TOP of an already-resolved
+ * effective agent set. Pure — no DB / FS. Mirrors {@link applyWorkflowAgentConfigs}
+ * for the four target fields only (no `custom` body, no addendum):
+ *   - `runtime` (a valid launchable runtime) replaces the runtime;
+ *   - `model` (a valid alias) replaces the model; `null` CLEARS it to `null`
+ *     (inherit the run model) — a switch onto a non-Claude provider writes
+ *     `model: null` so a workflow-pinned Claude alias cannot ride along;
+ *   - `providerModel` (non-empty) replaces it; `null` CLEARS it (absent);
+ *   - `effort` (a known effort level) replaces it; `null` CLEARS it (absent).
+ *
+ * Nothing changed → the SAME object (no spurious source flip). Otherwise
+ * `rawContent` is dropped, `builtin` flips to `builtin-override`, and `codexModel`
+ * mirrors `providerModel`. There is deliberately no `'*'` wildcard key: the writer
+ * names every agent it covers. A key with no matching agent is ignored (overrides
+ * never ADD agents).
+ *
+ * Merge order at the call site (`resolveRunEffectiveAgents`): AFTER the workflow
+ * `agentConfigs` and the variant deltas, BEFORE `applyPromptAddenda` — the
+ * operator's mid-run directive is the highest-precedence target layer.
+ */
+export function applyRunAgentTargetOverrides(
+  effective: EffectiveAgent[],
+  overrides: RunAgentTargetOverrides,
+): EffectiveAgent[] {
+  return effective.map((agent) => {
+    const target = overrides[agent.agentKey];
+    if (!target) return agent;
+
+    const runtime = isWorkflowLaunchableRuntime(target.runtime) ? target.runtime : agent.runtime;
+    const model =
+      target.model === null ? null : isAgentModelAlias(target.model) ? target.model : agent.model;
+    const providerModel =
+      target.providerModel === null
+        ? undefined
+        : typeof target.providerModel === 'string' && target.providerModel.length > 0
+          ? target.providerModel
+          : agent.providerModel;
+    const effort =
+      target.effort === null ? undefined : isAnyEffortLevel(target.effort) ? target.effort : agent.effort;
+
+    if (
+      runtime === agent.runtime &&
+      model === agent.model &&
+      providerModel === agent.providerModel &&
+      effort === agent.effort
+    ) {
+      return agent;
+    }
+
+    const source = agent.source === 'builtin' ? 'builtin-override' : agent.source;
+    const { rawContent: _dropped, providerModel: _pm, codexModel: _cm, effort: _ef, ...rest } = agent;
+    void _dropped;
+    void _pm;
+    void _cm;
+    void _ef;
+    return {
+      ...rest,
+      model,
+      runtime,
+      ...(providerModel !== undefined ? { providerModel, codexModel: providerModel } : {}),
+      ...(effort !== undefined ? { effort } : {}),
       source,
     };
   });

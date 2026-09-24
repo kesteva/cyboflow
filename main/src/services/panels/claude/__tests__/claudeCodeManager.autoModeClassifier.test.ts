@@ -248,7 +248,7 @@ describe('ClaudeCodeManager buildSdkOptions — auto-mode classifier model fallb
 
     expect(opts.permissionMode).toBe('auto');
     // Classifier now runs on an available model instead of the pulled default.
-    expect(opts.model).toBe('claude-opus-5[1m]');
+    expect(opts.model).toBe('claude-opus-5-5[1m]');
   });
 
   it('NULL model + auto + guarded default AVAILABLE → no pin (CLI default retained)', async () => {

@@ -427,9 +427,18 @@ describe('PlaywrightBackend — missing `playwright` module soft-fails (packagin
     vi.doUnmock('playwright');
   });
 
-  // Generous timeout: vi.resetModules() + fresh dynamic imports are CPU-contention
-  // sensitive — this test flakes at the 5s default under the full test:unit chain
-  // while passing in isolation (recurring full-suite flake, see sprint-verify notes).
+  // `runInstall` is the ONLY dep injected here, and it is not a convenience: a
+  // bare `new Installer()` takes defaultRunInstall, which really does
+  // `spawn('npx', ['playwright','install','chromium'], {shell:true})` on the host.
+  // That spawn is not the subject — the subject is defaultExecutablePath's lazy
+  // `await import('playwright')` soft-failing when the module is absent — but it
+  // dominated the runtime and made the case a host-load measurement: 13.5 s on
+  // ubuntu, 25.8 s of a 30 s budget on the previous windows-latest run, and 30009 ms
+  // (timeout) on the 0.4.3 release gate, where it blocked a release with the
+  // production path correct and unchanged. The budget had already gone 5 s → 30 s
+  // chasing it. Stubbing the install keeps every assertion below intact — the
+  // default executablePath and pathExists still run — and the case drops to
+  // milliseconds, deterministically.
   it('healthCheck()/ensureChromium() resolve false (no throw) when the module is absent', async () => {
     vi.resetModules();
     vi.doMock('playwright', () => {
@@ -438,8 +447,9 @@ describe('PlaywrightBackend — missing `playwright` module soft-fails (packagin
     const { PlaywrightInstaller: Installer } = await import('../playwrightInstaller');
     const { PlaywrightBackend: Backend } = await import('../playwrightBackend');
 
-    // DEFAULT installer (its default executablePath lazy-imports the absent module).
-    const installer = new Installer();
+    // DEFAULT executablePath/pathExists (they lazy-import the absent module); only
+    // the npx spawn is stubbed out.
+    const installer = new Installer({ runInstall: async () => false });
     await expect(installer.ensureChromium()).resolves.toBe(false);
 
     // DEFAULT backend wired with that installer: healthCheck is false, never throws.

@@ -148,6 +148,42 @@ describe('ReviewQueueHumanGate', () => {
     await expect(pending).resolves.toBe('approve');
   });
 
+  it("threads the walk's adversarial-review freshness bound through as the 5th argument", async () => {
+    const events = new EventEmitter();
+    const opener = makeOpener('ri-fb');
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'approve-design', name: 'Approve design' }),
+      reviewReportedSinceMs: 1_758_364_800_000,
+    });
+    await Promise.resolve();
+    expect(opener.openHumanGate).toHaveBeenCalledWith('r', 'approve-design', 'Approve design', undefined, {
+      reviewReportedSinceMs: 1_758_364_800_000,
+    });
+
+    events.emit('review-project-1', { reviewItemId: 'ri-fb', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
+  });
+
+  it('keeps the FOUR-argument call shape when the walk holds no bound', async () => {
+    const events = new EventEmitter();
+    const opener = makeOpener('ri-nb');
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'approve-design', name: 'Approve design' }) });
+    await Promise.resolve();
+    // Exactly four — an opener written against the old shape must not start
+    // receiving a fifth argument on every bound-less gate.
+    const call = (opener.openHumanGate as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call).toEqual(['r', 'approve-design', 'Approve design', undefined]);
+
+    events.emit('review-project-1', { reviewItemId: 'ri-nb', action: 'resolved', item: { resolution: 'approve' } });
+    await expect(pending).resolves.toBe('approve');
+  });
+
   it('still rejects when the gate is null AND no pending gate exists', async () => {
     const events = new EventEmitter();
     const opener: HumanGateOpener = {
@@ -288,7 +324,13 @@ describe('ReviewQueueHumanGate', () => {
     const events = new EventEmitter();
     const sideEffects = makeDeferred<void>();
     const order: string[] = [];
-    const seen: Array<{ runId: string; stepId: string; resolution: string | null; dismissed: boolean }> = [];
+    const seen: Array<{
+      runId: string;
+      stepId: string;
+      resolution: string | null;
+      dismissed: boolean;
+      reviewItemId?: string;
+    }> = [];
     const opener: HumanGateOpener = {
       openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue('ri-se'),
       onGateResolved: vi.fn(async (args) => {
@@ -327,13 +369,16 @@ describe('ReviewQueueHumanGate', () => {
     await expect(pending).resolves.toBe('revise');
     expect(order).toEqual(['side-effects:start', 'side-effects:done', 'resume', 'settled']);
     // The RAW resolution, not the reduced verdict — the free text is the only
-    // thing a side-effect (or a later revision) can act on.
+    // thing a side-effect (or a later revision) can act on. Plus the SETTLED gate
+    // row's id, which is how the side-effects read back what the gate was minted
+    // with (the approve-design freshness bound).
     expect(seen).toEqual([
       {
         runId: 'r',
         stepId: 'approve-design',
         resolution: 'revise — the spend screen has no way back to Home',
         dismissed: false,
+        reviewItemId: 'ri-se',
       },
     ]);
   });
@@ -407,36 +452,58 @@ describe('ReviewQueueHumanGate', () => {
 
   it('settles with the stored verdict when the item was RESOLVED before the target was armed', async () => {
     const events = new EventEmitter();
-    const opener = openerReading('ri-lost', {
-      title: 'Approve plan',
-      body: 'body',
-      status: 'resolved',
-      resolution: 'revise: only AR-2 matters',
-    });
+    const calls: Array<{ resolution: string | null; dismissed: boolean; reviewItemId?: string }> = [];
+    const opener = openerReading(
+      'ri-lost',
+      {
+        title: 'Approve plan',
+        body: 'body',
+        status: 'resolved',
+        resolution: 'revise: only AR-2 matters',
+      },
+      {
+        onGateResolved: vi.fn(async (args) => {
+          calls.push({
+            resolution: args.resolution,
+            dismissed: args.dismissed,
+            ...(args.reviewItemId !== undefined ? { reviewItemId: args.reviewItemId } : {}),
+          });
+        }),
+      },
+    );
     const gate = new ReviewQueueHumanGate(opener, events, channelFor);
 
     // No event is ever emitted — the read-back is the only signal.
     await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).resolves.toBe('revise');
     expect(opener.readGateItem).toHaveBeenCalledWith('ri-lost');
     expect(events.listenerCount('review-project-1')).toBe(0);
+    // The ALREADY-RESOLVED read-back settle carries the gate id to the side
+    // effects exactly as the change-event path does.
+    expect(calls).toEqual([{ resolution: 'revise: only AR-2 matters', dismissed: false, reviewItemId: 'ri-lost' }]);
   });
 
   it('settles as a reject when the item was DISMISSED before the target was armed', async () => {
     const events = new EventEmitter();
-    const calls: Array<{ resolution: string | null; dismissed: boolean }> = [];
+    const calls: Array<{ resolution: string | null; dismissed: boolean; reviewItemId?: string }> = [];
     const opener = openerReading(
       'ri-lost-dis',
       { title: 't', body: 'b', status: 'dismissed', resolution: null },
       {
         onGateResolved: vi.fn(async (args) => {
-          calls.push({ resolution: args.resolution, dismissed: args.dismissed });
+          calls.push({
+            resolution: args.resolution,
+            dismissed: args.dismissed,
+            ...(args.reviewItemId !== undefined ? { reviewItemId: args.reviewItemId } : {}),
+          });
         }),
       },
     );
     const gate = new ReviewQueueHumanGate(opener, events, channelFor);
 
     await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).resolves.toBe('reject');
-    expect(calls).toEqual([{ resolution: null, dismissed: true }]);
+    // The ALREADY-RESOLVED read-back path carries the id too: it settles from the
+    // row, not from a change event, and the side-effects need the same handle.
+    expect(calls).toEqual([{ resolution: null, dismissed: true, reviewItemId: 'ri-lost-dis' }]);
   });
 
   it('keeps awaiting the change event when the read-back says pending (or cannot answer)', async () => {

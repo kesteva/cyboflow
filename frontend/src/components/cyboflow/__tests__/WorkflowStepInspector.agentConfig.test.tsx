@@ -237,7 +237,7 @@ describe('AgentConfigSection — model pin', () => {
     });
     openAgentTab();
 
-    expect(screen.getByTestId('inspector-model-hint')).toHaveTextContent('Inherits Opus 5 (agent setting).');
+    expect(screen.getByTestId('inspector-model-hint')).toHaveTextContent('Inherits Opus 5.5 (agent setting).');
   });
 });
 
