@@ -192,6 +192,9 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
   mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
+  requireProvenRunbook: VISUAL_VERIFY_DEFAULTS.requireProvenRunbook,
+  exploreDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.exploreDeadlineFloorMs,
+  mobileDriveEngine: VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
 };
 
 /** The leased pair every row's request gets: the pool's first slot and its driver sidecar. */

@@ -14,8 +14,13 @@ import type {
 } from '../../../services/panels/codex/appServer/client';
 import type { AppServerInitializeParams } from '../../../services/panels/codex/appServer/protocol';
 import type { TurnSessionEvent } from '../../../services/panels/codex/appServer/turnSession';
-import { normalizeVerificationReportV1 } from '../../../../../shared/types/visualVerification';
+import {
+  normalizeVerificationReportV1,
+  VERIFICATION_REPORT_OUTCOMES,
+} from '../../../../../shared/types/visualVerification';
+import { toStrictOutputSchema } from '../../../services/panels/codex/appServer/strictOutputSchema';
 import { VerificationAgentQueryError } from '../verificationAgentRunner';
+import { VERIFICATION_REPORT_JSON_SCHEMA } from '../verificationAgentQuery';
 import {
   makeCodexVerificationAgentQuery,
   createCodexVerifyTranscriptAccumulator,
@@ -577,5 +582,236 @@ describe('createCodexVerifyTranscriptAccumulator', () => {
     acc.onEvent(completed({ type: 'reasoning', id: 'r', summary: [], content: ['thinking'] }));
     acc.onEvent({ type: 'turn.started', threadId: 't', turnId: 'u' });
     expect(acc.text()).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The runbook-optional report-contract widening (F6) on the Codex strict path
+// ---------------------------------------------------------------------------
+
+/** Run one fake Codex turn whose terminal agent message is `report`, capturing the turn params. */
+async function runCodexTurn(report: unknown): Promise<{ structured: unknown; turnParams: Record<string, unknown> }> {
+  const clients: FakeClient[] = [];
+  const factory = (options: CodexAppServerClientOptions): FakeClient => {
+    const client = new FakeClient(options, (method, _params, current) => {
+      if (method === 'account/read') return accountResponse();
+      if (method === 'model/list') return modelResponse();
+      if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+      if (method === 'turn/start') {
+        emitSuccessTurn(current, JSON.stringify(report));
+        return { turn: { id: 'turn-1' } };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    clients.push(client);
+    return client;
+  };
+  const query = makeCodexVerificationAgentQuery(undefined, undefined, {
+    clientFactory: factory,
+    resolveExecutable: executable,
+  });
+  const outcome = await query(baseArgs);
+  const client = clients[0];
+  if (!client) throw new Error('fake client was not created');
+  const turnParams = asRecord(client.requests.find((r) => r.method === 'turn/start')?.params);
+  return { structured: outcome.structured, turnParams };
+}
+
+/**
+ * A report as the STRICT schema forces Codex to emit it: every property present,
+ * every optional one explicitly null unless `over` sets it.
+ */
+function strictNullReport(over: Record<string, unknown>): Record<string, unknown> {
+  return {
+    version: 1,
+    behaviors: [{ id: 'b1', result: 'not_testable', evidence: { screenshots: [], notes: 'unreachable' } }],
+    screenshots: [],
+    outcome: 'pass',
+    buildLogExcerpt: null,
+    diagnosis: null,
+    neededModality: null,
+    app: null,
+    recipeJson: null,
+    confidence: 0.5,
+    feedback: 'fb',
+    issues: [{ severity: 'low', description: 'nit', fileName: null }],
+    attestation: null,
+    ...over,
+  };
+}
+
+/**
+ * Every OpenAI-strict rule the transform is responsible for, checked at every
+ * node: an object node lists ALL its properties in `required` and sets
+ * `additionalProperties: false`; an originally-optional property is nullable
+ * (type widened, and an enum admits null); every array has `items`. Returns the
+ * offending paths so a failure names where the schema went wrong.
+ */
+function strictViolations(strict: unknown, lenient: unknown, path = '$'): string[] {
+  const s = asRecord(strict);
+  const l = asRecord(lenient);
+  const out: string[] = [];
+  const types = Array.isArray(s.type) ? s.type : [s.type];
+  if (types.includes('object')) {
+    if (!('properties' in s)) out.push(`${path}: object without properties`);
+    if (s.additionalProperties !== false) out.push(`${path}: additionalProperties is not false`);
+  }
+  if (types.includes('array') && !('items' in s)) out.push(`${path}: array without items`);
+  if ('properties' in s) {
+    const props = asRecord(s.properties);
+    const required = new Set(s.required as string[]);
+    const lenientRequired = new Set(Array.isArray(l.required) ? (l.required as string[]) : []);
+    const lenientProps = asRecord(l.properties);
+    for (const key of Object.keys(props)) {
+      if (!required.has(key)) out.push(`${path}.${key}: not in required`);
+      const child = asRecord(props[key]);
+      if (!lenientRequired.has(key)) {
+        const childTypes = Array.isArray(child.type) ? child.type : [child.type];
+        if (!childTypes.includes('null')) out.push(`${path}.${key}: optional but not nullable`);
+        if (Array.isArray(child.enum) && !child.enum.includes(null)) out.push(`${path}.${key}: enum rejects null`);
+      }
+      out.push(...strictViolations(child, lenientProps[key], `${path}.${key}`));
+    }
+  }
+  if ('items' in s) out.push(...strictViolations(s.items, l.items, `${path}[]`));
+  return out;
+}
+
+describe('the Codex strict output schema after the runbook-optional widening', () => {
+  it('sends a VALID strict schema: every node closed, all-required, optionals nullable', async () => {
+    const { turnParams } = await runCodexTurn(validReport());
+    const outputSchema = turnParams.outputSchema;
+    expect(strictViolations(outputSchema, VERIFICATION_REPORT_JSON_SCHEMA)).toEqual([]);
+    // …and it is exactly what the shared transform derives from the lenient schema.
+    expect(outputSchema).toEqual(toStrictOutputSchema(VERIFICATION_REPORT_JSON_SCHEMA));
+  });
+
+  it('makes the new optional fields required-but-nullable, and the outcome enum carries the new outcomes', async () => {
+    const { turnParams } = await runCodexTurn(validReport());
+    const schema = asRecord(turnParams.outputSchema);
+    const props = asRecord(schema.properties);
+    for (const key of ['diagnosis', 'neededModality', 'app', 'recipeJson', 'attestation']) {
+      expect(schema.required).toContain(key);
+      expect(asRecord(props[key]).type).toContain('null');
+    }
+    expect(asRecord(props.outcome).enum).toEqual([...VERIFICATION_REPORT_OUTCOMES]);
+    // outcome stays REQUIRED and NON-nullable: a strict report must always name one.
+    expect(asRecord(props.outcome).type).toBe('string');
+  });
+});
+
+describe('Codex round trip: strict-null reports reach the normalizer ok', () => {
+  it('a report with EVERY optional field null normalizes ok, with none of them present', async () => {
+    const { structured } = await runCodexTurn(strictNullReport({}));
+    const record = asRecord(structured);
+    for (const key of ['buildLogExcerpt', 'diagnosis', 'neededModality', 'app', 'recipeJson', 'attestation']) {
+      expect(key in record).toBe(false);
+    }
+    const normalized = normalizeVerificationReportV1(structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) {
+      expect(normalized.report.outcome).toBe('pass');
+      expect('fileName' in normalized.report.issues[0]!).toBe(false);
+    }
+  });
+
+  it('unverifiable (diagnosis set, the rest null) normalizes ok', async () => {
+    const { structured } = await runCodexTurn(
+      strictNullReport({ outcome: 'unverifiable', diagnosis: 'the app cannot be confined to VERIFY_DATA_DIR' }),
+    );
+    const normalized = normalizeVerificationReportV1(structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) {
+      expect(normalized.report.outcome).toBe('unverifiable');
+      expect(normalized.report.diagnosis).toBe('the app cannot be confined to VERIFY_DATA_DIR');
+    }
+  });
+
+  it('wrong_environment with a nested null (app.productGlob) normalizes ok and drops it', async () => {
+    const { structured } = await runCodexTurn(
+      strictNullReport({
+        outcome: 'wrong_environment',
+        neededModality: 'mobile',
+        app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'App', productGlob: null },
+        diagnosis: 'an iOS application target, stamped web',
+      }),
+    );
+    const normalized = normalizeVerificationReportV1(structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) {
+      expect(normalized.report.outcome).toBe('wrong_environment');
+      expect(normalized.report.neededModality).toBe('mobile');
+      expect(normalized.report.app).toEqual({ platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'App' });
+    }
+  });
+
+  it('a pass carrying a recipeJson string normalizes ok with the recipe intact', async () => {
+    const { structured } = await runCodexTurn(
+      strictNullReport({
+        behaviors: [{ id: 'b1', result: 'pass', evidence: { screenshots: [], notes: 'ok' } }],
+        recipeJson: '{"build":["pnpm run build"]}',
+      }),
+    );
+    const normalized = normalizeVerificationReportV1(structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) expect(normalized.report.recipeJson).toBe('{"build":["pnpm run build"]}');
+  });
+
+  it('an A4 fail (every behavior not_testable) arrives as unverifiable after normalization', async () => {
+    const { structured } = await runCodexTurn(strictNullReport({ outcome: 'fail' }));
+    const normalized = normalizeVerificationReportV1(structured, ['b1']);
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) {
+      expect(normalized.report.outcome).toBe('unverifiable');
+      expect(normalized.coerced).toBe(true);
+    }
+  });
+});
+
+describe('stripStrictSchemaNulls — the stripped set is derived from the schema', () => {
+  it('strips a null attestation (the key the hand-kept list used to miss)', () => {
+    const stripped = asRecord(stripStrictSchemaNulls({ ...(validReport() as Record<string, unknown>), attestation: null }));
+    expect('attestation' in stripped).toBe(false);
+    expect(normalizeVerificationReportV1(stripped, ['b1']).ok).toBe(true);
+  });
+
+  it('strips every declared optional at the top level and inside nested objects and arrays', () => {
+    const stripped = asRecord(
+      stripStrictSchemaNulls(
+        strictNullReport({
+          app: { platform: 'ios-simulator', bundleId: 'b', scheme: 's', productGlob: null },
+        }),
+      ),
+    );
+    expect(Object.keys(stripped).sort()).toEqual(
+      ['app', 'behaviors', 'confidence', 'feedback', 'issues', 'outcome', 'screenshots', 'version'].sort(),
+    );
+    expect(stripped.app).toEqual({ platform: 'ios-simulator', bundleId: 'b', scheme: 's' });
+    expect(stripped.issues).toEqual([{ severity: 'low', description: 'nit' }]);
+  });
+
+  it('leaves a null on a REQUIRED property for the normalizer to reject', () => {
+    const stripped = asRecord(stripStrictSchemaNulls({ ...(validReport() as Record<string, unknown>), feedback: null }));
+    expect(stripped.feedback).toBeNull();
+    const normalized = normalizeVerificationReportV1(stripped, ['b1']);
+    expect(normalized.ok).toBe(false);
+    if (!normalized.ok) expect(normalized.error).toBe('feedback: expected string');
+  });
+
+  it('leaves a null on a nested REQUIRED property (app.bundleId) in place', () => {
+    const stripped = asRecord(
+      stripStrictSchemaNulls({
+        app: { platform: 'ios-simulator', bundleId: null, scheme: 's', productGlob: null },
+      }),
+    );
+    expect(stripped.app).toEqual({ platform: 'ios-simulator', bundleId: null, scheme: 's' });
+  });
+
+  it('passes an undeclared key through untouched, null or not', () => {
+    const stripped = asRecord(
+      stripStrictSchemaNulls({ ...(validReport() as Record<string, unknown>), extra: null, constructor: null }),
+    );
+    expect(stripped.extra).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(stripped, 'constructor')).toBe(true);
   });
 });

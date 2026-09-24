@@ -23,6 +23,11 @@ import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { VerificationAgentQueryError, type VerificationAgentQueryFn } from './verificationAgentRunner';
 import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
+import {
+  ATTESTATION_KINDS,
+  VERIFICATION_MODALITIES,
+  VERIFICATION_REPORT_OUTCOMES,
+} from '../../../../shared/types/visualVerification';
 
 /**
  * Default per-deployment deadline (10 min, §5.4 step 6), used only when the request
@@ -42,6 +47,15 @@ const VERIFICATION_AGENT_MAX_TURNS = 80;
  * The JSON schema the SDK enforces on the agent's structured output. It nudges the
  * model toward VerificationReportV1; the runner re-validates strictly via
  * `normalizeVerificationReportV1` (never trusting this schema alone).
+ *
+ * The closed enums (outcome, needed modality, attestation kind) are read from the
+ * shared constants rather than re-listed, so the SDK boundary can never refuse an
+ * outcome the normalizer accepts. OPTIONALITY IS LOAD-BEARING on the Codex path:
+ * `toStrictOutputSchema` makes every property NOT in a node's `required`
+ * required-but-nullable, and `stripStrictSchemaNulls` (codexVerificationAgentQuery)
+ * derives the nulls it strips from exactly that set — so a new optional property
+ * needs no second edit there, but moving one into `required` changes what Codex
+ * may omit.
  */
 export const VERIFICATION_REPORT_JSON_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -76,8 +90,26 @@ export const VERIFICATION_REPORT_JSON_SCHEMA: Record<string, unknown> = {
         properties: { fileName: { type: 'string' }, caption: { type: 'string' } },
       },
     },
-    outcome: { type: 'string', enum: ['pass', 'fail', 'build_failed', 'launch_failed'] },
+    outcome: { type: 'string', enum: [...VERIFICATION_REPORT_OUTCOMES] },
     buildLogExcerpt: { type: 'string' },
+    // OPTIONAL (absent from `required`) — the runbook-optional widening (F6).
+    // `diagnosis` is REQUIRED by the normalizer for `unverifiable` /
+    // `wrong_environment`; `neededModality` / `app` only mean something for
+    // `wrong_environment`; `recipeJson` is a portable-runbook entry as a STRING,
+    // so the Codex strict form of this schema stays a flat nullable string (F6).
+    diagnosis: { type: 'string' },
+    neededModality: { type: 'string', enum: [...VERIFICATION_MODALITIES] },
+    app: {
+      type: 'object',
+      required: ['platform', 'bundleId', 'scheme'],
+      properties: {
+        platform: { type: 'string', enum: ['ios-simulator'] },
+        bundleId: { type: 'string' },
+        scheme: { type: 'string' },
+        productGlob: { type: 'string' },
+      },
+    },
+    recipeJson: { type: 'string' },
     confidence: { type: 'number' },
     feedback: { type: 'string' },
     issues: {
@@ -103,17 +135,7 @@ export const VERIFICATION_REPORT_JSON_SCHEMA: Record<string, unknown> = {
       required: ['verified', 'kind', 'detail'],
       properties: {
         verified: { type: 'boolean' },
-        kind: {
-          type: 'string',
-          enum: [
-            'http-endpoint',
-            'dom-marker',
-            'cdp-token',
-            'window-identity',
-            'file-identity',
-            'bundle-identity',
-          ],
-        },
+        kind: { type: 'string', enum: [...ATTESTATION_KINDS] },
         detail: { type: 'string' },
       },
     },

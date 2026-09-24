@@ -46,6 +46,8 @@ import {
 } from '../../../shared/types/sprintBatch';
 import {
   VISUAL_VERIFY_DEFAULTS,
+  isMobileDriveEngine,
+  resolveExploreDeadlineFloorMs,
   type ResolvedVisualVerifyConfig,
 } from '../../../shared/types/visualVerification';
 import fs from 'fs/promises';
@@ -852,6 +854,20 @@ export class ConfigManager extends EventEmitter {
       agentSlots: vv?.agentSlots ?? VISUAL_VERIFY_DEFAULTS.agentSlots,
       autoBootstrapRunbook:
         vv?.autoBootstrapRunbook ?? VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook,
+      // The runbook-optional knobs (docs/proposals/runbook-optional-verification.md
+      // §A1/§A1.1/§B3). VALIDATED here rather than merely `??`-floored: the kill
+      // switch and the engine selector are read by code that branches on them,
+      // so a hand-edited "yes" or "Xcode" must fall back to the default instead
+      // of reaching a comparison that silently never matches, and the explore
+      // floor is clamped into the only range the scheduler can honour.
+      requireProvenRunbook:
+        typeof vv?.requireProvenRunbook === 'boolean'
+          ? vv.requireProvenRunbook
+          : VISUAL_VERIFY_DEFAULTS.requireProvenRunbook,
+      exploreDeadlineFloorMs: resolveExploreDeadlineFloorMs(vv?.exploreDeadlineFloorMs),
+      mobileDriveEngine: isMobileDriveEngine(vv?.mobileDriveEngine)
+        ? vv.mobileDriveEngine
+        : VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
     };
   }
 

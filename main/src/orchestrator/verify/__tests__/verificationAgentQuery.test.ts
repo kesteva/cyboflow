@@ -41,7 +41,12 @@ import {
   makeVerificationAgentQuery,
   VERIFICATION_REPORT_JSON_SCHEMA,
 } from '../verificationAgentQuery';
-import { ATTESTATION_KINDS } from '../../../../../shared/types/visualVerification';
+import {
+  ATTESTATION_KINDS,
+  VERIFICATION_MODALITIES,
+  VERIFICATION_REPORT_OUTCOMES,
+  normalizeVerificationReportV1,
+} from '../../../../../shared/types/visualVerification';
 
 let lastOptions: Record<string, unknown> | undefined;
 
@@ -372,4 +377,103 @@ describe('VERIFICATION_REPORT_JSON_SCHEMA — the attestation kind enum', () => 
   it('mirrors the closed AttestationSpec union exactly, in both directions', () => {
     expect([...attestationKindEnum()].sort()).toEqual([...ATTESTATION_KINDS].sort());
   });
+});
+
+// ---------------------------------------------------------------------------
+// The runbook-optional report-contract widening (F6) — schema + Claude round trip
+// ---------------------------------------------------------------------------
+
+describe('VERIFICATION_REPORT_JSON_SCHEMA — the runbook-optional widening', () => {
+  const asRecord = (v: unknown): Record<string, unknown> => v as Record<string, unknown>;
+  const schema = asRecord(VERIFICATION_REPORT_JSON_SCHEMA);
+  const props = asRecord(schema.properties);
+
+  it('the outcome enum mirrors the shared VERIFICATION_REPORT_OUTCOMES exactly', () => {
+    expect(asRecord(props.outcome).enum).toEqual([...VERIFICATION_REPORT_OUTCOMES]);
+  });
+
+  it('declares diagnosis / neededModality / app / recipeJson as OPTIONAL properties', () => {
+    const required = schema.required as string[];
+    for (const key of ['diagnosis', 'neededModality', 'app', 'recipeJson']) {
+      expect(props).toHaveProperty(key);
+      expect(required).not.toContain(key);
+    }
+    // The pre-widening required set is unchanged — an old-shaped report still validates.
+    expect(required).toEqual(['version', 'behaviors', 'screenshots', 'outcome', 'confidence', 'feedback', 'issues']);
+  });
+
+  it('neededModality enumerates every VerificationModality; recipeJson is a flat string', () => {
+    expect(asRecord(props.neededModality).enum).toEqual([...VERIFICATION_MODALITIES]);
+    expect(props.recipeJson).toEqual({ type: 'string' });
+    expect(props.diagnosis).toEqual({ type: 'string' });
+  });
+
+  it('shapes app like MobileAppSpec: platform/bundleId/scheme required, productGlob optional', () => {
+    const app = asRecord(props.app);
+    expect(app.required).toEqual(['platform', 'bundleId', 'scheme']);
+    const appProps = asRecord(app.properties);
+    expect(Object.keys(appProps).sort()).toEqual(['bundleId', 'platform', 'productGlob', 'scheme']);
+    expect(asRecord(appProps.platform).enum).toEqual(['ios-simulator']);
+  });
+});
+
+describe('makeVerificationAgentQuery — a new-outcome report round-trips to the normalizer', () => {
+  const base = {
+    version: 1,
+    screenshots: [],
+    confidence: 0.6,
+    feedback: 'see diagnosis',
+    issues: [],
+  };
+  const cases: Array<{ name: string; structured: Record<string, unknown>; outcome: string }> = [
+    {
+      name: 'unverifiable',
+      structured: {
+        ...base,
+        behaviors: [{ id: 'b1', result: 'not_testable', evidence: { screenshots: [], notes: 'no data dir lever' } }],
+        outcome: 'unverifiable',
+        diagnosis: 'the app cannot be confined to VERIFY_DATA_DIR',
+      },
+      outcome: 'unverifiable',
+    },
+    {
+      name: 'wrong_environment',
+      structured: {
+        ...base,
+        behaviors: [],
+        outcome: 'wrong_environment',
+        neededModality: 'mobile',
+        app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'App' },
+        diagnosis: 'an iOS application target, stamped web',
+      },
+      outcome: 'wrong_environment',
+    },
+    {
+      name: 'pass carrying a recipeJson',
+      structured: {
+        ...base,
+        behaviors: [{ id: 'b1', result: 'pass', evidence: { screenshots: [], notes: 'ok' } }],
+        outcome: 'pass',
+        recipeJson: '{"build":["pnpm run build"]}',
+      },
+      outcome: 'pass',
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name}: the structured output the SDK returns normalizes ok`, async () => {
+      install(makeFakeQuery([sdkResultSuccess({ structuredOutput: c.structured })]));
+      const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+
+      const out = await fn({ prompt: 'p', systemPrompt: 's', cwd: '/wt', allowedTools: ['Bash'], env: {} });
+
+      // The widened schema is what the session was actually constrained by…
+      const outputFormat = (lastOptions ?? {}).outputFormat as { schema?: unknown } | undefined;
+      expect(outputFormat?.schema).toBe(VERIFICATION_REPORT_JSON_SCHEMA);
+      // …and the Claude path hands the report through untouched to the normalizer.
+      const normalized = normalizeVerificationReportV1(out.structured, ['b1']);
+      expect(normalized.ok).toBe(true);
+      if (normalized.ok) expect(normalized.report.outcome).toBe(c.outcome);
+    });
+  }
 });

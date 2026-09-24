@@ -39,6 +39,7 @@
 import type {
   VerificationFailureClass,
   VerificationFailureEvidence,
+  VerificationReportOutcome,
   RequestStatus,
 } from '../../../../shared/types/visualVerification';
 import type { AgentPreflightResult } from './preflight';
@@ -57,7 +58,11 @@ import type { AgentPreflightResult } from './preflight';
  *     / the booleans below, never on `runnerStatus` alone).
  *   - `reportOutcome`           — the agent's own `VerificationReportV1.outcome`
  *     when a report was produced, else `null` (no report reached — e.g. a
- *     timeout, a preflight skip, a spawn failure).
+ *     timeout, a preflight skip, a spawn failure). Typed off the shared
+ *     outcome union, so `'unverifiable'` / `'wrong_environment'` are accepted
+ *     — and, being model-authored, can never by themselves reach `'env'` (only
+ *     harness evidence does) nor `'deliverable'` (only a judged `'fail'` does):
+ *     they fall to `'ambiguous'` like every other unattributed outcome.
  *   - `provisionMode`           — `'snapshot'` (the normal detached-worktree
  *     path, §5.2 pinned injection) or `'fallback'` (a degraded provisioning
  *     path — never eligible for `'deliverable'`, see below), or `null` when
@@ -72,7 +77,7 @@ import type { AgentPreflightResult } from './preflight';
 export interface FailureClassifierInputs {
   preflight: AgentPreflightResult | null;
   runnerStatus: RequestStatus;
-  reportOutcome: 'pass' | 'fail' | 'build_failed' | 'launch_failed' | null;
+  reportOutcome: VerificationReportOutcome | null;
   provisionMode: 'snapshot' | 'fallback' | null;
   instanceLockContention: boolean;
   runbookMismatch: boolean;

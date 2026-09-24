@@ -1686,7 +1686,26 @@ export function mapReportToResult(
     return { status: 'failed', verdict: verdictOf('fail'), report, fileNames, ...provenance };
   }
 
-  // outcome === 'pass'
+  // The agent could not exercise the surface, or found it needs another
+  // modality: never a pass (docs/proposals/runbook-optional-verification.md
+  // A3/A4), whatever its behaviour rows say.
+  if (report.outcome === 'unverifiable' || report.outcome === 'wrong_environment') {
+    const errorMessage =
+      report.outcome === 'wrong_environment'
+        ? `wrong environment${report.neededModality ? ` (needs ${report.neededModality})` : ''}: ${report.diagnosis ?? ''}`
+        : `unverifiable: ${report.diagnosis ?? ''}`;
+    return {
+      status: 'low_confidence',
+      verdict: verdictOf('low_confidence'),
+      report,
+      fileNames,
+      errorMessage,
+      ...provenance,
+    };
+  }
+
+  const exhaustive: 'pass' = report.outcome;
+  void exhaustive;
   if (mutated) {
     return {
       status: 'low_confidence',

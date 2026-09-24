@@ -487,6 +487,32 @@ describe('mapReportToResult', () => {
     expect(r.verdict?.status).toBe('fail');
   });
 
+  it.each([
+    ['all-pass behaviours', [{ id: 'b1', result: 'pass' as const, evidence: { screenshots: [], notes: '' } }]],
+    ['no behaviours at all', []],
+  ])('unverifiable with %s → low_confidence, never passed', (_label, behaviors) => {
+    const r = mapReportToResult(
+      validReport({ outcome: 'unverifiable', diagnosis: 'FamilyControls needs a device', behaviors }),
+      'snapshot',
+      false,
+      M,
+    );
+    expect(r.status).toBe('low_confidence');
+    expect(r.verdict?.status).toBe('low_confidence');
+    expect(r.errorMessage).toBe('unverifiable: FamilyControls needs a device');
+  });
+
+  it('wrong_environment with no behaviours → low_confidence naming the needed modality, never passed', () => {
+    const r = mapReportToResult(
+      validReport({ outcome: 'wrong_environment', diagnosis: 'an iOS app', neededModality: 'mobile', behaviors: [] }),
+      'snapshot',
+      false,
+      M,
+    );
+    expect(r.status).toBe('low_confidence');
+    expect(r.errorMessage).toBe('wrong environment (needs mobile): an iOS app');
+  });
+
   it('build_failed IN A SNAPSHOT → failed (verdict-less, error = build log excerpt)', () => {
     const report = validReport({ outcome: 'build_failed', buildLogExcerpt: 'tsc error TS1005' });
     const r = mapReportToResult(report, 'snapshot', false, M);
