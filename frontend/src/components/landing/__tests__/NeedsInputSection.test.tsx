@@ -4,7 +4,7 @@
  * the Approve/Reject inline actions.
  */
 import '@testing-library/jest-dom';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
@@ -12,12 +12,15 @@ import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { QueueItem } from '../../../utils/reviewQueueSelectors';
 import type { Approval } from '../../../../../shared/types/approvals';
 
-const { approveMock, rejectMock, approveRestOfRunMock, dismissAskMock } = vi.hoisted(() => ({
-  approveMock: vi.fn().mockResolvedValue({ ok: true }),
-  rejectMock: vi.fn().mockResolvedValue({ ok: true }),
-  approveRestOfRunMock: vi.fn().mockResolvedValue({ ok: true }),
-  dismissAskMock: vi.fn().mockResolvedValue({ success: true }),
-}));
+const { approveMock, rejectMock, approveRestOfRunMock, dismissAskMock, resolveItemMock, dismissItemMock } =
+  vi.hoisted(() => ({
+    approveMock: vi.fn().mockResolvedValue({ ok: true }),
+    rejectMock: vi.fn().mockResolvedValue({ ok: true }),
+    approveRestOfRunMock: vi.fn().mockResolvedValue({ ok: true }),
+    dismissAskMock: vi.fn().mockResolvedValue({ success: true }),
+    resolveItemMock: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_pause', resumed: true }),
+    dismissItemMock: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_pause' }),
+  }));
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -29,6 +32,10 @@ vi.mock('../../../trpc/client', () => ({
       },
       sessions: {
         dismissAsk: { mutate: dismissAskMock },
+      },
+      reviewItems: {
+        resolve: { mutate: resolveItemMock },
+        dismiss: { mutate: dismissItemMock },
       },
     },
   },
@@ -126,7 +133,24 @@ beforeEach(() => {
   approveRestOfRunMock.mockClear();
   dismissAskMock.mockClear();
   dismissAskMock.mockResolvedValue({ success: true });
+  resolveItemMock.mockClear();
+  dismissItemMock.mockClear();
 });
+
+/** A `gate:systemic-pause:<stepId>` decision — the one decision row that settles itself. */
+function makePauseItem(overrides: Partial<ReviewItem> = {}, origin?: 'step' | 'triage'): ReviewItem {
+  return makeReviewItem({
+    id: 'rvw_pause',
+    title: 'Paused: Claude usage limit reached',
+    body: 'Auto-resumes in about 2 hours.',
+    source: 'gate:systemic-pause:implement',
+    payload:
+      origin === undefined
+        ? null
+        : ({ kind: 'decision', gate: 'systemic-pause', stepId: 'implement', origin } as unknown as ReviewItem['payload']),
+    ...overrides,
+  });
+}
 
 describe('NeedsInputSection', () => {
   it('renders nothing when empty and showWhenEmpty is false', () => {
@@ -188,6 +212,55 @@ describe('NeedsInputSection', () => {
     expect(screen.getByText('Approve the plan')).toBeInTheDocument();
     await user.click(screen.getByText('Answer →'));
     expect(onOpenReviewItem).toHaveBeenCalledWith(item);
+  });
+
+  it('a systemic-pause item renders Retry now / Switch & retry… / Stop waiting instead of Answer →', () => {
+    render(<NeedsInputSection {...baseProps} reviewItems={[makePauseItem()]} />);
+    expect(screen.getByTestId('pause-retry')).toHaveTextContent('Retry now');
+    expect(screen.getByTestId('pause-switch-open')).toHaveTextContent('Switch & retry');
+    expect(screen.getByTestId('pause-stop')).toHaveTextContent('Stop waiting');
+    expect(screen.queryByText('Answer →')).not.toBeInTheDocument();
+    // The body is still available behind Details, like any decision row.
+    expect(screen.getByText(/Details/)).toBeInTheDocument();
+  });
+
+  it('Retry now resolves the pause WITHOUT an outcome (surface queue) and refreshes the board', async () => {
+    const user = userEvent.setup();
+    const onReviewItemActed = vi.fn();
+    render(<NeedsInputSection {...baseProps} reviewItems={[makePauseItem()]} onReviewItemActed={onReviewItemActed} />);
+    await user.click(screen.getByTestId('pause-retry'));
+    await waitFor(() =>
+      expect(resolveItemMock).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'rvw_pause', surface: 'queue' }),
+    );
+    expect(dismissItemMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(onReviewItemActed).toHaveBeenCalledTimes(1));
+  });
+
+  it('Stop waiting DISMISSES the pause (never a reject outcome) and refreshes the board', async () => {
+    const user = userEvent.setup();
+    const onReviewItemActed = vi.fn();
+    render(<NeedsInputSection {...baseProps} reviewItems={[makePauseItem()]} onReviewItemActed={onReviewItemActed} />);
+    await user.click(screen.getByTestId('pause-stop'));
+    await waitFor(() => expect(dismissItemMock).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'rvw_pause' }));
+    expect(resolveItemMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(onReviewItemActed).toHaveBeenCalledTimes(1));
+  });
+
+  it('Switch & retry… opens the session via onOpenReviewItem (the runtime/model form lives there)', async () => {
+    const user = userEvent.setup();
+    const onOpenReviewItem = vi.fn();
+    const item = makePauseItem();
+    render(<NeedsInputSection {...baseProps} reviewItems={[item]} onOpenReviewItem={onOpenReviewItem} />);
+    await user.click(screen.getByTestId('pause-switch-open'));
+    expect(onOpenReviewItem).toHaveBeenCalledWith(item);
+    expect(resolveItemMock).not.toHaveBeenCalled();
+  });
+
+  it('a TRIAGE-origin pause withholds the switch (Retry now / Stop waiting only)', () => {
+    render(<NeedsInputSection {...baseProps} reviewItems={[makePauseItem({}, 'triage')]} />);
+    expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+    expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
+    expect(screen.queryByTestId('pause-switch-open')).not.toBeInTheDocument();
   });
 
   it('routes an idle-session-sourced review item to the quick session, not the run', () => {

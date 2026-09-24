@@ -1411,18 +1411,21 @@ describe('ReviewItemCard', () => {
       expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
     });
 
-    it('renders the QUEUE trio — Retry now / Switch & retry… / Stop waiting, never the toggle form', () => {
+    it('on the (hostless) QUEUE surface renders Retry now / Stop waiting only — the landing row owns the queue-side switch', () => {
       render(<ReviewItemCard item={makePauseItem({ id: 'rvw_pause_q' })} />);
       expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
-      expect(screen.getByTestId('pause-switch-open')).toHaveTextContent('Switch & retry');
       expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
       expect(screen.queryByTestId('pause-switch-toggle')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('pause-switch-open')).not.toBeInTheDocument();
+      // Never the option-less default pair either.
       expect(screen.queryByTestId('open-in-session')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-dismiss')).not.toBeInTheDocument();
     });
 
-    it('the QUEUE trio is also recognized by the PAYLOAD gate alone', () => {
+    it('the QUEUE pair is also recognized by the PAYLOAD gate alone', () => {
       render(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_payload_q' })} />);
-      expect(screen.getByTestId('pause-switch-open')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
+      expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
     });
 
     it('Retry now resolves WITHOUT an outcome, in-session', async () => {
@@ -1547,7 +1550,7 @@ describe('ReviewItemCard', () => {
 
       rerender(<ReviewItemCard item={makePausePayloadItem({ id: 'rvw_pause_triage_q' }, 'triage')} />);
       expect(screen.getByTestId('pause-triage-note')).toBeInTheDocument();
-      expect(screen.queryByTestId('pause-switch-open')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('pause-switch-toggle')).not.toBeInTheDocument();
       expect(screen.getByTestId('pause-retry')).toBeInTheDocument();
       expect(screen.getByTestId('pause-stop')).toBeInTheDocument();
     });
