@@ -30,7 +30,7 @@ import type {
 import { classifyVerificationFailure } from './failureClassifier';
 import type { VerifyCapabilityStore } from './capabilityStore';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
-import { declineForRunbookStatus, taskDerivesEnvironment } from './bootstrapEligibility';
+import { declineForRunbookStatus, taskDerivesEnvironment, taskHasRunnableSurface } from './bootstrapEligibility';
 import type { CapabilityBreakerFindingFn } from './verificationSchedulerContracts';
 import { raceWithAbort, verifyAgentSlot } from './verificationLeases';
 import type { LeaseHandle, ResourceLeasePool } from './verificationLeases';
@@ -38,6 +38,7 @@ import {
   NATIVE_CAPTURE_UNAVAILABLE_DETAIL,
   UNSUPPORTED_MODALITY_REASONS,
   VERIFY_UNPROVEN_SKIP_BLOCKED,
+  nothingToRunReason,
   skipReasonForRunbookDecline,
 } from './verificationSkipReasons';
 import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
@@ -389,6 +390,18 @@ export class AgentEngine {
 
     // (3) The §3.2 degrade path.
     if (setupProof || bootstrapProof) return null;
+    // (3a) A COMPOSED web/cdp-app task with no surface at all can never run —
+    // the degenerate exemption below would wave it through to an agent that has
+    // nothing to open (see taskHasRunnableSurface). The legacy intent-only row
+    // (no task_json) keeps its own contract, and native-screen/mobile have
+    // their own shapes (a running app window; the `app` block + mobile gates).
+    if (
+      (modality === 'web' || modality === 'cdp-app') &&
+      this.agentColumnsForRow(row.id).taskJson !== null &&
+      !taskHasRunnableSurface(task)
+    ) {
+      return nothingToRunReason(modality, task.modality);
+    }
     // ONE definition of "derives an environment", shared with the bootstrap
     // preflight — see bootstrapEligibility.ts for why they must not be two.
     if (!taskDerivesEnvironment(task)) return null;

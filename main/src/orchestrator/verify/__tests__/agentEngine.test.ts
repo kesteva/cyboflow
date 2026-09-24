@@ -209,6 +209,49 @@ describe('AgentEngine.processAgentRow', () => {
       expect(h.run).toHaveBeenCalledWith(expect.objectContaining({ setupProof: true, verifyPort: PORT }));
       expect(terminal(h.db).status).toBe('passed');
     });
+
+    it('gate 3a: a composed web task with no build, serve, target or app skips before any lease', async () => {
+      // shiny-eagle 9/22: an iOS lane composed `native-screen` with nothing to
+      // stand up, stamped `web`, and burned an agent that had nothing to open.
+      const empty: VerificationTaskV1 = { version: 1, summary: 'banned apps list', modality: 'native-screen', behaviors: [] };
+      h = harness({}, { task: empty });
+
+      const { work } = await h.engine.processAgentRow(row(), INPUT);
+
+      expect(work).toBeNull();
+      expect(h.run).not.toHaveBeenCalled();
+      const t = terminal(h.db);
+      expect(t).toMatchObject({ status: 'skipped', failureClass: 'env' });
+      expect(t.error).toContain('names nothing to stand up');
+      expect(t.error).toContain("declared modality 'native-screen', but this request resolved to 'web'");
+      // A composer defect, not a missing runbook — must not collapse into the
+      // run-level "no verifiable modality" decline.
+      expect(t.error).not.toContain('verification runbook');
+      await expectLeasesFree(h.pool);
+    });
+
+    it('gate 3a: a pre-live target and the legacy intent-only row still run', async () => {
+      const live: VerificationTaskV1 = { version: 1, summary: 'live', target: { url: 'https://staging.example.test/' }, behaviors: [] };
+      h = harness({}, { task: live });
+      const first = await h.engine.processAgentRow(row(), INPUT);
+      await first.work;
+      expect(h.run).toHaveBeenCalledTimes(1);
+
+      h.db.close();
+      h = harness({}, { task: undefined });
+      const second = await h.engine.processAgentRow(row(), { intent: 'no url at all' });
+      await second.work;
+      expect(h.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('gate 3a: exempts a setup proof', async () => {
+      const empty: VerificationTaskV1 = { version: 1, summary: 'x', behaviors: [] };
+      h = harness({}, { task: empty });
+      h.gate.setupProof = true;
+      const { work } = await h.engine.processAgentRow(row(), INPUT);
+      await work;
+      expect(h.run).toHaveBeenCalled();
+    });
   });
 
   describe('lease ladder', () => {

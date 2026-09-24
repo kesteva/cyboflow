@@ -23,6 +23,7 @@ import {
   decideRunbookBootstrap,
   declineForRunbookStatus,
   taskDerivesEnvironment,
+  taskHasRunnableSurface,
   type BootstrapDeclineReason,
 } from '../bootstrapEligibility';
 import type { VerificationModality } from '../../../../../shared/types/visualVerification';
@@ -55,6 +56,22 @@ describe('taskDerivesEnvironment', () => {
     ['an EMPTY build array', { build: [] }, false],
   ])('%s → %s', (_label, task, expected) => {
     expect(taskDerivesEnvironment(task)).toBe(expected);
+  });
+});
+
+describe('taskHasRunnableSurface', () => {
+  const app = { platform: 'ios-simulator' as const, bundleId: 'com.x.app', scheme: 'App', productGlob: '*.app' };
+  it.each([
+    ['a serve step', { serve: { cmd: 'x' } }, true],
+    ['a non-empty build', { build: ['xcodebuild build'] }, true],
+    ['a pre-live url', { target: { url: 'http://localhost:3000' } }, true],
+    ['a static html path', { target: { htmlPath: 'index.html' } }, true],
+    ['a mobile app block with an empty build', { build: [], app }, true],
+    ['nothing at all (the shiny-eagle shape)', {}, false],
+    ['an empty build and an empty target', { build: [], target: {} }, false],
+    ['a whitespace-only url', { target: { url: '  ' } }, false],
+  ])('%s → %s', (_label, task, expected) => {
+    expect(taskHasRunnableSurface(task)).toBe(expected);
   });
 });
 

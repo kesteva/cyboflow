@@ -44,6 +44,26 @@ export function taskDerivesEnvironment(task: Pick<VerificationTaskV1, 'build' | 
 }
 
 /**
+ * Does this composed task name ANY surface the verifier could put in front of
+ * itself — something to build, something to serve, a pre-live target, or a
+ * mobile `app` block? A task with none of the four is un-runnable on the web /
+ * cdp-app engines: `taskDerivesEnvironment` is false, so the §3.2 degrade gate
+ * exempts it as "degenerate", yet there is no live URL either, and the agent is
+ * deployed into a snapshot with no port, no simulator and nothing to open
+ * (shiny-eagle 9/22: five iOS lanes composed `native-screen` with no build and
+ * no target, stamped `web`, each burned ~2.5 min and FAILED — looping the lane
+ * back to implement over a composer defect).
+ */
+export function taskHasRunnableSurface(
+  task: Pick<VerificationTaskV1, 'build' | 'serve' | 'target' | 'app'>,
+): boolean {
+  if (taskDerivesEnvironment(task) || task.app !== undefined) return true;
+  const url = task.target?.url?.trim() ?? '';
+  const htmlPath = task.target?.htmlPath?.trim() ?? '';
+  return url.length > 0 || htmlPath.length > 0;
+}
+
+/**
  * Why a bootstrap declined. Each maps to a DIFFERENT remedy, which is the whole
  * reason this is not a boolean — a human told "run verification setup" when the
  * real fix is "merge the branch carrying the runbook" will do the wrong thing
