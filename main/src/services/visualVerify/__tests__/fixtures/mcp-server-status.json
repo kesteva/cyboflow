@@ -1,0 +1,27 @@
+{
+  "openWorkspaces": [],
+  "permission": {
+    "enabled": true,
+    "permittedAgents": [
+      {
+        "id": "FCC0C7CB-C446-46B8-93A3-D9CB349F4416",
+        "trust": {
+          "unsigned": {
+            "expiration": 812061289.087738,
+            "path": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+            "sha256": "e89d60f8ccee9db684801330198797723db2ac378cd53e5cfe523128feb76599"
+          }
+        }
+      }
+    ],
+    "permittedFolders": [
+      {
+        "expiration": 812061289.10414,
+        "id": "BFC0C4BA-F57D-4C6F-9D3D-8379CBE0E2A5",
+        "subtreeRoot": "/private/tmp/xcode-probe/dtd"
+      }
+    ],
+    "unsafeAlwaysAllowAllAgents": false
+  },
+  "running": false
+}

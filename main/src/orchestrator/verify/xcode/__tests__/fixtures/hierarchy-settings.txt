@@ -1,0 +1,169 @@
+Device orientation: Unknown
+------------------------
+Application bundle identifier: com.apple.Preferences
+Application UI orientation: Portrait
+Application, pid: 17785, label: 'Settings'
+ Window, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+  Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+   Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+    Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+     Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+      Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+       Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+        Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+         Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+          Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+           NavigationBar, {{0.0, 62.0}, {402.0, 106.0}}, identifier: 'Settings', hitPoint: {201.0, 115.0}
+            StaticText, {{16.0, 119.7}, {133.0, 40.7}}, label: 'Settings', hitPoint: {82.5, 140.0}
+           Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+            Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+             Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+              Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+               CollectionView, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'com.apple.settings.sidebar.collectionView', hitPoint: {201.0, 437.0}
+                Other, {{-16.0, -1580.0}, {434.0, 1856.0}}, hitPoint: {201.0, 138.0}
+                Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+                 Other, {{0.0, 0.0}, {402.0, 102.0}}, hitPoint: {201.0, 51.0}
+                 Other, {{0.0, 748.0}, {402.0, 126.0}}, hitPoint: {201.0, 811.0}
+                Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+                 Other, {{0.0, 748.0}, {402.0, 126.0}}, hitPoint: {201.0, 811.0}
+                Cell, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                 Other, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                  Other, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                 Other, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                  Other, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                   Other, {{16.0, 168.0}, {370.0, 90.3}}, hitPoint: {201.0, 213.2}
+                    Button, {{16.0, 168.0}, {370.0, 90.3}}, identifier: 'com.apple.settings.primaryAppleAccount', label: 'Apple Account, Sign in to access your iCloud data, the App Store, Apple services, and more.', hitPoint: {201.0, 213.2}
+                     Image, {{32.0, 183.0}, {60.0, 60.3}}, identifier: 'apple.id', label: 'apple.id', hitPoint: {62.0, 213.2}
+                     StaticText, {{100.0, 183.0}, {138.3, 24.0}}, label: 'Apple Account', hitPoint: {169.2, 195.0}
+                     StaticText, {{100.0, 209.7}, {236.0, 33.7}}, label: 'Sign in to access your iCloud data, the App Store, Apple services, and more.', hitPoint: {218.0, 226.5}
+                     Image, {{360.7, 207.0}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 213.0}
+                Other, {{-16.0, 276.0}, {434.0, 87.0}}, hitPoint: {201.0, 319.5}
+                Cell, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                 Other, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                  Other, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                 Other, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                  Other, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                   Other, {{16.0, 293.3}, {370.0, 52.0}}, hitPoint: {201.0, 319.3}
+                    Button, {{16.0, 293.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.spotlightIndexingProgress', label: 'Optimizing Search and Siri', hitPoint: {201.0, 319.3}
+                     Image, {{30.0, 305.3}, {28.0, 28.0}}, hitPoint: {44.0, 319.3}
+                     StaticText, {{30.0, 305.3}, {243.0, 28.0}}, label: 'Optimizing Search and Siri', hitPoint: {151.5, 319.3}
+                     Image, {{360.7, 313.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 319.3}
+                Other, {{-16.0, 363.0}, {434.0, 503.0}}, hitPoint: {201.0, 614.5}
+                Cell, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                 Other, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                  Other, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                 Other, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                  Other, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                   Other, {{16.0, 380.3}, {370.0, 52.0}}, hitPoint: {201.0, 406.3}
+                    Button, {{16.0, 380.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.general', label: 'General', hitPoint: {201.0, 406.3}
+                     Image, {{30.0, 392.3}, {28.0, 28.0}}, hitPoint: {44.0, 406.3}
+                     StaticText, {{30.0, 392.3}, {101.3, 28.0}}, label: 'General', hitPoint: {80.7, 406.3}
+                     Image, {{360.7, 400.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 406.3}
+                Cell, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                 Other, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                  Other, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                 Other, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                  Other, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                   Other, {{16.0, 432.3}, {370.0, 52.0}}, hitPoint: {201.0, 458.3}
+                    Button, {{16.0, 432.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.accessibility', label: 'Accessibility', hitPoint: {201.0, 458.3}
+                     Image, {{30.0, 444.3}, {28.0, 28.0}}, hitPoint: {44.0, 458.3}
+                     StaticText, {{30.0, 444.3}, {136.7, 28.0}}, label: 'Accessibility', hitPoint: {98.3, 458.3}
+                     Image, {{360.7, 452.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 458.3}
+                Other, {{72.0, 431.3}, {298.0, 1.0}}, hitPoint: {221.0, 431.8}
+                Cell, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                 Other, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                  Other, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                 Other, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                  Other, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                   Other, {{16.0, 484.3}, {370.0, 52.0}}, hitPoint: {201.0, 510.3}
+                    Button, {{16.0, 484.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.actionButton', label: 'Action Button', hitPoint: {201.0, 510.3}
+                     Image, {{30.0, 496.3}, {28.0, 28.0}}, hitPoint: {44.0, 510.3}
+                     StaticText, {{30.0, 496.3}, {145.7, 28.0}}, label: 'Action Button', hitPoint: {102.8, 510.3}
+                     Image, {{360.7, 504.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 510.3}
+                Other, {{72.0, 483.3}, {298.0, 1.0}}, hitPoint: {221.0, 483.8}
+                Cell, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                 Other, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                  Other, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                 Other, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                  Other, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                   Other, {{16.0, 536.3}, {370.0, 52.0}}, hitPoint: {201.0, 562.3}
+                    Button, {{16.0, 536.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.appearance', label: 'Appearance', hitPoint: {201.0, 562.3}
+                     StaticText, {{30.0, 548.3}, {134.0, 28.0}}, label: 'Appearance', hitPoint: {97.0, 562.3}
+                     Image, {{30.0, 548.3}, {28.0, 28.0}}, hitPoint: {44.0, 562.3}
+                     Image, {{360.7, 556.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 562.3}
+                Other, {{72.0, 535.3}, {298.0, 1.0}}, hitPoint: {221.0, 535.8}
+                Cell, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                 Other, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                  Other, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                 Other, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                  Other, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                   Other, {{16.0, 588.3}, {370.0, 52.0}}, hitPoint: {201.0, 614.3}
+                    Button, {{16.0, 588.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.camera', label: 'Camera', hitPoint: {201.0, 614.3}
+                     StaticText, {{30.0, 600.3}, {101.3, 28.0}}, label: 'Camera', hitPoint: {80.7, 614.3}
+                     Image, {{30.0, 600.3}, {28.0, 28.0}}, hitPoint: {44.0, 614.3}
+                     Image, {{360.7, 608.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 614.3}
+                Other, {{72.0, 587.3}, {298.0, 1.0}}, hitPoint: {221.0, 587.8}
+                Cell, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                 Other, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                  Other, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                 Other, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                  Other, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                   Other, {{16.0, 640.3}, {370.0, 52.0}}, hitPoint: {201.0, 666.3}
+                    Button, {{16.0, 640.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.homeScreen', label: 'Home Screen & App Library', hitPoint: {201.0, 666.3}
+                     StaticText, {{30.0, 652.3}, {253.7, 28.0}}, label: 'Home Screen & App Library', hitPoint: {156.8, 666.3}
+                     Image, {{30.0, 652.3}, {28.0, 28.0}}, hitPoint: {44.0, 666.3}
+                     Image, {{360.7, 660.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 666.3}
+                Other, {{72.0, 639.3}, {298.0, 1.0}}, hitPoint: {221.0, 639.8}
+                Cell, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                 Other, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                  Other, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                 Other, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                  Other, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                   Other, {{16.0, 692.3}, {370.0, 52.0}}, hitPoint: {201.0, 718.3}
+                    Button, {{16.0, 692.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.search', label: 'Search', hitPoint: {201.0, 718.3}
+                     StaticText, {{30.0, 704.3}, {95.3, 28.0}}, label: 'Search', hitPoint: {77.7, 718.3}
+                     Image, {{30.0, 704.3}, {28.0, 28.0}}, hitPoint: {44.0, 718.3}
+                     Image, {{360.7, 712.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 718.3}
+                Other, {{72.0, 691.3}, {298.0, 1.0}}, hitPoint: {221.0, 691.8}
+                Cell, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                 Other, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                  Other, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                 Other, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                  Other, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                   Other, {{16.0, 744.3}, {370.0, 52.0}}, hitPoint: {201.0, 770.3}
+                    Button, {{16.0, 744.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.siri', label: 'Siri', hitPoint: {201.0, 770.3}
+                     StaticText, {{30.0, 756.3}, {66.0, 28.0}}, label: 'Siri', hitPoint: {63.0, 770.3}
+                     Image, {{30.0, 756.3}, {28.0, 28.0}}, hitPoint: {44.0, 770.3}
+                     Image, {{360.7, 764.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 770.3}
+                Other, {{72.0, 743.3}, {298.0, 1.0}}, hitPoint: {221.0, 743.8}
+                Cell, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                 Other, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                  Other, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                 Other, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                  Other, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                   Other, {{16.0, 796.3}, {370.0, 52.0}}, hitPoint: {201.0, 822.3}
+                    Button, {{16.0, 796.3}, {370.0, 52.0}}, identifier: 'com.apple.settings.standBy', label: 'StandBy', hitPoint: {201.0, 822.3}
+                     StaticText, {{30.0, 808.3}, {106.3, 28.0}}, label: 'StandBy', hitPoint: {83.2, 822.3}
+                     Image, {{30.0, 808.3}, {28.0, 28.0}}, hitPoint: {44.0, 822.3}
+                     Image, {{360.7, 816.3}, {7.0, 12.0}}, identifier: 'chevron.forward', hitPoint: {364.2, 822.3}
+                Other, {{72.0, 795.3}, {298.0, 1.0}}, hitPoint: {221.0, 795.8}
+                Other, {{-16.0, 866.0}, {434.0, 87.0}}, hitPoint: {201.0, 870.0}
+                Other, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 2 pages', value: 0%, hitPoint: {384.0, 464.0}
+                 Other, {{396.0, 119.0}, {3.0, 428.7}}, hitPoint: {397.5, 333.3}
+                Other, {{369.0, 116.0}, {30.0, 696.0}}, label: 'Vertical scroll bar, 2 pages', value: 0%, hitPoint: {384.0, 464.0}
+                 Other, {{396.0, 119.0}, {3.0, 428.7}}, hitPoint: {397.5, 333.3}
+           Toolbar, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'Toolbar', label: 'Toolbar', hitPoint: {201.0, 437.0}
+            Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+             Other, {{0.0, 62.0}, {402.0, 812.0}}, hitPoint: {201.0, 468.0}
+              Other, {{0.0, 62.0}, {402.0, 812.0}}, hitPoint: {201.0, 468.0}
+                Other, {{28.0, 798.0}, {346.0, 48.0}}, hitPoint: {201.0, 822.0}
+                 Other, {{28.0, 798.0}, {346.0, 48.0}}, hitPoint: {201.0, 822.0}
+                  Other, {{28.0, 808.0}, {346.0, 28.0}}, hitPoint: {201.0, 822.0}
+                   SearchField, {{28.0, 808.0}, {346.0, 28.0}}, label: 'Search', placeholderValue: 'Search', hitPoint: {201.0, 822.0}
+                    Button, {{341.7, 811.0}, {17.3, 22.0}}, identifier: 'Dictate', label: 'Dictate', hitPoint: {350.3, 822.0}
+                    Image, {{40.0, 812.0}, {20.7, 19.3}}, identifier: 'magnifyingglass', label: 'Search', hitPoint: {50.3, 821.7}
+                    Button, {{341.7, 811.0}, {17.3, 22.0}}, identifier: 'Dictate', label: 'Dictate', hitPoint: {350.3, 822.0}
+         Toolbar, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'Toolbar', label: 'Toolbar', hitPoint: {201.0, 437.0}
+          Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+       Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}
+        Other, {{0.0, 0.0}, {402.0, 874.0}}, hitPoint: {201.0, 437.0}

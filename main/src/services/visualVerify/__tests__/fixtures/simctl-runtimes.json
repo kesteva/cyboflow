@@ -1,0 +1,60 @@
+{
+  "runtimes": [
+    {
+      "isAvailable": true,
+      "version": "26.2",
+      "isInternal": false,
+      "buildversion": "23C54",
+      "supportedArchitectures": [
+        "arm64"
+      ],
+      "supportedDeviceTypes": [
+        {
+          "bundlePath": "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone 17 Pro.simdevicetype",
+          "name": "iPhone 17 Pro",
+          "productFamily": "iPhone",
+          "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro"
+        },
+        {
+          "bundlePath": "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone 17 Pro Max.simdevicetype",
+          "name": "iPhone 17 Pro Max",
+          "productFamily": "iPhone",
+          "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max"
+        }
+      ],
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+      "platform": "iOS",
+      "bundlePath": "/Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime",
+      "runtimeRoot": "/Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime/Contents/Resources/RuntimeRoot",
+      "name": "iOS 26.2"
+    },
+    {
+      "isAvailable": true,
+      "version": "27.0",
+      "isInternal": false,
+      "buildversion": "24A434",
+      "supportedArchitectures": [
+        "arm64"
+      ],
+      "supportedDeviceTypes": [
+        {
+          "bundlePath": "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone 18 Pro.simdevicetype",
+          "name": "iPhone 18 Pro",
+          "productFamily": "iPhone",
+          "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"
+        },
+        {
+          "bundlePath": "/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone 18 Pro Max.simdevicetype",
+          "name": "iPhone 18 Pro Max",
+          "productFamily": "iPhone",
+          "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro-Max"
+        }
+      ],
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0",
+      "platform": "iOS",
+      "bundlePath": "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.iPhoneOS.SimulatorRuntime-v24.1.434.0.CTkLyx/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime",
+      "runtimeRoot": "/private/var/run/com.apple.security.cryptexd/mnt/com.apple.iPhoneOS.SimulatorRuntime-v24.1.434.0.CTkLyx/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot",
+      "name": "iOS 27.0"
+    }
+  ]
+}
