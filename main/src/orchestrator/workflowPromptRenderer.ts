@@ -15,6 +15,21 @@ export interface WorkflowPromptRenderContext {
   runtime: WorkflowRunStorableRuntime;
   executionModel?: ExecutionModel;
   turnKind?: WorkflowPromptTurnKind;
+  /**
+   * The run's resolved role prompts (built-in body + project overrides + workflow
+   * agentConfigs + variant deltas + tuning-level addendum — the same set the
+   * Claude overlay writes to `.claude/agents/`). Claude ignores it: it reads the
+   * installed files. Every other provider gets no agent files, so the briefs the
+   * prompt actually names are inlined after the body — otherwise a Codex/OMP/pi
+   * step runs its role from a one-line name and a paraphrase.
+   */
+  roleBriefs?: readonly RoleBrief[];
+}
+
+/** One role's full prompt body, keyed by its agent key (`implement`, not `cyboflow-implement`). */
+export interface RoleBrief {
+  agentKey: string;
+  body: string;
 }
 
 const DEFAULT_RENDER_CONTEXT: WorkflowPromptRenderContext = {
@@ -36,6 +51,7 @@ Provider adaptation rules:
 
 - Treat the workflow body below as the source of truth for phases, step ids, required outputs, database writes, artifacts, and human gates.
 - When the workflow mentions Claude-specific mechanics such as \`.claude/agents/\`, the Agent tool, or a named \`cyboflow-*\` subagent, interpret that as a role/delegation instruction. On Codex, never pass a \`cyboflow-*\` name as \`agent_type\`: use built-in \`worker\` for \`implement\`, \`write-tests\`, and \`ui-prototype\`; use built-in \`explorer\` for \`context\`, \`research\`, \`epics\`, \`tasks\`, \`architecture\`, \`dependency-analyzer\`, \`code-review\`, \`task-verify\`, \`visual-verify\`, \`sprint-verify\`, \`sprint-review\`, \`compound-load\`, and \`compounder\`; use built-in \`worker\` for \`address-review\` and \`compound-writeback\` (both edit files). For an unlisted role, use \`worker\` when it must modify files and \`explorer\` when it is read-only. If native delegation is unavailable, perform that role's work directly in this turn while preserving the same returned sections and persistence contract.
+- The \`# Cyboflow role briefs\` section at the end of this prompt carries the full brief of every role the workflow names — the same instructions the Claude runtime installs as that role's subagent prompt. When you delegate a role, give the delegate that brief VERBATIM, followed by the task-specific context the workflow says to hand it; when you do a role's work yourself, follow its brief as your own instructions. Never paraphrase a brief that is there.
 - Continue to use the \`cyboflow_*\` MCP tools for workflow state. \`cyboflow_report_step\` is still required at the same step boundaries.
 - Human gates remain host-owned gates. Whenever the workflow says to use AskUserQuestion or request_user_input, call \`cyboflow_request_user_input\` with the same questions instead. This MCP call blocks until the human answers in Cyboflow; do not continue past the gate before it returns.
 - Do not create or read plugin state files. The Cyboflow database remains the single source of truth.
@@ -51,7 +67,7 @@ Provider adaptation rules:
 - Treat the workflow body below as the source of truth for phases, step ids, required outputs, database writes, artifacts, and human gates.
 - When the workflow mentions Claude-specific mechanics such as \`.claude/agents/\`, the Agent tool, or a named \`cyboflow-*\` subagent, interpret that as a role/delegation instruction. **Cyboflow installs no agent files on this runtime**, so the workflow's claim that a \`cyboflow-*\` role "is installed in this worktree's \`.claude/agents/\`" does not hold here — OMP's task-agent discovery loads OMP-native \`.omp\` agent roots only.
 - NEVER pass a \`cyboflow-*\` name — or the same name with the prefix stripped — as an OMP task agent type, and NEVER go looking for a matching agent definition on disk, in \`~/.claude\`, or in a plugin cache. An agent that happens to share the role's name is NOT Cyboflow's: adopting one runs a stranger's prompt, under a model pin Cyboflow never chose, on your workflow's step.
-- Delegate with OMP's own bundled agents instead: \`task\` for a role that must modify files (\`implement\`, \`write-tests\`, \`ui-prototype\`, \`address-review\`, \`compound-writeback\`), \`reviewer\` for \`code-review\`, and \`scout\` for the read-only roles (\`context\`, \`research\`, \`epics\`, \`tasks\`, \`architecture\`, \`adversarial-review\`, \`dependency-analyzer\`, \`interview\`, \`task-verify\`, \`sprint-verify\`, \`sprint-review\`, \`compound-load\`, \`compounder\`, \`verify-setup\`). For an unlisted role, use \`task\` when it must modify files and \`scout\` when it is read-only. Give the delegate the role's brief in your own words — it has no Cyboflow role prompt of its own.
+- Delegate with OMP's own bundled agents instead: \`task\` for a role that must modify files (\`implement\`, \`write-tests\`, \`ui-prototype\`, \`address-review\`, \`compound-writeback\`), \`reviewer\` for \`code-review\`, and \`scout\` for the read-only roles (\`context\`, \`research\`, \`epics\`, \`tasks\`, \`architecture\`, \`adversarial-review\`, \`dependency-analyzer\`, \`interview\`, \`task-verify\`, \`sprint-verify\`, \`sprint-review\`, \`compound-load\`, \`compounder\`, \`verify-setup\`). For an unlisted role, use \`task\` when it must modify files and \`scout\` when it is read-only. The delegate has no Cyboflow role prompt of its own, so give it the role's brief: The \`# Cyboflow role briefs\` section at the end of this prompt carries the full brief of every role the workflow names — the same instructions the Claude runtime installs as that role's subagent prompt. Pass that brief VERBATIM, followed by the task-specific context the workflow says to hand it; only for a role with no brief there, describe it in your own words.
 - If native delegation is unavailable or would not help, perform that role's work directly in this turn while preserving the same returned sections and persistence contract. Doing the step yourself is always preferable to delegating to an agent you did not verify is Cyboflow's.
 - Continue to use the \`cyboflow_*\` MCP tools for workflow state. \`cyboflow_report_step\` is still required at the same step boundaries.
 - Human gates remain host-owned gates. Whenever the workflow says to use AskUserQuestion or request_user_input, call \`cyboflow_request_user_input\` with the same questions instead. This MCP call blocks until the human answers in Cyboflow; do not continue past the gate before it returns.
@@ -66,7 +82,7 @@ You are running the same Cyboflow workflow semantics as the Claude runtime, but 
 Provider adaptation rules:
 
 - Treat the workflow body below as the source of truth for phases, step ids, required outputs, and human gates.
-- **There is no delegation tool on this runtime.** pi registers exactly eight tools — \`read\`, \`grep\`, \`ls\`, \`find\`, \`edit\`, \`write\`, \`bash\`, \`powershell\` — and none of them spawns a subagent. So when the workflow says to delegate to a \`cyboflow-*\` role with the Agent/Task tool, **perform that role's work yourself, in this turn**, preserving the same returned sections and the same contract the role was given. Do not look for a Task tool, and do not treat its absence as a reason to stop.
+- **There is no delegation tool on this runtime.** pi registers exactly eight tools — \`read\`, \`grep\`, \`ls\`, \`find\`, \`edit\`, \`write\`, \`bash\`, \`powershell\` — and none of them spawns a subagent. So when the workflow says to delegate to a \`cyboflow-*\` role with the Agent/Task tool, **perform that role's work yourself, in this turn**, preserving the same returned sections and the same contract the role was given. The \`# Cyboflow role briefs\` section at the end of this prompt carries the full brief of every role the workflow names — the same instructions the Claude runtime installs as that role's subagent prompt. Follow a role's brief as your own instructions while you do its work. Do not look for a Task tool, and do not treat its absence as a reason to stop.
 - **Cyboflow installs no agent files on this runtime**, so the workflow's claim that a \`cyboflow-*\` role "is installed in this worktree's \`.claude/agents/\`" does not hold here. Never go looking for a matching agent definition on disk, in \`~/.claude\`, or in a plugin cache, and never adopt an agent that merely shares the role's name — it is not Cyboflow's, and running a stranger's prompt on your step is worse than doing the step yourself.
 - pi's pattern-search tool is \`find\`, not \`glob\`. A role brief that names Glob means \`find\` here.
 - **The \`cyboflow_*\` MCP tools are NOT available on this runtime.** Do not call them, do not wait on them, and do not report a step as blocked because they are missing. Anything the workflow tells you to persist — a created task, a reported step, a resolved finding, an artifact — you instead state plainly in your returned text, clearly enough that the host can act on it: what you would have written, and with what values.
@@ -136,8 +152,53 @@ export function renderWorkflowPromptForRuntime(
     return prompt;
   }
 
+  const briefs = renderRoleBriefsSection(selectMentionedRoleBriefs(context.roleBriefs, prompt.prompt));
   return {
-    prompt: `${envelope}\n\n${prompt.prompt}`,
+    prompt: `${envelope}\n\n${prompt.prompt}${briefs}`,
     systemPromptAppend: prompt.systemPromptAppend,
   };
+}
+
+/**
+ * Keep only the briefs whose `cyboflow-<key>` role the prompt actually names, in
+ * first-mention order — the run's effective set spans every built-in flow, and a
+ * sprint prompt has no use for the planner's roles. The lookahead stops
+ * `cyboflow-sprint` from matching inside `cyboflow-sprint-review`.
+ */
+export function selectMentionedRoleBriefs(
+  briefs: readonly RoleBrief[] | undefined,
+  promptText: string,
+): RoleBrief[] {
+  if (!briefs || briefs.length === 0) return [];
+  const mentioned: Array<{ brief: RoleBrief; at: number }> = [];
+  for (const brief of briefs) {
+    if (brief.body.trim().length === 0) continue;
+    const escaped = brief.agentKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = new RegExp(`cyboflow-${escaped}(?![\\w-])`).exec(promptText);
+    if (match) mentioned.push({ brief, at: match.index });
+  }
+  return mentioned.sort((a, b) => a.at - b.at).map((m) => m.brief);
+}
+
+/**
+ * The inlined briefs, each wrapped in a `<role-brief>` tag rather than a markdown
+ * heading: the bodies carry their own `##` headings and json fences, which would
+ * otherwise read as sections of this prompt. `''` when there is nothing to inline.
+ */
+export function renderRoleBriefsSection(briefs: readonly RoleBrief[]): string {
+  if (briefs.length === 0) return '';
+  const blocks = briefs.map(
+    (b) => `<role-brief name="cyboflow-${b.agentKey}">\n${b.body.trim()}\n</role-brief>`,
+  );
+  return [
+    '',
+    '',
+    '---',
+    '',
+    '# Cyboflow role briefs',
+    '',
+    "These are the roles' actual instructions — on the Claude runtime each one is the named subagent's system prompt. When you delegate a role, pass its brief to the delegate VERBATIM, followed by the task-specific context; when you perform a role yourself, follow its brief as your own instructions for that step, including its required output sections and verdict lines.",
+    '',
+    blocks.join('\n\n'),
+  ].join('\n');
 }

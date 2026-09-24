@@ -71,6 +71,7 @@ import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/
 import { bareModelId } from '../../../../../shared/agents/modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 import type { EffectiveAgentsResolver } from '../../../orchestrator/runStepModels';
+import type { RoleBrief } from '../../../orchestrator/workflowPromptRenderer';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */
 const AGENTS_DIR = ['.claude', 'agents'] as const;
@@ -286,6 +287,23 @@ export function resolveRunEffectiveAgents(
     effective = applyPromptAddenda(effective, workflowConfigs);
   }
   return effective;
+}
+
+/**
+ * The run's role prompts in the shape the non-Claude prompt renderer inlines:
+ * each effective agent's resolved `systemPrompt` (tuning addendum included —
+ * applyPromptAddenda appends it there), keyed by agent key. Claude never reads
+ * this; it gets the same bodies as `.claude/agents/` files via installAgentOverlay.
+ */
+export function resolveRunRoleBriefs(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): RoleBrief[] {
+  return resolveRunEffectiveAgents(db, runId, logger).map((a) => ({
+    agentKey: a.agentKey,
+    body: a.systemPrompt,
+  }));
 }
 
 /**

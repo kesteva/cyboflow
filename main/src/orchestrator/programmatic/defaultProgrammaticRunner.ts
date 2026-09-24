@@ -55,6 +55,7 @@ import type {
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import type { RoleBrief } from '../workflowPromptRenderer';
 import { composeDesignSurfaces } from './designSurfaces';
 import {
   isSolutionThoroughness,
@@ -249,6 +250,14 @@ export interface DefaultProgrammaticRunnerDeps {
         effort?: ReasoningEffort;
       }
     | undefined;
+  /**
+   * The run's resolved role prompts, threaded to SpawnStepRunner as a run-bound
+   * thunk so a step that spawns OFF Claude (a run-level Codex/OMP/pi run, or a
+   * step routed there by agentConfigs / runtime mix) carries its role's full
+   * brief — Claude reads the same prompts from its installed agent files.
+   * Absent ⇒ non-Claude steps keep the bare role name (today's behaviour).
+   */
+  resolveRoleBriefs?: (runId: string) => readonly RoleBrief[];
   /**
    * LANE-TRIAGE task reader (autonomous lane rescue). Resolves a fan-out item's
    * ref / title / CURRENT body so the host can enrich the controller's bare
@@ -841,6 +850,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const resolveStepAgent = this.deps.resolveStepAgent
       ? (agentKey: string) => this.deps.resolveStepAgent!(ctx.runId, agentKey)
       : undefined;
+    const resolveRoleBriefs = this.deps.resolveRoleBriefs
+      ? () => this.deps.resolveRoleBriefs!(ctx.runId)
+      : undefined;
 
     const runner = new SpawnStepRunner(
       this.deps.spawner,
@@ -891,6 +903,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
+        ...(resolveRoleBriefs ? { resolveRoleBriefs } : {}),
       },
       this.deps.logger,
     );

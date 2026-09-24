@@ -49,6 +49,7 @@ import { ReviewItemRouter } from './reviewItemRouter';
 import { createRunDirectives, type RunDirectives } from './programmatic/runDirectives';
 import {
   renderWorkflowPromptForRuntime,
+  type RoleBrief,
   type WorkflowPromptRenderContext,
   type WorkflowPromptTurnKind,
 } from './workflowPromptRenderer';
@@ -792,6 +793,14 @@ export class RunExecutor {
      * byte-identical to before this seam existed.
      */
     private readonly hasRunningDynamicWorkflow?: (runId: string) => boolean,
+    /**
+     * Optional resolver for the run's role prompts (the same effective set the
+     * Claude overlay writes to `.claude/agents/`). Consulted only for a launch
+     * turn on a NON-Claude provider, whose renderer inlines the briefs the
+     * workflow body names — those runtimes get no agent files. When absent, a
+     * non-Claude run keeps today's bare role names.
+     */
+    private readonly resolveRoleBriefs?: (runId: string) => readonly RoleBrief[],
   ) {}
 
   /**
@@ -1977,11 +1986,15 @@ export class RunExecutor {
     run: WorkflowRunRow,
     turnKind: WorkflowPromptTurnKind,
   ): WorkflowPromptRenderContext {
+    const provider = run.agent_provider ?? 'claude';
     return {
-      provider: run.agent_provider ?? 'claude',
+      provider,
       runtime: run.agent_runtime ?? 'claude-sdk',
       executionModel: run.execution_model ?? 'orchestrated',
       turnKind,
+      ...(provider !== 'claude' && turnKind === 'launch' && this.resolveRoleBriefs
+        ? { roleBriefs: this.resolveRoleBriefs(run.id) }
+        : {}),
     };
   }
 

@@ -1348,6 +1348,46 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     expect(opts.hidePromptFromTranscript).toBe(true);
   });
 
+  it('inlines the role briefs the workflow names into a non-Claude launch prompt, and never resolves them for Claude', async () => {
+    const launch = async (provider: 'codex' | 'claude') => {
+      const run = makeWorkflowRunRow({
+        worktree_path: '/my/worktree',
+        agent_provider: provider,
+        agent_runtime: provider === 'codex' ? 'codex-sdk' : 'claude-sdk',
+      });
+      const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+      const registry: WorkflowRegistryLike = {
+        getRunById: vi.fn().mockReturnValue(run),
+        getById: vi.fn().mockReturnValue(workflow),
+      };
+      const spawner = makeSpawner();
+      const reader = makeStubReader({
+        '/fake/sprint.md': { prompt: 'delegate to `cyboflow-code-review`', systemPromptAppend: '' },
+      });
+      const resolveRoleBriefs = vi.fn(() => [
+        { agentKey: 'code-review', body: 'CODE-REVIEW ROLE BODY' },
+        { agentKey: 'context', body: 'UNNAMED ROLE BODY' },
+      ]);
+      const executor = new RunExecutor(
+        spawner, registry, makeSpyLogger(), reader,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        resolveRoleBriefs,
+      );
+      await executor.execute(run.id);
+      return { prompt: spawnedOpts(spawner).prompt, resolveRoleBriefs };
+    };
+
+    const codex = await launch('codex');
+    expect(codex.resolveRoleBriefs).toHaveBeenCalledOnce();
+    expect(codex.prompt).toContain('<role-brief name="cyboflow-code-review">\nCODE-REVIEW ROLE BODY\n</role-brief>');
+    expect(codex.prompt).not.toContain('UNNAMED ROLE BODY');
+
+    const claude = await launch('claude');
+    expect(claude.resolveRoleBriefs).not.toHaveBeenCalled();
+    expect(claude.prompt).not.toContain('# Cyboflow role briefs');
+  });
+
   it('does not wrap Codex nudge prompts because the resumed thread already has the launch envelope', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/my/worktree',

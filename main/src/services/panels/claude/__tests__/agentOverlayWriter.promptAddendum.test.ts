@@ -20,7 +20,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Database from 'better-sqlite3';
-import { installAgentOverlay, resolveRunEffectiveAgents } from '../agentOverlayWriter';
+import { installAgentOverlay, resolveRunEffectiveAgents, resolveRunRoleBriefs } from '../agentOverlayWriter';
 import { materializeForLevel } from '../../../../../../shared/tuning/workflowTuning';
 
 const ADDENDUM_HEADING = '## Tuning-level addendum';
@@ -159,5 +159,17 @@ describe('resolveRunEffectiveAgents — promptAddendum from the frozen spec', ()
     // The frontmatter still names the agent correctly and the base body survives.
     expect(written.startsWith('---\nname: cyboflow-implement\n')).toBe(true);
     expect(written).toContain('cyboflow Sprint **implement** subagent');
+  });
+});
+
+describe('resolveRunRoleBriefs — the non-Claude channel carries the same addendum', () => {
+  it("the implement brief is the addended body, with no frontmatter", () => {
+    const runId = seedRun(db, EFFICIENT_SPRINT_SPEC);
+    const implement = resolveRunRoleBriefs(db, runId).find((b) => b.agentKey === 'implement');
+
+    expect(implement?.body).toContain(ADDENDUM_HEADING);
+    expect(implement?.body).toContain('you also author the unit tests covering it');
+    expect(implement?.body).toContain('cyboflow Sprint **implement** subagent');
+    expect(implement?.body.startsWith('---')).toBe(false);
   });
 });

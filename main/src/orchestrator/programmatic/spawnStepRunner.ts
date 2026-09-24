@@ -40,6 +40,7 @@ import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { resolveStepSpawnTarget } from '../stepSpawnTarget';
 import {
   renderWorkflowPromptForRuntime,
+  type RoleBrief,
   type WorkflowPromptRenderContext,
 } from '../workflowPromptRenderer';
 
@@ -257,6 +258,13 @@ export interface SpawnStepRunnerOptions {
         effort?: ReasoningEffort;
       }
     | undefined;
+  /**
+   * The run's resolved role prompts, inlined into a NON-Claude step's prompt
+   * (Claude reads them from the installed `.claude/agents/` files instead).
+   * Re-resolved per step like every thunk here; consulted only when the step
+   * actually spawns off Claude, so a Claude step pays nothing.
+   */
+  resolveRoleBriefs?: () => readonly RoleBrief[];
 }
 
 /**
@@ -443,6 +451,9 @@ export class SpawnStepRunner implements StepRunner {
       {
         ...renderCtx,
         turnKind: 'programmatic-step',
+        ...(effectiveProvider !== 'claude' && this.opts.resolveRoleBriefs
+          ? { roleBriefs: this.opts.resolveRoleBriefs() }
+          : {}),
       },
     );
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
