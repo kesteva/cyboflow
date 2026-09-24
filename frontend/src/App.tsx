@@ -109,10 +109,10 @@ function App() {
   const backlogCount = useBacklogStore((s) => countActiveBacklogItems(s.tasks));
   // Pending findings drive the Insights rail badge — derived from the SAME
   // source the review-queue findings partition uses (useReviewItemsSlice.items
-  // filtered to kind='finding' + status='pending'; see ReviewQueueView), NOT the
+  // filtered to kind='finding' + status='pending'; see LandingHome), NOT the
   // insights store, so the badge stays decoupled from the Insights view's own
   // fetch lifecycle. The slice is project-scoped: it carries findings only for
-  // the project ReviewQueueView last wired, so this badge reflects the active
+  // the project last wired into the slice, so this badge reflects the active
   // project's findings (0 until a project's review inbox has been opened).
   const insightsCount = useReviewItemsSlice(
     (s) => s.items.filter((it) => it.kind === 'finding' && it.status === 'pending').length,
@@ -188,7 +188,7 @@ function App() {
   }, [subscribeToOmpFleet]);
 
   // Subscribe to stuck-run events so RunStatusMap stays current for the lifetime
-  // of the app shell (not just while ReviewQueueView is mounted).
+  // of the app shell (not just while the landing queue is mounted).
   const subscribeToStuckEvents = useReviewQueueSlice((s) => s.subscribeToStuckEvents);
   useEffect(() => {
     const unsubscribe = subscribeToStuckEvents();
