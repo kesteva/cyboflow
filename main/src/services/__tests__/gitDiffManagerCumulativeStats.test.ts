@@ -14,7 +14,7 @@
  * captureWorkingDirectoryDiff, without ever committing in between.
  *
  * The fix itself (contiguous same-before_commit_hash run collapsing) lives
- * in main/src/ipc/session.ts (aggregateExecutionDiffTotals) and is covered
+ * in main/src/ipc/executionDiffAggregation.ts (aggregateExecutionDiffTotals) and is covered
  * by main/src/ipc/__tests__/aggregateExecutionDiffTotals.test.ts — this file
  * only documents/locks the GitDiffManager-level behavior that fix works
  * around.

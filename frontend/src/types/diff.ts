@@ -1,3 +1,5 @@
+import type { WorktreeStatusPayload } from '../../../shared/types/runFiles';
+
 export interface ExecutionDiff {
   id: number;
   session_id: string;
@@ -25,12 +27,20 @@ export interface GitDiffStats {
   filesChanged: number;
 }
 
+/**
+ * Renderer twin of the main-side `SessionGitDiffResult`
+ * (main/src/orchestrator/trpc/contracts/sessionGitOps.ts). The Seam B
+ * (TASK-212) fields are REQUIRED on the wire but optional here: this legacy
+ * shape's only consumer (CombinedDiffView) never reads them.
+ */
 export interface GitDiffResult {
   diff: string;
   stats: GitDiffStats;
   changedFiles: string[];
   beforeHash?: string;
   afterHash?: string;
+  resolvedBase?: string | null;
+  worktree?: WorktreeStatusPayload;
 }
 
 export interface FileDiff {

@@ -12,7 +12,11 @@
  *   - `sessionGit.commit` (via the reusable CommitDialog) — stages everything
  *     (`git add -A`) and commits with a user-entered message.
  *   - `workspaceFiles.gitRestore` — destructive (`git clean -fd` + checkout),
- *     gated behind a `window.confirm`.
+ *     gated behind a `window.confirm`. A failed restore (`{ success: false }`
+ *     envelope or a rejected mutation) is surfaced inline in place of the
+ *     count (`worktree-strip-restore-error`) and still refetches — a restore
+ *     that failed part-way (e.g. after `git clean`) has already changed the
+ *     tree, so the snapshot is known-stale.
  * After either succeeds it calls `onMutated`, which the rail turns into a
  * refetch of the panel (and therefore of this strip's own snapshot).
  *
@@ -75,6 +79,7 @@ const NO_STATUS_ERROR = 'Working-tree status is not available yet';
 
 export function WorktreeStrip({ sessionId, worktree, onMutated, onRefresh }: WorktreeStripProps): ReactElement {
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const entries = worktree?.entries ?? [];
   const hasConflict = entries.some((e) => e.conflicted);
@@ -121,11 +126,20 @@ export function WorktreeStrip({ sessionId, worktree, onMutated, onRefresh }: Wor
     ) {
       return;
     }
-    trpc.cyboflow.workspaceFiles.gitRestore.mutate({ sessionId }).then((result) => {
-      if (result.success) {
+    setRestoreError(null);
+    trpc.cyboflow.workspaceFiles.gitRestore
+      .mutate({ sessionId })
+      .then((result) => {
+        if (!result.success) setRestoreError(result.error || 'Failed to restore changes');
+        // Refetch on failure too: a restore that failed part-way has already
+        // mutated the tree, so the lifted snapshot is known-stale.
         onMutated?.();
-      }
-    });
+      })
+      .catch((error: unknown) => {
+        console.error('[WorktreeStrip] gitRestore failed:', error);
+        setRestoreError(error instanceof Error ? error.message : 'Failed to restore changes');
+        onMutated?.();
+      });
   }, [sessionId, onMutated]);
 
   return (
@@ -140,13 +154,24 @@ export function WorktreeStrip({ sessionId, worktree, onMutated, onRefresh }: Wor
         to an ellipsis instead of wrapping to a second line or pushing Restore
         past the rail edge. The full text stays reachable via `title`.
       */}
-      <span
-        data-testid="worktree-strip-count"
-        className="min-w-0 truncate text-text-secondary"
-        title={countLabel}
-      >
-        {countLabel}
-      </span>
+      {restoreError !== null ? (
+        <span
+          role="alert"
+          data-testid="worktree-strip-restore-error"
+          className="min-w-0 truncate text-status-error"
+          title={restoreError}
+        >
+          Restore failed: {restoreError}
+        </span>
+      ) : (
+        <span
+          data-testid="worktree-strip-count"
+          className="min-w-0 truncate text-text-secondary"
+          title={countLabel}
+        >
+          {countLabel}
+        </span>
+      )}
       <div className="flex shrink-0 items-center gap-1.5">
         {onRefresh && (
           <button

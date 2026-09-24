@@ -44,6 +44,7 @@ import type {
   SessionLastCommitRow,
 } from '../contracts/sessionGitOps';
 import type { GitStatus } from '../../../types/session';
+import type { ComparisonBases } from '../../../../../shared/types/runFiles';
 
 function requireOps<T>(ops: T | undefined): T {
   if (!ops) {
@@ -244,15 +245,7 @@ export const sessionGitRouter = router({
       ctx,
       input,
     }): Promise<
-      | {
-          success: true;
-          data: {
-            branchPoint: { ref: string; shortSha: string } | null;
-            defaultBranch: string | null;
-            localDefault: { ref: string; behind: number } | null;
-            originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
-          };
-        }
+      | { success: true; data: ComparisonBases }
       | SessionGitError
     > => {
       return requireOps(ctx.sessionGitOps).getComparisonBases(input);
