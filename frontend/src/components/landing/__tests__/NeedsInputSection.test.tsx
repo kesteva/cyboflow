@@ -42,6 +42,7 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 import { NeedsInputSection } from '../NeedsInputSection';
+import { useErrorStore } from '../../../stores/errorStore';
 
 function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
   return {
@@ -443,6 +444,27 @@ describe('NeedsInputSection', () => {
     await user.click(screen.getByText('Dismiss'));
     await vi.waitFor(() => expect(dismissAskMock).toHaveBeenCalled());
     expect(onQuickSessionAskDismissed).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call onQuickSessionAskDismissed and surfaces the error when dismissAsk RESOLVES with {success:false} (rvw_e58cbf90)', async () => {
+    dismissAskMock.mockResolvedValueOnce({ success: false, error: 'Session not found' });
+    useErrorStore.getState().clearError();
+    const user = userEvent.setup();
+    const onQuickSessionAskDismissed = vi.fn();
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        quickRows={[dismissableRow()]}
+        onQuickSessionAskDismissed={onQuickSessionAskDismissed}
+      />,
+    );
+
+    await user.click(screen.getByText('Dismiss'));
+    await vi.waitFor(() => expect(dismissAskMock).toHaveBeenCalled());
+    expect(onQuickSessionAskDismissed).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(useErrorStore.getState().currentError).toMatchObject({ error: 'Session not found' }),
+    );
   });
 
   it('offers NO Dismiss (button or ✕) on a live blocked row — the mutation cannot clear an in-flight gate', () => {

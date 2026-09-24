@@ -1324,6 +1324,30 @@ describe('ReviewItemCard', () => {
     );
   });
 
+  it('a canAddressReviewFindings transport failure renders disabled with an "unavailable" tooltip, never the false "Run already completed" (rvw_898ebd7f)', async () => {
+    mockCanAddressReviewFindings.mockRejectedValueOnce(new Error('boom'));
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'Could not check eligibility — try again',
+    );
+  });
+
+  it('after a successful Address click the button goes disabled+tooltip instead of re-enabling on stale eligibility (rvw_2ae3779e)', async () => {
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalled());
+    // addressBusy resets in .finally, but eligibility must already read
+    // in_progress locally — never a re-enabled stale eligible:true.
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'Address review is already running for this run',
+    );
+  });
+
   it('Log as findings resolves with triaged:logged and does not promote to a task', async () => {
     const onResolved = vi.fn();
     render(<ReviewItemCard item={makeEvalFinding()} onResolved={onResolved} />);

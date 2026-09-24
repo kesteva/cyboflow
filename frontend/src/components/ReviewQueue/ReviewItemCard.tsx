@@ -110,10 +110,12 @@
  * (review-item triage) or the approvals router (permission gates).
  */
 import React from 'react';
+import type { inferRouterOutputs } from '@trpc/server';
 import { Button } from '../ui/Button';
 import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
+import type { AppRouter } from '../../../../shared/types/trpc';
 import { isSystemicPauseItem, systemicPauseOrigin } from '../../utils/systemicPause';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import {
@@ -429,15 +431,35 @@ function systemicPauseResolvedLabel(item: ReviewItem): string {
 // findings / Dismiss), replacing the legacy Dismiss / Promote-to-task pair.
 // ---------------------------------------------------------------------------
 
-/** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons. */
-const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<'completed' | 'no_step' | 'in_progress', string> = {
+type RouterOutputs = inferRouterOutputs<AppRouter>;
+
+// AppRouter-inferred rather than hand-mirrored (docs/CODE-PATTERNS.md IPC /
+// type-parity rules) — `'unavailable'` is added on top: a CLIENT-side reason
+// for a canAddressReviewFindings query failure, which the server never
+// returns (see the effect below), kept out of band from the server's own
+// ineligibility reasons so a real 'completed' can't be confused with a probe
+// that simply never got an answer.
+type AddressReviewServerEligibility = RouterOutputs['cyboflow']['runs']['canAddressReviewFindings'];
+type AddressReviewIneligibleReason = NonNullable<AddressReviewServerEligibility['reason']> | 'unavailable';
+/** The eligibility shape `runs.canAddressReviewFindings` returns, or the client-side 'unavailable' probe failure; null while loading. */
+type AddressReviewEligibility =
+  | AddressReviewServerEligibility
+  | { eligible: false; reason: 'unavailable' }
+  | null;
+
+/** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons, plus the client-side probe-failure reason. */
+const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<AddressReviewIneligibleReason, string> = {
   completed: 'Run already completed — log or dismiss',
   no_step: 'This flow has no address-review step',
   in_progress: 'Address review is already running for this run',
+  unavailable: 'Could not check eligibility — try again',
 };
 
+type AddressReviewFindingsResult = RouterOutputs['cyboflow']['runs']['addressReviewFindings'];
+type AddressReviewNoOpReason = Extract<AddressReviewFindingsResult, { noOp: true }>['reason'];
+
 /** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case). */
-const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
+const ADDRESS_REVIEW_NOOP_MESSAGE: Record<AddressReviewNoOpReason, string> = {
   not_found: 'Run not found.',
   not_programmatic: 'Only programmatic runs support Address review findings.',
   not_rewindable: 'This run is not in a state that can be rewound right now.',
@@ -447,9 +469,6 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
   fanout_settled: 'Every sprint task in this run is already integrated.',
   race: 'The run changed state — try again.',
 };
-
-/** The eligibility shape `runs.canAddressReviewFindings` returns; null while loading. */
-type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' | 'in_progress' } | null;
 
 /**
  * The narrower half of {@link isApproveDesignGateItem}: ONLY the programmatic
@@ -656,7 +675,12 @@ export function ReviewItemCard({
         if (!cancelled) setAddressEligibility(result);
       })
       .catch(() => {
-        if (!cancelled) setAddressEligibility({ eligible: false, reason: 'completed' });
+        // A transport/DB error is NOT a statement about the run's state — using
+        // 'completed' here would show the false "Run already completed" tooltip
+        // on a probe failure. 'unavailable' is a client-only reason the server
+        // never returns, kept distinct so a real completed run is never confused
+        // with an eligibility check that simply never got an answer.
+        if (!cancelled) setAddressEligibility({ eligible: false, reason: 'unavailable' });
       });
     return () => {
       cancelled = true;
@@ -688,6 +712,12 @@ export function ReviewItemCard({
       .mutate({ runId: item.run_id })
       .then((result) => {
         if ('delivered' in result) {
+          // The run's address-review step is now the live current step — set
+          // eligibility to the same 'in_progress' the next query would report,
+          // right away, so the button re-renders disabled+tooltip instead of
+          // re-enabling on the now-stale `eligible:true` (a second click would
+          // otherwise reach the in_progress noOp error instead).
+          setAddressEligibility({ eligible: false, reason: 'in_progress' });
           trackEvent('review_item_resolved', {
             kind: item.kind,
             action: 'address_review_findings',
