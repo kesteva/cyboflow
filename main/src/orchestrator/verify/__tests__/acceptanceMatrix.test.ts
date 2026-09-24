@@ -1341,10 +1341,15 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
     expect(runbookRecord(db)?.status).toBe('proven');
     expect(world.deploys).toHaveLength(0);
 
-    // RE-PROOF on the new host: a fresh draft (bumping the CAS version so any
-    // in-flight pin against the old revision fails) plus a fresh proof.
+    // RE-PROOF on the new host. Re-registering unchanged content over a proven
+    // record is a no-op (A8: same hash + bindings keeps the record and its CAS
+    // version), so the recovery is a fresh proof against the SAME revision,
+    // re-stamped with this host's provenance.
     const reProof = await proveModality(store, 'web');
-    expect(reProof.version).toBeGreaterThan(firstProof.version);
+    expect(reProof).toEqual(firstProof);
+    expect(
+      store.markProven(1, 'web', reProof.hash, reProof.version, '{"fixture":true}', await store.freshProvenance(LIVE_WORKTREE)),
+    ).toEqual({ ok: true });
     expect(runbookRecord(db)?.status).toBe('proven');
 
     // …and the SAME task now deploys, pinned to the new revision.

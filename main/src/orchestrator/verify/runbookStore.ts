@@ -352,6 +352,26 @@ export interface VerifyRunbookStoreDeps {
    * stable across calls on an unchanged host.
    */
   hostFingerprint: () => Promise<string>;
+  /**
+   * A0 legacy-NULL compat ONLY (docs/proposals/runbook-optional-verification.md
+   * §A0) — a cheap existence check for `<dirPath>/package.json`, used solely to
+   * interpret a stored `input_hash IS NULL` row: one written by a pre-A0
+   * `registerDraft`/`markProven`, back when `computeInputHash` genuinely
+   * returned `null` for a package.json-less tree (see A0's
+   * `computeVerifyInputHash`, which now folds in fallback manifests there
+   * instead of returning null). Without this, such a legacy record would read
+   * as drifted on every future call — the exact case A0 exists to fix (a
+   * proven mobile runbook with no `package.json` in its tree).
+   *
+   * Optional so a wiring that has not added it yet keeps compiling.
+   * `statusDetail` then conservatively assumes a `package.json` IS present —
+   * the SAFE direction: it costs an avoidable re-prove, never a proof this
+   * store cannot actually confirm. An implementation must hold the same line:
+   * answer `false` only for genuine absence (ENOENT/ENOTDIR) and `true` when it
+   * cannot look, as the production `probeHasPackageJson` does; one that rejects
+   * lands in `statusDetail`'s fail-soft `'absent'`/`'indeterminate'`.
+   */
+  hasPackageJson?: (dirPath: string) => Promise<boolean>;
   logger?: LoggerLike;
 }
 
@@ -429,7 +449,10 @@ export class VerifyRunbookStore {
    * conservative reading of "any component changing demotes": a proven record
    * whose provenance was never captured cannot be shown to still hold, and the
    * cost of being wrong here is one re-proof, versus shipping against a runbook
-   * proven on inputs nobody recorded.
+   * proven on inputs nobody recorded. The one exception is A0's legacy-NULL
+   * compat (docs/proposals/runbook-optional-verification.md §A0): a stored NULL
+   * `input_hash` matches when the probe tree has no `package.json` — see
+   * {@link VerifyRunbookStoreDeps.hasPackageJson}.
    *
    * A READ THAT CANNOT OBSERVE ITS INPUTS IS NOT A DRIFT. A `computeInputHash`
    * of `null`, a `readPortableFile` that REJECTS (permissions, IO — see that
@@ -515,7 +538,20 @@ export class VerifyRunbookStore {
         return { status: 'absent', reason: 'indeterminate' };
       }
       if (freshInputHash !== row.input_hash) {
-        return this.drifted(projectId, modality, 'drifted', 'project input hash drift');
+        // A0 legacy-NULL compat. `computeInputHash` used to return `null` for a
+        // package.json-less tree, and a record proven back then stored that
+        // `null` as `input_hash`. It no longer returns null there (it folds in
+        // fallback manifests instead — see `computeVerifyInputHash`), so a bare
+        // comparison would now read every such legacy record as drifted
+        // forever, the moment this fix ships — the exact Distractodo case A0
+        // exists to fix. A stored NULL counts as matching ONLY when the probe
+        // tree STILL has no `package.json`, the same condition that produced
+        // the NULL in the first place; a tree that has since grown one is real
+        // drift, judged exactly like any other stored value.
+        const isLegacyNullMatch = row.input_hash === null && !(await this.hasPackageJson(probePath));
+        if (!isLegacyNullMatch) {
+          return this.drifted(projectId, modality, 'drifted', 'project input hash drift');
+        }
       }
 
       const freshFingerprint = await this.deps.hostFingerprint();
@@ -548,12 +584,21 @@ export class VerifyRunbookStore {
    * caller's `bindingsJson` plus a fresh input-hash and host fingerprint as the
    * baseline the drift checks will later compare against.
    *
-   * ALWAYS `'unproven-draft'`, even when re-registering over a proven record:
+   * USUALLY `'unproven-draft'`, even when re-registering over a proven record:
    * new portable content is by definition unproven content. The version bump is
    * what makes a mid-flight pin (§5.2 seam 3) fail its CAS check rather than
    * silently execute against a revision that was swapped underneath it — and
    * the CAS predicate on the UPDATE means two concurrent registrations cannot
    * both believe they won.
+   *
+   * A8 EXCEPTION (RS-12): when the computed portable hash AND `bindingsJson`
+   * both equal those of an EXISTING record that is already `'proven'`, this is
+   * a NO-OP — nothing is written, and the existing record's own `{ hash,
+   * version }` comes back unchanged. Without this, an idempotent re-register
+   * (the setup flow calling it twice, a retried bootstrap) would silently
+   * demote a proof that changed nothing and bump every pin waiting on it. ANY
+   * other difference — different content, different bindings, or no existing
+   * PROVEN record to compare against — updates and demotes exactly as before.
    *
    * Errors are RETURNED, not thrown — the setup flow surfaces them to the human
    * inline (a missing/malformed runbook is a normal wizard state, not a crash).
@@ -597,6 +642,16 @@ export class VerifyRunbookStore {
       }
 
       const hash = runbookPortableHash(parsed.runbook);
+      const normalizedBindings = bindingsJson ?? null;
+
+      // A8 (RS-12) — a register that changes NOTHING must not demote an
+      // already-proven record. Checked BEFORE the input-hash/fingerprint probes
+      // below so the no-op path costs neither their IO nor a write.
+      const existing = this.readRow(projectId, modality);
+      if (existing && existing.status === 'proven' && existing.portable_hash === hash && existing.bindings_json === normalizedBindings) {
+        return { hash, version: existing.version };
+      }
+
       const portableJson = JSON.stringify(parsed.runbook);
       const inputHash = await this.deps.computeInputHash(worktreePath);
       const fingerprint = await this.deps.hostFingerprint();
@@ -935,6 +990,18 @@ export class VerifyRunbookStore {
          WHERE project_id = ? AND modality = ?`,
       )
       .get(projectId, modality) as RunbookLocalRow | undefined;
+  }
+
+  /**
+   * A0 legacy-NULL compat's existence probe, wrapping the optional
+   * `deps.hasPackageJson` — see that dep's doc for why absence conservatively
+   * answers `true` (assume a `package.json` IS present, so an unwired host
+   * keeps refusing exactly as it did before A0 rather than manufacturing a
+   * proof it never actually confirmed).
+   */
+  private async hasPackageJson(probePath: string): Promise<boolean> {
+    if (!this.deps.hasPackageJson) return true;
+    return this.deps.hasPackageJson(probePath);
   }
 
   /** Parse + validate portable-half text; `null` (with a warn) on malformed content. */

@@ -51,6 +51,7 @@ import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore
 import {
   computeVerifyInputHash,
   computeVerifyHostFingerprint,
+  probeHasPackageJson,
 } from './services/visualVerify/verifyDriftProbes';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
@@ -453,6 +454,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     },
     computeInputHash: verifyComputeInputHash,
     hostFingerprint: verifyHostFingerprint,
+    // A0 legacy-NULL compat: a record proven before the fallback input hash
+    // stored NULL for a package.json-less tree; this lets it keep matching.
+    hasPackageJson: probeHasPackageJson,
     logger: cyboflowLogger,
   });
 

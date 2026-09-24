@@ -127,6 +127,13 @@ interface Harness {
    */
   unreadable: Set<string>;
   state: { inputHash: string | null; fingerprint: string };
+  /**
+   * A0 legacy-NULL compat's `hasPackageJson` dep — the set of probe paths this
+   * fake tree currently "has a package.json" under. Not in `files`/`unreadable`
+   * because it models a wholly separate file (`package.json`, not the
+   * `.cyboflow/verify-runbook.json` those track).
+   */
+  packageJsonExists: Set<string>;
   warnings: string[];
 }
 
@@ -134,6 +141,7 @@ function makeHarness(db: Database.Database = buildDb()): Harness {
   const files = new Map<string, string>([[WORKTREE, JSON.stringify(baseRunbook())]]);
   const unreadable = new Set<string>();
   const state = { inputHash: 'inputs-v1' as string | null, fingerprint: 'host-v1' };
+  const packageJsonExists = new Set<string>();
   const warnings: string[] = [];
   const deps: VerifyRunbookStoreDeps = {
     readPortableFile: async (dirPath) => {
@@ -142,6 +150,7 @@ function makeHarness(db: Database.Database = buildDb()): Harness {
     },
     computeInputHash: async () => state.inputHash,
     hostFingerprint: async () => state.fingerprint,
+    hasPackageJson: async (dirPath) => packageJsonExists.has(dirPath),
     logger: {
       info: () => {},
       warn: (message) => {
@@ -151,17 +160,25 @@ function makeHarness(db: Database.Database = buildDb()): Harness {
       debug: () => {},
     },
   };
-  return { store: new VerifyRunbookStore(db, deps), db, files, unreadable, state, warnings };
+  return { store: new VerifyRunbookStore(db, deps), db, files, unreadable, state, packageJsonExists, warnings };
 }
 
 /** The whole persisted record — what a non-writing read must leave untouched. */
 function persistedRow(
   db: Database.Database,
   modality = 'web',
-): { status: string; version: number; proof_json: string | null; portable_hash: string; input_hash: string | null; host_fingerprint_json: string | null } {
+): {
+  status: string;
+  version: number;
+  proof_json: string | null;
+  portable_hash: string;
+  input_hash: string | null;
+  host_fingerprint_json: string | null;
+  bindings_json: string | null;
+} {
   return db
     .prepare(
-      `SELECT status, version, proof_json, portable_hash, input_hash, host_fingerprint_json
+      `SELECT status, version, proof_json, portable_hash, input_hash, host_fingerprint_json, bindings_json
        FROM verify_runbook_local WHERE project_id = 1 AND modality = ?`,
     )
     .get(modality) as {
@@ -171,6 +188,7 @@ function persistedRow(
     portable_hash: string;
     input_hash: string | null;
     host_fingerprint_json: string | null;
+    bindings_json: string | null;
   };
 }
 
@@ -412,13 +430,18 @@ describe('VerifyRunbookStore drift → computed, non-writing', () => {
     h.state.fingerprint = 'host-v2';
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
 
-    // Re-register against the new host, then re-prove. (registerDraft is the
-    // one verb that still writes the record DOWN — new content is unproven
-    // content — so this is where the persisted 'proven' actually goes away.)
-    const re = await h.store.registerDraft(1, WORKTREE, 'web');
-    if ('error' in re) throw new Error(re.error);
-    expect(re.hash).toBe(pin.hash);
-    expect(h.store.markProven(1, 'web', re.hash, re.version, '{"sha":"cafe"}')).toEqual({ ok: true });
+    // A8 (RS-12): content and bindings are UNCHANGED, so re-registering is
+    // correctly a NO-OP here — it does not touch input_hash/host_fingerprint,
+    // and does NOT bump the version. Recovery from a HOST-only drift therefore
+    // goes through markProven's own `fresh` re-stamp (see the
+    // "fresh provenance re-stamp" describe block), against the SAME pinned
+    // hash + version, not through a pointless re-register of identical content.
+    const noop = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in noop) throw new Error(noop.error);
+    expect(noop).toEqual(pin);
+
+    const fresh = await h.store.freshProvenance(WORKTREE);
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{"sha":"cafe"}', fresh)).toEqual({ ok: true });
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
     h.db.close();
   });
@@ -1211,6 +1234,212 @@ describe('VerifyRunbookStore.statusDetail', () => {
       status: 'absent',
       reason: 'indeterminate',
     });
+    h.db.close();
+  });
+});
+
+/**
+ * A0 legacy-NULL compat (docs/proposals/runbook-optional-verification.md §A0).
+ *
+ * Before A0, `computeInputHash` returned `null` for a package.json-less tree,
+ * and `registerDraft`/`markProven` stamped that `null` straight into
+ * `input_hash`. A0's `computeVerifyInputHash` no longer returns null there — it
+ * folds in fallback manifests instead — so a bare `freshInputHash !==
+ * row.input_hash` comparison would now read EVERY such legacy record as
+ * drifted, forever, the instant this fix ships (the Distractodo case the
+ * design's evidence section documents). `statusDetail` special-cases a stored
+ * NULL: it counts as matching only when the probe tree STILL has no
+ * `package.json`, via the optional injected `hasPackageJson` dep.
+ */
+describe('VerifyRunbookStore — A0 legacy-NULL input-hash compat', () => {
+  /** Registers + proves 'web' the way a pre-A0 host would have: a null input hash. */
+  async function proveWebWithLegacyNullInputHash(h: Harness): Promise<{ hash: string; version: number }> {
+    const savedInputHash = h.state.inputHash;
+    h.state.inputHash = null;
+    try {
+      const registered = await h.store.registerDraft(1, WORKTREE, 'web');
+      if ('error' in registered) throw new Error(`registerDraft failed: ${registered.error}`);
+      expect(h.store.markProven(1, 'web', registered.hash, registered.version, '{"sha":"legacy"}')).toEqual({
+        ok: true,
+      });
+      return registered;
+    } finally {
+      h.state.inputHash = savedInputHash;
+    }
+  }
+
+  it('persists input_hash = NULL, the pre-A0 shape', async () => {
+    const h = makeHarness();
+    await proveWebWithLegacyNullInputHash(h);
+    expect(persistedRow(h.db).input_hash).toBeNull();
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+
+  it('reads proven when the probe tree STILL has no package.json (the condition that produced the NULL)', async () => {
+    const h = makeHarness();
+    await proveWebWithLegacyNullInputHash(h);
+
+    // A0 ships: the SAME package.json-less tree now computes a non-null
+    // fallback hash instead of null.
+    h.state.inputHash = 'fallback-hash-v1';
+    h.packageJsonExists.delete(WORKTREE);
+
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({ status: 'proven', reason: 'proven' });
+    expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
+    // Still a pure read — nothing was re-stamped.
+    expect(persistedRow(h.db).input_hash).toBeNull();
+    h.db.close();
+  });
+
+  it('reads drifted once the tree grows a package.json — real drift, not the legacy case', async () => {
+    const h = makeHarness();
+    await proveWebWithLegacyNullInputHash(h);
+
+    h.state.inputHash = 'npm-hash-v1';
+    h.packageJsonExists.add(WORKTREE);
+
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({ status: 'unproven-draft', reason: 'drifted' });
+    // Non-writing, same as every other drift answer.
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+
+  it('a NON-legacy record (a real stored hash) still refuses on any hash difference regardless of package.json', async () => {
+    const h = makeHarness();
+    await proveWeb(h); // ordinary proof — input_hash = 'inputs-v1', not NULL.
+    h.state.inputHash = 'inputs-v2';
+    h.packageJsonExists.delete(WORKTREE); // package.json absence is irrelevant here — the stored hash isn't NULL.
+
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({ status: 'unproven-draft', reason: 'drifted' });
+    h.db.close();
+  });
+
+  it('without an injected hasPackageJson dep, a legacy NULL record conservatively reads drifted — never a spurious proven', async () => {
+    const db = buildDb();
+    const files = new Map<string, string>([[WORKTREE, JSON.stringify(baseRunbook())]]);
+    const state = { inputHash: null as string | null, fingerprint: 'host-v1' };
+    const store = new VerifyRunbookStore(db, {
+      readPortableFile: async (dirPath) => files.get(dirPath) ?? null,
+      computeInputHash: async () => state.inputHash,
+      hostFingerprint: async () => state.fingerprint,
+      // hasPackageJson intentionally omitted — models a wiring that has not
+      // added the A0 dep yet.
+    });
+
+    const registered = await store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in registered) throw new Error(registered.error);
+    expect(store.markProven(1, 'web', registered.hash, registered.version, '{}')).toEqual({ ok: true });
+
+    state.inputHash = 'fallback-hash-v1';
+    expect(await store.statusDetail(1, WORKTREE, 'web')).toEqual({ status: 'unproven-draft', reason: 'drifted' });
+    db.close();
+  });
+});
+
+/**
+ * A8 (RS-12): `registerDraft` is a no-op when the computed portable hash AND
+ * `bindingsJson` both equal those of an EXISTING PROVEN record — see the
+ * method's own doc for why an idempotent re-register must not silently demote
+ * a proof that changed nothing.
+ */
+describe('VerifyRunbookStore.registerDraft — A8 no-op over an unchanged proven record', () => {
+  it('is a no-op — same hash and same bindings over a proven record write NOTHING and return it unchanged', async () => {
+    const h = makeHarness();
+    const registered = await h.store.registerDraft(1, WORKTREE, 'web', '{"chromium":"/usr/bin/chromium"}');
+    if ('error' in registered) throw new Error(registered.error);
+    expect(h.store.markProven(1, 'web', registered.hash, registered.version, '{"sha":"deadbeef"}')).toEqual({
+      ok: true,
+    });
+    const before = persistedRow(h.db);
+
+    const again = await h.store.registerDraft(1, WORKTREE, 'web', '{"chromium":"/usr/bin/chromium"}');
+    expect('error' in again).toBe(false);
+    if ('error' in again) return;
+    expect(again).toEqual({ hash: registered.hash, version: registered.version });
+
+    // Byte-for-byte the same record: nothing was written.
+    expect(persistedRow(h.db)).toEqual(before);
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+
+  it('treats an omitted bindingsJson as matching a previously-omitted one (both normalize to NULL)', async () => {
+    const h = makeHarness();
+    const registered = await h.store.registerDraft(1, WORKTREE, 'web'); // no bindingsJson
+    if ('error' in registered) throw new Error(registered.error);
+    expect(h.store.markProven(1, 'web', registered.hash, registered.version, '{}')).toEqual({ ok: true });
+    const before = persistedRow(h.db);
+
+    const again = await h.store.registerDraft(1, WORKTREE, 'web'); // still no bindingsJson
+    expect(again).toEqual({ hash: registered.hash, version: registered.version });
+    expect(persistedRow(h.db)).toEqual(before);
+    h.db.close();
+  });
+
+  it('demotes to unproven-draft, bumping the version and clearing the proof, when only bindings differ', async () => {
+    const h = makeHarness();
+    const registered = await h.store.registerDraft(1, WORKTREE, 'web', '{"chromium":"/usr/bin/chromium"}');
+    if ('error' in registered) throw new Error(registered.error);
+    expect(h.store.markProven(1, 'web', registered.hash, registered.version, '{"sha":"deadbeef"}')).toEqual({
+      ok: true,
+    });
+
+    const changed = await h.store.registerDraft(1, WORKTREE, 'web', '{"chromium":"/opt/homebrew/bin/chromium"}');
+    expect('error' in changed).toBe(false);
+    if ('error' in changed) return;
+    expect(changed.hash).toBe(registered.hash); // content itself is unchanged
+    expect(changed.version).toBe(registered.version + 1); // still bumped — A8 does not apply
+
+    const row = persistedRow(h.db);
+    expect(row.status).toBe('unproven-draft');
+    expect(row.proof_json).toBeNull();
+    expect(row.bindings_json).toBe('{"chromium":"/opt/homebrew/bin/chromium"}');
+    h.db.close();
+  });
+
+  it('still demotes on any content difference, exactly as before A8, even with identical bindings', async () => {
+    const h = makeHarness();
+    const registered = await h.store.registerDraft(1, WORKTREE, 'web', '{"x":"y"}');
+    if ('error' in registered) throw new Error(registered.error);
+    expect(h.store.markProven(1, 'web', registered.hash, registered.version, '{}')).toEqual({ ok: true });
+
+    const edited = baseRunbook();
+    edited.modalities.web = {
+      serve: { cmd: 'pnpm preview --port ${PORT}' },
+      attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+    };
+    h.files.set(WORKTREE, JSON.stringify(edited));
+
+    const changed = await h.store.registerDraft(1, WORKTREE, 'web', '{"x":"y"}');
+    expect('error' in changed).toBe(false);
+    if ('error' in changed) return;
+    expect(changed.hash).not.toBe(registered.hash);
+    expect(changed.version).toBe(registered.version + 1);
+    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    h.db.close();
+  });
+
+  it('does NOT no-op when the existing record is a draft, never proven — a draft always bumps on re-register', async () => {
+    const h = makeHarness();
+    const first = await h.store.registerDraft(1, WORKTREE, 'web', '{"x":"y"}');
+    if ('error' in first) throw new Error(first.error);
+    // Never proven.
+
+    const second = await h.store.registerDraft(1, WORKTREE, 'web', '{"x":"y"}');
+    if ('error' in second) throw new Error(second.error);
+    expect(second.hash).toBe(first.hash);
+    expect(second.version).toBe(first.version + 1); // bumped — no proven record to protect
+    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    h.db.close();
+  });
+
+  it('registering a brand-new (project, modality) with no existing record at all is unaffected by A8', async () => {
+    const h = makeHarness();
+    const result = await h.store.registerDraft(1, WORKTREE, 'cdp-app');
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(result.version).toBe(1);
     h.db.close();
   });
 });
