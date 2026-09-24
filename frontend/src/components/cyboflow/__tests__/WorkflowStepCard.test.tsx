@@ -96,6 +96,24 @@ describe('WorkflowStepCard', () => {
     });
   });
 
+  it('paused variant (systemic pause parked on this step): PAUSED label, amber outline + dot, no running outline', () => {
+    render(<WorkflowStepCard step={MOCK_STEP} phase={MOCK_PHASE} stepIndex={3} status="paused" />);
+
+    const card = screen.getByTestId('step-card-implement');
+    expect(card).toHaveTextContent('PAUSED');
+    expect(card).not.toHaveTextContent('RUNNING');
+    expect(card).toHaveStyle({
+      outlineStyle: 'solid',
+      outlineWidth: '2px',
+      outlineColor: 'var(--color-status-warning)',
+    });
+    expect(screen.getByTestId('step-card-dot-implement')).toHaveStyle({
+      background: 'var(--color-status-warning)',
+    });
+    // Never the done overlay — the step has not finished.
+    expect(screen.queryByTestId('step-card-frosted-overlay-implement')).not.toBeInTheDocument();
+  });
+
   it('done variant: frosted-glass overlay present + green check circle present', () => {
     render(
       <WorkflowStepCard

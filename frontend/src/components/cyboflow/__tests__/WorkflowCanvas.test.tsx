@@ -153,6 +153,40 @@ describe('WorkflowCanvas', () => {
     expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
   });
 
+  it('pausedStepId (systemic pause): that card reads PAUSED, the rest derive from currentStepId, and the paused pill replaces the running pill', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        workflowTitle="SPRINT-014"
+        runLabel="run-001"
+        isRunning={true}
+        currentStepId="step-b"
+        pausedStepId="step-b"
+      />,
+    );
+
+    expect(screen.getByTestId('step-card-step-b')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-step-a')).toHaveTextContent('DONE');
+    expect(screen.getByTestId('step-card-step-c')).toHaveTextContent('PENDING');
+    // The run row is still 'running' while parked — the pill must not say so.
+    expect(screen.getByTestId('workflow-canvas-paused-pill')).toHaveTextContent('paused');
+    expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
+  });
+
+  it('pausedStepId wins over a lagging currentStepId for the parked card only', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        isRunning={true}
+        currentStepId="step-a"
+        pausedStepId="step-c"
+      />,
+    );
+    expect(screen.getByTestId('step-card-step-c')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-step-a')).toHaveTextContent('RUNNING');
+    expect(screen.getByTestId('step-card-step-b')).toHaveTextContent('PENDING');
+  });
+
   it('shows the running pill (not paused) when isRunning=true and paused is absent', () => {
     render(
       <WorkflowCanvas

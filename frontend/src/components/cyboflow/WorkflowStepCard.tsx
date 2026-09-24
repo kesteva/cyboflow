@@ -14,7 +14,13 @@ import { MODEL_FAMILY_COLORS } from '../../../../shared/types/agents';
 // Types
 // ---------------------------------------------------------------------------
 
-export type StepStatus = 'pending' | 'running' | 'done';
+/**
+ * 'paused' = the run is parked on THIS step by a systemic pause (a
+ * `gate:systemic-pause:<stepId>` item — usage / session limit). The run row
+ * stays 'running' while parked, so without this state the card read RUNNING
+ * for the whole wait. Styled amber (at rest), never the pulsing red outline.
+ */
+export type StepStatus = 'pending' | 'running' | 'paused' | 'done';
 
 export interface WorkflowStepCardProps {
   step: WorkflowStep;
@@ -53,12 +59,13 @@ export function WorkflowStepCard({
 }: WorkflowStepCardProps) {
   const isPending = status === 'pending';
   const isRunning = status === 'running';
+  const isPaused = status === 'paused';
   const isDone = status === 'done';
   const isHuman = step.human === true;
   const isOptional = step.optional === true;
 
   // State text for the foot area
-  const stateLabel = isRunning ? 'RUNNING' : isDone ? 'DONE' : 'PENDING';
+  const stateLabel = isRunning ? 'RUNNING' : isPaused ? 'PAUSED' : isDone ? 'DONE' : 'PENDING';
 
   // ── Root styles ────────────────────────────────────────────────────────────
   // Done cards: position relative + GPU promotion via translateZ(0) + will-change
@@ -95,6 +102,16 @@ export function WorkflowStepCard({
           outlineOffset: '2px',
         }
       : {}),
+    ...(isPaused
+      ? {
+          // Paused: the same outline geometry as running, in the amber
+          // status-warning token — "the run is here, but at rest".
+          outlineStyle: 'solid',
+          outlineWidth: '2px',
+          outlineColor: 'var(--color-status-warning)',
+          outlineOffset: '2px',
+        }
+      : {}),
     ...(isHuman
       ? {
           // Human: inner amber halo
@@ -119,7 +136,9 @@ export function WorkflowStepCard({
     ? 'var(--color-status-success)'
     : isRunning
       ? 'var(--color-status-error)'
-      : '#c8bea3';
+      : isPaused
+        ? 'var(--color-status-warning)'
+        : '#c8bea3';
 
   // ── Agent short name — resolved canonical key (legacy labels mapped) ───────
   const agentShortName = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
