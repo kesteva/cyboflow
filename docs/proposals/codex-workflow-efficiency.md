@@ -1,794 +1,1080 @@
-# SDK workflow efficiency — accurate Codex usage, direct steps, scoped tools, pooled app-server
+# SDK workflow efficiency — complete usage accounting, scoped Codex tools, direct programmatic steps
 
-Status: PROPOSED (2026-09-24). Based on a read-only audit of the live Cyboflow Codex and
-Claude sessions from 2026-09-16 through 2026-09-23 and an adversarial Opus 5.5 review. No
-implementation has landed; the measured savings remain provisional pending §3.1.
+Status: PROPOSED, revision 2 (2026-09-24). This revision replaces revision 1, which was drafted
+on `solar-juniper` the same day. Revision 1 was checked against three sources: the production
+database (read-only), the local Codex rollout files under `~/.codex/sessions`, and the code.
+That check disproved its Codex accounting premise and blocked its app-server pool.
+
+Nothing from this proposal has landed except the service-tier pin in §4.3.
+
+### What changed from revision 1
+
+| Revision 1 | Revision 2 | Why |
+| --- | --- | --- |
+| Codex baseline of 41.1M input; `agent_result` described as "9.0x actual" | 816.9M input. `agent_result` holds root threads only; children are missing | r1 summed the final `last` of each turn, and `last` covers only one model request (§1.1) |
+| Increment 1 replaces the `last` sum, chosen by a probe | Increment 1 makes accounting complete: descendant threads, mixed-provider rollups, Claude dedup, recompute | The replacement would have cut reported Codex usage about 20x |
+| Five probes gate all work | Probes 1–4 answered offline; lifecycle answered by a model-free probe; two small probes remain | §4 |
+| — | Service tier pinned to standard for workflow threads (landed) | Every audited workflow thread ran on `priority` |
+| — | New Increment 2: fixes to the delegated path | Removes baseline confounds, and each fix saves usage on its own |
+| Tools restricted by disabling MCP servers by name | Each tool source closed with its own setting, a `mcpServerStatus/list` gate, and router-side limits per step | Disabling a plugin server by name makes the whole thread fail |
+| Direct steps enabled by an env allowlist keyed `provider:role` | Frozen-spec `stepDispatch` keyed by step id; host eligibility keyed `provider:workflow:stepId` | Role keys collide, and env toggles contaminate A/B comparisons |
+| Increment 4: per-run app-server pool | Deferred to `codex-app-server-pool.md` | `thread/unsubscribe` leaks MCP children, and the possible gain is under 1% of lane time |
+| Session MCP/plugin parity inside the tools increment | Split out as its own small fix (§7.6) | The session columns hold Claude-namespace ids |
+
+Increment numbers now follow delivery order. Revision 1's Increment 3 (capabilities) is now
+Increment 3. Revision 1's Increment 2 (direct steps) is now Increment 4.
 
 ## 1. Problem and measured baseline
 
-Cyboflow's Codex workflow path works, and observed prompt caching appears healthy, but four
-candidate mechanisms may distort reported usage or make the real workload more expensive than
-it needs to be:
+The audit window is 2026-09-16 → 2026-09-23. Sources:
 
-1. `CodexTurnUsageAccumulator` sums `tokenUsage.last` snapshots without a protocol-level proof
-   of whether they are cumulative or per-request, making stored `agent_result` usage suspect.
-2. A programmatic Claude or Codex step starts an outer agent whose first responsibility is to
-   start a second provider agent to do the actual role work. Both agents consume allowance.
-3. Ordinary Codex workflow threads inherit unrelated user MCP/plugin/app surfaces unless they
-   happen to be running under the separate global-assistant isolation branch.
-4. Every fan-out lane starts and stops a whole Codex app-server process even though one
-   app-server can host multiple isolated threads.
+- `raw_events` and `workflow_runs` in the production `sessions.db`, read-only;
+- the Codex rollout file for every workflow thread;
+- the protocol types generated from the bundled `@openai/codex` 0.153.3.
 
-The seven-day audit reconstructed provider usage from the final deduplicated
-`thread/tokenUsage/updated.params.tokenUsage.last` snapshot for every turn, rather than from
-the inflated `agent_result` projection:
+A second agent re-derived every figure independently. Where it corrected a number, the corrected
+figure is used.
+
+Cyboflow's workflow path has two separate problems.
+
+1. **The stored usage is wrong.** It misses most Codex work and double-counts most Claude input,
+   so Insights cannot measure any efficiency change.
+2. **The work costs more than it needs to.** Four things add cost:
+   - Every programmatic step runs a dispatcher agent whose only job is to start a second agent
+     that does the role work.
+   - Codex workflow threads load unrelated MCP servers, plugins and apps.
+   - The Codex role prompt never reaches Codex.
+   - Every audited Codex workflow thread ran on the `priority` service tier.
+
+### 1.1 Codex usage semantics (settled)
+
+On 0.153.3, the two fields of `thread/tokenUsage/updated.params.tokenUsage` mean:
+
+- **`last`** is the usage of one model request.
+- **`total`** is cumulative per thread, per app-server process. It restarts when a thread is
+  resumed in a new process.
+
+In all 564 audited rollouts, the per-request records sum exactly to their turn and thread
+totals.
+
+**The exact per-turn check value** is the sum of `rawResponse/completed.usage` for each
+(threadId, turnId):
+
+- it is append-only in `raw_events`, with no dedup key;
+- no response id appears twice;
+- it matches the rollouts on 593 of 593 turns;
+- it has been recorded since 2026-09-14T19:51Z.
+
+`total(end) − total(start)` is **not** an exact check. It misses compaction requests, spills
+across turn boundaries and resets on resume; 7 of about 600 turns disagree.
+
+Three consequences:
+
+- `CodexTurnUsageAccumulator` is correct to add up `last`.
+- The `rawNotificationSink.ts` comment calling the snapshot "cumulative per-turn" is wrong.
+- Revision 1's 41.1M is exactly the sum of the final `last` of each turn, which counts one
+  request per turn.
+
+### 1.2 Codex baseline
 
 | Metric | Observed |
 | --- | ---: |
-| Registered outer Codex threads with final usage | 282 |
-| Spawned child threads with final usage | 282 |
-| Total turns | 594 |
-| Input tokens, inclusive of cache reads | 41.1 million |
-| Cached input tokens | 40.2 million |
-| Uncached input tokens | 0.89 million |
-| Effective cache-hit rate | **97.82%** |
-| Output tokens | 0.261 million |
-| Input reported through `agent_result` | 370.8 million (**about 9.0x actual**) |
-| Output reported through `agent_result` | 1.26 million (**about 4.8x actual**) |
+| Threads with usage | 282 root + 282 child. Roots: 281 workflow, 1 quick chat |
+| Turns | 593 |
+| Model requests | 13,542 |
+| Input, including cache reads | 816.9M |
+| Cached input | 780.7M |
+| Uncached input | 36.3M |
+| Cache-write input | 0 |
+| Output | 3.39M |
+| Cache-hit rate | 95.56% |
+| Service tier | `priority` on 130/130 recorded thread-settings rows |
 
-The workload split shows the avoidable orchestration layer clearly:
-
-| Layer | Threads | Turns | Input | Output |
+| Layer | Input | Output | Share of input | Share of output |
 | --- | ---: | ---: | ---: | ---: |
-| Registered outer dispatcher | 282 | 282 | 16,482,102 | 55,341 |
-| Spawned worker | 282 | 312 | 24,595,052 | 205,769 |
+| Root (dispatcher) threads | 373.2M | 1.28M | 45.7% | 37.7% |
+| Child (worker) threads | 443.7M | 2.11M | 54.3% | 62.3% |
+| Programmatic runs only: root | 224.3M | 0.777M | 51.0% | 37.6% |
+| Programmatic runs only: child | 215.4M | 1.289M | 49.0% | 62.4% |
 
-Under the current interpretation of Codex's `last` field, the outer layer represented about
-40% of observed input and 21% of observed output. This is not a claim that removing it saves
-exactly 40%: a direct worker must absorb a small amount of its persistence work. It is a
-provisional upper bound on the duplicated orchestration surface. The protocol-validation gate
-below must confirm the `last` semantics and re-derive this table before it becomes the rollout
-baseline.
+What the product stored:
 
-The provider's own `account/rateLimits/updated` snapshots confirm that consumption is not only
-a Cyboflow display bug. In the prior weekly window the last observed meter advanced from 33%
-to 74%; after the 2026-09-22 reset, the large Sprint run brought the new window to 13%. The
-accounting defect and the real efficiency defect are separate and both need fixing.
+- **Root threads:** `agent_result` matches them to within about 0.4%. The excess comes from
+  duplicate `tokenUsage/updated` emissions.
+- **Child threads:** nothing is recorded. Stored Codex usage is therefore about 54% too **low**,
+  not 9x too high.
+- **Mixed runs:** in runs that mix Claude and Codex steps, `run_usage` and Insights carry zero
+  Codex usage (§5.1).
 
-The same double-delegation pattern appears in Claude programmatic sessions. The initial
-comparison used terminal outer `result.usage` values and deduplicated child assistant messages
-(`parent_tool_use_id != null`, grouped by run, session, and message id). Whether terminal
-`result.usage` already includes Task-subagent traffic is not yet proven. Until the controlled
-Claude probe below resolves that question, the combined total and outer share are provisional.
-Child output cannot be reconstructed reliably from the forwarded event stream, so it is
-deliberately not estimated:
+Codex lanes inside *orchestrated* Sprints also dispatch through a second agent. Their
+dispatchers account for 39.1% of those runs' Codex input. The orchestrated-run exclusion in §2
+covers only the Claude orchestrator parent; §7.2 and §8.2 state what applies to these lanes.
 
-| Claude programmatic metric | Observed |
-| --- | ---: |
-| Runs | 9 |
-| Outer result records | 297 |
-| Task/Agent delegations | 251 |
-| Outer input, inclusive of cache reads | 183.6 million |
-| Child input, inclusive of cache reads | 169.1 million |
-| Naively combined input, pending inclusion probe | 352.7 million |
-| Provisional outer share, if sources are disjoint | **52.1%** |
-| Outer cache-read rate | **91.42%** |
-| Child cache-read rate | **93.31%** |
-| Outer output | 2.61 million |
+### 1.3 Claude baseline (programmatic runs)
 
-If the two Claude sources are disjoint, the outer share is an upper bound rather than a
-promised saving: a direct role must retain the necessary persistence and reporting work. If
-`result.usage` includes child usage, outer-only input is closer to 14.5 million and the implied
-share is about 8%, not 52.1%. The Claude totals are also not a cross-provider cost comparison
-because provider tokenization, accounting, models, and subscription meters differ. The trace
-topology justifies investigating a shared architectural opportunity; it does not yet establish
-the size of Claude savings.
+How Claude reports usage:
 
-This conclusion is limited to **programmatic** runs, where the host already owns sequencing,
-retries, gates, and loopbacks. The audit also found 143 Task/Agent calls across 13 orchestrated
-Claude runs; those parents perform real model-led orchestration and are excluded from the
-direct-step conversion.
+- `result.usage` is per query and counts only the outer agent (297 of 297 results).
+- `modelUsage` is cumulative per SDK process and includes Task children.
+- Child usage is therefore the difference between successive `modelUsage` readings, minus the
+  outer `result.usage`.
+
+| Metric | Outer | Child | Combined |
+| --- | ---: | ---: | ---: |
+| Input, including cache | 183.6M | 175.7M | 359.2M |
+| Cache-read rate | 91.42% | 93.44% | |
+| Cache-creation input | 15.75M | 11.5M | |
+| Output | 2.61M | 3.15M | 5.76M |
+
+The outer share is 51.1% of input and 45.3% of output.
+
+The set covers 9 runs, 297 outer result records and 251 Task/Agent delegations. The audit also
+found 143 Task/Agent calls across 13 orchestrated Claude runs. Those parents do real
+orchestration and are out of scope.
+
+Claude's stored `run_usage` input is about 2.1x the true value. Each assistant content block is
+stored as its own `assistant` row carrying the same `message.usage`. For example, run 232d22d8
+has 964 rows for 362 message ids.
+
+### 1.4 What skews the baseline
+
+The shares above are the most that direct execution could remove. They are not yet a fair
+comparison, for five reasons.
+
+1. **Service tier.** Every Codex figure was measured on `priority`, which 0.153.3's `model/list`
+   describes as "Fast — 1.5x speed, increased usage". How much extra allowance it uses is not
+   known. Since 2026-09-24:
+   - workflow threads are pinned to the standard tier (§4.3);
+   - the user's own config was switched to `default`.
+
+   So **no Codex run from before 2026-09-24 is a valid baseline** for later comparisons.
+2. **The child runs a different model or effort from its pin.**
+   - Claude: the outer passes `Agent input.model`. 111 of 253 dispatches ran on a model other
+     than the outer's, and the task-verify opus pin ran on sonnet in 65 of 74.
+     `agentMarkdown.ts` never writes `effort:`.
+   - Codex: the outer chooses the child's effort. 29 of 99 write-tests children ran above their
+     pin, and 3 code-review children were switched to gpt-6-astra/high.
+
+   So direct execution *at the pinned model* can cost **more** for review roles than today.
+3. **Codex never receives the Cyboflow role prompt.** `SpawnStepRunner` passes
+   `systemPromptAppend: ''` for Codex (`spawnStepRunner.ts:456`), so no `developerInstructions`
+   are sent. Every thread-settings row shows `developer_instructions = null`. As a result:
+   - project prompt overrides, variant prompt changes and tuning addenda do nothing on Codex
+     today;
+   - past Codex prompt A/B results measured nothing.
+4. **Single-step dispatches run in the background.** `resolveAgentDispatchBackgroundPin`
+   (`claudeCodeManager.ts:356`) treats a single (non-fan-out) programmatic step as a `flow`
+   spawn, so its Agent dispatches run in the background. The outer then pays for roughly one
+   extra full-context query per child just to collect the result. In planner run e6a1a2df, the
+   `tasks` step alone used about 53% of the run's outer input.
+5. **There is no outcome baseline for the delegated path.** No programmatic Sprint completed in
+   the window: all 7 Sprint runs were canceled, and 6 had been handed over to orchestrated.
+   - Handover rewrites `execution_model` to `orchestrated` (`handoverRunHandler.ts`).
+   - So filtering on `execution_model = 'programmatic'` silently drops the phases before
+     handover.
+   - That is why the Claude programmatic set contains **zero** implement and **zero** write-tests
+     dispatches.
+
+### 1.5 Other observations
+
+- **Weekly meter.** The provider's `account/rateLimits/updated` snapshots show the previous
+  weekly window rising from 33% to 74%. After the 2026-09-22 reset, one large Sprint took the
+  new window to 13%. These were measured on the priority tier and not re-checked.
+- **State writes.** Codex children made 504 Cyboflow MCP calls, including 124 `report_finding`
+  and 124 `update_sprint_task`. Claude children made none. "The outer agent is the only writer"
+  is true for Claude only.
+- **MCP servers.**
+  - Codex root threads start 6 MCP servers from 3 sources: config.toml, plugins and apps.
+  - Children start `codex_apps` and `cloudflare-api` (159 threads), and `cyboflow` in 124 of
+    283 threads.
+  - `codex_apps` exposes 98 tools.
+- **Unrequested tools in use.** Workflow roots called `cua_repl` (desktop computer-use) 6 times.
+  Sprint implement children used web search 10 times.
+- **Process start time.** Starting the app-server process takes p50 0.14s and p95 3.8s, against
+  a p50 lane of about 186s.
 
 ## 2. Goals and non-goals
 
 ### Goals
 
-- Store one accurate, disjoint usage record per Codex turn.
-- Execute each programmatic Claude or Codex step with one model agent, while retaining the effective
-  role prompt, project/workflow overrides, model and effort pins, result contracts, Cyboflow
-  state writes, approvals, and cancellation semantics.
-- Give workflow turns only the external capabilities that Cyboflow or the user explicitly
-  selected for that run/agent.
-- Reuse the local app-server process across concurrent lanes in one workflow run without
-  sharing conversation state between lanes.
-- Preserve provider-neutral controller semantics and leave orchestrated execution, OMP, pi,
-  interactive sessions, quick sessions, and the global assistant unchanged unless a section
-  explicitly says otherwise.
+- Store complete, non-overlapping usage for every Codex and Claude step, so Insights can measure
+  change. This includes Codex descendant threads and mixed-provider runs.
+- Remove the known skews from the delegated path before comparing anything against it.
+- Give Codex workflow threads only the capabilities that Cyboflow or the effective agent
+  explicitly selected.
+- Run each eligible programmatic step as one model agent. The step must keep its effective role
+  prompt, overrides, model and effort pins, result contracts, state writes, approvals and
+  cancellation behavior.
+- Leave orchestrated execution, OMP, pi, interactive and quick sessions, and the global
+  assistant unchanged, unless a section says otherwise.
 
 ### Non-goals
 
-- Sharing one provider conversation between unrelated lanes. Threads stay isolated.
-- Disabling prompt caching, changing model selection, or lowering reasoning effort globally.
-  The observed model split (Luna for implementation/test writing, Sol for review/verification,
-  medium effort) was reasonable.
-- Changing subscription policy or inferring dollar cost from subscription allowance.
-- Changing `auto_review` approval behavior. That is a separate measurement proposal because
-  its allowance impact is not represented in the available token events.
-- Redesigning `raw_events` retention. Redundant raw-event persistence is a local database
-  concern and is intentionally outside these four increments.
-- Converting orchestrated Claude flows to direct execution. Their long-lived parent is the
-  orchestrator, not a redundant wrapper around a host-owned step.
-
-## 3. Non-negotiable invariants
-
-1. The host controller remains the workflow sequencer. A direct step may execute only the one
-   step and lane item in its prompt.
-2. The Cyboflow database remains the source of truth. No replacement state files.
-3. All entity writes continue through the existing MCP/router chokepoints.
-4. The resolved effective agent is authoritative: project overrides, workflow `agentConfigs`,
-   variant deltas, model/runtime/effort pins, prompt addenda, and output contracts must survive.
-5. Conversation isolation is stronger than process reuse. Pooling never makes two lanes share
-   a thread, history, approval bridge, terminal latch, or usage accumulator.
-6. A child thread spawned deliberately by a user-authored prompt is still allowed outside the
-   programmatic direct-step path. This proposal removes host-requested double delegation; it
-   does not remove Claude Task or Codex collaboration from every product surface.
-7. Tool reduction is fail-closed but not silently destructive: a capability explicitly enabled
-   for an effective agent/run remains available, or the launch fails with a legible reason.
-
-### 3.1 Mandatory validation gate before implementation
-
-The audit interpretations are hypotheses until they are checked against independent provider
-counters. No production behavior in increments 1–4 changes until these probes pass and the
-baseline tables are regenerated:
-
-1. **Codex usage semantics.** On the pinned app-server build, capture a controlled turn with
-   multiple model/tool round trips and record `last` and `total` at every notification. Compare
-   both candidate identities:
-
-   ```text
-   sum(last snapshots within turn) == total(end) - total(start)
-   final(last snapshot)            == total(end) - total(start)
-   ```
-
-   Exactly one interpretation must match within exact integer equality. `total` deltas, not a
-   second projection of `last`, are the independent oracle.
-2. **Claude inclusion semantics.** Run one controlled Task delegation and compare terminal
-   `result.usage` with deduplicated outer-only assistant messages and deduplicated child
-   messages. Determine whether `result.usage` is outer-only or inclusive of the child before
-   publishing a dispatcher share.
-3. **Correction-loop inventory.** Classify the 30 Codex child turns beyond the 282 child-thread
-   count as correction prompts, completion checks, retries, or unrelated events. Direct-mode
-   evaluation must include any replacement controller loopback or full-step retry.
-4. **Model and bucket baseline.** Record outer and child model, effort, uncached input, cache
-   creation, cache reads, and output per step. Inclusive input alone is not an allowance proxy.
-5. **Codex process/thread lifecycle.** Probe whether MCP servers and their authentication are
-   process-scoped or thread-scoped, whether concurrent thread starts are safe, and which
-   configuration fields are fixed at process initialization. Increment 4 remains blocked until
-   lane attribution and cancellation can be preserved under the observed lifecycle.
-
-The probe fixtures and raw observations become checked-in test fixtures or reproducible scripts.
-If a probe contradicts the current audit interpretation, update the proposal and baseline before
-implementation rather than forcing the result into the current design.
-
-## 4. Increment 1 — correct Codex usage accounting
-
-### 4.1 Root cause
-
-`rawNotificationSink.ts` describes `thread/tokenUsage/updated.params.tokenUsage.last` as a
-cumulative per-turn snapshot and stores it last-write-wins by `run + turn`. In contrast,
-`CodexTurnUsageAccumulator.addLastUsage()` adds every update to its prior fields. This would
-inflate usage if `last` is cumulative. However, the field name and historical protocol naming
-also permit the interpretation that `last` is the most recent request while `total` is
-cumulative. A code comment is not sufficient evidence to choose between them.
-
-The four exported `AgentUsage` buckets must remain disjoint:
-
-```text
-uncached input = inputTokens - cachedInputTokens - cacheWriteInputTokens
-cache read     = cachedInputTokens
-cache creation = cacheWriteInputTokens
-output         = outputTokens
-```
-
-The bucket normalization is independent of the snapshot question. The accumulator is a defect
-only if the validation gate proves `last` is cumulative within a turn.
-
-### 4.2 Design
-
-Select the implementation from the controlled `total`-delta probe:
-
-- If `final(last) == total(end) - total(start)`, replace additive accumulation with
-  latest-snapshot replacement inside the per-turn accumulator.
-- If `sum(last) == total(end) - total(start)`, retain additive accounting and correct the audit,
-  comments, and tests instead. Do not ship the replacement path.
-
-For the replacement case:
-
-- Rename `addLastUsage` to `observeSnapshot` so the API states the event semantics.
-- On each accepted notification, normalize and replace all five stored fields.
-- Keep `hasSnapshot` rather than `updateCount`; `snapshot()` remains `undefined` until the
-  first valid notification.
-- Use `total` deltas as the validation oracle, not as the stored production calculation unless
-  the protocol probe shows that neither `last` identity is stable.
-- Retain `Math.max(0, ...)` around uncached input for forward compatibility with temporarily
-  inconsistent provider counters.
-
-No database migration is required. Stamp new result payloads with an explicit
-`usage_accounting_version`; timestamps are not reliable across reverts and development builds.
-If the cumulative interpretation is confirmed, historical `agent_result` rows remain inflated
-and Insights must distinguish the old version. A one-off rewrite is deliberately excluded: the
-retained raw events do not always contain enough information to reconstruct every older result
-after retention/backup compaction.
-
-Keep the prior accumulator selectable behind a temporary accounting-mode flag until the
-`total`-delta oracle has passed in production smoke runs. This is a rollback lever, not a
-permanent product setting.
-
-### 4.3 Tests
-
-- Unit: one snapshot yields the current bucket breakdown.
-- Unit, cumulative interpretation: a growing sequence `10 -> 30 -> 50` yields `50`, not `90`.
-- Unit, cumulative interpretation: duplicate snapshots are idempotent.
-- Unit, per-request interpretation: three `last` values sum to the matching `total` delta.
-- Unit: cache read/write subtraction never produces negative uncached input.
-- Manager test: repeated `thread/tokenUsage/updated` notifications followed by
-  `turn/completed` emit exactly one `agent_result` carrying the probe-selected aggregate.
-- Oracle test: a turn's stored usage equals `total(end) - total(start)` within exact integer
-  equality on the pinned protocol fixture.
-- Rollup test: a terminal run's `run_usage` equals the sum of its accepted per-turn finals,
-  including or excluding descendant threads according to one documented rule that is stable
-  before and after direct mode.
-
-### 4.4 Acceptance
-
-- New Codex turns show `agent_result` prompt/output totals equal to the independent `total`-delta
-  oracle, with `reported / oracle` ratios between 0.99 and 1.01.
-- The cache-hit calculation uses `cached / inclusive input`; it is not allowed to count cached
-  tokens in both numerator and an already-inclusive extra denominator.
-
-## 5. Increment 2 — make the programmatic step the worker
-
-### 5.1 Current topology
-
-`SpawnStepRunner` already creates one top-level turn per programmatic step. For both Claude and
-Codex, the composed prompt then says:
-
-> Delegate to the `cyboflow-${step.agent}` role ... You are the single writer; subagents are
-> edit-only.
-
-Claude resolves the exact `.claude/agents` Task subagent; the Codex runtime envelope maps the
-role onto Codex's built-in `worker` or `explorer`. In both cases the outer agent starts the
-child, waits for it, interprets its report, performs MCP writes, commits, and returns the final
-result. Fan-out lanes are single-shot/fresh in both SDK managers, so there is no accumulated
-conversation that requires the extra parent.
-
-The Claude audit measured 183.6 million terminal result input tokens and 169.1 million input
-tokens on forwarded child messages. The outer layer is 52.1% only if those sources are disjoint;
-the mandatory inclusion probe must establish the real split. The topology still supports a
-provider-neutral experiment while leaving orchestrated Claude execution alone.
-
-Codex also produced 312 child turns across 282 child threads. The 30 additional turns may be
-dispatcher-driven correction or completion checks rather than incidental duplication. They
-must be classified, and any controller loopback or full-step retry that replaces them must be
-charged to the direct step during evaluation.
-
-### 5.2 Decision
-
-For `executionModel === 'programmatic'` and either `runtime === 'claude-sdk'` or
-`runtime === 'codex-sdk'`, the top-level step turn is the role worker. It must not invoke
-Claude Task/Agent delegation or `collaboration.spawn_agent` merely to satisfy Cyboflow's own
-delegation prose.
-
-This is a pair of provider adapters, not a fork of workflow semantics. OMP keeps its own native
-adapter; pi already performs role work directly because it has no delegation tool; orchestrated
-Claude runs retain their current Task arrangement.
-
-### 5.3 Prompt composition
-
-Extend the per-step effective-agent resolver so it can supply the role material already held
-by `EffectiveAgent`, not only runtime/model/effort:
-
-```ts
-interface ResolvedStepAgent {
-  runtime?: WorkflowAgentRuntime;
-  model?: string;
-  providerModel?: string;
-  effort?: ReasoningEffort;
-  roleName: string;
-  rolePrompt: string;
-  tools: CliTool[];
-  enabledMcps: string[];
-}
-```
-
-For a direct SDK step, compose provider-specific system instructions—Claude SDK
-`systemPrompt.append` or Codex app-server `developerInstructions`—from:
-
-1. the resolved effective agent's `systemPrompt` (including project/workflow/variant prompt
-   overrides), then
-2. a host-owned **direct-step addendum** that resolves the one intentional role conflict:
-   the role markdown says it is a subagent and never writes Cyboflow state, while this direct
-   turn also owns the former dispatcher's exact persistence duties.
-
-The addendum must say, in substance:
-
-- perform the named role's work directly; do not spawn a collaboration agent for it;
-- retain the role's file scope, test scope, and result schema;
-- after the role work, perform only the state writes and commit/reporting actions explicitly
-  required by the step prompt;
-- the role's “never writes Cyboflow state” rule still forbids unrequested writes, but the
-  step prompt's enumerated persistence contract is an explicit host override;
-- stop after this one step.
-
-The user-turn prompt continues to carry task scope, acceptance criteria, prior-step output,
-review loopback, runbook protection, and machine-read result contracts. `composeStepPrompt`
-gains an execution mode so its first instruction is direct and unambiguous instead of first
-ordering delegation and relying on the provider envelope to contradict it:
-
-```ts
-executionMode: 'delegated' | 'direct-role'
-```
-
-The default remains `delegated`. `SpawnStepRunner` selects `direct-role` only after resolving
-the effective provider/runtime to Claude SDK or Codex SDK and finding a concrete effective
-agent. Missing role material fails closed with a step error; it must not silently run a generic
-unscoped agent.
-
-### 5.4 Tools and state ownership
-
-The direct turn receives the union of:
-
-- tools required by the effective role;
-- the run-scoped Cyboflow MCP surface already available to the outer turn; and
-- host-required commit/report plumbing.
-
-It does not receive a second copy of the role through Claude Task or Codex collaboration. The
-controller still parses `resultText` and owns loopbacks/gates exactly as today. No
-model-generated JSON is introduced as a new control plane.
-
-This union must be the minimum privilege for the step, not the union of every capability held
-by the former parent and child. The Cyboflow MCP router exposes a step-type-specific method set;
-review and verification turns are read-only except for the narrow finding/verdict writes their
-contracts require. Codex review/verification turns use a read-only sandbox and have no commit
-capability. Claude direct turns structurally disable `Task`/`Agent` and constrain their allowed
-tools through the SDK.
-
-Enforcement remains provider-specific. The role `tools` list cannot initially be treated as an
-exact denylist for Codex built-ins because the current app-server configuration does not expose
-a proven per-thread arbitrary-tool allowlist. It is still carried forward as policy input and
-covered by increment 3 where Codex offers enforceable feature/MCP controls. Prompt-only
-restrictions must never be described as structural enforcement. Direct-mode expansion to a
-role remains blocked until its sandbox and MCP restrictions are structural.
-
-### 5.5 Compatibility and rollout
-
-- Add a temporary allowlist, `CYBOFLOW_DIRECT_PROGRAMMATIC_STEPS`, expressed as
-  `provider:role` entries such as `codex:implement,claude:write-tests`.
-- Resolve the allowlist once at run start, persist the resolved execution mode with the run,
-  and use that snapshot for every lane. A process environment change must not create a mixed
-  run or corrupt attribution.
-- When off, behavior is byte-identical to today's delegated path.
-- Enable Codex first for `implement` and `write-tests`, which were the majority of audited role
-  invocations and use the lower-cost model tier.
-- Enable Claude next for `implement` and `write-tests`, validating independently against the
-  Claude baseline rather than assuming Codex behavior transfers.
-- Expand each provider to read-only review/verification roles only after that provider's
-  output-contract tests pass.
-- Remove the flag only after representative Sprints for both providers complete with no child
-  calls caused by the host prompt and with equivalent task/result outcomes.
-
-### 5.6 Tests
-
-- Prompt tests: each provider's direct prompt contains the effective role body, direct-step
-  addendum, task scope, and exactly one final-result contract; it contains no instruction to
-  delegate.
-- Golden-snapshot tests: with the allowlist off, provider prompts and launch configuration are
-  byte-identical to the current delegated path.
-- Override tests: project prompt replacement, workflow addendum, variant delta, provider model,
-  and effort all reach the direct turn.
-- Integration: implement edits and reports state in one thread; write-tests does likewise;
-  code-review findings and blocking verdicts still drive the controller loopback.
-- Negative: a direct role cannot start when effective-agent resolution fails.
-- Negative: direct mode never leaks onto OMP, pi, or orchestrated runs, and enabling one SDK
-  provider does not enable the other.
-- Cancellation: canceling one lane interrupts its turn and produces no late MCP write.
-- Metrics: Claude Task/Agent calls and Codex `collabAgentToolCall(tool=spawnAgent)` are zero for
-  their respective direct programmatic steps.
-- Compaction: the direct-step persistence and result contracts remain available after Claude
-  auto-compaction, either because they survive or because the host safely re-injects them.
-- Repetition: run at least five matched fixture trials per provider and role. Predeclare
-  tolerances for completion rate, controller loopbacks, full-step retries, and result parsing.
-
-### 5.7 Acceptance
-
-- One top-level provider thread/query per ordinary programmatic step; no host-requested child.
-- The same acceptance criteria, commits, artifacts, findings, and controller verdicts appear
-  as on the delegated baseline.
-- Before treatment runs, set a provider-specific savings floor from the validated removable
-  share and measurement noise. Codex retains a 25% target if its current baseline is confirmed;
-  Claude's floor is set only after resolving whether its terminal result includes child usage.
-  On at least five matched Sprint fixtures, the model-weighted total must beat that floor, with
-  no increase in per-step uncached input, cache-creation input, or output and no regression
-  beyond predeclared tolerances for task completion, verification, loopbacks, retries, or result
-  parsing. Usage from loopbacks and retries is charged back to the originating step. The weekly
-  provider meter is corroborating evidence only, not a fixture-scale oracle.
-- A user-requested child is exempt from the zero-child metric only when delegation originates
-  in explicit task/user text rather than a role template, system addendum, or host-composed
-  step prompt; record that exemption in local diagnostics.
-
-## 6. Increment 3 — explicit workflow tool surface
-
-### 6.1 Current gap
-
-The hermetic global-assistant branch enumerates and disables user MCP servers and turns off
-plugins, apps, remote plugin discovery, image generation, goals, and other unrelated built-ins.
-The ordinary workflow branch only overlays the Cyboflow MCP server and otherwise inherits the
-user's Codex configuration. The audit observed unrelated `cloudflare-api` and `codex_apps`
-servers starting inside child workers.
-
-There is also a parity gap: Cyboflow persists session-level MCP/plugin selections and the
-Claude managers enforce them, but `CodexSdkManager` does not currently resolve those session
-columns for ordinary workflow spawns.
-
-### 6.2 Decision
-
-Programmatic workflow steps use an explicit, capability-derived surface:
-
-- `cyboflow` is always present and cannot be disabled for a workflow step.
-- User MCP servers are disabled by name unless explicitly allowed by the effective agent's
-  `enabledMcps` or a run/session selection.
-- Plugin/app/remote-plugin surfaces are off by default for programmatic steps. A future or
-  existing explicit selection may enable a known capability; inheritance alone may not.
-- Shell/edit functionality remains governed by the role, sandbox, permission mode, and the
-  existing Cyboflow approval hook. This proposal does not weaken the sandbox to avoid prompts.
-- Quick/chat sessions retain today's user-config inheritance. Users reasonably expect their
-  chosen tools there; the high-volume autonomous workflow path is the narrowed surface.
-
-The policy applies to both direct turns and delegated programmatic turns, including their
-children. That is the path on which the audit observed unrelated server startup. Before
-enforcement, mine the seven-day raw events for MCP tools actually invoked by workflow threads,
-convert legitimate dependencies to explicit grants, and run a warn-only compatibility phase.
-
-### 6.3 Resolution model
-
-Introduce a provider-neutral spawn policy rather than adding more Codex-specific booleans to
-`SpawnStepRunner`:
-
-```ts
-interface AgentCapabilityPolicy {
-  allowedMcpServers: readonly string[]; // `cyboflow` implicit for workflows
-  allowPlugins: boolean;
-  allowApps: boolean;
-  allowRemotePluginDiscovery: boolean;
-  allowCollaboration: boolean;
-}
-```
-
-For a direct programmatic Codex step:
-
-- `allowedMcpServers` is the validated union of effective-agent `enabledMcps` and explicit
-  session/run selections;
-- `allowCollaboration` is false because increment 2 made the step direct;
-- the other flags are false unless explicitly selected by a capability that maps to them.
-
-`CodexSdkManager` reads the installed/user MCP universe, computes the complement, and emits
-`mcp_servers.<name>.enabled=false` entries alongside the required `cyboflow` configuration.
-Known feature switches (`plugins`, `apps`, `remote_plugin`, and their required companion
-config) are set explicitly rather than relying on global defaults.
-
-Complement disabling is not itself a security boundary: project configuration, profiles,
-plugin-contributed servers, or a configuration race may escape the enumerated universe. After
-thread start, compare the observed MCP startup set with the resolved policy and abort before
-role work on any unexpected server. This post-start verification is the fail-closed control.
-
-Important limitation: on Codex 0.153.3, setting the documented collaboration feature flags
-false did not remove `collaboration.spawn_agent` in the global-assistant probe. Therefore
-`allowCollaboration:false` is defense-in-depth plus a prompt contract, not yet structural tool
-removal. Increment 2's acceptance criterion observes that the tool is not called. If a later
-Codex build exposes a reliable exclusion, adopt it behind a versioned capability probe.
-
-### 6.4 Compatibility and failure behavior
-
-- Ship behind `CYBOFLOW_CODEX_EXPLICIT_CAPABILITIES=warn|enforce`. In `warn`, report unexpected
-  or missing capabilities without changing behavior; move to `enforce` only after legitimate
-  inherited dependencies are represented explicitly.
-- Unknown requested MCP name: warn during compatibility rollout, then fail the step before role
-  work in enforce mode with a clear configuration error. Do not silently omit a dependency.
-  Shared workflows may declare a capability optional explicitly; machine absence alone does not
-  make a required capability optional.
-- Unavailable required plugin/app capability: same fail-before-invocation rule. An explicitly
-  optional capability may be omitted with a diagnostic warning.
-- `cyboflow` in a deny list is ignored, matching existing behavior.
-- The pool fingerprint in increment 4 includes the resolved capability policy, so a policy
-  change can never reuse an incompatible process/thread configuration.
-
-### 6.5 Tests
-
-- Hostile-config integration fixture: globally enabled MCP servers, plugins, apps, and remote
-  discovery do not appear in a default programmatic Codex step.
-- Post-start verification fixture: a server introduced through project config, a profile, or a
-  plugin is detected even when it was absent from the pre-spawn universe.
-- Explicit allow test: a validated role MCP is present and usable while siblings stay disabled.
-- Session toggle parity tests for malformed, missing, empty, deny, and explicit-allow values.
-- `cyboflow` remains required and carries the correct run id, socket, token, scope, and timeout.
-- Direct-step threads do not emit unrelated MCP startup notifications in a smoke run.
-- Delegated programmatic parents and children obey the same capability policy.
-
-### 6.6 Acceptance
-
-- Default programmatic Codex lanes start only Cyboflow plus explicitly granted servers.
-- No `cloudflare-api`, `codex_apps`, or other inherited startup event appears absent an explicit
-  grant.
-- Prompt/context size, startup latency, and MCP-start failure rate do not regress; context size
-  should decrease.
-
-## 7. Increment 4 — pool app-server processes, never conversations
-
-### 7.1 Current topology
-
-`CodexSdkManager.spawnTrackedProcess()` marks a lane spawn as single-shot whenever
-`spawnKey !== panelId`. It constructs a cold app-server entry, starts one thread/turn, and
-stops the client afterward. This is correct for conversation isolation but conflates thread
-lifetime with process lifetime.
-
-A large Sprint consequently repeats binary startup, protocol initialization, MCP startup,
-and teardown hundreds of times. Cache behavior at the provider is unaffected, but local
-latency, CPU, memory churn, file descriptors, and startup-failure exposure all increase.
+- Sharing a provider conversation between lanes.
+- Turning off prompt caching, changing model selection, or lowering reasoning effort globally.
+  The actual workflow pins are:
+
+  | Codex role | Model / effort |
+  | --- | --- |
+  | implement | luna / high |
+  | write-tests | luna / medium |
+  | task-verify | sol / low |
+  | code-review | sol / medium |
+
+  luna/high uses the most tokens in both the root and child layers.
+- Changing subscription policy, or inferring dollar cost from allowance.
+- Changing `auto_review` approval behavior. §12 explains why it still matters for evaluation.
+- Redesigning `raw_events` retention.
+- Converting orchestrated Claude flows to direct execution.
+- Pooling Codex app-server processes. This is deferred to
+  `docs/proposals/codex-app-server-pool.md`.
+
+## 3. Invariants
+
+1. **The host controller stays the workflow sequencer.** A direct step runs only the one step
+   and lane item in its prompt.
+2. **The Cyboflow database stays the source of truth.** No state files replace it.
+3. **All entity writes go through the existing MCP/router chokepoints.** Who writes differs by
+   provider today:
+   - Claude: the outer agent only.
+   - Codex: the outer agent *and* the child.
+
+   Direct mode brings Codex down to one writer and leaves Claude at one.
+4. **The resolved effective agent is authoritative.** These must reach whichever agent does the
+   role work:
+   - project overrides;
+   - workflow `agentConfigs`;
+   - variant deltas;
+   - model, runtime and effort pins;
+   - prompt addenda;
+   - output contracts.
+
+   Today they do not reach Codex (§1.4).
+5. **Threads stay isolated.** No two lanes share a thread, history, approval bridge, terminal
+   latch or usage accumulator.
+6. **Delegation the user writes into a prompt stays allowed.** This covers any delegation
+   outside the host-composed programmatic step. This proposal removes only delegation that the
+   host itself requests.
+7. **Tool reduction fails closed, but never silently.** A capability explicitly granted to an
+   effective agent is available. Otherwise the launch fails with a named reason.
+8. **A restriction enforced only by the prompt is never described as structural.**
+
+## 4. Increment 0 — settled questions and remaining groundwork
+
+### 4.1 Revision 1's probes
+
+Revision 1 blocked all work on five probes. Their status:
+
+| Revision 1 probe | Status | Answer |
+| --- | --- | --- |
+| 1. Codex `last` vs `total` | Settled offline | §1.1. `last` is one request. The check value is the sum of `rawResponse/completed.usage` |
+| 2. Whether Claude `result.usage` includes children | Settled offline | §1.3. It counts the outer agent only; `modelUsage` is cumulative and includes children |
+| 3. Extra Codex child turns | Classified (approximate) | 29 follow-up turns, about 24.3M input (below) |
+| 4. Model and token-type baseline | Settled offline, with skews | §1.2–1.4 |
+| 5. App-server lifecycle | Settled by a probe that ran no model | MCP servers start per thread, and `thread/unsubscribe` does not stop them. This is what blocks the pool |
+
+The 29 extra child turns were a mix of:
+
+- timeboxes;
+- completeness corrections;
+- reverts of edits that went outside the task's scope;
+- branch re-syncs.
+
+Direct mode must reproduce the timebox and scope interventions through controller loopbacks.
+
+### 4.2 Remaining before the increments that depend on it
+
+- **Checked-in reproductions.** Each offline answer becomes a reproducible script under
+  `docs/probes/`. Where a test needs one, a *sanitized* fixture goes under
+  `main/src/services/panels/codex/appServer/__fixtures__/`. The repo is public, so fixtures taken
+  from production `raw_events` must be stripped of prompts, paths and identifiers.
+- **Claude SDK probe.** This blocks the Claude half of Increment 4. Run one minimal turn for
+  each of:
+  - the `tools` option with a role's tool list plus `mcp__cyboflow__*`;
+  - `Options.agent = 'cyboflow-<key>'`, checking system-prompt layering, model precedence over
+    `Options.model`, and whether the agent can reach the Cyboflow MCP server.
+- **Codex role-prompt probe.** This blocks Increment 2c. It checks whether a forked
+  `spawn_agent` child inherits the parent thread's `developerInstructions`.
+- **Outcome baseline for the delegated path.** This blocks evaluation of Increment 4. Run the
+  Increment 2 arm to completion on the programmatic plane (§8.6). It costs real Sprints, so
+  budget for them.
+- **Shared fake app-server.** Build `main/src/test/fakes/fakeCodexAppServer.ts`, following the
+  existing `fakeSdk.ts` pattern. It must cover:
+  - several threads emitting events at once;
+  - collaboration children;
+  - server requests (approvals and user input);
+  - `mcpServerStatus/list`.
+
+  Today there is only a fake local to one test file, and no Codex integration test. Increments
+  1, 3 and 4 all need it.
+
+### 4.3 Landed: standard service tier for workflow threads
+
+Commit `ab1de1118`, on branch `mellow-otter-20260924`. Not merged and not smoke-tested live.
+
+How it works:
+
+- `ClaudeSpawnerOptions.standardServiceTier` is set by the two workflow spawn seams,
+  `RunExecutor.execute` and `SpawnStepRunner`.
+- `buildCodexAppServerThreadConfiguration` then sends `serviceTier: 'default'` on `thread/start`
+  and `thread/resume`. This overrides `service_tier` in `~/.codex/config.toml`.
+- The field is part of the thread configuration, so it is included in the warm-session
+  fingerprint.
+- Quick chats and the global assistant keep the user's choice.
+- Claude already pins fast mode off for every spawn.
+
+A probe on 0.153.3 that ran no model confirmed the behavior:
+
+| `serviceTier` sent | Tier used |
+| --- | --- |
+| omitted | inherits `priority` |
+| `null` | `default` |
+| `'default'` | `default` |
+
+Still open, and optional: measuring how much extra allowance `priority` uses. One matched
+fixture pair (priority vs default) would do it, comparing the change in `account/rateLimits`
+usedPercent per token. The pin is correct either way.
+
+## 5. Increment 1 — complete usage accounting
+
+Every later measurement depends on this. Without it, direct mode on Codex would move worker
+usage from untracked children into `agent_result`. Insights would then show Codex usage
+*rising* in Codex-only runs and not changing at all in mixed runs.
+
+### 5.1 Defects
+
+**A1 — Codex descendant threads are never counted.** These are the collaboration child threads.
+`TurnSession.acceptsTurn` (`turnSession.ts:719`) drops every usage and terminal notification
+that is not from the lane's root thread.
+
+**A2 — Root `agent_result` counts about 0.4% too high.** Duplicate `tokenUsage/updated`
+emissions arrive with an unchanged `total` and a non-zero `last`, and each is added again.
+
+**A3 — Mixed Claude+Codex runs record no Codex usage in `run_usage`.**
+- `scanRawEventRollups` adds `agent_result` only when `assistantMessageCount === 0`
+  (`insightsQueries.ts:780`).
+- `selectDailyModelUsage` (`insightsQueries.ts:2666`) has the same per-run condition.
+- All 10 mixed runs in the window show Claude usage only. For example, run 91811849 has 159
+  Codex `agent_result` rows totalling 223.1M input, and none of it is in `run_usage`.
+
+**A4 — Claude `run_usage` input is about 2.1x too high.** Each content block is stored as its
+own `assistant` row, and each row repeats `message.usage`.
+
+**A5 — A misleading comment.** `rawNotificationSink.ts:25` describes `tokenUsage/updated` as
+"cumulative per-turn".
+
+### 5.2 Design
+
+**1a — Count Codex usage per response.**
+
+Add `observeResponse(threadId, responseId, usage)` to `CodexTurnUsageAccumulator`:
+
+- Calling it twice with the same `responseId` changes nothing.
+- It keeps a breakdown per thread.
+- `CodexSdkManager`'s notification handler calls it *before* `TurnSession` filters the
+  notification, so the root thread's descendants are counted.
+
+A thread belongs to the lane that spawned it, as shown by `spawnAgent.receiverThreadIds` or
+`subAgentActivity(kind=started).agentThreadId`. A descendant's usage is attributed to the
+lane's current turn.
+
+`thread/tokenUsage/updated` stays as a fallback. It is used for a thread only when no
+`rawResponse/completed` arrives for that thread:
+
+- Add up changes in `total`, not `last`.
+- Skip repeats whose `total` has not changed.
+- If `total` goes down, treat it as a process restart: take the new value as the starting point
+  instead of subtracting.
+
+Two guards protect the primary source:
+
+- **Drift diagnostic.** Log loudly when a turn has `tokenUsage` snapshots but no
+  `rawResponse/completed`; that means the protocol has changed.
+- **Protocol-shape test.** `rawResponse/completed` is typed as internal-only, and its `usage` is
+  `TokenUsageBreakdown | null`. Pin the method name, field names and nullability against the
+  generated types, so a Codex upgrade that changes them fails CI instead of silently zeroing
+  usage.
+
+Also confirm whether delivery depends on `experimentalApi: true`. The fallback covers either
+answer.
+
+Output shape:
+
+- The root thread's usage stays on `agent_result`, as today.
+- Descendant usage is emitted as the existing `subagent_usage` event type. Both Insights paths
+  already add it unconditionally (`insightsQueries.ts:141`, `:686`).
+
+No new event type and no new rollup are needed.
+
+**1b — Roll up per provider.**
+
+Replace the per-run `assistantMessageCount === 0` condition with a rollup per provider:
+
+| Usage | Source |
+| --- | --- |
+| Claude | deduplicated assistant messages |
+| Codex root | `agent_result` |
+| Descendants | `subagent_usage` |
+
+Put this in one shared function that both `scanRawEventRollups` and `selectDailyModelUsage`
+call, so they cannot drift apart again. `insightsQueries.ts` is 3,122 lines and has no size cap
+yet, but the shared function still belongs in a separate file next to it.
+
+**1c — Deduplicate Claude usage.**
+
+Count assistant usage once per (session, `message.id`).
+- **Outer usage:** from `result.usage` where present.
+- **Child usage:** from the differences between successive `modelUsage` readings. These are
+  already tracked per (run, session) for cost.
+
+Apply this to both Insights paths.
+
+**1d — Recompute past runs.**
+
+A data-only migration recomputes `run_usage` for runs with Codex or Claude rows. It takes the
+next free number (145 when this was written) and follows migration 132
+(`132_run_usage_recompute.sql`).
+
+| Run | What the migration does |
+| --- | --- |
+| Codex run whose raw events predate 2026-09-14T19:51Z (no `rawResponse/completed`) | Recompute from the root-thread fallback and mark it root-only |
+| Run whose raw events have been archived out of `raw_events` (see `docs/BACKUP-RESTORE.md`) | Keep the stored value and mark it not recomputed |
+
+Stamp new usage with a `usage_accounting_version` so Insights can tell the old accounting from
+the new. Do not rely on timestamps for this.
+
+**1e — Fix the comment.**
+
+Correct `rawNotificationSink.ts:25`. Add a sink test that `rawResponse/completed` is never
+deduplicated.
+
+There is no accounting-mode flag. 1a has an exact, independent check value, and rolling back is
+a revert.
+
+### 5.3 Tests
+
+**Accumulator:**
+- one response;
+- several responses add up;
+- a repeated `responseId` adds 0;
+- null `usage` falls back to the change in `total`;
+- a duplicate `tokenUsage/updated` with unchanged `total` and non-zero `last` adds 0;
+- a change in `total` that spans two requests;
+- a `total` reset (process resume) takes the new starting point;
+- compaction requests are counted;
+- uncached input is never negative.
+
+**Manager, using the fake app-server:**
+- A lane whose root thread spawns two children emits one root `agent_result` and one
+  `subagent_usage` per child.
+- Their sum equals the lane's total from `rawResponse/completed.usage`.
+
+**Protocol shape:**
+- `rawResponse/completed` is pinned against the generated 0.153.3 types.
+
+**Rollups:**
+- In a mixed claude-primary fixture, `run_usage` equals deduplicated Claude plus Codex root plus
+  Codex children, and also equals the sum of the daily buckets.
+- In a Claude run with multi-block assistant messages, each message is counted once.
+
+**Migration:**
+- Running it twice gives the same result.
+- Runs before the boundary are marked root-only.
+- Archived runs are untouched.
+
+### 5.4 Acceptance
+
+- For new Codex runs, stored input and output per lane (root plus descendants) equals the sum of
+  `rawResponse/completed.usage` exactly.
+- For the audit window, the recompute reproduces two figures within 0.5%:
+  - Codex: §1.2's 816.9M input and 3.39M output, minus the one quick-chat root;
+  - Claude: §1.3's deduplicated totals.
+- Mixed runs show both providers in `run_usage` and in the daily model buckets.
+
+## 6. Increment 2 — fixes to the delegated path
+
+These are cheap changes to today's delegated path that need no new architecture. Each one saves
+usage or fixes a defect on its own. Together they make the delegated path a fair comparison
+point for Increment 4, called the "delegated-fixed" arm.
+
+**2a — The Claude child uses its pinned model and effort.**
+
+- **Strip the model override.** Use the existing PreToolUse `updatedInput` merge for Agent
+  dispatches, the same one that applies the `run_in_background` pin (`claudeCodeManager.ts:388`).
+  Remove `input.model` from dispatches the host requested in programmatic steps, so the
+  subagent's frontmatter `model:` wins.
+- **Write the effort.** Have `agentMarkdown.ts` write `effort:` when the effective agent has one.
+  First check that the CLI honors `effort` in subagent frontmatter. If it does not, record that
+  as a known skew.
+
+Codex has no equivalent place to strip the model. The outer chooses the child's effort in the
+`spawn_agent` call, so on Codex this skew stays until Increment 4.
+
+**2b — Run dispatches in the foreground for single-step programmatic runs.**
+
+In `resolveAgentDispatchBackgroundPin`, classify single-step programmatic spawns separately
+from the flow orchestrator, and pin `run_in_background = false` for them, as lanes already are.
+Background dispatch exists to keep an interactive orchestrator steerable; a programmatic step
+turn has nothing to steer.
+
+**2c — Deliver the role prompt on Codex.**
+
+- **If** the Increment 0 probe shows forked children inherit the parent's
+  `developerInstructions`: send the effective role body as thread `developerInstructions` on
+  programmatic Codex steps.
+- **Otherwise:** put it in the spawn message the host composes.
+
+Either way, prompt overrides and variant changes start working on Codex. Split historical Codex
+prompt-variant stats at this change, because comparisons before 2c measured nothing.
+
+**2d — Service tier.** Already landed (§4.3).
+
+**Tests:**
+- The `updatedInput` merge drops `model` only for dispatches the host requested in programmatic
+  steps. It keeps the rest of the input, which must be spread in full (anthropics/claude-code#30770).
+- Agent markdown writes `effort:` only when one is set. An agent that inherits its model gets
+  byte-identical output to today.
+- The background-pin tests gain a row for single-step programmatic runs.
+- Codex programmatic threads carry the role body, and project and variant overrides reach it.
+
+**Acceptance, in a matched run:**
+- Claude children run on their pinned model in 100% of dispatches the host requested.
+- Outer input for single-step programmatic runs falls.
+- Codex prompt overrides visibly change the child's instructions.
+
+## 7. Increment 3 — explicit Codex workflow capability surface
+
+### 7.1 Current gap
+
+The global assistant's isolated configuration turns off:
+
+- user MCP servers;
+- plugins and apps;
+- remote plugin discovery;
+- image generation;
+- goals.
+
+Ordinary workflow threads get none of that. They only add the `cyboflow` server on top of the
+user's Codex configuration (§1.5).
+
+`agent_init` also hard-codes `mcp_servers: [{ name: 'cyboflow' }]` (`codexSdkManager.ts:1467`),
+so the transcript misreports which servers actually started.
 
 ### 7.2 Decision
 
-Create a `CodexAppServerPool` that owns long-lived app-server clients. Each lane still creates
-a new `CodexTurnSession`, thread, usage accumulator, terminal latch, approval/question bridge,
-and invocation row.
+This applies to programmatic workflow steps on Codex, delegated or direct, on both root and
+child threads. It also covers Codex lanes of orchestrated Sprints: they are spawned through the
+same `SpawnStepRunner` → `CodexSdkManager` path. Increment 4's direct dispatch does not cover
+them.
 
-This decision is conditional on the lifecycle probe in §3.1. If Cyboflow MCP configuration or
-authentication is process-scoped, pooling requires a per-lane identity mechanism—such as a
-lane-scoped token carried on every router call—before implementation. If MCP startup is
-thread-scoped, remove MCP startup from the expected savings and keep capability policy in the
-thread configuration rather than the process key.
+| Capability | Policy |
+| --- | --- |
+| `cyboflow` MCP server | Always present; cannot be disabled |
+| Other MCP servers | Allowed only if listed in the effective agent's `enabledMcps`, resolved against the *Codex* server list |
+| Plugins, apps, remote plugin discovery, image generation, goals | Off unless an explicit capability maps to them |
+| Web search | Its own setting, **not** derived from role `tools` (implement children used it without a WebSearch grant). Decide the implement/write-tests default during the warn phase; likely on for implement/write-tests and off for review/verify |
+| Shell and edit | Still governed by the role, sandbox, permission mode and the Cyboflow approval hook |
 
-Initial pool scope is **one workflow run**. Cross-run pooling is rejected for v1 because the
-process environment carries the run id, orchestration bearer token, socket path, sandbox
-environment, and test-concurrency settings. Sharing that process across runs would blur an
-authentication and cancellation boundary for marginal extra gain.
+Quick and chat sessions keep inheriting the user's configuration, as today.
 
-### 7.3 Pool key and lifecycle
+### 7.3 Mechanism
 
-Key a pool entry by the stable process-level fingerprint:
+Each source of tools is closed with its own setting. Disabling everything by name is unsafe:
+`mcp_servers.<id>.enabled = false` for an id that config.toml does not define creates an entry
+with no transport, and the app-server then rejects the whole thread. This was verified live and
+is documented in the `userMcpServers.ts` header.
 
-```text
-run id
-+ Codex executable path/version
-+ app-server client protocol version
-+ process environment (including orch socket/token and PATH)
-+ sandbox/permission family
-+ resolved capability policy
-```
+| Source | Setting |
+| --- | --- |
+| config.toml servers | Disable by name, but only ids the *effective* configuration defines. List them with `config/read { cwd, includeLayers: true }` so project config and profiles are included; the current header scan reads only `$CODEX_HOME/config.toml` |
+| Plugins | `features.plugins = false` |
+| Apps | `features.apps = false` plus `apps._default.enabled = false` |
+| Remote plugin discovery | `features.remote_plugin = false` |
+| Image generation, goals | Their feature switches, as in the isolated configuration |
 
-Model, effort, role developer instructions, and conversation history are thread/turn inputs,
-not process-key fields, provided the pinned app-server protocol confirms they are accepted per
-thread/turn. Any field the protocol actually bakes at process initialization must be promoted
-into the key.
+A probe on 0.153.3 that ran no model verified these settings.
 
-Emit `pool_key_distinct_per_run`. If lane-specific ports, test databases, or environment values
-make every fingerprint distinct, the pool must report that it is ineffective rather than claim
-process reuse.
+**Gate that blocks on failure.** Between `thread/start` and `turn/start`, call
+`mcpServerStatus/list({ threadId, detail: 'toolsAndAuthOnly' })`.
 
-Lifecycle:
+- It lists config, plugin and app servers, with `pluginId`, and reports disabled ones as
+  `disabled`.
+- If any enabled server is outside the resolved policy, the step stops before role work with a
+  named error.
+- Collaboration children have their own threads, so each child must pass the same check with its
+  own `threadId`.
+- Fill `agent_init.mcp_servers` from this call.
 
-1. First lane acquires and starts the run's pool entry.
-2. Concurrent lanes acquire references and start independent threads.
-3. Lane completion releases only its thread resources.
-4. Run cancellation interrupts every active turn, then closes the pool.
-5. A clean idle pool closes after a bounded TTL; terminal run status closes immediately.
-6. App-server process failure rejects all attached turns with the same systemic failure class;
-   it does not silently respawn and replay mutating prompts. Any controller retries are capped,
-   staggered, and their provider usage is attributed to pooling evaluation.
+Startup notifications cannot serve as the gate: nothing marks when startup is complete, and
+`cloudflare-api` arrives late.
 
-Use a small configurable process count only if a real concurrency probe shows one app-server
-cannot service the workflow's target lane concurrency. Default target is one process per run,
-not an arbitrary N-process pool.
+`collaboration.spawn_agent` cannot be removed from the tool list on 0.153.3. Setting the
+collaboration feature flags to false did not remove it in the global-assistant probe. So
+`allowCollaboration: false` is a prompt instruction backed by Increment 4's zero-child metric,
+not enforcement.
 
-### 7.4 Notification routing
+The capability policy is part of the thread configuration, so include it in the existing
+warm-session fingerprint.
 
-Pooling requires a central notification router. Attaching one raw sink and one generic listener
-per lane would cause every listener to see every thread's notification and multiply persistence.
+### 7.4 Limits on Cyboflow MCP methods per step
 
-The pool router must:
+Revision 1 assumed Cyboflow MCP methods were already limited per step type. They are not: the
+router's only scopes are run, global-agent and design.
 
-- route outer-thread events by `threadId` to exactly one lane session;
-- associate collaboration descendants with their owning lane when collaboration is allowed on
-  a non-direct surface;
-- persist each raw notification at most once to the owning run;
-- send approval/question events only to the bridge for the owning active turn;
-- buffer notifications for an unknown thread for a short bounded registration window, then
-  diagnostic-log and drop only notifications that cannot affect liveness or accounting;
-- answer an unroutable server request such as approval or user input with an explicit denial or
-  error—never drop a request that would leave the provider waiting indefinitely;
-- unregister ownership before resolving lane teardown, preventing late events from reaching a
-  reused key.
+Add a router-side allowlist keyed on (run, step, lane). It limits each step to the Cyboflow MCP
+methods its contract needs. For example, review and verification steps get the read methods plus
+`report_finding`, but not `update_task`.
 
-This router also creates the right seam for future raw-event filtering, but filtering itself is
-outside this proposal.
+- **Pattern to follow.** The existing server-side check in `verifyToolHandlers.ts`, which rejects
+  `request_verification` on programmatic runs. It already works for both providers because it
+  does not rely on per-spawn `disallowedTools`.
+- **Step identity.** It reaches the router from the spawn's MCP server configuration. If pooling
+  is ever revived, it must move to a token sent with each call.
+- **Where the code goes.** New handler code goes in `orchestrator/mcpServer/handlers/`, not
+  `mcpQueryHandler.ts`, which is at its size cap.
 
-### 7.5 Concurrency, cancellation, and backpressure
+This must be in place before Increment 4 is enabled on any review or verification step.
 
-- The pool maintains `threadId -> LaneContext` and `spawnKey -> threadId` maps.
-- `killProcess(spawnKey)` interrupts only that lane's active turn.
-- `killProcess(runId)` interrupts all lanes and closes the run pool.
-- Canceling a lane revokes that lane at the Cyboflow MCP router before interrupting its turn, so
-  a late in-flight write is rejected even when the MCP transport is process-scoped.
-- Thread start is bounded by the existing workflow concurrency controller; the pool does not
-  invent a second scheduler.
-- Notification persistence remains ordered per thread. If the central sink queue exceeds a
-  bounded threshold, diagnostic raw notifications may be shed only under an explicit policy;
-  projected transcript, token-usage, terminal, approval, and tool events are never shed. Every
-  shed event increments a local counter.
+### 7.5 Rollout
 
-### 7.6 Rollout and tests
+- The mode (`warn` or `enforce`) is a ConfigManager setting, not an env flag.
+  `CYBOFLOW_DISABLE_CODEX_CAPABILITY_POLICY=1` turns the policy off entirely.
+- **Warn phase:**
+  - Change nothing.
+  - Search `raw_events` for the MCP tools *and built-in tools* (web search, computer use) that
+    workflow threads actually called.
+  - Report what enforcement would have removed.
+  - Turn legitimate uses into explicit grants.
+- **Enforce phase:**
+  - An unknown MCP name, or a required capability that is unavailable, fails the step before
+    role work with a named error.
+  - A capability marked optional may be left out, with a warning.
+  - `cyboflow` in a deny list is ignored.
 
-Ship behind `CYBOFLOW_CODEX_APP_SERVER_POOL=1` until the following pass:
+### 7.6 Split out: session MCP/plugin parity
 
-- Unit: identical process fingerprints share; any security/config difference does not.
-- Concurrency: 20 lane threads complete through one fake client with no event cross-talk.
-- Isolation: prompts, usage, result text, approvals, and cancellation remain lane-local.
-- Failure: process death rejects every attached lane exactly once and cleans all maps.
-- Cancellation: canceling one lane leaves siblings running; canceling the run stops all.
-- Persistence: one provider notification produces one raw row, not one row per listener.
-- Routing matrix: both direct and delegated steps work through the pool, including a child whose
-  first notification arrives before its ownership mapping.
-- Integration: a multi-lane programmatic Sprint starts at most one app-server process per run
-  under the supported concurrency probe.
+Revision 1 folded "`CodexSdkManager` ignores the session's MCP and plugin toggles" into this
+increment. The fix is not a simple read of those columns:
 
-### 7.7 Acceptance
+- they hold Claude-namespace ids from `~/.claude.json` and `~/.claude/plugins`;
+- the session wizard hides the toggles for Codex;
+- workflows have no run-level selection at all.
 
-- App-server process starts fall from approximately one per lane to one per active run under
-  ordinary conditions.
-- Lane thread count, model usage, and conversation isolation are unchanged by pooling alone.
-- Median and p95 time from lane dispatch to `turn/started` improve materially; target at least
-  30% p95 improvement on both a simultaneous 20-lane burst and a representative staggered
-  arrival fixture. Serialized thread starts must not make burst p95 worse than the baseline.
-- No increase in terminal errors, approval misrouting, or leaked thread state.
+Handle it as a separate small fix that also covers quick sessions. The session deny list may
+only *remove* Codex servers whose ids match; it never grants one.
 
-## 8. Delivery sequence
+### 7.7 Tests
 
-The validation gate and increments are intentionally ordered so every later measurement trusts
-an independent oracle and every architecture change has a narrow rollback:
+- **Config-builder unit tests, with no live Codex.** A hostile config (user servers, plugins,
+  apps, remote discovery) produces exactly the expected override set. Ids that are absent from
+  the effective config are never named.
+- **Fake `mcpServerStatus/list`.** An unexpected enabled server from config, a profile or a
+  plugin stops the step before `turn/start`. A child thread is checked separately.
+- **Explicit grant.** A validated role MCP server is present while the other servers are
+  disabled.
+- **Router.** A review step that calls a write method outside its scope is rejected, for both
+  providers.
+- **Checked-in probe output.** A saved output from a live 0.153.3 probe that runs no model.
 
-| Order | Increment | Why here | Rollback |
+### 7.8 Acceptance
+
+- By default, programmatic Codex threads (root and child) start only `cyboflow` plus explicit
+  grants, and no `cloudflare-api`, `codex_apps` or `cua_repl`.
+- `agent_init` reports the servers that actually started.
+- Context size decreases, and neither startup latency nor MCP startup failures get worse.
+
+## 8. Increment 4 — direct programmatic steps
+
+### 8.1 Current topology
+
+`SpawnStepRunner` creates one top-level turn per programmatic step. Its composed prompt says
+"Delegate to the `cyboflow-${step.agent}` role … You are the single writer; subagents are
+edit-only."
+
+- Claude resolves the `.claude/agents` Task subagent.
+- The Codex envelope maps the role onto the built-in `worker` or `explorer`.
+
+The providers differ in ways that matter:
+
+| | Claude | Codex |
+| --- | --- | --- |
+| What the child sees | only the Task brief | a fork of the full history (`fork_turns: 'all'`), including the whole step prompt |
+| Role prompt | the child gets the role `.md` | nobody gets it (until 2c) |
+| Child writes Cyboflow state | never (0 calls) | yes (504 calls) |
+| Child model and effort | the outer may override them (fixed by 2a) | the outer chooses them |
+| Most that could be removed (programmatic runs) | 51.1% of input, 45.3% of output | 51.0% of input, 37.6% of output |
+
+How much could be removed varies by step. For example, the dependency-analyzer outer used about
+10x its child's input, mostly on 111 persistence calls that a direct worker would still have to
+make.
+
+### 8.2 Decision
+
+A step runs direct only when all three hold:
+
+- it is programmatic and its resolved runtime is `claude-sdk` or `codex-sdk`;
+- its frozen spec marks it direct;
+- it is on the host eligibility list.
+
+A direct step's top-level turn does the role work itself.
+
+These keep their current behavior:
+- OMP keeps its own adapter.
+- pi already does role work directly.
+- Orchestrated runs, including their Codex lanes, keep delegating. The orchestrated plane
+  ignores `stepDispatch` (§8.3).
+
+**Codex goes first, for three reasons:**
+- direct mode takes Codex from two writers to one;
+- it removes the effort-override skew;
+- it needs no SDK probe.
+
+Claude follows once the Increment 0 SDK probe is done and its baseline is rebuilt.
+
+### 8.3 Selection and keying
+
+**Recorded in the frozen spec, not an env var.**
+- Add a definition-level `stepDispatch?: Record<stepId, 'delegated' | 'direct'>` to
+  `workflowDefinitionSchema`. The schema's `z.object` strips unknown keys, so the field must be
+  declared.
+- It is copied into the run's frozen spec, so the two arms get different `spec_hash` values, a
+  restart replays the same choice, and no migration is needed.
+- It is *not* an `agentConfigs` field. `agentConfigs` is keyed by agent/role
+  (`workflowDefinitionSchema.ts:194`), and role keys collide (next point).
+
+**Host eligibility is keyed `provider:workflow:stepId`.** It is a code constant, not a setting.
+Role keys would be wrong because one role backs several steps:
+- Ship's `materialize-batch` uses the `implement` role for work that only touches the database.
+- `expand-spec` uses `context`.
+- Launch's `interview` role backs three steps.
+- `execute-tasks` is `implement`.
+
+Exclude verify-setup `prove` and fan-out parent steps.
+
+The first entries are `codex:sprint:implement` and `codex:sprint:write-tests`. Ship's lane
+equivalents follow once Sprint passes.
+
+**How a `direct` entry resolves.** At launch, after the runtime mix is applied, a `direct` entry
+falls back to `delegated` if:
+- the step's resolved runtime is not `claude-sdk` or `codex-sdk`; or
+- the step is not eligible.
+
+The fallback is recorded in the run stamp, never applied silently. Each invocation row also
+records its dispatch mode, so attribution survives handover.
+
+**Handover.** After a run is handed over, the orchestrated plane ignores `stepDispatch` and
+goes back to the Task arrangement. Invocations that already ran keep their recorded mode.
+Evaluation excludes handed-over runs.
+
+**Kill switch.** `CYBOFLOW_DISABLE_DIRECT_STEPS=1` forces `delegated` everywhere.
+
+### 8.4 Prompt composition
+
+`composeStepPrompt` gains `stepDispatch: 'delegated' | 'direct'`. It is named that way to avoid
+confusion with the existing `ExecutionModel`.
+
+- Delegated output stays byte-identical to today.
+- Direct output must reword every contract that talks about a subagent, not just the opening
+  instruction. In `stepPrompt.ts` these include:
+  - the artifact contracts (around lines 361–388);
+  - idea persistence (410);
+  - build breaks (598);
+  - sprint task scope (791);
+  - final-message contracts (872, 895);
+  - address-review's two-pass delegation (907);
+  - Compound review-queue rules (944).
+- Add a `programmatic-step-direct` Codex envelope. The existing envelope already has a fallback
+  clause for doing the work directly, which can be the starting point.
+
+**System instructions for the direct turn.** These go in Claude's `systemPrompt.append` or
+Codex's `developerInstructions`, in this order:
+
+1. The resolved effective agent's `systemPrompt`, including project, workflow and variant
+   overrides.
+2. A **direct-step addendum** written by the host. It says:
+   - do the role's work directly and do not spawn an agent for it;
+   - keep the role's file scope, test scope and result schema;
+   - then perform only the state writes and commit/report actions the step prompt lists; the
+     role's "never writes Cyboflow state" rule still forbids anything else;
+   - stop after this one step.
+
+**A second option for Claude.** Claude could instead use `Options.agent = 'cyboflow-<key>'`.
+`settingSources` already includes `project`, so the installed agent file is found and would run
+exactly what today's child runs, which makes for the closest comparison. It would still need
+`mcp__cyboflow__*` added and a rule for which model setting wins. The Increment 0 SDK probe
+chooses between the two options.
+
+**Expected change in Claude behavior.** A direct Claude worker sees the full step prompt for
+the first time. That includes design surfaces, thoroughness budgets and loopback text that the
+Task child never saw. On Codex nothing changes here, because the child already sees the full
+prompt.
+
+If the role material is missing, the step fails. It never falls back to a generic, unscoped
+agent.
+
+### 8.5 Tools, sandbox and state ownership
+
+**Claude.**
+- Pass the role's tool list as the SDK `tools` option. The option is
+  `ClaudeSpawnerOptions.tools`, wired at `claudeCodeManager.ts:3203`.
+- Add the step's `mcp__cyboflow__*` tools, because role `tools:` lists omit them.
+- Exclude `Task` and `Agent`.
+- Never use `allowedTools`, which only pre-approves tools and does not restrict them. Without
+  the `tools` option, a direct code-review turn would gain Edit and Write.
+
+**Codex.** Set the sandbox per role based on what each role actually does, not on its name.
+
+| Role | Sandbox | Why |
+| --- | --- | --- |
+| implement, write-tests | workspace-write | They edit files |
+| task-verify, sprint-verify, visual-verify | workspace-write | They run tests |
+| Reviewers | workspace-write, unless warn-phase data shows read-only is enough | They also run Bash (25 of 46 role files list it) |
+
+"Verifiers don't commit" is enforced only by the prompt plus a commit check after the step. It
+is not structural, and should not be described that way.
+
+**State writes.** These are limited by Increment 3's per-step router limits. Direct mode is not
+turned on for any review or verification step until those limits are enforced.
+
+### 8.6 Evaluation design
+
+**Compare variants side by side, not with a toggle.**
+- **Arm A:** a delegated-fixed variant (Increment 2 in place) with explicit per-agent runtime
+  pins. The pins are needed because variants reject a runtime-mix override
+  (`workflowRegistry.ts`).
+- **Arm B:** the same variant plus `stepDispatch`.
+
+An env toggle would leave `spec_hash`, variant and level identical in both arms, which would
+mix them together in the `workflowTuningEstimates` medians.
+
+**Match models.** Both arms run each role at the same model and effort. Record the service tier
+as a dimension, and use only runs from 2026-09-24 onward.
+
+**Run on the programmatic plane, to completion.** Arm A runs first, to produce the outcome
+baseline that §1.4 says is missing.
+
+**Count child agents.**
+- Codex: combine three signals, because the Sol path emits no `spawnAgent` items (81 spawns in
+  the window):
+  - `spawnAgent.receiverThreadIds`;
+  - `subAgentActivity(kind=started).agentThreadId`;
+  - `rawResponseItem` function calls named `spawn_agent`, `followup_task` or `send_message`.
+- Claude: count Task/Agent `tool_use` calls.
+- No exemption based on who asked for the child: the Sol spawn message is encrypted, so the
+  origin cannot be established.
+
+**Attribute cost to the originating step.** Usage from controller loopbacks and full-step
+retries counts against the step that caused them. The eval jury's cost is not in `run_usage`;
+budget for it separately.
+
+**Findings.** Codex children filed 124 findings in the window. If the outer and the child both
+filed, direct mode will produce *fewer* findings with no change in quality. Deduplicate the
+findings metric, or split it by dispatch mode.
+
+**Trials.** Run at least five matched fixture trials per provider and step, plus one opt-in
+production Sprint. Decide the tolerances in advance for completion, verification, loopbacks,
+retries and result parsing.
+
+### 8.7 Tests
+
+- **Prompts.**
+  - Direct prompts contain the effective role body, the addendum, the task scope and exactly one
+    result contract.
+  - They contain no "subagent", "delegate" or "relay" wording.
+  - Delegated prompts and launch config are byte-identical to today (golden snapshots).
+- **Overrides.** Project prompt replacement, workflow addendum, variant delta, provider model
+  and effort all reach the direct turn.
+- **Keying.**
+  - `codex:sprint:implement` never makes Ship's `materialize-batch` direct.
+  - Ineligible or wrong-runtime entries fall back to delegated and are recorded in the stamp.
+- **No leakage.**
+  - Direct mode never reaches OMP, pi or orchestrated turns; check every place `stepDispatch` is
+    read.
+  - Enabling one provider does not enable the other.
+- **Tools.**
+  - A direct Claude code-review turn has no Edit, Write or Task.
+  - A direct Codex review turn cannot call Cyboflow methods outside its limits.
+- **Integration, with the fake app-server and fake SDK.**
+  - implement edits files and reports state in one thread.
+  - Code-review findings and blocking verdicts still trigger the loopback.
+  - Canceling interrupts the turn, and no MCP write arrives afterwards.
+- **Handover.** A run handed over after a direct step keeps an accurate per-invocation stamp.
+- **Compaction.**
+  - The persistence and result contracts survive Claude auto-compaction, or are re-injected.
+  - Measure how often direct Claude workers compact: they now carry the full step prompt plus
+    the role body for the whole turn.
+- **Warm-session reuse.** Check whether per-role `tools` or prompt changes stop Claude from
+  reusing a warm session between sequential programmatic steps. If they do, count the extra
+  cold starts in evaluation.
+
+### 8.8 Acceptance
+
+- Each eligible step runs one top-level thread or query, with zero host-requested children by
+  the §8.6 count.
+- Acceptance criteria, commits, artifacts, findings (after deduplication) and controller
+  verdicts match arm A within the tolerances set in advance.
+- Before arm B runs, set a minimum saving per provider. Base it on how much the validated
+  baseline shows could be removed, and on how much arm A varies between runs.
+- Across five matched fixtures, the per-model totals must beat that minimum. No token type that
+  §10 guards for that provider may rise per step.
+- Codex cache-hit rate is no more than 1.0 point below arm A.
+
+## 9. Delivery sequence
+
+| Order | Increment | Why at this point | How to roll back |
 | --- | --- | --- | --- |
-| 0 | Protocol and accounting probes | Prevents an inverted baseline or unsafe pool design | No production behavior changed |
-| 1 | Probe-selected usage accounting | Establishes a trustworthy meter | Temporary accounting-mode flag |
-| 3 | Explicit workflow capabilities | Establishes least privilege before parent/child roles are combined | `warn` mode restores inherited surface |
-| 2 | Direct Claude/Codex programmatic steps | Largest shared subscription-efficiency opportunity after capability enforcement | Provider/role-selective flag to delegated path |
-| 4 | Per-run app-server pool | Local performance change after turn semantics stabilize | Feature flag to single-shot clients |
+| — | Service-tier pin (§4.3) | Already landed. The cheapest saving, and it removes a skew | Revert |
+| 0 | Reproductions, fake app-server, SDK and role-prompt probes | Every later increment needs the fake; 2c and Claude direct mode need the probes | Nothing to roll back; no behavior changes |
+| 1 | Complete usage accounting | Nothing can be measured without it | Revert. The migration only touches data and can be re-run |
+| 2 | Fixes to the delegated path | Each saves usage on its own, and together they define arm A | Revert each sub-item separately |
+| 3 | Codex capability surface and per-step router limits | Least privilege must exist before parent and child are merged into one agent | Switch ConfigManager to `warn`, or use the kill switch |
+| 4 | Direct steps: Codex, then Claude | The largest opportunity, measured against arm A | Remove `stepDispatch` from the variant, or use the kill switch |
 
-The implementation order intentionally delivers increment 3's structural capability controls
-before enabling increment 2. The numbering continues to identify the four original proposal
-areas rather than implying execution order.
+Increments 1 and 2 can land in parallel. Increment 4's evaluation must not start until 1 and 2
+are in and arm A has completed its baseline.
 
-Do not combine increments 2 and 4 in one rollout. A direct-step result-contract regression and
-a pooled-notification routing regression have very different failure signatures and must remain
-independently attributable.
+## 10. Observability and evaluation
 
-## 9. Observability and evaluation
+**Compute evaluation metrics with SQL.** Derive them from `raw_events` and the run and
+invocation stamps, not from in-process counters. `perfBump` does nothing unless
+`CYBOFLOW_PERF_TRACE=1`, so counters would be empty in real Sprints. Check the queries in under
+`docs/probes/`.
 
-Add no prompt/code content to telemetry. Local diagnostic counters are sufficient. Shared step
-counters carry a local `provider` dimension; app-server and usage-accounting counters remain
-Codex-specific:
+**Add these diagnostics** as raw events or log lines:
+- `duplicate_token_snapshots`;
+- `descendant_input` and `descendant_output`;
+- `response_usage_missing`;
+- `oracle_mismatch`;
+- capability-gate aborts;
+- per invocation: `stepDispatch`, `serviceTier`, model and effort.
 
-- `codex.usage.snapshot_updates`
-- `codex.usage.final_input/output/cache`
-- `agent.step.execution_mode = delegated | direct-role`
-- `agent.step.child_spawn_count`
-- `agent.step.result_parse_failures`, `loopbacks`, and `full_step_retries`
-- `agent.step.usage.{uncached,cache_read,cache_creation,output}` by provider, model, role,
-  execution mode, and originating step
-- `agent.step.mcp_write_failures`
-- `codex.capabilities.mcp_count` and feature booleans (names remain local logs only)
-- `codex.app_server.process_starts`
-- `codex.app_server.active_threads`
-- `codex.app_server.pool_key_distinct_per_run`
-- `codex.app_server.dispatch_to_turn_started_ms`
-- `codex.app_server.unroutable_notifications`
-- `codex.app_server.shed_notifications`
+**Compare**, per provider, per model and per step:
+- task outcomes;
+- loopbacks and findings (deduplicated);
+- uncached, cache-read, cache-creation and output tokens;
+- the number of child agents;
+- MCP and plugin startups and failures.
 
-Evaluate with at least five trials of a fixed workflow fixture and one opt-in production Sprint
-for each provider. Compare:
+Weekly meter changes are rough supporting evidence only.
 
-1. completed/failed/canceled task outcomes;
-2. controller loopbacks and review findings;
-3. provider-reconstructed input/cache/output;
-4. provider weekly-meter delta where observable, as coarse corroboration only;
-5. process starts and dispatch latency;
-6. MCP/plugin startups and startup errors.
+**Guardrails differ by provider:**
 
-Cache hit rate is a guardrail, not the optimization target. Codex should remain at least 95%
-on a comparable workload; Claude should not decline materially from the matched 91–93%
-programmatic baseline. A lower total token count with a slightly lower percentage can still be
-a win, but a material cache collapse blocks rollout until explained.
+| Provider | Token types guarded | Cache-hit guardrail |
+| --- | --- | --- |
+| Codex | uncached input and output (cache-write is always 0) | no more than 1.0 point below the matched baseline, about 95.5% today |
+| Claude | cache-creation and output (uncached is about 0) | no clear drop from 91–93% |
 
-Do not collapse unlike models into a raw-token headline. Where the provider exposes a stable
-allowance or cost-equivalent weight by model, use it to compute the model-weighted total and
-publish the weights. Otherwise report each model separately and require every materially used
-model to pass its bucket guardrails; no invented conversion factor is allowed. Integer weekly
-subscription meters include non-Cyboflow activity and are too coarse to judge fixture-scale
-changes.
+Never add different models together into one headline figure. Use published allowance weights
+where they exist; otherwise report each model separately.
 
-## 10. Expected code touchpoints
+## 11. Code touchpoints
 
-Indicative, not an exhaustive implementation checklist:
+Indicative, not exhaustive:
 
-- `main/src/services/panels/codex/appServer/usageAccumulator.ts`
-- `main/src/services/panels/codex/appServer/usageAccumulator.test.ts`
-- `main/src/services/panels/codex/codexSdkManager.ts`
-- `main/src/services/panels/codex/appServer/runConfig.ts`
-- `main/src/services/panels/codex/appServer/runConfig.test.ts`
-- `main/src/services/panels/codex/appServer/turnSession.ts`
-- `main/src/services/panels/claude/claudeCodeManager.ts`
-- `main/src/orchestrator/programmatic/spawnStepRunner.ts`
-- `main/src/orchestrator/programmatic/stepPrompt.ts`
-- `main/src/orchestrator/workflowPromptRenderer.ts`
-- `main/src/orchestrator/agents/effectiveAgents.ts`
-- `main/src/index.ts` (`resolveStepAgent` adapter)
-- focused programmatic integration tests and a new app-server pool/router test fixture
+- **Increment 1**
+  - `codex/appServer/usageAccumulator.ts`
+  - `codex/codexSdkManager.ts`
+  - `codex/appServer/turnSession.ts`
+  - `codex/appServer/rawNotificationSink.ts`
+  - `orchestrator/insightsQueries.ts`, plus a new shared-rollup file next to it
+  - a data-only migration
+  - `test/fakes/fakeCodexAppServer.ts`
+- **Increment 2**
+  - the PreToolUse Agent-dispatch merge and background pin in `claude/`, extracted (see below)
+  - `orchestrator/agents/agentMarkdown.ts`
+  - `programmatic/spawnStepRunner.ts`
+  - `codex/appServer/runConfig.ts`
+- **Increment 3**
+  - `codex/appServer/runConfig.ts`
+  - `codex/appServer/userMcpServers.ts`
+  - `codex/codexSdkManager.ts`
+  - a new module for per-step router limits under `orchestrator/mcpServer/handlers/`
+  - ConfigManager
+- **Increment 4**
+  - `orchestrator/workflowDefinitionSchema.ts`
+  - `programmatic/stepPrompt.ts`
+  - `programmatic/spawnStepRunner.ts`
+  - the Codex runtime envelope
+  - a new `resolveStepRole` module
+  - `orchestrator/runExecutor.ts` (`ClaudeSpawnerOptions.tools`)
 
-Before editing `main/src/services/panels/`, read its directory-scoped `AGENTS.md`; the substrate
-seam and integration-test requirement apply.
+**Where new code lives.** Three files are at or near their size caps:
 
-## 11. Risks and mitigations
+| File | Lines / cap |
+| --- | --- |
+| `claudeCodeManager.ts` | 4,818 / 4,818 (at cap) |
+| `mcpQueryHandler.ts` | 4,495 / 4,495 (at cap) |
+| `index.ts` | 6,180 / 6,220 (40 lines free) |
+
+So:
+- Claude option wiring and the dispatch-pin changes go in a new file extracted next to
+  `claudeCodeManager.ts`.
+- Router limits go in `handlers/`.
+- `resolveStepRole` is a new module. `resolveStepAgent` stays byte-identical, because callers
+  rely on it returning `undefined` for unpinned agents.
+- Fix the outdated comment near `resolveStepAgent` in `index.ts` that claims frontmatter never
+  applies on this plane.
+
+Read `main/src/services/panels/AGENTS.md` before editing under `panels/`.
+
+## 12. Risks and open questions
 
 | Risk | Mitigation |
 | --- | --- |
-| Codex `last` is per-request rather than cumulative | Gate the accounting design on an independent `total`-delta protocol probe and retain a rollback mode |
-| Claude terminal usage already includes child usage | Treat the 52.1% figure as provisional until an outer-only controlled delegation reconciles all sources |
-| Direct agent performs state writes before its file work is valid | Preserve current step ordering in the direct addendum; controller gates and result contracts remain authoritative |
-| Role prompt's “subagent/no state” prose conflicts with direct ownership | Host-owned addendum explicitly and narrowly overrides only enumerated persistence duties |
-| Removing the dispatcher loses corrective child follow-ups | Classify the observed extra turns; include replacement loopbacks/retries in usage; require repeated matched trials |
-| Direct mode concentrates parent and child privileges | Enforce role-specific sandbox and MCP method sets before enabling each role; reviewers remain structurally read-only |
-| Claude and Codex diverge in tool controls or result behavior | Keep provider adapters and rollout gates independent while sharing only the controller execution mode |
-| A workflow relied accidentally on globally inherited plugins | Explicit capability grants; fail before invocation with a named missing capability; staged rollout |
-| Codex feature flags do not actually remove a tool | Treat version-probed enforcement separately from prompt policy; verify the live `tools` surface where possible |
-| Pool routes one lane's event to another | Central ownership map, exact `threadId` routing, bounded pre-registration buffering, no guess fallback, and concurrency tests |
-| One pooled process becomes a larger failure domain | Reject attached turns once; cap and stagger controller retries; attribute retry usage; never replay mutating prompts automatically |
-| Historical Insights use the wrong interpretation if the cumulative hypothesis is confirmed | Accounting-version marker and documentation; do not forge a lossy backfill |
+| `rawResponse/completed` is internal-only and could change | Protocol-shape test; the `total` fallback; the drift diagnostic |
+| The recompute migration mislabels old runs | Explicit root-only and not-recomputed markers, plus an accounting version |
+| A direct worker writes state before its file work is valid | The addendum keeps the step's order; controller gates and result contracts stay authoritative |
+| The role's "subagent / no state writes" wording conflicts with direct ownership | The addendum overrides only the listed persistence duties |
+| A direct worker loses the dispatcher's corrective follow-ups (timeboxes, scope reverts) | Reproduce them as controller loopbacks, and charge their usage to the step |
+| Direct Claude review turns at the pinned model cost more than today's downgraded children | Arm A also runs at the pins (2a), so the comparison is fair. Accept the cost, or change the pin deliberately |
+| A workflow relied on inherited plugins, apps or web search | Warn phase that also mines built-in tool use; named failures in enforce mode |
+| `spawn_agent` cannot be removed from the tool list | The child-agent count; a loopback when one is spawned |
+| Reviewers need Bash, so they can change files | workspace-write only where the data shows it is needed; a commit check after the step; described as policy, not enforcement |
 
-## 12. Open decisions before implementation
+Not yet examined, and relevant to evaluation:
 
-1. Whether each provider should expand beyond the proposed implement/write-tests first rollout
-   after meeting its independent acceptance threshold.
-2. Whether explicit external capabilities are configured only through effective-agent
-   `enabledMcps` or also through a run-level selection snapshot. The implementation needs one
-   precedence rule, not two implicit inheritance paths.
-3. After the lifecycle probe, whether the pinned Codex app-server supports one client at the
-   workflow's maximum lane concurrency or requires a small per-run pool with the same
-   isolation/router design.
-4. How long to retain the accounting, capability, direct-step, and app-server-pool rollout
-   controls after production validation. They are not permanent product settings.
+1. **`auto_review` approvals.** Codex task-verify threads run with
+   `approvalsReviewer: auto_review`. Two things are unknown:
+   - whether its model calls appear in `rawResponse/completed` or use allowance invisibly;
+   - whether direct mode changes how many approvals there are.
+2. **Why all 7 Sprints were canceled.** If usage was the reason, that argues for urgency. If
+   defects were, the outcome baseline is compromised.
+3. **Whether outer requests are mostly waiting and polling.** If they are, telling the outer to
+   block on `wait` with a long timeout is a cheap fix for delegated mode. This can be checked
+   offline by comparing, per outer turn, the number of `rawResponse` events with the number of
+   `wait`, `sendInput` and MCP items.
+4. **Whether Claude children inherit the session's effort.** Check child `system/init` rows
+   offline if they record it; otherwise arm A will answer it.
+5. **Whether Claude fan-out lanes are single-shot and fresh,** as revision 1 claimed. This was
+   checked for Codex only.
+
+Open decisions:
+
+1. The web-search default for implement and write-tests (§7.2).
+2. The Claude direct mechanism: `systemPrompt.append` plus `tools`, or `Options.agent`. The probe
+   decides (§8.4).
+3. When to extend eligibility beyond Sprint implement and write-tests, and in what order.
+4. How long the kill switches and the ConfigManager mode stay after validation.
 
 ## 13. Definition of done
 
-The proposal is complete when the §3.1 probes have resolved the provider semantics, the baseline
-has been regenerated, and at least five representative matched programmatic trials per enabled
-provider/role demonstrate the shared direct-step outcomes below. The Codex trials must also
-demonstrate the Codex-specific accounting, capability, and pooling outcomes:
+- **Accurate usage.** Codex and Claude usage matches the independent check values in each of:
+  - `agent_result`;
+  - `subagent_usage`;
+  - `run_usage`;
+  - the daily buckets.
 
-- accurate Codex `agent_result` and `run_usage` totals against the independent `total`-delta
-  oracle, stamped with an accounting version;
-- a reconciled Claude outer/child baseline that proves whether terminal result usage includes
-  Task-subagent traffic;
-- one top-level provider thread/query per programmatic step unless delegation came from explicit
-  user/task text and was recorded as an exemption;
-- only Cyboflow and explicitly granted external capabilities on Codex workflow threads;
-- structurally enforced role-specific sandboxes and Cyboflow MCP method sets, with review and
-  verification roles remaining read-only outside their narrow result writes;
-- at most one Codex app-server process per active run under the supported concurrency profile;
-- no regression in task outcomes, commits, findings, gates, verification, cancellation, or
-  security boundaries beyond predeclared tolerances, including loopbacks, retries, and
-  result-parse failures;
-- each provider beats its predeclared, baseline-derived savings floor on matched direct-step
-  workloads, using published model weights or separate per-model results if no defensible
-  weights exist, with no increase in uncached input, cache creation, or output per originating
-  step;
-- at least 30% lower Codex p95 local lane-start latency after pooling on both burst and staggered
-  fixtures, with no regression in burst p95.
+  The check values are:
+  - Codex: the sum of `rawResponse/completed.usage`;
+  - Claude: deduplicated messages plus the differences between successive `modelUsage` readings.
+
+  Descendant threads and mixed runs are included. Every new row carries an accounting version,
+  and the audit window has been recomputed.
+- **Tiers, models and effort.** Workflow Codex threads run on the standard tier. Claude children
+  run on their pinned model and effort.
+- **Capabilities.** By default, programmatic Codex threads start only `cyboflow` plus explicit
+  grants, as checked by the gate. Review and verification steps are held to their per-step
+  router limits.
+- **Direct steps.** Eligible direct steps run one agent per step, with zero host-requested
+  children. Outcomes do not regress beyond the tolerances set in advance. Savings beat each
+  provider's minimum on trials that are model-matched, completed and not handed over.
