@@ -134,6 +134,9 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
       ? ' (optional — an unavailable / not-configured step is skipped and never fails the lane)'
       : '';
   const head = `${n}. **\`${laneId}\`**${optionalNote} → move the lane's \`current_step\` to \`${laneId}\` via \`cyboflow_update_sprint_task\`, then`;
+  // Only relay write-tests' output when the chain actually runs write-tests — a
+  // tuning level that drops the step must never have its name in the prompt.
+  const hasWriteTests = ctx.innerById.has('write-tests');
 
   switch (laneId) {
     case 'implement':
@@ -159,7 +162,12 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
       return (
         `${head} delegate to \`${agent}\` with the task **and the files it touched** (implement's ` +
         `list, plus any test files write-tests added) so it reviews this task's diff and not other ` +
-        `lanes' in-flight work. For each entry in its \`## Findings\`, record a **non-blocking ` +
+        `lanes' in-flight work${
+          hasWriteTests
+            ? ` — and write-tests' \`## Tests\` section VERBATIM (its \`Proof of failure:\` / ` +
+              `\`Supporting:\` lines are how it tells acceptance tests from supporting ones)`
+            : ''
+        }. For each entry in its \`## Findings\`, record a **non-blocking ` +
         `finding** via \`cyboflow_report_finding\` — always passing \`category\` and code ` +
         `\`locations\` (each \`{ path, line }\`). Before filing, call \`cyboflow_list_run_findings\` ` +
         `and skip any entry that restates a finding already open (same issue — line numbers drift ` +
@@ -177,7 +185,9 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
     case 'task-verify':
       return (
         `${head} delegate to \`${agent}\` with the task, its acceptance criteria, **and the files ` +
-        `it touched** (same list, so it judges this task's changes only). Read its \`VERDICT\`. On ` +
+        `it touched** (same list, so it judges this task's changes only)${
+          hasWriteTests ? `, plus write-tests' \`## Tests\` section VERBATIM` : ''
+        }. Read its \`VERDICT\`. On ` +
         `\`FAIL\`, re-delegate \`${loopbackAgent(targetId, ctx.innerById)}\` with its ` +
         `\`## Fix guidance\` and re-verify — up to **3×** (see the attempt protocol below) before ` +
         `marking the lane \`failed\` and **continuing the other lanes**. A \`FAIL\` is handled by ` +
