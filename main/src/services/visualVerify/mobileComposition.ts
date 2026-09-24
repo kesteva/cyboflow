@@ -111,6 +111,7 @@ export function createHostAppleCliExec(defaultTimeoutMs = DEFAULT_EXEC_TIMEOUT_M
         {
           timeout: opts?.timeoutMs ?? defaultTimeoutMs,
           maxBuffer: MAX_EXEC_BUFFER_BYTES,
+          ...(opts?.env ? { env: opts.env } : {}),
           // No `shell` key at all — the default is false, and it stays that way.
           windowsHide: true,
         },

@@ -63,12 +63,14 @@ export interface AppleCliExecResult {
  *    REJECTS.
  *
  * Implementations MUST pass `args` as an argv array (never a shell string) and
- * MUST honour `timeoutMs`.
+ * MUST honour `timeoutMs`. `env`, when given, is the child's COMPLETE
+ * environment (callers pass a full env, never a delta); absent, the child
+ * inherits the host's.
  */
 export type AppleCliExec = (
   command: string,
   args: readonly string[],
-  opts?: { timeoutMs?: number },
+  opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
 ) => Promise<AppleCliExecResult>;
 
 /** The filesystem surface this module drives; the default wraps `node:fs/promises`. */

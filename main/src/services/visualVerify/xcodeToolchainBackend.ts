@@ -33,11 +33,22 @@
  * of the flat `devicetypes` list yields `iPhone-6s-Plus`, which `simctl create`
  * rejects against iOS 26.2 with `Incompatible device`. Nothing here hardcodes a
  * product name — "iPhone 17 Pro" is not a stable string.
+ *
+ * B6 — MAESTRO `JAVA_HOME` (docs/proposals/runbook-optional-verification.md
+ * §B6). MEASURED on this host: the harness login shell resolves `java` to the
+ * macOS stub `/usr/bin/java` ("Unable to locate a Java Runtime"), so `maestro
+ * test --help` fails there and the drive rung silently becomes `none` — with
+ * `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home`
+ * set it works and `--udid` resolves. {@link XcodeToolchainBackend.resolveJavaHome}
+ * finds a JDK home (a valid `JAVA_HOME` already in the env, then
+ * `/usr/libexec/java_home`, then the newest Homebrew `openjdk*` formula), and
+ * every Maestro invocation this class makes runs with `JAVA_HOME` set to it
+ * and its `bin` prefixed onto `PATH` — see {@link XcodeToolchainBackend.runMaestro}.
  */
-import { access, stat } from 'node:fs/promises';
+import { access, readdir, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type { LoggerLike } from '../../orchestrator/types';
 import {
   resolveSimTarget,
@@ -78,6 +89,12 @@ export interface XcodeToolchainProbe {
   newestRuntime: string | null;
   /** The resolved absolute Maestro path, or `null` — the optional drive rung. */
   maestroBin: string | null;
+  /**
+   * The JDK home Maestro was (or would be) run under, per B6 — `null` when
+   * `maestroBin` is `null` (nothing to run) or when none of the four rungs in
+   * {@link XcodeToolchainBackend.resolveJavaHome} answered.
+   */
+  javaHome: string | null;
 }
 
 /** The flag `maestro test` uses to pin a target device, as parsed from its own `--help`. */
@@ -98,6 +115,21 @@ export interface XcodeToolchainBackendDeps {
    * DIRECTORY named `maestro` can never be handed to the driver as a binary.
    */
   isExecutableFile?: (absPath: string) => Promise<boolean>;
+  /**
+   * Whether an absolute path is an existing DIRECTORY. Defaults to
+   * `fs.stat().isDirectory()`. Injected for the same reason as
+   * {@link isExecutableFile}: {@link XcodeToolchainBackend.resolveJavaHome}'s
+   * `/usr/libexec/java_home` and Homebrew rungs (B6) must be testable without
+   * a real JDK on the CI host.
+   */
+  isDirectory?: (absPath: string) => Promise<boolean>;
+  /**
+   * List a directory's entries by bare name, or throw when it does not exist
+   * (matches `fs.readdir`'s contract; defaults to it). Injected so the
+   * `openjdk*` Homebrew glob in {@link XcodeToolchainBackend.resolveJavaHome}
+   * (B6) never touches a real `/opt/homebrew/opt` or `/usr/local/opt`.
+   */
+  readdir?: (dirPath: string) => Promise<string[]>;
   /** Per-command bound. Defaults to {@link DEFAULT_COMMAND_TIMEOUT_MS}. */
   commandTimeoutMs?: number;
 }
@@ -137,6 +169,20 @@ export function parseMaestroPinFlag(helpText: string): MaestroPinFlag | null {
   return null;
 }
 
+/**
+ * Sort key for one `openjdk*` Homebrew formula directory name (B6). The bare
+ * `openjdk` formula (no `@N`) always tracks Homebrew's current release, so it
+ * outranks every pinned `openjdk@N`; among pinned formulas the higher `N`
+ * wins. Anything that is not an `openjdk` formula name at all sorts lowest —
+ * callers filter those out before this ever runs, so this is a fallback, not
+ * the filter.
+ */
+export function parseOpenjdkVersion(name: string): number {
+  if (name === 'openjdk') return Number.POSITIVE_INFINITY;
+  const match = /^openjdk@([0-9]+(?:\.[0-9]+)?)$/.exec(name);
+  return match ? Number.parseFloat(match[1] as string) : -1;
+}
+
 /** The default executable-file test: it must exist, be a regular file, and carry +x. */
 async function defaultIsExecutableFile(absPath: string): Promise<boolean> {
   try {
@@ -149,6 +195,21 @@ async function defaultIsExecutableFile(absPath: string): Promise<boolean> {
   }
 }
 
+/** The default directory test, backing {@link XcodeToolchainBackendDeps.isDirectory}. */
+async function defaultIsDirectory(absPath: string): Promise<boolean> {
+  try {
+    const info = await stat(absPath);
+    return info.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The default directory listing, backing {@link XcodeToolchainBackendDeps.readdir}. */
+async function defaultReaddir(dirPath: string): Promise<string[]> {
+  return readdir(dirPath);
+}
+
 export class XcodeToolchainBackend {
   private readonly exec: AppleCliExec;
   private readonly platform: NodeJS.Platform;
@@ -157,6 +218,8 @@ export class XcodeToolchainBackend {
   private readonly now: () => number;
   private readonly logger?: LoggerLike;
   private readonly isExecutableFile: (absPath: string) => Promise<boolean>;
+  private readonly isDirectory: (absPath: string) => Promise<boolean>;
+  private readonly readdir: (dirPath: string) => Promise<string[]>;
   private readonly timeoutMs: number;
 
   /** The 60 s memo: a settled verdict plus when it settled. */
@@ -172,6 +235,14 @@ export class XcodeToolchainBackend {
   private maestroMemo: Promise<string | null> | null = null;
   private readonly pinFlagMemo = new Map<string, Promise<MaestroPinFlag | null>>();
 
+  /**
+   * The B6 JDK-home memo: process-lifetime, same rationale as
+   * {@link maestroMemo} — {@link resolveJavaHome} answers "where is the JDK",
+   * not something worth re-probing (a `java_home` spawn plus two `readdir`s)
+   * on every Maestro invocation.
+   */
+  private javaHomeMemo: Promise<string | null> | null = null;
+
   constructor(deps: XcodeToolchainBackendDeps) {
     this.exec = deps.exec;
     this.platform = deps.platform ?? process.platform;
@@ -180,6 +251,8 @@ export class XcodeToolchainBackend {
     this.now = deps.now ?? Date.now;
     this.logger = deps.logger;
     this.isExecutableFile = deps.isExecutableFile ?? defaultIsExecutableFile;
+    this.isDirectory = deps.isDirectory ?? defaultIsDirectory;
+    this.readdir = deps.readdir ?? defaultReaddir;
     this.timeoutMs = deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
   }
 
@@ -240,7 +313,7 @@ export class XcodeToolchainBackend {
     if (memo !== undefined) return memo;
     const attempt = (async (): Promise<MaestroPinFlag | null> => {
       try {
-        const result = await this.run(maestroBin, ['test', '--help']);
+        const result = await this.runMaestro(maestroBin, ['test', '--help']);
         // `--help` exits non-zero on some builds while still printing usage, so
         // the TEXT decides, not the exit code.
         return parseMaestroPinFlag(`${result.stdout}\n${result.stderr}`);
@@ -256,8 +329,57 @@ export class XcodeToolchainBackend {
     return attempt;
   }
 
+  /**
+   * B6: resolve a JDK home Maestro can run under. See the class-header "B6 —
+   * MAESTRO JAVA_HOME" note for the measured failure and the four-rung order;
+   * exposed publicly (not just used internally by {@link runMaestro}) so a
+   * caller that exports env into an agent process — the mobile verification
+   * runner — can read the SAME resolved value this backend used to run
+   * Maestro's own health probes, rather than re-deriving it and risking the
+   * two disagreeing.
+   */
+  async resolveJavaHome(): Promise<string | null> {
+    if (this.javaHomeMemo === null) this.javaHomeMemo = this.computeJavaHome();
+    return this.javaHomeMemo;
+  }
+
   private run(command: string, args: readonly string[]): Promise<AppleCliExecResult> {
     return this.exec(command, args, { timeoutMs: this.timeoutMs });
+  }
+
+  /**
+   * Run a resolved Maestro binary with {@link resolveJavaHome}'s answer
+   * threaded into its environment (B6): `JAVA_HOME` set, and `PATH` prefixed
+   * with `$JAVA_HOME/bin` so Maestro's own launcher finds that `java` before
+   * whatever the login shell would otherwise have resolved (the measured
+   * failure: the macOS `/usr/bin/java` stub). A `null` JAVA_HOME runs Maestro
+   * unchanged — the pre-B6 behaviour — rather than inventing a path.
+   *
+   * THE CHILD'S BASE ENV IS `process.env`, NOT `this.env`. `this.env` is this
+   * class's LOOKUP environment (`VERIFY_MAESTRO_BIN`, rung 1's `JAVA_HOME`),
+   * and callers narrow it on purpose — mobileVerification.itest.ts injects `{}`
+   * so a developer's own variables cannot leak into resolution. The child, by
+   * contrast, would otherwise inherit `process.env` from the transport
+   * (`createHostAppleCliExec` forwards `env` only when one is given), so that
+   * is what gets extended:
+   * building the override from a narrowed `this.env` would strip `HOME`,
+   * `TMPDIR` and `PATH` out from under Maestro the moment the transport starts
+   * honouring `env`. The full env (not a delta) is passed so the answer is the
+   * same whether a transport REPLACES its child env with `opts.env` or merges it.
+   */
+  private async runMaestro(maestroBin: string, args: readonly string[]): Promise<AppleCliExecResult> {
+    const javaHome = await this.resolveJavaHome();
+    const opts: NonNullable<Parameters<AppleCliExec>[2]> = { timeoutMs: this.timeoutMs };
+    if (javaHome !== null) {
+      const inherited = process.env;
+      const javaBin = join(javaHome, 'bin');
+      opts.env = {
+        ...inherited,
+        JAVA_HOME: javaHome,
+        PATH: inherited.PATH ? `${javaBin}${delimiter}${inherited.PATH}` : javaBin,
+      };
+    }
+    return this.exec(maestroBin, args, opts);
   }
 
   private async computeProbe(): Promise<XcodeToolchainProbe> {
@@ -270,6 +392,7 @@ export class XcodeToolchainBackend {
         xcodeVersion: null,
         newestRuntime: null,
         maestroBin: null,
+        javaHome: null,
       };
     }
 
@@ -291,6 +414,7 @@ export class XcodeToolchainBackend {
         xcodeVersion: null,
         newestRuntime: null,
         maestroBin: maestro.bin,
+        javaHome: maestro.javaHome,
       };
     }
     const xcodeVersion = parseXcodeVersion(xcodebuild.stdout);
@@ -347,6 +471,7 @@ export class XcodeToolchainBackend {
         xcodeVersion,
         newestRuntime: null,
         maestroBin: maestro.bin,
+        javaHome: maestro.javaHome,
       };
     }
 
@@ -356,12 +481,13 @@ export class XcodeToolchainBackend {
       xcodeVersion,
       newestRuntime: target.runtimeName,
       maestroBin: maestro.bin,
+      javaHome: maestro.javaHome,
     };
   }
 
   private inconclusive(
     reason: string,
-    maestro: { bin: string | null; label: string },
+    maestro: { bin: string | null; label: string; javaHome: string | null },
     xcodeVersion: string | null,
   ): XcodeToolchainProbe {
     this.logger?.info('[XcodeToolchainBackend] the toolchain probe could not answer', { reason });
@@ -371,6 +497,7 @@ export class XcodeToolchainBackend {
       xcodeVersion,
       newestRuntime: null,
       maestroBin: maestro.bin,
+      javaHome: maestro.javaHome,
     };
   }
 
@@ -379,17 +506,22 @@ export class XcodeToolchainBackend {
    * rung is optional, so nothing here may turn into an inconclusive verdict for
    * the REQUIRED path.
    */
-  private async describeMaestro(): Promise<{ bin: string | null; label: string }> {
+  private async describeMaestro(): Promise<{ bin: string | null; label: string; javaHome: string | null }> {
     let bin: string | null = null;
     try {
       bin = await this.resolveMaestroBin();
     } catch (err) {
       this.logger?.info('[XcodeToolchainBackend] maestro resolution threw', { error: errorText(err) });
     }
-    if (bin === null) return { bin: null, label: 'Maestro not found' };
+    if (bin === null) return { bin: null, label: 'Maestro not found', javaHome: null };
+
+    // B6: resolve before `--version` so that call itself already runs under
+    // the right JAVA_HOME — the login-shell `java` stub can make even
+    // `maestro --version` fail, not just `test --help`.
+    const javaHome = await this.resolveJavaHome();
     let version = 'unknown version';
     try {
-      const result = await this.run(bin, ['--version']);
+      const result = await this.runMaestro(bin, ['--version']);
       const line = result.stdout.trim().split('\n')[0]?.trim() ?? '';
       if (result.code === 0 && line.length > 0) version = line;
     } catch (err) {
@@ -397,7 +529,77 @@ export class XcodeToolchainBackend {
         error: errorText(err),
       });
     }
-    return { bin, label: `Maestro ${version}` };
+    return {
+      bin,
+      label: `Maestro ${version}${javaHome === null ? ' (no JAVA_HOME resolved)' : ''}`,
+      javaHome,
+    };
+  }
+
+  private async computeJavaHome(): Promise<string | null> {
+    // The drive rung is iOS-Simulator-only, so off darwin there is nothing to
+    // resolve and nothing to spawn — same posture as computeMaestroBin.
+    if (this.platform !== 'darwin') return null;
+
+    // Rung 1: an existing JAVA_HOME, but only if it actually names a JDK —
+    // trusting the variable just because it is SET would repeat the exact bug
+    // this method exists to fix (a stale or wrong JAVA_HOME left in the env).
+    const fromEnv = this.env.JAVA_HOME;
+    if (
+      typeof fromEnv === 'string' &&
+      fromEnv.length > 0 &&
+      (await this.isExecutableFile(join(fromEnv, 'bin', 'java')))
+    ) {
+      return fromEnv;
+    }
+
+    // Rung 2: the platform's own JDK locator.
+    try {
+      const result = await this.run('/usr/libexec/java_home', []);
+      const candidate = result.stdout.trim().split('\n')[0]?.trim() ?? '';
+      if (result.code === 0 && candidate.length > 0 && (await this.isDirectory(candidate))) {
+        return candidate;
+      }
+    } catch (err) {
+      this.logger?.info('[XcodeToolchainBackend] `/usr/libexec/java_home` could not run', {
+        error: errorText(err),
+      });
+    }
+
+    // Rungs 3 and 4: the newest Homebrew `openjdk*` formula, Apple Silicon
+    // prefix before Intel — a host with both installed is expected to prefer
+    // the one matching its own architecture, and Apple Silicon is checked
+    // first because that is this backend's primary target.
+    for (const prefix of ['/opt/homebrew/opt', '/usr/local/opt']) {
+      const home = await this.newestOpenjdkHome(prefix);
+      if (home !== null) return home;
+    }
+    return null;
+  }
+
+  /**
+   * The newest `openjdk*` Homebrew formula's JDK home directly under `prefix`
+   * (e.g. `/opt/homebrew/opt`), or `null` when none is installed there.
+   * "Newest" is decided by {@link parseOpenjdkVersion}. A `readdir` failure
+   * (ENOENT — this Homebrew prefix is not installed at all, the common case on
+   * either architecture) is swallowed rather than logged: it is the expected
+   * outcome on most hosts, not evidence of anything wrong.
+   */
+  private async newestOpenjdkHome(prefix: string): Promise<string | null> {
+    let entries: string[];
+    try {
+      entries = await this.readdir(prefix);
+    } catch {
+      return null;
+    }
+    const candidates = entries
+      .filter((name) => name === 'openjdk' || name.startsWith('openjdk@'))
+      .sort((a, b) => parseOpenjdkVersion(b) - parseOpenjdkVersion(a));
+    for (const name of candidates) {
+      const home = join(prefix, name, 'libexec', 'openjdk.jdk', 'Contents', 'Home');
+      if (await this.isDirectory(home)) return home;
+    }
+    return null;
   }
 
   private async computeMaestroBin(): Promise<string | null> {
