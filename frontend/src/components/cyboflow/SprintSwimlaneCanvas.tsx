@@ -79,6 +79,13 @@ export interface SprintSwimlaneCanvasProps {
    * `null`/omitted renders exactly as before this prop existed.
    */
   stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
+  /**
+   * The OUTER step the run is parked on by a systemic pause (see
+   * WorkflowCanvasProps.pausedStepId) — the collapsed PLAN card or a
+   * SPRINT-REVIEW card renders 'paused' instead of 'running'. A pause on the
+   * fan-out step itself is not a per-lane fact and leaves the lanes untouched.
+   */
+  pausedStepId?: string | null;
 }
 
 /**
@@ -469,6 +476,7 @@ export function SprintSwimlaneCanvas({
   projectId = null,
   sessionKey,
   stepModels,
+  pausedStepId = null,
 }: SprintSwimlaneCanvasProps) {
   const { lanes } = useSprintLanes(runId);
   const definition = phaseState.definition;
@@ -485,6 +493,7 @@ export function SprintSwimlaneCanvas({
   const currentIdx =
     phaseState.currentStepId != null ? stepIds.indexOf(phaseState.currentStepId) : -1;
   const statusFor = (flatIdx: number): StepStatus => {
+    if (pausedStepId !== null && stepIds[flatIdx] === pausedStepId) return 'paused';
     if (currentIdx === -1) return 'pending';
     if (flatIdx < currentIdx) return 'done';
     if (flatIdx === currentIdx) return 'running';
@@ -502,16 +511,19 @@ export function SprintSwimlaneCanvas({
   // Execute phase color for the center header strip (second phase when present).
   const executeColor = definition?.phases[1]?.color ?? '#6a5e44';
 
-  // Collapsed plan-card status: done when every plan step is done, running when
-  // any is the current step, pending otherwise.
+  // Collapsed plan-card status: done when every plan step is done, paused when
+  // the run is parked on one of them, running when any is the current step,
+  // pending otherwise.
   let planStatus: StepStatus = 'pending';
   if (planPhase !== null && planPhase.steps.length > 0) {
     const planStatuses = planPhase.steps.map((_, i) => statusFor(i));
     planStatus = planStatuses.every((s) => s === 'done')
       ? 'done'
-      : planStatuses.some((s) => s === 'running')
-        ? 'running'
-        : 'pending';
+      : planStatuses.some((s) => s === 'paused')
+        ? 'paused'
+        : planStatuses.some((s) => s === 'running')
+          ? 'running'
+          : 'pending';
   }
 
   // ── Lane aggregates ────────────────────────────────────────────────────────

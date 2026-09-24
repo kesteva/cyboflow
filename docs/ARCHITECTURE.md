@@ -160,7 +160,10 @@ rail on the workflow canvas (`runs.getStepModels`, resolved through the same eff
 is fetched once per run, so a switch and a revert each bump a renderer-side per-run counter
 (`frontend/src/stores/runAgentTargetsStore.ts`) that the run pane and the chip re-fetch on; the step
 cards flip to the switched runtime/model without a main-process subscription, since those two
-mutations are the layer's only writers. Two Claude-only
+mutations are the layer's only writers. While parked, the run row stays 'running'; the canvases
+read the pending pause item (`frontend/src/utils/systemicPause.ts`) and render that step's card as
+PAUSED (amber) with the paused pill, and the landing home's "Needs your input" row for the item
+offers the same Retry now / Switch & retry… (opens the session) / Stop waiting trio. Two Claude-only
 surfaces are NOT moved by a switch: the lane-triage consult and the run monitor both run on the
 run's supervisor. An `origin: 'triage'` pause says so, offers no switch (the handler refuses one with
 `origin_triage`), and a monitor "switch agents" chat action was deferred because it could not

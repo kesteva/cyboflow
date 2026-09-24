@@ -32,6 +32,8 @@ import { pathBasename } from '../../utils/pathBasename';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useRunAgentTargetsVersion } from '../../stores/runAgentTargetsStore';
+import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
+import { pendingSystemicPauseStepId } from '../../utils/systemicPause';
 import { trpc } from '../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -161,6 +163,16 @@ export function RunCenterPane({
     };
   }, [activeRunId, agentTargetsVersion]);
 
+  // The step a SYSTEMIC pause (usage / session limit) has parked the run on,
+  // read off the run's pending `gate:systemic-pause:<stepId>` item — the run
+  // row stays 'running' while parked, so the item is the only signal. Same
+  // slice subscription RunPendingInputStrip (mounted below) keeps alive.
+  const reviewItems = useReviewItemsSlice((s) => s.items);
+  const pausedStepId = useMemo(
+    () => pendingSystemicPauseStepId(reviewItems, activeRunId),
+    [reviewItems, activeRunId],
+  );
+
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
   // Active bottom-dock surface (RunBottomPane opens on Chat). The question strip
@@ -204,6 +216,7 @@ export function RunCenterPane({
           projectId={projectId}
           sessionKey={sessionKey}
           stepModels={stepModels}
+          pausedStepId={pausedStepId}
         />
       );
     }
@@ -219,6 +232,7 @@ export function RunCenterPane({
         status={activeRun?.status}
         sessionKey={sessionKey}
         stepModels={stepModels}
+        pausedStepId={pausedStepId}
       />
     );
   };

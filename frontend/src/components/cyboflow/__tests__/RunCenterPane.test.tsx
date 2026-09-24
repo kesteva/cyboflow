@@ -23,6 +23,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RunCenterPane } from '../RunCenterPane';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import { useRunAgentTargetsStore } from '../../../stores/runAgentTargetsStore';
+import { useReviewItemsSlice } from '../../../stores/reviewItemsSlice';
+import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -49,9 +51,9 @@ vi.mock('../WorkflowCanvas', () => ({
 // A sprint/batch run hosts SprintSwimlaneCanvas INSTEAD of WorkflowCanvas, and
 // its PLAN / SPRINT-REVIEW columns are ordinary phases[].steps cards — so they
 // need the same `stepModels` map. Capture its props to pin that threading.
-let capturedSwimlaneProps: { stepModels?: unknown } | undefined;
+let capturedSwimlaneProps: { stepModels?: unknown; pausedStepId?: string | null } | undefined;
 vi.mock('../SprintSwimlaneCanvas', () => ({
-  SprintSwimlaneCanvas: (props: { stepModels?: unknown }) => {
+  SprintSwimlaneCanvas: (props: { stepModels?: unknown; pausedStepId?: string | null }) => {
     capturedSwimlaneProps = props;
     return <div data-testid="mock-swimlane-canvas" />;
   },
@@ -164,6 +166,7 @@ describe('RunCenterPane', () => {
   beforeEach(() => {
     useCenterPaneStore.setState({ bySession: {} });
     useRunAgentTargetsStore.setState({ versionByRun: {} });
+    useReviewItemsSlice.setState({ items: [] });
     mockArtifacts = [];
     mockLoaded = true;
     reportBottomTabKind = undefined;
@@ -249,6 +252,57 @@ describe('RunCenterPane', () => {
     });
     await waitFor(() => expect(capturedWorkflowCanvasProps).toBeDefined());
     expect(getStepModelsQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('derives pausedStepId from the run\'s PENDING gate:systemic-pause item and threads it to both canvases', async () => {
+    const pause: ReviewItem = {
+      id: 'rvw_pause',
+      project_id: 1,
+      run_id: 'run-1',
+      entity_type: null,
+      entity_id: null,
+      kind: 'decision',
+      status: 'pending',
+      blocking: true,
+      audience: 'human',
+      title: 'Paused: usage limit',
+      body: null,
+      severity: null,
+      priority: null,
+      staged_at: null,
+      selected: false,
+      source: 'gate:systemic-pause:implement',
+      payload: null,
+      created_at: '2026-09-23T00:00:00.000Z',
+      updated_at: '2026-09-23T00:00:00.000Z',
+      resolved_by: null,
+      resolution: null,
+    };
+    useReviewItemsSlice.setState({ items: [pause, { ...pause, id: 'rvw_other', run_id: 'run-2', source: 'gate:systemic-pause:ideas' }] });
+
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(capturedWorkflowCanvasProps?.pausedStepId).toBe('implement'));
+
+    // The pause clears (resolved) → the card goes back to the ordering rule.
+    act(() => {
+      useReviewItemsSlice.setState({ items: [{ ...pause, status: 'resolved' }] });
+    });
+    await waitFor(() => expect(capturedWorkflowCanvasProps?.pausedStepId).toBeNull());
+
+    // A sprint (batch) run threads the same value into SprintSwimlaneCanvas.
+    act(() => {
+      useReviewItemsSlice.setState({ items: [pause] });
+    });
+    rerender(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ batch_id: 'batch-1' })}
+      />,
+    );
+    await waitFor(() => expect(capturedSwimlaneProps?.pausedStepId).toBe('implement'));
   });
 
   it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a stepId-keyed Map', async () => {

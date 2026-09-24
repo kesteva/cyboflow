@@ -18,14 +18,20 @@
  * or simply the transcript), rather than offering a resolve button that settles
  * the gate without anyone having looked at the work.
  *
- * That routing is SURFACE-AWARE (`surface` prop). In the queue surfaces
- * (ReviewQueueView, the landing TypeGroupedQueue) the default pair applies. In
- * `surface="session"` — RunPendingInputStrip, which renders this same card INSIDE
- * the run — "Open in session" is a no-op, so those branches keep their real
- * actions; the strip is the terminal surface for any gate whose flow has no
- * artifact tab of its own (sprint's `human-review`, compound's
- * `approve-learnings`, ship's gates). Removing them there would leave those gates
- * answerable only by Dismiss, which humanGate.ts maps to a REJECT verdict.
+ * That routing is SURFACE-AWARE (`surface` prop). On the 'queue' surface the
+ * default pair applies. In `surface="session"` — RunPendingInputStrip, which
+ * renders this same card INSIDE the run — "Open in session" is a no-op, so those
+ * branches keep their real actions; the strip is the terminal surface for any
+ * gate whose flow has no artifact tab of its own (sprint's `human-review`,
+ * compound's `approve-learnings`, ship's gates). Removing them there would leave
+ * those gates answerable only by Dismiss, which humanGate.ts maps to a REJECT
+ * verdict.
+ *
+ * NOTE: as of the review-queue redesign the landing home renders its OWN rows
+ * (`landing/NeedsInputSection.tsx`) rather than this card, so RunPendingInputStrip
+ * is this card's only production host and 'queue' has none today. The surface is
+ * kept (and its default-pair semantics tested) because it is the safe default for
+ * any future host that is NOT inside the run.
  *
  * Two further carve-outs, both load-bearing:
  *   - A RUN-LESS item (`run_id === null` — a manual / triage-minted row) keeps its
@@ -108,6 +114,7 @@ import { Button } from '../ui/Button';
 import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
+import { isSystemicPauseItem, systemicPauseOrigin } from '../../utils/systemicPause';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import {
   IDLE_REVIEW_SOURCE_PREFIX,
@@ -176,10 +183,11 @@ const KIND_ACCENT: Record<ReviewItemKind, string> = {
 };
 
 /**
- * Where this card is mounted. 'queue' (the default — ReviewQueueView, the landing
- * TypeGroupedQueue) routes option-less escalations to the run via the default
- * "Open in session →" pair. 'session' (RunPendingInputStrip) is already inside the
- * run, so those branches render their real actions instead.
+ * Where this card is mounted. 'queue' (the default — any host OUTSIDE the run;
+ * none in production today, see the module doc) routes option-less escalations
+ * to the run via the default "Open in session →" pair. 'session'
+ * (RunPendingInputStrip) is already inside the run, so those branches render
+ * their real actions instead.
  */
 export type ReviewItemCardSurface = 'queue' | 'session';
 
@@ -401,41 +409,6 @@ function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
 // ---------------------------------------------------------------------------
 
 /**
- * True for a systemic-pause decision item — the programmatic run host's
- * `gate:systemic-pause:<stepId>` gate, opened when a step's agent hits a
- * subscription/session limit. Keyed on EITHER the source prefix (matches even
- * a pause re-attached before its payload landed) OR the payload discriminant,
- * mirroring the dual-discriminant pattern of {@link isApproveIdeasGateItem} /
- * {@link isApproveDesignGateItem} above. The payload is read through an
- * `unknown` cast on purpose: a pause item minted before the payload existed
- * (payload_json NULL) or re-attached across an app restart must still match by
- * its source prefix, and a malformed payload must never throw out of a card.
- */
-function isSystemicPauseItem(item: ReviewItem): boolean {
-  if (item.kind !== 'decision') return false;
-  if ((item.source ?? '').startsWith('gate:systemic-pause:')) return true;
-  const payload: unknown = item.payload;
-  if (payload === null || typeof payload !== 'object') return false;
-  const p = payload as { kind?: unknown; gate?: unknown };
-  return p.kind === 'decision' && p.gate === 'systemic-pause';
-}
-
-/**
- * The systemic-pause payload's `origin` field ('step' | 'triage'), or
- * undefined when absent/malformed/not a pause item. 'triage' means the run's
- * Claude-only supervisor (lane triage) hit the limit rather than a step
- * agent — switching step agents does not move it, hence the note rendered
- * under the pause card's actions for that case.
- */
-function systemicPauseOrigin(item: ReviewItem): 'step' | 'triage' | undefined {
-  if (!isSystemicPauseItem(item)) return undefined;
-  const payload: unknown = item.payload;
-  if (payload === null || typeof payload !== 'object') return undefined;
-  const origin = (payload as { origin?: unknown }).origin;
-  return origin === 'step' || origin === 'triage' ? origin : undefined;
-}
-
-/**
  * The human-readable disposition for a RESOLVED/DISMISSED systemic-pause
  * item, keyed on the resolution's stable prefix. Dismissed (by status OR a
  * 'stop waiting' resolution) is checked first — it is the definitive "gave
@@ -567,8 +540,8 @@ export function ReviewItemCard({
   const [addressError, setAddressError] = React.useState<string | null>(null);
   const [addressEligibility, setAddressEligibility] = React.useState<AddressReviewEligibility>(null);
   // Plan v2: whether the inline "Switch runtime & retry" form is open for a
-  // systemic-pause item (session surface only — the queue surface routes to
-  // the session instead, see 'pause-switch-open' below).
+  // systemic-pause item (session surface only — the queue-side row lives in
+  // the landing's NeedsInputSection, whose "Switch & retry…" opens the session).
   const [showSwitchForm, setShowSwitchForm] = React.useState(false);
 
   const busy = pendingItemId === item.id || approvalBusy;
@@ -1147,10 +1120,11 @@ export function ReviewItemCard({
         // Plan v2 (switch runtime/model on a systemic pause, then retry): the
         // programmatic run host's `gate:systemic-pause:<stepId>` gate, opened
         // when a step's agent hits a subscription/session limit. Checked
-        // BEFORE `usesDefaultActions` — like approve-design above — so BOTH
-        // surfaces get this gate's real actions instead of the option-less
-        // "Open in session" + Dismiss pair (which would offer no way to
-        // switch runtimes from the queue). Never sends outcome 'reject':
+        // BEFORE `usesDefaultActions` — like approve-design above — so the
+        // card never collapses this gate into the option-less "Open in
+        // session" + Dismiss pair. The switch form is session-only (the
+        // landing's NeedsInputSection row is the queue-side surface and
+        // routes its "Switch & retry…" here). Never sends outcome 'reject':
         // Retry now / Switch & retry both resolve WITHOUT an outcome (a plain
         // retry — the pause gate reads any resolve as 'retry'), and Stop
         // waiting dismisses (giveup) instead.
@@ -1198,17 +1172,6 @@ export function ReviewItemCard({
                   data-testid="pause-switch-toggle"
                 >
                   Switch runtime &amp; retry
-                </Button>
-              )}
-              {switchable && surface !== 'session' && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={item.run_id === null}
-                  onClick={openInSession}
-                  data-testid="pause-switch-open"
-                >
-                  Switch &amp; retry…
                 </Button>
               )}
               <Button variant="secondary" size="sm" disabled={busy} onClick={stopWaiting} data-testid="pause-stop">

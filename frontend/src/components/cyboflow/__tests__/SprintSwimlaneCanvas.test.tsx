@@ -200,6 +200,7 @@ async function renderCanvas(
     projectId?: number | null;
     sessionKey?: string;
     stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
+    pausedStepId?: string | null;
   } = {},
 ) {
   render(
@@ -734,5 +735,19 @@ describe('SprintSwimlaneCanvas — visual-check state (F8)', () => {
     expect(stepStatus('vr', 'code-review')).toBe('running');
     expect(stepStatus('vr', 'visual-verify')).toBe('pending');
     expect(stepTitle('vr', 'visual-verify')).toBeNull();
+  });
+});
+
+describe('SprintSwimlaneCanvas — systemic pause on an outer step', () => {
+  it('renders the collapsed PLAN card as PAUSED when the run is parked on a plan step', async () => {
+    await renderCanvas({ pausedStepId: 'analyze-dependencies' });
+    const plan = screen.getByTestId('swimlane-plan');
+    expect(plan.querySelector('[data-testid="step-card-analyze-dependencies"]')).toHaveTextContent('PAUSED');
+  });
+
+  it('renders a SPRINT-REVIEW card as PAUSED when the run is parked on it, leaving the lanes alone', async () => {
+    await renderCanvas({ pausedStepId: 'sprint-verify' });
+    expect(screen.getByTestId('step-card-sprint-verify')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-sprint-review')).toHaveTextContent('PENDING');
   });
 });

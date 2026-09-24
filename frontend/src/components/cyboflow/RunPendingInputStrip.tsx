@@ -4,7 +4,7 @@
  *
  * Mounted once in RunCenterPane, BETWEEN the tab content and TerminalDock, so
  * it is visible regardless of the active tab. Mirrors the init/subscribe/
- * cleanup + empty-state-null pattern established by `ReviewQueueView.tsx`, but
+ * cleanup + empty-state-null pattern of the review-queue slice consumers, but
  * sources from TWO stores:
  *
  *   - {@link useReviewItemsSlice} (project-scoped review_items inbox) —

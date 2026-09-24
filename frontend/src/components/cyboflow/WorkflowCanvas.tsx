@@ -64,6 +64,16 @@ export interface WorkflowCanvasProps {
    */
   paused?: boolean;
   /**
+   * The step the run is parked on by a SYSTEMIC pause (a usage / session
+   * limit — `gate:systemic-pause:<stepId>`), or null/undefined when it is not
+   * parked. Distinct from `paused`: the run row stays 'running' while parked,
+   * so RunCenterPane derives this from the run's pending review items
+   * (`pendingSystemicPauseStepId`). That step's card renders 'paused' instead
+   * of 'running', the meta row shows the amber paused pill, and the running
+   * pill + token animation are suppressed exactly as for `paused`.
+   */
+  pausedStepId?: string | null;
+  /**
    * The run's raw lifecycle status. When it is a terminal self-completion
    * ('completed' / 'failed'), the meta row renders a static outcome pill (green /
    * red) so the finished state reads clearly while the operator decides to "End
@@ -213,20 +223,26 @@ export function WorkflowCanvas({
   tokenCount,
   isRunning = false,
   paused = false,
+  pausedStepId = null,
   status,
   sessionKey,
   stepModels,
 }: WorkflowCanvasProps) {
-  // A paused run is, by definition, not actively running — suppress the running
-  // pill and the token animation regardless of the isRunning prop so the canvas
-  // is self-consistent even if a caller passes a stale isRunning.
-  const effectiveRunning = isRunning && !paused;
+  // A paused run — the SDK Pause (`paused`) OR a systemic pause parking a step
+  // (`pausedStepId`) — is, by definition, not actively running: suppress the
+  // running pill and the token animation regardless of the isRunning prop so
+  // the canvas is self-consistent even if a caller passes a stale isRunning.
+  const parked = pausedStepId !== null && pausedStepId !== undefined;
+  const showPausedPill = paused || parked;
+  const effectiveRunning = isRunning && !showPausedPill;
   // ── Flatten all step ids for state derivation ─────────────────────────────
   const stepIds = definition.phases.flatMap((p) => p.steps.map((s) => s.id));
   const currentIdx = currentStepId != null ? stepIds.indexOf(currentStepId) : -1;
 
-  // Derive per-step status
+  // Derive per-step status. The parked step wins over the ordering rule: the
+  // pause item names where the run actually sits, even if currentStepId lags.
   const statusFor = (flatIdx: number): StepStatus => {
+    if (parked && stepIds[flatIdx] === pausedStepId) return 'paused';
     if (currentIdx === -1) return 'pending';
     if (flatIdx < currentIdx) return 'done';
     if (flatIdx === currentIdx) return 'running';
@@ -393,7 +409,7 @@ export function WorkflowCanvas({
             <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>{tokenCount}</b>
           </span>
         )}
-        {paused ? (
+        {showPausedPill ? (
           <span
             style={{
               padding: '2px 8px',
