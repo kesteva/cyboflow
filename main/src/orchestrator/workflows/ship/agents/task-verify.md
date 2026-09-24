@@ -111,8 +111,12 @@ shape of `serve`/`target`/`attestation` below:
   webapp, a marketing page, a component-library preview. Set `"modality":
   "web"` (or omit it — the runner's default). This is the common case and
   unchanged from before.
-- **`native-screen`** — behaviors that live entirely in OS chrome, with no DOM
-  and no CDP endpoint to attach to. Set `"modality": "native-screen"`. Driving
+- **`native-screen`** — behaviors that live entirely in **macOS** OS chrome,
+  with no DOM and no CDP endpoint to attach to. **Never an iOS/iPadOS app** —
+  a SwiftUI/UIKit app with an iOS target is `mobile` (below), even when you
+  doubt a simulator or runbook is available; the harness refuses a
+  `native-screen`-shaped task with no build, serve or target as un-runnable.
+  Set `"modality": "native-screen"`. Driving
   (click/type) is **not implemented today** — native-screen is observe-only.
   A behavior that genuinely needs a click or a keystroke to exercise MUST
   still be emitted (never silently dropped), with `"requiresDrive": true` on
@@ -122,7 +126,8 @@ shape of `serve`/`target`/`attestation` below:
   `requiresDrive` and are exercised normally.
 - **`mobile`** — an iOS app the verifier runs on a simulator. Declare it ONLY
   when the repo shows the evidence: an `.xcodeproj` / `.xcworkspace` / a
-  `Package.swift` with an iOS app target. Set `"modality": "mobile"`, give the
+  `Package.swift` with an iOS app target (or a `project.yml` declaring
+  `platform: iOS`). Set `"modality": "mobile"`, give the
   task an `app` block `{ "platform": "ios-simulator", "bundleId": "...",
   "scheme": "...", "productGlob": "..." }` and **no `serve`** — the app runs
   under the simulator's launchd, there is no port and nothing to attach to.
