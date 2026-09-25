@@ -1286,6 +1286,27 @@ describe('VerificationAgentRunner.run — the explore attestation floor', () => 
     expect(result.status).toBe('passed');
   });
 
+  it('explore mobile with NO declared channel probes an implicit bundle-identity and passes (an inferred app)', async () => {
+    const attest = vi.fn(bundleVerified);
+    const { runner } = makeRunner({ mobile: mobileDeps({ maestro: true }), attest });
+    const result = await runner.run(
+      makeMobileReq({ executionMode: 'explore', task: makeTask({ app: APP, attestation: undefined }) }),
+    );
+    expect(attest).toHaveBeenCalledTimes(1);
+    expect((attest.mock.calls[0] as unknown[])[0]).toEqual({ kind: 'bundle-identity', bundleId: APP.bundleId });
+    expect(result.status).toBe('passed');
+  });
+
+  it('pinned mobile with no declared channel is NOT given the implicit spec — still capped', async () => {
+    const attest = vi.fn(bundleVerified);
+    const { runner } = makeRunner({ mobile: mobileDeps({ maestro: true }), attest });
+    const result = await runner.run(
+      makeMobileReq({ executionMode: 'pinned', task: makeTask({ app: APP, attestation: undefined }) }),
+    );
+    expect(attest).not.toHaveBeenCalled();
+    expect(result.status).toBe('low_confidence');
+  });
+
   it('an explore FAIL on an unattested surface: low_confidence — and the probe DID run for it', async () => {
     const attest = vi.fn(async (): Promise<HarnessAttestationResult> => ({ verified: false, kind: 'http-endpoint', detail: 'no nonce' }));
     const { runner } = makeRunner({ attest, query: async () => outcome(validReport({ outcome: 'fail', behaviors: [failedB1] })) });

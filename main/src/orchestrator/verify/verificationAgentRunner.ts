@@ -1187,10 +1187,23 @@ export type AttestationFloorOutcome =
  *
  * A `target.url` task gets NO implicit spec: a bare URL is exactly the shape
  * whose identity cannot be assumed (that URL may be answered by anything).
+ *
+ * §A1.2 — an EXPLORE mobile run on a leased simulator gets an implicit
+ * `bundle-identity`: the harness hashes the installed product itself, so the
+ * channel needs no composer's declaration (an inferred or undeclared app never
+ * carries one — without this, explore mobile could never reach `passed`).
+ * Pinned rows keep reading the declaration only; their runbook supplies it.
  */
-export function effectiveAttestationSpec(task: VerificationTaskV1): AttestationSpec | null {
+export function effectiveAttestationSpec(
+  task: VerificationTaskV1,
+  implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean },
+): AttestationSpec | null {
   if (task.attestation !== undefined) return task.attestation;
-  return isDegenerateFileTarget(task) ? { kind: 'file-identity' } : null;
+  if (isDegenerateFileTarget(task)) return { kind: 'file-identity' };
+  if (implicit?.executionMode === 'explore' && implicit.mobileLeased && task.app !== undefined) {
+    return { kind: 'bundle-identity', bundleId: task.app.bundleId };
+  }
+  return null;
 }
 
 /**
@@ -3805,7 +3818,8 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // ended but before the `finally` tears the surface down: an attestation is
       // a question you can only ask something that is still alive, which is also
       // why the harness contract forbids the agent from stopping its own serve.
-      const declaredChannel = req.task.attestation !== undefined;
+      const spec = effectiveAttestationSpec(req.task, { executionMode, mobileLeased: mobileHandle !== null });
+      const declaredChannel = req.task.attestation !== undefined || spec?.kind === 'bundle-identity';
       const runsFloor =
         report.outcome === 'pass' ||
         (report.outcome === 'fail' && executionMode === 'explore' && declaredChannel) ||
@@ -3815,7 +3829,6 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       let floor: AttestationFloorOutcome | null = null;
       let probe: HarnessAttestationResult | null = null;
       if (runsFloor) {
-        const spec = effectiveAttestationSpec(req.task);
         const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
         probe = identity.probe;
         floor = evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding);
