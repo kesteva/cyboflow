@@ -2772,6 +2772,11 @@ async function initializeServices(): Promise<boolean> {
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
+    // Direct step dispatch: the role's effective prompt (same layering as above).
+    resolveStepRole: (runId, agentKey) => {
+      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
+      return systemPrompt ? { systemPrompt } : undefined;
+    },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then

@@ -4,6 +4,7 @@ import type {
 } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowPrompt } from './workflowPromptReader';
+import type { StepDispatch } from './programmatic/stepDispatch';
 
 export type WorkflowPromptTurnKind = 'launch' | 'nudge' | 'resume' | 'programmatic-step';
 
@@ -15,6 +16,12 @@ export interface WorkflowPromptRenderContext {
   runtime: WorkflowRunStorableRuntime;
   executionModel?: ExecutionModel;
   turnKind?: WorkflowPromptTurnKind;
+  /**
+   * How a `programmatic-step` turn runs its role (programmatic/stepDispatch.ts).
+   * Only `direct` changes the rendering, and only for a provider with a
+   * {@link DIRECT_STEP_PROMPT_ENVELOPES} entry. Absent ⇒ delegated.
+   */
+  stepDispatch?: StepDispatch;
 }
 
 const DEFAULT_RENDER_CONTEXT: WorkflowPromptRenderContext = {
@@ -38,6 +45,25 @@ Provider adaptation rules:
 - When the workflow mentions Claude-specific mechanics such as \`.claude/agents/\`, the Agent tool, or a named \`cyboflow-*\` subagent, interpret that as a role/delegation instruction. Cyboflow registers each \`cyboflow-*\` role this run uses as a native Codex agent role that carries the role's instructions, so delegate with \`spawn_agent\` using the role's exact name as \`agent_type\` (for example \`agent_type: "cyboflow-code-review"\`). Do not fork your own context into the delegate: its instructions arrive with the agent type, so its message only needs the task-specific context the workflow says to hand it. Never substitute \`worker\`, \`explorer\`, or the name with the \`cyboflow-\` prefix stripped — none of them carries the role's instructions. If \`spawn_agent\` rejects a \`cyboflow-*\` agent type, perform that role's work directly in this turn while preserving the same returned sections and persistence contract.
 - A delegate must not write Cyboflow state even though Codex gives it the \`cyboflow_*\` tools — its role instructions already forbid that, and every Cyboflow write stays with you.
 - Continue to use the \`cyboflow_*\` MCP tools for workflow state. \`cyboflow_report_step\` is still required at the same step boundaries.
+- Human gates remain host-owned gates. Whenever the workflow says to use AskUserQuestion or request_user_input, call \`cyboflow_request_user_input\` with the same questions instead. This MCP call blocks until the human answers in Cyboflow; do not continue past the gate before it returns.
+- Do not create or read plugin state files. The Cyboflow database remains the single source of truth.
+
+---`;
+
+// The Codex adapter for a DIRECT programmatic step: the role's instructions are
+// already this thread's developer instructions, so the delegation rules above
+// would send the work to a second agent for no reason. `spawn_agent` cannot be
+// removed from Codex's tool list, so this instruction is the only thing keeping
+// a direct step single-agent.
+const CODEX_DIRECT_STEP_ENVELOPE = `# Runtime adapter: Codex
+
+You are running the same Cyboflow workflow semantics as the Claude runtime, but through Codex.
+
+Provider adaptation rules:
+
+- Treat the workflow step below as the source of truth for step ids, required outputs, database writes, artifacts, and human gates.
+- This step runs its \`cyboflow-*\` role DIRECTLY: the role's instructions are your developer instructions, and you do the role's work yourself in this turn. Do NOT call \`spawn_agent\` for this step's work, and do not hand it to any other agent.
+- Use the \`cyboflow_*\` MCP tools for workflow state. \`cyboflow_report_step\` is still required at the same step boundaries.
 - Human gates remain host-owned gates. Whenever the workflow says to use AskUserQuestion or request_user_input, call \`cyboflow_request_user_input\` with the same questions instead. This MCP call blocks until the human answers in Cyboflow; do not continue past the gate before it returns.
 - Do not create or read plugin state files. The Cyboflow database remains the single source of truth.
 
@@ -125,11 +151,24 @@ export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   pi: PI_WORKFLOW_ENVELOPE,
 };
 
+/**
+ * Envelopes that REPLACE {@link PROVIDER_PROMPT_ENVELOPES} for a direct
+ * programmatic step. Claude needs none (its envelope is null either way), and
+ * OMP / pi never run direct (stepDispatch.ts), so only Codex has an entry.
+ */
+export const DIRECT_STEP_PROMPT_ENVELOPES: Partial<Record<AgentProvider, string>> = {
+  codex: CODEX_DIRECT_STEP_ENVELOPE,
+};
+
 export function renderWorkflowPromptForRuntime(
   prompt: WorkflowPrompt,
   context: WorkflowPromptRenderContext = DEFAULT_RENDER_CONTEXT,
 ): WorkflowPrompt {
-  const envelope = PROVIDER_PROMPT_ENVELOPES[context.provider];
+  const directEnvelope =
+    context.turnKind === 'programmatic-step' && context.stepDispatch === 'direct'
+      ? DIRECT_STEP_PROMPT_ENVELOPES[context.provider]
+      : undefined;
+  const envelope = directEnvelope ?? PROVIDER_PROMPT_ENVELOPES[context.provider];
   if (envelope === null) {
     return prompt;
   }

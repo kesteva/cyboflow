@@ -50,6 +50,7 @@ import type { SolutionThoroughness } from '../../../../shared/types/thoroughness
 import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudgets';
 import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
 import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
+import type { StepDispatch } from './stepDispatch';
 
 /**
  * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
@@ -80,6 +81,13 @@ export interface ComposeStepPromptArgs {
    * scoped to exactly this item (do not touch other items).
    */
   item?: { id: string; over: string };
+  /**
+   * `direct` ⇒ this turn runs the step's role itself (programmatic/stepDispatch.ts):
+   * step 1 says do the work rather than delegate, and the sections that speak of
+   * "your subagent" are read as the turn's own work. Absent or `delegated` ⇒ the
+   * prompt is byte-identical to the delegated shape.
+   */
+  stepDispatch?: StepDispatch;
   /**
    * The sprint's task scope — the pre-rendered `# Sprint tasks` block BODY (the
    * SAME text the orchestrated `getPrompt` path prepends), resolved by the host
@@ -778,6 +786,7 @@ function composeAdversarialRevisionSection(
 
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   const { step, workflowName, attempt } = args;
+  const direct = args.stepDispatch === 'direct';
   const retryNote =
     attempt > 1
       ? `\n\nThis is **attempt ${attempt}** — a previous attempt at this step did not complete. Diagnose what went wrong and try again.`
@@ -788,7 +797,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     : '';
   const taskScope =
     args.taskScope !== undefined && args.taskScope.trim().length > 0
-      ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
+      ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list${direct ? '' : ' and pass it to your subagent'}; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
   const runOwnedIdeaIds = [...new Set(args.runOwnedIdeaIds?.filter((id) => id.trim().length > 0) ?? [])];
   const runOwnedIdeaScope =
@@ -891,7 +900,9 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   // into a live cyboflow_request_verification call + a self-parked lane). Both
   // observed on the first live run. This note overrides them for task-verify.
   const taskVerifyRelayNote =
-    step.agent === 'task-verify' || step.id === 'task-verify'
+    (step.agent === 'task-verify' || step.id === 'task-verify') && direct
+      ? `\n\n## Final message contract (task-verify) — overrides step 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly.\n\n- End your final message with your literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of a \`## Visual verification task\` section (a single \`\`\`json fence) or a bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line, exactly as your role instructions specify. Dropping these, or replacing them with a summary, is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT run a visual verification yourself. The controller fires the request from the fence you print and parks the lane itself.`
+      : step.agent === 'task-verify' || step.id === 'task-verify'
       ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
       : '';
   // Address-review findings contract (sprint/ship): this step is the ONLY one
@@ -1030,15 +1041,25 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
             : ''
         }`;
 
+  const doTheWork = direct
+    ? `1. **Do the work yourself.** You are running the \`cyboflow-${step.agent}\` role directly — its instructions are in your system instructions. Do NOT delegate this step's work to a subagent or any other agent. Persist every cyboflow state change via the \`cyboflow_*\` MCP tools, recording EVERY item your work produces that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge you identify; never collapse a non-empty result to "none". This does NOT mean filing context-only sections you produce for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer.`
+    : `1. **Do the work.** Delegate to the \`cyboflow-${step.agent}\` role. On the Claude runtime, use the Task tool with that EXACT \`subagent_type\` — it is installed in this worktree's \`.claude/agents/\`, so do NOT fall back to \`general-purpose\`. On another runtime, follow its provider adapter for the equivalent native delegation type. Pass the role the context it needs (including the task scope above when relevant) and read its result. Persist every cyboflow state change yourself via the \`cyboflow_*\` MCP tools, recording EVERY item the subagent returns that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge it reports; never collapse a non-empty result to "none". This does NOT mean filing context-only sections the subagent returns for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer; subagents are edit-only.`;
+  // Some sections below were written for the delegated shape and speak of "your
+  // subagent". Rather than fork every one of them, a direct turn gets one reading
+  // rule, placed before them.
+  const directReadingNote = direct
+    ? `\n\n## Reading the sections below\n\nThis step runs its role directly. Wherever a section below says "your subagent", "the \`cyboflow-${step.agent}\` subagent", or what that subagent returns, it means YOU and the output of your own work in this turn — produce those sections yourself, then do what the section says with them. An instruction not to delegate still applies.`
+    : '';
+
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
 Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${selectedFindings}${solutionThoroughness}${projectBrief}${designSurfaces}${runbookProposal}${approveRunbookResolution}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 
-1. **Do the work.** Delegate to the \`cyboflow-${step.agent}\` role. On the Claude runtime, use the Task tool with that EXACT \`subagent_type\` — it is installed in this worktree's \`.claude/agents/\`, so do NOT fall back to \`general-purpose\`. On another runtime, follow its provider adapter for the equivalent native delegation type. Pass the role the context it needs (including the task scope above when relevant) and read its result. Persist every cyboflow state change yourself via the \`cyboflow_*\` MCP tools, recording EVERY item the subagent returns that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge it reports; never collapse a non-empty result to "none". This does NOT mean filing context-only sections the subagent returns for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer; subagents are edit-only.
+${doTheWork}
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

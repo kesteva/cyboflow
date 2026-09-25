@@ -39,6 +39,12 @@ import { normalizeEffortSelection, type ReasoningEffort } from '../../../../shar
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { resolveStepSpawnTarget } from '../stepSpawnTarget';
 import {
+  composeDirectStepSystemPrompt,
+  DIRECT_STEP_DISALLOWED_TOOLS,
+  resolveStepDispatch,
+  type StepDispatchDecision,
+} from './stepDispatch';
+import {
   renderWorkflowPromptForRuntime,
   type WorkflowPromptRenderContext,
 } from '../workflowPromptRenderer';
@@ -248,6 +254,15 @@ export interface SpawnStepRunnerOptions {
    * Only the address-review step renders it.
    */
   bootstrapProtectedPaths?: () => readonly string[];
+  /**
+   * Per-step ROLE resolver for direct dispatch (programmatic/stepDispatch.ts):
+   * the step's canonical agent key → the role's EFFECTIVE system prompt (project,
+   * workflow and variant overrides layered in). Invoked once per `runStep`, like
+   * the resolvers above, so a mid-run agent edit reaches the next spawn. Absent,
+   * or returning undefined ⇒ the step stays delegated (byte-identical to before
+   * direct dispatch existed).
+   */
+  resolveStepRole?: (agentKey: string) => { systemPrompt: string } | undefined;
   resolveStepAgent?: (agentKey: string) =>
     | {
         runtime?: WorkflowAgentRuntime;
@@ -391,8 +406,35 @@ export class SpawnStepRunner implements StepRunner {
     const stepEffort = stepAgent?.effort
       ? normalizeEffortSelection(effortProvider, stepAgent.effort)
       : undefined;
+    // The runtime this step spawns on, and with it whether the step runs its role
+    // DIRECTLY or delegates it (stepDispatch.ts). A step with no canonical agent
+    // key (a human gate never reaches here) or no resolvable role stays delegated.
+    const spawnRuntime = stepRuntime ?? this.opts.promptRenderContext?.runtime ?? 'claude-sdk';
+    const role = agentKey ? this.opts.resolveStepRole?.(agentKey) : undefined;
+    const dispatch: StepDispatchDecision = agentKey
+      ? resolveStepDispatch({
+          workflowName: this.opts.workflowName,
+          stepId: step.id,
+          agentKey,
+          runtime: spawnRuntime,
+          roleSystemPrompt: role?.systemPrompt,
+        })
+      : { dispatch: 'delegated', reason: 'the step names no canonical agent' };
+    const directSystemPrompt =
+      dispatch.dispatch === 'direct' && agentKey && role
+        ? composeDirectStepSystemPrompt(agentKey, role.systemPrompt)
+        : undefined;
+    // One line per step whenever direct dispatch is wired, so the log says how each
+    // step ran and, when it stayed delegated, why. Unwired ⇒ silent, as before.
+    if (this.opts.resolveStepRole) {
+      this.logger?.info(
+        `[SpawnStepRunner] step '${step.id}' dispatch=${directSystemPrompt ? 'direct' : 'delegated'} runtime=${spawnRuntime}${dispatch.reason ? ` (${dispatch.reason})` : ''}`,
+        { runId: this.opts.runId, stepId: step.id },
+      );
+    }
     const basePrompt = composeStepPrompt({
       step,
+      ...(directSystemPrompt ? { stepDispatch: 'direct' as const } : {}),
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
@@ -443,6 +485,7 @@ export class SpawnStepRunner implements StepRunner {
       {
         ...renderCtx,
         turnKind: 'programmatic-step',
+        ...(directSystemPrompt ? { stepDispatch: 'direct' as const } : {}),
       },
     );
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
@@ -494,7 +537,15 @@ export class SpawnStepRunner implements StepRunner {
         // Constant across the run, so warm lane sessions never recycle over the
         // fingerprint; EMPTY for a run with no such step (the spawn seam drops an
         // empty list), so verify-setup's `prove` step can fire its own proof.
-        disallowedTools: [...(this.opts.disallowedTools ?? PROGRAMMATIC_STEP_DISALLOWED_TOOLS)],
+        disallowedTools: [
+          ...(this.opts.disallowedTools ?? PROGRAMMATIC_STEP_DISALLOWED_TOOLS),
+          // A direct Claude turn is denied the delegation tools; Codex cannot
+          // remove `spawn_agent`, so its direct envelope carries that rule.
+          ...(directSystemPrompt && effectiveProvider === 'claude' ? DIRECT_STEP_DISALLOWED_TOOLS : []),
+        ],
+        // The role's instructions + the direct-step addendum. Claude appends it to
+        // the system prompt; Codex sends it as the thread's developerInstructions.
+        ...(directSystemPrompt ? { systemPromptAppend: directSystemPrompt } : {}),
         ...(spawnModel ? { model: spawnModel } : {}),
         ...(stepProvider ? { agentProvider: stepProvider } : {}),
         ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),
