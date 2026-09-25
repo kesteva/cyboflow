@@ -29,9 +29,13 @@ describe('renderWorkflowPromptForRuntime', () => {
 
     expect(rendered.prompt).toContain('# Runtime adapter: Codex');
     expect(rendered.prompt).toContain('same Cyboflow workflow semantics');
-    expect(rendered.prompt).toContain('never pass a `cyboflow-*` name as `agent_type`');
-    expect(rendered.prompt).toContain('built-in `worker`');
-    expect(rendered.prompt).toContain('built-in `explorer`');
+    // The roles are registered as native Codex agent roles, so delegation names
+    // them exactly — never a generic built-in that carries no role instructions.
+    expect(rendered.prompt).toContain('agent_type: "cyboflow-code-review"');
+    expect(rendered.prompt).toContain('Never substitute `worker`, `explorer`');
+    // A role child inherits the cyboflow MCP server on Codex (a role file cannot
+    // close it), so the write boundary is stated rather than assumed.
+    expect(rendered.prompt).toContain('A delegate must not write Cyboflow state even though Codex gives it the `cyboflow_*` tools');
     expect(rendered.prompt.endsWith(BASE_PROMPT.prompt)).toBe(true);
     expect(rendered.systemPromptAppend).toBe(BASE_PROMPT.systemPromptAppend);
   });
@@ -92,8 +96,12 @@ describe('renderWorkflowPromptForRuntime', () => {
     const envelope = PROVIDER_PROMPT_ENVELOPES.omp;
 
     expect(envelope).not.toBeNull();
-    expect(envelope).toContain('NEVER pass a `cyboflow-*` name');
-    expect(envelope).toContain('with the prefix stripped');
+    // The roles live in OMP's own project-agent root, delegated by exact name…
+    expect(envelope).toContain('`.omp/agents/cyboflow-<role>.md`');
+    expect(envelope).toContain('using the role\'s exact name as the agent');
+    // …and nothing else that happens to answer to the name is ever adopted.
+    expect(envelope).toContain('NEVER pass the role name with the `cyboflow-` prefix stripped');
+    expect(envelope).toContain('NEVER substitute a bundled agent');
     expect(envelope).toContain('plugin cache');
   });
 
@@ -138,6 +146,14 @@ describe('renderWorkflowPromptForRuntime', () => {
     );
     expect(envelope, 'never resolve a role against the host roster').toContain(
       'never adopt an agent that merely shares the role',
+    );
+    // The pi manager writes the run's role files where the workflow says they
+    // are; pi reads the role's file instead of working from the name alone.
+    expect(envelope, 'pi reads the role file cyboflow wrote').toContain(
+      '`.claude/agents/cyboflow-<role>.md` in this worktree',
+    );
+    expect(envelope, 'the stale no-agent-files claim is gone').not.toContain(
+      'installs no agent files',
     );
     expect(envelope, 'pi has no cyboflow MCP surface').toContain(
       'The `cyboflow_*` MCP tools are NOT available on this runtime',
