@@ -409,6 +409,51 @@ function QuickSessionSummaryHistoryNode({
 }
 
 // ---------------------------------------------------------------------------
+// Summary & History skeleton — same 300px footprint as
+// QuickSessionSummaryHistoryNode, rendered while the summary fetch's initial
+// load is in flight (`useSessionSummary`'s `loading`). Reserves the node's
+// width up front so the layout doesn't shift once the real content (or
+// nothing, if the session has none) lands — see the QuickSessionCanvas
+// render below, which swaps this for the real node or drops it entirely.
+// Reuses the same border/background tokens as the real node plus the
+// existing `animate-pulse` convention (used elsewhere on this canvas for the
+// live-session dot) for the subtle pulse.
+// ---------------------------------------------------------------------------
+
+function QuickSessionSkeletonNode() {
+  return (
+    <div
+      aria-hidden
+      className="animate-pulse motion-reduce:animate-none"
+      style={{
+        width: 300,
+        flexShrink: 0,
+        background: 'var(--color-surface-primary)',
+        border: '1.4px solid var(--color-border-primary)',
+      }}
+      data-testid="quick-session-summary-history-skeleton"
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: '8px 12px',
+          background: 'var(--color-bg-secondary)',
+          borderBottom: '1px solid var(--color-border-primary)',
+        }}
+      >
+        <span style={{ width: 90, height: 9, background: 'var(--color-border-primary)' }} />
+      </div>
+      <div style={{ padding: '13px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <span style={{ width: '85%', height: 9, background: 'var(--color-border-primary)' }} />
+        <span style={{ width: '95%', height: 9, background: 'var(--color-border-primary)' }} />
+        <span style={{ width: '60%', height: 9, background: 'var(--color-border-primary)' }} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // QuickSessionCanvas
 // ---------------------------------------------------------------------------
 
@@ -420,7 +465,7 @@ export function QuickSessionCanvas({
   onAddWorkflowToNewSession,
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
-  const { summary: summaryPayload } = useSessionSummary(session.id);
+  const { summary: summaryPayload, loading: summaryLoading } = useSessionSummary(session.id);
   const [historyOpen, setHistoryOpen] = useState(true);
   // Reset the disclosure to its expanded-by-default state whenever the
   // canvas is handed a DIFFERENT session — without this, collapsing history
@@ -792,14 +837,22 @@ export function QuickSessionCanvas({
         )}
 
         {/* ── Canvas body — 24px graph-paper grid: session node → edge →
-            summary/history node → edge → add-workflow node ─────────────────── */}
+            summary/history node → edge → add-workflow node ───────────────────
+            Wraps (flexWrap) rather than scrolling horizontally forever on a
+            narrow pane: each [edge, node] pair below is grouped into its own
+            flex item so an edge never lands on a row by itself when a wrap
+            occurs — it always travels with the node it leads into. `rowGap`
+            gives wrapped rows breathing room; at full width nothing wraps and
+            the layout is pixel-identical to before. */}
         <div
           style={{
             position: 'relative',
             flex: 1,
             overflow: 'auto',
             display: 'flex',
+            flexWrap: 'wrap',
             alignItems: 'flex-start',
+            rowGap: 20,
             padding: '26px 30px',
             background:
               'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
@@ -974,8 +1027,11 @@ export function QuickSessionCanvas({
             </div>
           </div>
 
-          {(hasSummary || hasHistory) && (
-            <>
+          {(hasSummary || hasHistory) ? (
+            // Grouped into one flex item (edge + node) so flex-wrap never
+            // strands the dashed edge alone on a row — it wraps together
+            // with the node it leads into.
+            <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
               <QuickSessionEdge />
 
               {/* 2 · Summary & History node — hidden entirely (gated with its
@@ -988,12 +1044,22 @@ export function QuickSessionCanvas({
                 historyOpen={historyOpen}
                 onToggleHistory={() => setHistoryOpen((v) => !v)}
               />
-            </>
-          )}
+            </div>
+          ) : summaryLoading ? (
+            // Reserves the summary/history node's footprint (edge + 300px
+            // node) while the initial fetch is in flight, so the add-workflow
+            // node doesn't jump right once the real content resolves. Goes
+            // away entirely once loading settles with nothing to show.
+            <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
+              <QuickSessionEdge />
+              <QuickSessionSkeletonNode />
+            </div>
+          ) : null}
 
+          {/* 3 · Add-workflow node — grouped with its leading edge for the
+              same flex-wrap reason as above. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
           <QuickSessionEdge />
-
-          {/* 3 · Add-workflow node */}
           <div
             onMouseEnter={() => setAddHovered(true)}
             onMouseLeave={() => setAddHovered(false)}
@@ -1071,6 +1137,7 @@ export function QuickSessionCanvas({
                 {error}
               </p>
             )}
+          </div>
           </div>
         </div>
         </>
