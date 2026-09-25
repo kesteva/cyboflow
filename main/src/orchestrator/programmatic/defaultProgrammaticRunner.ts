@@ -55,6 +55,7 @@ import type {
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import { definitionMergesDecomposition } from './stepPrompt';
 import { composeDesignSurfaces } from './designSurfaces';
 import {
   isSolutionThoroughness,
@@ -901,6 +902,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
         ...(resolveStepRole ? { resolveStepRole } : {}),
+        ...(definitionMergesDecomposition(def) ? { mergedDecomposition: true } : {}),
       },
       this.deps.logger,
     );

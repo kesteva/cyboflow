@@ -210,6 +210,10 @@ work never done. The per-step stamps are called out below.
      is unknown until step 9. Report the step, then apply the **fallback epic**
      there: >1 task → ONE epic whose title is the idea's title (body: a one-line
      pointer to the idea); exactly 1 task → no epic.
+     **Exception — `tasks` absent from the appended step list:** this step is the
+     only one that decomposes, so DO delegate `cyboflow-epics` for the `small` idea
+     too, asking for no epics and its complete task list, then create those tasks
+     here per step 9's rules (fallback epic first, stamps).
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
    hints, parent epic/idea linkage).

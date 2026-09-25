@@ -263,6 +263,13 @@ export interface SpawnStepRunnerOptions {
    * direct dispatch existed).
    */
   resolveStepRole?: (agentKey: string) => { systemPrompt: string } | undefined;
+  /**
+   * The run's frozen definition merges task decomposition into `epics` (no
+   * `tasks` step) — normally `definitionMergesDecomposition(def)`. Captured at
+   * construction: the definition is frozen for the run. Absent/false ⇒ the
+   * `epics` prompt is byte-identical.
+   */
+  mergedDecomposition?: boolean;
   resolveStepAgent?: (agentKey: string) =>
     | {
         runtime?: WorkflowAgentRuntime;
@@ -436,6 +443,7 @@ export class SpawnStepRunner implements StepRunner {
       step,
       ...(directSystemPrompt ? { stepDispatch: 'direct' as const } : {}),
       workflowName: this.opts.workflowName,
+      ...(this.opts.mergedDecomposition ? { mergedDecomposition: true } : {}),
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),

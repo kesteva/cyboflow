@@ -44,13 +44,14 @@
  * is trivially testable. Human-gate steps never reach here (the controller
  * resolves them via the host's human-gate path, not the runner).
  */
-import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { DESIGN_SPEC_SECTION_HEADING, PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
 import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
 import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudgets';
 import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
 import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
 import type { StepDispatch } from './stepDispatch';
+import { flattenStepIds } from '../prompts/step-reporting-instructions';
 
 /**
  * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
@@ -88,6 +89,12 @@ export interface ComposeStepPromptArgs {
    * prompt is byte-identical to the delegated shape.
    */
   stepDispatch?: StepDispatch;
+  /**
+   * The run's definition has an `epics` step but no `tasks` step (the
+   * planner/ship Efficient preset merges task decomposition into `epics`) —
+   * see {@link definitionMergesDecomposition}. Absent/false ⇒ byte-identical.
+   */
+  mergedDecomposition?: boolean;
   /**
    * The sprint's task scope — the pre-rendered `# Sprint tasks` block BODY (the
    * SAME text the orchestrated `getPrompt` path prepends), resolved by the host
@@ -459,9 +466,9 @@ function ideaFlagContract(step: WorkflowStep): string {
  * starts one step earlier, at `context`, where the RESUME read happens. So the
  * two families are separate functions with separate headings, dispatched here.
  */
-function ideaLedgerContract(step: WorkflowStep, workflowName: string): string {
+function ideaLedgerContract(step: WorkflowStep, workflowName: string, mergedDecomposition: boolean): string {
   if (workflowName === 'launch') return launchIdeaLedgerContract(step);
-  if (workflowName === 'planner' || workflowName === 'ship') return planIdeaLedgerContract(step);
+  if (workflowName === 'planner' || workflowName === 'ship') return planIdeaLedgerContract(step, mergedDecomposition);
   return '';
 }
 
@@ -511,9 +518,12 @@ function launchIdeaLedgerContract(step: WorkflowStep): string {
  * started. Collapsing the middle case into the last one is the expensive mistake —
  * it throws away real work and burns a whole run redoing it.
  */
-function planIdeaLedgerContract(step: WorkflowStep): string {
+function planIdeaLedgerContract(step: WorkflowStep, mergedDecomposition: boolean): string {
   const H = '\n\n## Component ledger\n\n';
-  switch (step.id) {
+  // A merged-decomposition `epics` step creates the tasks, so it owns the
+  // `tasks` step's stamps — its own "defer to tasks" string would leave
+  // `epics`/`stories` unstamped with no later step to write them.
+  switch (step.id === 'epics' && mergedDecomposition ? 'tasks' : step.id) {
     case 'context':
       return `${H}Before you plan anything, call \`cyboflow_get_task\` on EVERY idea in scope and read its \`components\` block — the five-entry ledger (\`idea-spec\`, \`prototype\`, \`architecture\`, \`epics\`, \`stories\`). It records what earlier runs already did to this idea, and this flow re-enters ideas other runs have already worked. Read each entry's \`state\` AND its \`staleAt\`:\n\n- \`complete\` → settled work. Do NOT redo it, do NOT rewrite the body section it covers, and do not delegate a step whose only output would be that component again. Say in your summary which components you found settled.\n- \`incomplete\` with a non-null \`staleAt\` → prior work that EXISTS and needs RE-VERIFICATION, not a redo. Something changed underneath it (the \`staleReason\` says what). Read what is there, judge whether it still holds against the change, and adjust the parts that no longer do. Rewriting it from scratch throws away work a human may already have reviewed.\n- \`incomplete\` with \`staleAt\` null → genuinely not started. Plan it.\n- \`skipped\` → a deliberate "not applicable" declaration. Leave it skipped; never silently un-skip it by producing the component anyway.\n\nIf what you find means this run has materially less to do than its brief assumes — e.g. every component already reads \`complete\` — say so plainly in your summary rather than manufacturing work to fill the step.`;
     case 'expand-spec':
@@ -561,6 +571,32 @@ function decomposeEverything(step: WorkflowStep, workflowName: string): string {
   if (workflowName !== 'launch') return '';
   if (step.id !== 'ideas' && step.id !== 'expand-spec' && step.id !== 'tasks') return '';
   return `\n\n## Decompose everything approved\n\nEVERY approved idea gets the full treatment in THIS run — spec expansion and epic/task decomposition, all of them. Never narrow the set to save time, and never treat \`BUILD_ORDER\` as a cut line: it is a build sequence that decides what gets built first, never what gets planned. Work the ideas in \`BUILD_ORDER\`, and expect this to be the long part of the run — a 4-8 idea set means 4-8 expansions and 4-8 breakdowns, and that cost is the intended one. The ONLY ideas you skip are the ones the human DENIED at the approve-ideas gate; those stay on the backlog untouched. A run that plans a subset leaves a backlog that LOOKS planned, which is worse than one that visibly is not.`;
+}
+
+/**
+ * True when the definition keeps `epics` but drops `tasks` — the planner/ship
+ * Efficient preset's merged decomposition (shared/tuning/workflowTuning.ts).
+ */
+export function definitionMergesDecomposition(def: WorkflowDefinition): boolean {
+  const ids = flattenStepIds(def);
+  return ids.includes('epics') && !ids.includes('tasks');
+}
+
+/**
+ * Merged-decomposition contract for the planner/ship `epics` step, when the run
+ * has no `tasks` step.
+ *
+ * The flows' small-idea rule sends a `small` idea past `epics` untouched ("the
+ * task count is unknown until the tasks step"), and the epics role says it is
+ * never invoked for one. With `tasks` removed that leaves no step that creates a
+ * small idea's tasks: the run reached approve-plan with zero tasks and could
+ * only be rejected (live smoke, 2026-09-25, delegated and direct alike). Planner
+ * batches are all-small, so every Efficient planner batch hit it.
+ */
+function mergedDecompositionContract(step: WorkflowStep, workflowName: string, merged: boolean): string {
+  if (!merged || step.id !== 'epics') return '';
+  if (workflowName !== 'planner' && workflowName !== 'ship') return '';
+  return `\n\n## Task decomposition happens at THIS step\n\nThis run has no separate \`tasks\` step: its definition merged task decomposition into \`epics\`, so this step is the ONLY place the run's tasks get created. An idea you pass over here reaches the plan gate with no tasks, and the run cannot continue.\n\n- Decompose EVERY idea in scope into its tasks — a \`small\` idea included. For a \`small\` idea your subagent proposes NO epics, only the complete task list (title, body, acceptance criteria, and file/dependency hints per task). A \`large\` idea gets its epic breakdown AND the complete task list for every epic.\n- Create each task with \`cyboflow_create_task\` (\`task_type='task'\`, \`originating_idea_id\` = its idea). **Fallback epic first:** for an idea with no epic, count its tasks before creating any. More than one → create ONE epic (\`task_type='epic'\`, title = the idea's title, \`originating_idea_id\` = the idea) FIRST, and set \`parent_epic_id\` to it on every task. Exactly one → no epic.`;
 }
 
 /**
@@ -934,7 +970,9 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       : '';
   const conditionalExecutionNote = conditionalExecution(step, workflowName, runOwnedIdeaIds.length > 0);
   const ideaFlagContractNote = ideaFlagContract(step);
-  const ideaLedgerContractNote = ideaLedgerContract(step, workflowName);
+  const mergedDecomposition = args.mergedDecomposition === true;
+  const ideaLedgerContractNote = ideaLedgerContract(step, workflowName, mergedDecomposition);
+  const mergedDecompositionNote = mergedDecompositionContract(step, workflowName, mergedDecomposition);
   const ideaSizeGuardNote = ideaSizeGuard(step, workflowName, runOwnedIdeaIds.length);
   const decomposeEverythingNote = decomposeEverything(step, workflowName);
   const shipNoDesignForkNote = shipNoDesignFork(step, workflowName);
@@ -1061,5 +1099,5 @@ ${doTheWork}
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${mergedDecompositionNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }
