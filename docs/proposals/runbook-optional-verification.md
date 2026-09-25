@@ -103,6 +103,8 @@ These are unconditional bug fixes that ignore the switch:
   - **Port-mediated channels** (http-endpoint, dom-marker, cdp-token) reach `passed` only when the task carries `serve.cmd` and the full existing binding holds (port owner plus the verbatim command). Otherwise the verdict is capped at `low_confidence`. The binding steps still run and are recorded as evidence.
   - **`file-identity`**: unchanged.
   - **Mobile `bundle-identity`** that verifies may reach `passed`. The hash is harness-owned.
+  - **Serve binding alone** (decided 2026-09-25, after the live smoke). When the task declared no channel, `passed` is allowed if it composed a `serve.cmd` and the binding holds: the port's listener is in the process group the driver started, and that group runs the verbatim composed command. Without this, a runbook-less web deliverable could never pass. The accepted gap is a composed command that deliberately fronts another server. A foreign listener still fails, and an unbound serve stays capped. Pinned rows are unchanged.
+  - **Explore mobile** with no declared channel probes an implicit `bundle-identity` built from `app.bundleId`.
 
 #### A1.3 Levers in explore (F8, T-F4)
 - **Lever source.** With no pin, resolve the best record for (project, modality): proven, otherwise any `unproven-draft` of any origin. Pass **only its `levers`** to `resolveLeverEnv`, which already applies the name pattern, the deny list and harness-wins. Its build/serve reach the agent as hints in the EXPLORE block, together with its notes.

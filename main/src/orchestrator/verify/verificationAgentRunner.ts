@@ -1158,7 +1158,12 @@ export const ATTESTATION_EXPLORE_CAP_MESSAGE = 'explore mode — capped at low_c
 /** What the floor decided about a report's identity proof. */
 export type AttestationFloorOutcome =
   /** The declared channel was probed and matched (or is true by construction). */
-  | { kind: 'verified'; channel: AttestationSpec['kind']; detail: string }
+  /**
+   * `serve-binding` is EXPLORE-only (§A1.2, relaxed 2026-09-25): no channel was
+   * declared, but the kernel-truth binding held — the port's listener is in the
+   * process group the driver started for the VERBATIM composed `serve.cmd`.
+   */
+  | { kind: 'verified'; channel: AttestationSpec['kind'] | 'serve-binding'; detail: string }
   /** A channel WAS declared but the harness's own probe did not verify it. */
   | { kind: 'missing'; detail: string }
   /** No channel was declared at all — the pass is advisory, capped at low_confidence. */
@@ -1334,6 +1339,23 @@ export function serveBindingTarget(
     probedPort: attach ? ports.driverPort : ports.verifyPort,
     portLever: ports.verifyPort,
   };
+}
+
+/**
+ * The explore binding-only target (§A1.2): a COMPOSED serve.cmd bound on the
+ * port the serve answers on (the driver port for an attach-mode task), with no
+ * channel involved. `null` when nothing was composed or there is no port.
+ */
+export function serveBindingOnlyTarget(
+  task: VerificationTaskV1,
+  ports: { verifyPort: number | null; driverPort: number | null },
+): { serveCmd: string; probedPort: number | null; portLever: number | null } | null {
+  const rawServeCmd = task.serve?.cmd;
+  const serveCmd = typeof rawServeCmd === 'string' && rawServeCmd.trim().length > 0 ? rawServeCmd.trim() : null;
+  if (serveCmd === null) return null;
+  const probedPort = task.serve?.attach === 'cdp' ? ports.driverPort : ports.verifyPort;
+  if (probedPort === null) return null;
+  return { serveCmd, probedPort, portLever: ports.verifyPort };
 }
 
 /**
@@ -1607,9 +1629,22 @@ export function evaluateAttestationFloorForMode(
   if (binding !== null && !binding.bound && binding.foreignListener !== undefined) {
     return { kind: 'foreign', detail: `${SERVE_BINDING_FAILED_PREFIX} [${binding.failure}]: ${binding.detail}` };
   }
+  // No declared channel: the binding ALONE vouches for the surface when it holds
+  // against a composed serve.cmd. What it cannot rule out is a composed command
+  // that deliberately fronts another server — accepted so a runbook-less web
+  // deliverable can pass at all (runbooks accelerate, never gate).
+  if (spec === null) {
+    const serveCmd = task.serve?.cmd;
+    const composedServe = typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+    if (composedServe && binding !== null && binding.bound) {
+      return { kind: 'verified', channel: 'serve-binding', detail: `serve-binding: ${binding.detail}` };
+    }
+    return base;
+  }
   if (base.kind !== 'verified') return base;
   switch (base.channel) {
     case 'bundle-identity':
+    case 'serve-binding':
       return base;
     case 'file-identity':
       // NOT `capped`: `capped` means the harness DID verify something it cannot
@@ -2783,16 +2818,16 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
    */
   private async bindServeIdentity(
     req: VerificationAgentRequest,
-    spec: AttestationSpec,
+    /** `null` = the explore binding-only case: a composed serve on the leased port. */
+    spec: AttestationSpec | null,
     executionMode: VerificationExecutionMode,
     logger: LoggerLike | undefined,
   ): Promise<{ binding: ServeBindingResult; composed: boolean } | null> {
-    const target = serveBindingTarget(
-      req.task,
-      spec,
-      { verifyPort: req.verifyPort, driverPort: req.verifyDriverPort },
-      { explore: executionMode === 'explore' },
-    );
+    const ports = { verifyPort: req.verifyPort, driverPort: req.verifyDriverPort };
+    const target =
+      spec === null
+        ? serveBindingOnlyTarget(req.task, ports)
+        : serveBindingTarget(req.task, spec, ports, { explore: executionMode === 'explore' });
     if (target === null) return null;
     const result = await checkServeIdentityBinding({
       artifactsDir: req.artifactsDir,
@@ -2837,7 +2872,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     attestNonce: string,
     logger: LoggerLike | undefined,
   ): Promise<{ probe: HarnessAttestationResult | null; binding: ServeBindingResult | null }> {
-    if (spec === null || spec.kind === 'file-identity') return { probe: null, binding: null };
+    if (spec === null) {
+      // §A1.2 explore: no channel to probe, but the binding still answers "is
+      // the port's listener this task's own verbatim serve?" — the floor lets it
+      // vouch alone. Pinned/legacy never bind without a declared channel.
+      if (executionMode !== 'explore') return { probe: null, binding: null };
+      const bound = await this.bindServeIdentity(req, null, executionMode, logger);
+      return { probe: null, binding: bound?.binding ?? null };
+    }
+    if (spec.kind === 'file-identity') return { probe: null, binding: null };
     // (d2a) SERVE-IDENTITY BINDING — a PRECONDITION of the channel probe, not a
     // second opinion on it. The nonce proves a surface knows this request's
     // secret; the agent knows that secret too and chooses what the driver

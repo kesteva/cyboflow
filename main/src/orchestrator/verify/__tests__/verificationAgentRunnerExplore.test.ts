@@ -1498,3 +1498,42 @@ describe('VerificationAgentRunner.run — wrong_environment the engine could nev
     expect(result.redispatch).toEqual({ modality: 'mobile', app: APP, diagnosis: 'an iOS app' });
   });
 });
+
+describe('VerificationAgentRunner.run — explore web with NO declared channel (serve-binding)', () => {
+  const noChannel = (overrides: Partial<VerificationTaskV1> = {}) =>
+    makeTask({ attestation: undefined, serve: { cmd: SERVE_CMD }, ...overrides });
+
+  it('a bound composed serve lets an explore pass reach passed, without probing any channel', async () => {
+    const { runner, attest } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel() }));
+    expect(attest).not.toHaveBeenCalled();
+    expect(result.status).toBe('passed');
+  });
+
+  it('a FOREIGN listener on the port fails the explore pass', async () => {
+    const { runner } = makeRunner(foreignListener);
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel() }));
+    expect(result.status).toBe('failed');
+    expect(result.foreignSurface).toBe(true);
+  });
+
+  it('an unbound serve (nothing recorded) stays capped at low_confidence', async () => {
+    const { runner } = makeRunner();
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel() }));
+    expect(result.status).toBe('low_confidence');
+  });
+
+  it('a task that composed no serve.cmd stays capped at low_confidence', async () => {
+    const { runner } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(
+      makeReq({ executionMode: 'explore', task: makeTask({ attestation: undefined, target: { url: 'http://127.0.0.1:1/' } }) }),
+    );
+    expect(result.status).toBe('low_confidence');
+  });
+
+  it('pinned keeps the old rule: no declared channel caps even with a bound serve', async () => {
+    const { runner } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(makeReq({ executionMode: 'pinned', task: noChannel() }));
+    expect(result.status).toBe('low_confidence');
+  });
+});
