@@ -1,8 +1,28 @@
 # SDK workflow efficiency — complete usage accounting, scoped Codex tools, direct programmatic steps
 
-Status: PROPOSED, revision 3 (2026-09-25).
+Status: PROPOSED, revision 4 (2026-09-25).
 
-Revision 3 folds in a Codex review of revision 2 (4 blocking, 7 should-fix, 4 nits):
+Revision 4 folds in a second Codex review, of revision 3 (8 blocking, 5 should-fix, 1 nit):
+- Codex turns are linked to invocations from now on (`agent_invocations.codex_turn_id`); past
+  runs get a separate run-level key and `codex-run-level` coverage;
+- a lane's client and raw sink stay alive through the drain, without delaying the lane;
+- unattributed and top-up usage go to their own counted rows, so nothing is dropped or
+  counted twice;
+- the `total` fallback settles at process scope, not at turn end;
+- Claude process segments are recorded at ingestion (`process_instance_id`); past runs are
+  marked `claude-segments-inferred`;
+- the outer Claude split uses parentless assistant messages only, and §13 uses the §5.2 formula;
+- the fold reads `dedup_key` and applies an exhaustive source matrix gated by
+  `accounting_version`;
+- Codex child rows carry the child's model;
+- the backfill runs per run in a transaction, before the rollup rebuild, with a marker written
+  last;
+- the step address is carried at runtime and stored per invocation, and Claude gets invocation
+  rows;
+- a config change on warm reuse restarts the app-server process;
+- sibling-lane edits are reported, not reverted, until a path-claim protocol exists.
+
+Revision 3 folded in a Codex review of revision 2 (4 blocking, 7 should-fix, 4 nits):
 - descendant usage is now disjoint from the root `agent_result`;
 - the backfill is a real backfill with a coverage record, not a delete;
 - child threads get inherited configuration plus an audit, not a pre-start gate;
@@ -315,6 +335,10 @@ Direct mode must reproduce these interventions in the controller (§8.6).
   - the `tools` option with a role's tool list plus `mcp__cyboflow__*`;
   - `Options.agent = 'cyboflow-<key>'`, checking system-prompt layering, model precedence over
     `Options.model`, and whether the agent can reach the Cyboflow MCP server.
+
+  The same probe also checks, for Increment 1, whether a warm process emits `system/init` once
+  per process or once per query. That decides whether past Claude runs can be segmented on
+  `system/init` (§5.2 1b).
 - **Codex child-inheritance probe.** This blocks Increments 2c and 3. It checks two things about a
   forked `spawn_agent` child:
   - whether it inherits the parent thread's `developerInstructions` (for 2c);
@@ -323,6 +347,8 @@ Direct mode must reproduce these interventions in the controller (§8.6).
     first request (§7.3), so inherited configuration is the only structural protection a child
     gets. If children do not inherit it, Increment 3's child coverage shrinks to an audit, and
     the proposal must say so.
+  - which spawn or thread-start field carries a child's effective model (for Increment 1's
+    per-model attribution, §5.2).
 - **Codex version.** Every protocol claim here was verified on 0.153.3. An upgrade to 0.156.1 is
   in progress on another branch. Whichever version lands first, re-run the model-free probes and
   the protocol-shape test (§5.2) against it before building on them.
@@ -415,30 +441,69 @@ The accumulator gets two read methods in place of today's single `snapshot()`:
 The two outputs are disjoint by construction. `agent_result` stays root-only, as it is today
 because `TurnSession` filters child events, so no descendant token is ever counted in both.
 
+**Invocation ↔ Codex turn link.** A warm root thread serves several invocations, and today
+nothing records which Codex turn belonged to which invocation: `agent_invocations` stores the
+thread id (`external_session_id`) but no turn id (`agentInvocationStore.ts:15`, `:60`), and the
+stored notifications carry thread and turn ids but no invocation id. Add a nullable
+`codex_turn_id` column to `agent_invocations`, written when `turn/start` returns. From then on,
+any stored notification can be mapped (run, thread, turn) → invocation. Past runs have no such
+link; 1d handles them separately.
+
 **Descendant rows.**
 - Each descendant gets one cumulative row, upserted under a stable Codex-namespaced dedup key
   `codex-subagent:<invocationId>:<threadId>`. This uses the existing `subagent_usage` upsert
-  (`persistSubagentUsage`, `shared/streamParser/rawEventsSink.ts:110`). The namespace keeps these
-  rows apart from the dynamic-workflow producer's `subagent:<wfRunId>:<agentId>` rows, which 1b
-  treats differently.
-- The payload uses the nested `message.usage` shape that Insights already reads.
+  (`persistSubagentUsage`, `shared/streamParser/rawEventsSink.ts:110`).
+- The payload uses the nested `message.usage` shape that Insights already reads, and it carries
+  `message.model`. The fold takes model attribution from that field (`insightsQueries.ts:672`),
+  and a child may run on a different model or effort from its parent.
+- **Child model.** The registry records each child's model from the spawn or thread-start
+  metadata. The Increment 0 child-inheritance probe must name the field that carries it. When no
+  authoritative model is available, the row uses the parent's model, sets
+  `model_inferred: true`, and the run's coverage is downgraded (1d).
+- A key namespace alone changes nothing: today's fold sums every `subagent_usage` row and never
+  reads `dedup_key` (`insightsQueries.ts:652-692`, and the daily path at `:2681-2723`). 1b makes
+  both rollups read it.
 
 **Descendant ownership.** Ownership cannot hang off `entry.currentContext`. That context is
-valid only during the logical turn, and terminal cleanup clears it (`codexSdkManager.ts:1109`).
+valid only during the logical turn, and terminal cleanup clears it (`codexSdkManager.ts:1110`).
 Instead, the warm entry keeps a **descendant registry**:
 - It maps a child `threadId` to the owning invocation and lane.
 - A thread is registered from `spawnAgent.receiverThreadIds` or
   `subAgentActivity(kind=started).agentThreadId`.
 - Registration is transitive, so a grandchild belongs to the same lane.
 
-**Late responses.**
-- On root terminal, the manager writes each descendant's row.
-- The registry then stays open for a bounded drain, which ends at whichever comes first: the
-  client stopping (single-shot lanes) or 30 seconds. A response arriving during the drain
-  re-upserts that descendant's row.
-- A response arriving after the drain, or from an unregistered thread, is recorded as a
-  `descendant_usage_unattributed` diagnostic that carries its token counts. It is never
-  silently dropped.
+**Drain before teardown.** Today a lane closes its client in the same `finally` block that
+handles the root terminal. Lanes are never warm-eligible (`codexSdkManager.ts:624-626`), so the
+`finally` calls `closeWarmEntry`, which calls `client.stop()` (`:1110-1129`, `:1214-1235`), and
+the raw sink is disposed right after. A late child response has nowhere to arrive. The order
+becomes:
+
+1. On root terminal, resolve the step's outcome to the controller as today. The lane is **not**
+   delayed.
+2. Write each registered descendant's row.
+3. Keep the client, the raw notification sink and the registry alive for a bounded drain. The
+   drain ends when every registered descendant has reported a terminal state and no response is
+   pending, or after 30 seconds, whichever comes first. A response during the drain re-upserts
+   its descendant's row.
+4. Then settle the fallback (below), stop the client and dispose the sink.
+
+Other endings:
+- **Cancellation** interrupts the turn and stops the client immediately, with no drain. Nothing
+  can arrive after the client stops, and everything received before it is already counted.
+  The run is marked as a canceled run in evaluation anyway.
+- **App shutdown** settles whatever has been received and stops every client, as cancellation
+  does.
+- **A warm parked entry** (not a lane) keeps its client after the drain. A response that
+  arrives after its drain goes to the unattributed row.
+
+**Unattributed usage is counted, once.** A response from a thread that was never registered, or
+that arrives after its owner's drain, goes to a separate additive row,
+`codex-unattributed:<runId>:<threadId>`, with the `descendant_usage_unattributed` diagnostic. The
+fold counts this row (1b), so run totals stay exact and only per-invocation attribution is
+lost. A thread's usage never moves between keys. Responses from a not-yet-registered thread are
+buffered on the entry; if the thread registers before the drain ends they go to its owner's
+row, and only what is still unregistered at drain end is written to the unattributed row. Once
+written there, a thread's usage stays there, so it is never in both.
 
 **Fallback from `thread/tokenUsage/updated`.** The primary source is `rawResponse/completed`.
 The fallback fills gaps in it request by request, not thread by thread:
@@ -450,17 +515,22 @@ The fallback fills gaps in it request by request, not thread by thread:
    process is compared against the first turn's last reading, not against zero.
 2. **Count only updates that moved `total`.** An update whose `total` equals the baseline is a
    duplicate emission and is skipped. This is defect A2.
-3. **Pair updates with responses.** Each counted update's `last` is one request's usage, so it
-   has a matching `rawResponse/completed.usage`. At turn end (and again at drain end), pair them
-   with a multiset match on all token fields. This doesn't depend on which arrived first.
-4. **Top up only for missing responses.** A counted update with no matching response means that
-   response was never delivered, or arrived with `usage: null`. Add its `last` to the thread's
-   total and log `response_usage_missing`.
+3. **Pair updates with responses, at process scope.** Each counted update's `last` is one
+   request's usage, so it has a matching `rawResponse/completed.usage`. Unmatched updates and
+   unmatched responses are kept per (process, thread) across logical turns. They are **not**
+   settled at turn end, because an update can arrive in one turn and its response in the next.
+   Pairing is a multiset match on all token fields, so it does not depend on arrival order and
+   handles identical-usage requests.
+4. **Top up only at settlement.** Settlement happens when the process's client stops (after the
+   drain, on cancellation, or on warm-entry close). An update still unmatched then means its
+   response never arrived or had `usage: null`. Its `last` goes to a separate additive row,
+   `codex-usage-topup:<runId>:<threadId>`, and `response_usage_missing` is logged. Top-ups never
+   modify `agent_result` or a descendant row, so they cannot be counted twice.
 
 If no responses arrive at all, this reduces to today's behavior without the duplicates.
 `total(end) − total(start)` is only a cross-check. When it differs from the stored figure for
-reasons other than the known ones (compaction, spill across a turn boundary), log
-`oracle_mismatch`; never use it as the stored value.
+reasons other than the known ones (compaction), log `oracle_mismatch`; never use it as the
+stored value.
 
 **Protocol guards.**
 - **Drift diagnostic.** Log loudly when a turn has `tokenUsage` snapshots but no
@@ -477,83 +547,125 @@ reasons other than the known ones (compaction, spill across a turn boundary), lo
 Replace the per-run `assistantMessageCount === 0` condition with a single shared function.
 `scanRawEventRollups`, `selectDailyModelUsage` and the daily model buckets all call it, so they
 cannot drift apart again. It lives in a new file next to `insightsQueries.ts`, which is 3,122
-lines.
+lines. Both rollup queries must read each row's `dedup_key` and each assistant event's
+`parent_tool_use_id`, which they do not today.
 
 Each token comes from exactly one source:
 
 | Provider | Tokens counted from | Also read, for attribution and checks only |
 | --- | --- | --- |
-| Claude, outer agent | `result.usage`, per query | deduplicated assistant messages (§1c) |
-| Claude, children | Δ`modelUsage` − `result.usage`, per query, within one process segment | Task/Agent `tool_use`; dynamic-workflow `subagent:` rows |
+| Claude, outer agent | `result.usage`, per query | parentless deduplicated assistant messages (1c) |
+| Claude, children | Δ`modelUsage` − `result.usage`, per query, within one process segment | Task/Agent `tool_use`; parented assistant messages; dynamic-workflow `subagent:` rows |
 | Codex, root thread | `agent_result` | — |
-| Codex, descendants | `codex-subagent:` `subagent_usage` rows | — |
+| Codex, descendants | `codex-subagent:` rows | — |
+| Codex, unattributed | `codex-unattributed:` rows | — |
+| Codex, missing responses | `codex-usage-topup:` rows | — |
 | OMP, pi, other | their existing `agent_result` / `subagent_usage` sources, unchanged | — |
+
+The source matrix is exhaustive and applies only to runs whose `accounting_version` is current.
+Rows under an older version keep the legacy fold, so an un-backfilled run is never re-counted
+under the new rules.
 
 Rules for the Claude child formula:
 
-- **Segments.** A process segment is one SDK process within one (run, session). A new segment
-  starts on the first reading, and whenever any `modelUsage` counter goes down. Reuse the
-  reset detection the cost fold already does (`insightsQueries.ts:723`).
+- **Segments.** A process segment is one SDK process. The rollup cannot infer this reliably:
+  result events carry `session_id` but no process identity (`shared/types/claudeStream.ts:241`),
+  cold resumes reuse the session id (`claudeCodeManager.ts:2056`, `:2247-2305`), and a
+  restarted process can pass the previous process's totals before its first stored result, so
+  no counter need go down. So **record the segment at ingestion**:
+  `claudeCodeManager` mints a `process_instance_id` for each SDK process it spawns and stamps it
+  on every stored event from that process. Segments are then exact for new runs.
+- **Past runs.** Segment on stored `system/init` events, with a counter decrease as a second
+  signal. This is a heuristic; the existing reset handling in the cost fold
+  (`insightsQueries.ts:723-741`) is a conservative cost-and-output check, not an exact segment
+  detector. Before relying on `system/init`, the Increment 0 Claude SDK probe must confirm
+  whether a warm process emits one per process or one per query. Past Claude runs get
+  `claude-segments-inferred` coverage (1d).
 - **First reading.** The first reading in a segment counts from zero.
 - **Negative result.** If Δ`modelUsage` − `result.usage` comes out negative, clamp that token
   type to 0 and log `claude_child_delta_negative`.
 - **Missing `modelUsage`.** A result with no `modelUsage` contributes zero child tokens and logs
   `claude_model_usage_missing`.
 - **Per-model split.** Take it from Δ`modelUsage` for each model. The outer's own per-model
-  figures come from deduplicated assistant messages.
+  figures come from parentless deduplicated assistant messages (1c).
 - **Dynamic-workflow rows.** Rows from `dynamicWorkflowTracker` run inside the same Claude
   process, so `modelUsage` already contains them. In Claude runs they become attribution-only.
   Today's fold adds them unconditionally. Check whether it also counts the same work through
   forwarded child assistant rows; if so, that is a further double count, and 1b removes it.
 
-**1c — Deduplicate Claude assistant messages.**
+**1c — Deduplicate Claude assistant messages, and separate outer from child.**
 
 - Count each (session, `message.id`) once.
-- These messages are no longer a token source (1b). They supply message counts and the outer
-  agent's per-model split.
-- They also give a check: summing the deduplicated outer messages should come close to
+- Assistant events carry `parent_tool_use_id` (`shared/types/claudeStream.ts:173`). A non-null
+  value marks a forwarded sub-agent message (`shared/streamParser/messageProjection.ts:315-362`),
+  and the sink stores these unchanged (`rawEventsSink.ts:182-192`). Only **parentless** messages
+  describe the outer agent.
+- Messages are no longer a token source (1b). Parentless ones supply the outer's message count
+  and per-model split; parented ones are attribution for children.
+- They also give a check: summing the deduplicated parentless messages should come close to
   `result.usage`. A large gap logs `claude_outer_mismatch`.
 
 **1d — Backfill past runs, and record how complete each run's accounting is.**
 
 Deleting `run_usage` rows, as migration 132 did, is not enough. The boot rebuild runs the fold
-over `raw_events`, and past runs have no `codex-subagent:` rows for the fold to find. The
-backfill has four parts.
+over `raw_events`, and past runs have no `codex-subagent:` rows for the fold to find.
 
-1. **Schema migration.** Take the next free number (145 when this was written). Add
-   `accounting_version INTEGER` and `coverage TEXT` to `run_usage`, update `schema.sql`, and
-   extend the writer in `runUsageRollup.ts:129`, which today inserts only nine fields.
+1. **Schema migration.** Take the next free number (145 when this was written).
+   - Add `accounting_version INTEGER NOT NULL DEFAULT 0` and
+     `coverage TEXT NOT NULL DEFAULT 'legacy'` to `run_usage`, with a `CHECK` on the coverage
+     values. The defaults label every existing row explicitly.
+   - Add `codex_turn_id` (1a) and, for Increment 4, the columns in §8.3, to
+     `agent_invocations` in the same or a following migration.
+   - Update `schema.sql`, and extend the writer in `runUsageRollup.ts:129`, which today inserts
+     only nine fields.
 
    | `coverage` | Meaning |
    | --- | --- |
-   | `complete` | every token source for the run was available |
+   | `complete` | every token source was available and attributed per invocation |
+   | `codex-run-level` | Codex run totals are complete, but descendant usage is attributed to the run and root turn, not to an invocation |
+   | `codex-model-inferred` | some Codex child rows use the parent's model |
+   | `claude-segments-inferred` | Claude process segments were inferred from `system/init` and resets |
    | `codex-root-only` | Codex descendants could not be reconstructed |
    | `legacy` | written before this change and not recomputed |
 
-2. **One-shot boot backfill.** This runs in TypeScript next to `backfillRunUsageRollups`
-   (`runRecovery.ts:924`), guarded by a completion marker. For each run with
-   `codex_app_server_notification` rows, it:
-   - replays the stored `rawResponse/completed` and spawn notifications through the same
-     registry and pairing code as 1a;
-   - writes the `codex-subagent:` rows using the same upsert keys that live code uses, so
-     re-running it is harmless;
-   - deletes the run's `run_usage` row so the existing boot rollup rebuilds it with the new
-     fold.
+   A run with several limitations gets the most severe, in the table's order from bottom to
+   top. The rollup writer records the value together with the current `accounting_version`.
 
-   Claude runs need no new rows, only the delete, because 1b recomputes them from stored
-   `result` and `modelUsage` payloads.
+2. **Historical key.** Past runs have no invocation ↔ turn link (1a), so replay cannot produce
+   the live `codex-subagent:<invocationId>:<threadId>` key. It writes
+   `codex-subagent-run:<runId>:<rootThreadId>:<rootTurnId>:<threadId>` instead, using the thread
+   and turn ids the stored spawn notifications carry. These rows count exactly like live
+   descendant rows in 1b, and the run is marked `codex-run-level`.
 
-3. **Runs before 2026-09-14T19:51Z.** These have no `rawResponse/completed`. Their descendant
+3. **One-shot boot backfill.** This is TypeScript that runs before `backfillRunUsageRollups`
+   (called from `index.ts:4160-4172`; defined at `runRecovery.ts:921-982`). For each run with
+   `codex_app_server_notification` rows, in one transaction per run:
+   - replay the stored `rawResponse/completed` and spawn notifications through the same registry
+     and pairing code as 1a (both kinds are persisted; only the two delta methods are dropped,
+     `rawNotificationSink.ts:12-46`);
+   - write the historical rows with their upsert keys, so re-running is harmless;
+   - recompute and write that run's `run_usage` row with the new fold, coverage and version;
+   - record the run in a per-run progress table.
+
+   Claude runs need no new rows, only the recompute, because 1b works from stored `result`,
+   `modelUsage` and assistant payloads.
+
+   The completion marker is written only after every run has succeeded. A failure is logged and
+   leaves that run's old row and the marker untouched, so the next boot resumes from the
+   progress table. No run is left with a deleted rollup.
+
+4. **Runs before 2026-09-14T19:51Z.** These have no `rawResponse/completed`. Their descendant
    `tokenUsage/updated` notifications were kept only last-write-wins per (run, turn), so they
    cannot be summed. They are rebuilt root-only and marked `codex-root-only`.
 
-4. **Daily buckets** read `raw_events` through the shared fold, so they pick up the backfilled
+5. **Daily buckets** read `raw_events` through the shared fold, so they pick up the backfilled
    rows without a separate step.
 
 Two things are deliberately not changed:
 - Historical root `agent_result` payloads are not rewritten. Their roughly 0.4% duplicate-update
   overcount stays, and it is documented.
-- Runs with no `raw_events` keep their stored value, following migration 132's rule.
+- Runs with no `raw_events` keep their stored value and stay `legacy`, following migration
+  132's rule.
 
 **1e — Fix the comment.**
 
@@ -571,8 +683,11 @@ a revert.
 - a repeated `responseId` adds 0;
 - `rootSnapshot()` excludes descendants, and `descendantSnapshots()` excludes the root;
 - a duplicate `tokenUsage/updated` with unchanged `total` and non-zero `last` adds 0;
-- partial delivery: 3 counted updates and 2 responses tops up exactly the unmatched `last`;
+- partial delivery: 3 counted updates and 2 responses tops up exactly the unmatched `last`, into
+  the `codex-usage-topup:` row;
 - null `usage` on a response is topped up from its update;
+- an update in turn A whose response arrives in turn B is matched, not topped up;
+- two requests with identical usage, one response missing, top up exactly one;
 - a second turn on the same warm process is baselined against the first turn's last `total`;
 - a new process starts each thread's baseline at 0;
 - compaction requests are counted;
@@ -583,36 +698,50 @@ a revert.
   `codex-subagent:` rows.
 - Each row is correct on its own, and the three add up to the lane's
   `rawResponse/completed.usage` total with no overlap.
-- A child response that arrives after root terminal but within the drain updates its row.
-- A response after the drain produces `descendant_usage_unattributed`.
+- The step outcome resolves at root terminal, before the drain ends.
+- The client is not stopped until the drain ends; a child response that arrives after root
+  terminal but within the drain updates its row.
+- An unregistered thread's usage lands in `codex-unattributed:` and is counted in `run_usage`.
+- Cancellation stops the client with no drain.
+- A child row carries the child's model; with no model metadata it carries the parent's model
+  and `model_inferred`.
+- The invocation row records `codex_turn_id`.
 
 **Protocol shape:**
 - `rawResponse/completed` is pinned against the generated types.
 
 **Rollups:**
 - In a mixed claude-primary fixture, `run_usage` equals Claude (outer plus child) plus Codex
-  root plus Codex descendants, and equals the sum of the daily buckets.
+  root, descendants, unattributed and top-ups, and equals the sum of the daily buckets.
 - Multi-block assistant messages are counted once, and never as tokens.
-- Claude cases: a `modelUsage` reset within one (run, session) starts a new segment; a negative
-  child delta clamps and logs; a result with no `modelUsage` logs.
+- Parented assistant messages never enter the outer per-model split.
+- Claude cases: a new `process_instance_id` starts a new segment; a restarted process whose
+  first reading is above the previous totals still starts a new segment; a negative child delta
+  clamps and logs; a result with no `modelUsage` logs.
 - A Claude run with dynamic-workflow `subagent:` rows is not double-counted.
+- A run at an older `accounting_version` is folded with the legacy rules.
 
 **Backfill:**
 - Running it twice gives the same rows.
+- A failure midway leaves the failed run's old row and no completion marker, and the next boot
+  finishes it.
+- A post-boundary Codex run is marked `codex-run-level` and uses the historical key.
 - A run before the boundary is marked `codex-root-only`.
-- Runs with no `raw_events` are untouched.
+- Runs with no `raw_events` are untouched and read `legacy`.
 - The daily buckets for a backfilled run match its `run_usage`.
 
 ### 5.4 Acceptance
 
-- For new Codex runs, stored input and output per lane (root plus descendants) equals the sum of
-  `rawResponse/completed.usage` exactly.
+- For new Codex runs, stored input and output per run (root, descendant, unattributed and
+  top-up rows) equals the sum of `rawResponse/completed.usage` exactly, and per lane when no
+  unattributed row exists.
 - For the audit window, the backfill reproduces two figures within 0.5%. The historical 0.4%
   root overcount fits inside that tolerance.
   - Codex: §1.2's 816.9M input and 3.39M output, minus the one quick-chat root.
   - Claude: §1.3's outer and child totals.
 - Mixed runs show both providers in `run_usage` and in the daily model buckets.
-- Every `run_usage` row carries `accounting_version` and `coverage`.
+- Every `run_usage` row carries `accounting_version` and `coverage`, and only `complete` rows are
+  used for per-invocation comparisons in §8.7.
 
 ## 6. Increment 2 — fixes to the delegated path
 
@@ -623,7 +752,8 @@ point for Increment 4, called the "delegated-fixed" arm.
 **2a — The Claude child uses its pinned model and effort.**
 
 - **Strip the model override.** Use the existing PreToolUse `updatedInput` merge for Agent
-  dispatches, the same one that applies the `run_in_background` pin (`claudeCodeManager.ts:388`).
+  dispatches, the same one that applies the `run_in_background` pin (documented at
+  `claudeCodeManager.ts:388`, implemented around `:404-422`).
   Remove `input.model` from dispatches the host requested in programmatic steps, so the
   subagent's frontmatter `model:` wins.
 - **Write the effort.** Have `agentMarkdown.ts` write `effort:` when the effective agent has one.
@@ -736,8 +866,14 @@ The warm fingerprint splits in two:
   the resolved policy.
 
 On every warm reuse, re-run `config/read`. It is one local call. If the digest has changed
-because the user edited config.toml or a profile, restart the thread cold rather than reuse a
-configuration built from stale input.
+because the user edited config.toml or a profile, **close the client and start a new app-server
+process**; never reuse a configuration built from stale input. Opening a second thread in the
+same process is not an option: `CodexAppServerTurnSession.openThread` rejects a second thread
+once one is bound (`turnSession.ts:666-683`), the warm entry owns exactly one thread
+(`codexSdkManager.ts:165-195`), and there is no way to unload a thread's MCP children
+(`codex-app-server-pool.md`). Only a change confined to the thread-configuration fingerprint
+could in principle reuse the process, and only after the session abstraction supports several
+threads; until then, any fingerprint change means a new process.
 
 **Gate that blocks on failure (root thread).** Between `thread/start` and `turn/start`, call
 `mcpServerStatus/list({ threadId, detail: 'toolsAndAuthOnly' })`.
@@ -834,7 +970,7 @@ only *remove* Codex servers whose ids match; it never grants one.
   plugin stops the root step before `turn/start`. An unexpected server on a registered child
   interrupts the lane's turn and fails the step.
 - **Cold start and warm reuse.** `config/read` runs before the thread configuration is built. A
-  changed `config/read` digest on warm reuse forces a cold thread. The audit-only switch keeps
+  changed `config/read` digest on warm reuse closes the client and starts a new process. The audit-only switch keeps
   the source-level settings, and it writes its diagnostic.
 - **Explicit grant.** A validated role MCP server is present while the other servers are
   disabled.
@@ -912,6 +1048,19 @@ Claude follows once the Increment 0 SDK probe is done and its baseline is rebuil
 A shared helper builds and parses addresses, and validation rejects an address that does not
 resolve to exactly one step.
 
+**The address must be carried at runtime; today it is lost.** A fan-out lane's inner step is
+turned into a synthesized `WorkflowStep` holding only the inner step's id
+(`workflowController.ts:2185-2194`). `ControllerStepContext` has `phaseId` and the fan-out item,
+but not the parent fan-out step's id (`programmatic/types.ts:116-143`). `SpawnStepRunner` passes
+only `step.id` as `agentInvocationStepId` (`spawnStepRunner.ts:496-520`), and
+`agent_invocations.step_id` stores that bare id. So:
+- add `stepAddress` to `ControllerStepContext`, set by the controller for ordinary and
+  fan-out steps alike;
+- pass it through the spawn options to both managers, and into diagnostics;
+- persist it in a new `agent_invocations.step_address` column (keep `step_id` for existing
+  readers).
+Dispatch lookup, eligibility and evaluation read the address, never `step_id`.
+
 **What the definition requests.**
 - Add a definition-level `stepDispatch?: Record<StepAddress, 'delegated' | 'direct'>` to
   `workflowDefinitionSchema`. The schema's `z.object` strips unknown keys, so the field must be
@@ -941,14 +1090,25 @@ change how a run that is already in flight executes. The resolved map is part of
 spec, so the two arms of a comparison get different `spec_hash` values.
 
 **Per-invocation record.** `agent_invocations` today stores only step, provider, runtime, model
-and panel identity (`agentInvocationStore.ts:15`, `:60`). Add three nullable columns, and have
+and panel identity (`agentInvocationStore.ts:15`, `:60`). Add nullable columns, and have
 the store write them and read them back:
+- `step_address` (above);
 - `dispatch_mode`;
 - `service_tier`;
 - `effort`.
 
 This needs a schema migration (next free number after Increment 1's) and a `schema.sql`
 update. §10 depends on these columns.
+
+**Claude has no invocation rows today.** Only the Codex and OMP managers call
+`AgentInvocationStore.createInvocation` (`codexSdkManager.ts:1028`, `ompSdkManager.ts:1050`).
+The Claude path receives `agentInvocationStepId` (`runExecutor.ts:233-245`) but never writes a
+row, so new columns alone give Claude evaluation nothing. Add a Claude invocation lifecycle, in a
+new file extracted next to `claudeCodeManager.ts` (which is at its size cap):
+- create the row before the query starts, with the step address, dispatch mode, effective model,
+  effort, service tier (Claude pins fast mode off, so `standard`), the SDK `session_id` once
+  known, and the `process_instance_id` from §5.2;
+- close it on result, error or cancellation, with the outcome.
 
 **Handover.** After a run is handed over, the orchestrated plane ignores the resolved
 `stepDispatch` map and goes back to the Task arrangement. Invocations that already ran keep their
@@ -1037,7 +1197,7 @@ direct worker has no dispatcher, so the controller must do this job. "Charge the
 step" covers only the accounting. It does not make the corrections happen.
 
 `SpawnStepRunner` today makes one spawn and waits for one terminal outcome
-(`spawnStepRunner.ts:495`, `:521`). Direct mode is not enabled for a step until each
+(`spawnStepRunner.ts:496`, `:521`). Direct mode is not enabled for a step until each
 intervention below has a controller-side trigger, action, limit and test.
 
 **Timebox.**
@@ -1054,13 +1214,22 @@ intervention below has a controller-side trigger, action, limit and test.
   lane after one retry"); extend it to every direct-eligible step.
 - **Limit:** one retry.
 
-**Edits outside the task's scope.**
-- **Trigger:** after the step, the lane's diff touches a path owned by a sibling lane in the same
-  batch, or a protected path such as the runbook.
-- **Action:** a loopback that lists the offending paths and asks for them to be reverted.
-- **Limit:** one loopback, then the step fails.
-- **Why not the task's file hints:** tasks carry file hints, not a strict list, so the check
-  cannot use them.
+**Edits outside the task's scope.** Lanes share one worktree, and nothing today records which
+lane owns which path. Tasks carry file hints, not a strict list, so they cannot decide
+ownership. A revert based on a guess could undo a sibling's legitimate work or the user's own
+uncommitted changes. So this correction is split:
+- **Protected paths** (the runbook, `.cyboflow/`, and any path the workflow declares protected):
+  - **Trigger:** after the step, the lane's diff touches one.
+  - **Action:** a loopback that lists the paths and asks for the edit to be reverted.
+  - **Limit:** one loopback, then the step fails.
+- **Possible sibling conflicts** (a path another lane in the batch also changed, or one outside
+  the task's file hints):
+  - **Action:** report a finding naming the lane, the paths and the other lane. Never revert
+    automatically.
+- **Automatic sibling reverts need a path-claim protocol first**, which is out of scope here.
+  It would define how a lane acquires claims, what happens on a conflicting claim, when claims
+  are released, and how files already dirty at lane start are excluded. It is listed as an open
+  decision in §12.
 
 **Branch drift.**
 - **Trigger:** after the step, the lane is not on its expected branch or base, or the worktree
@@ -1128,7 +1297,10 @@ retries and result parsing.
     direct.
   - A bare or ambiguous step id is rejected; only full step addresses resolve.
   - Restart after an eligibility-list change replays the frozen resolved map.
-  - `agent_invocations` rows carry `dispatch_mode`, `service_tier` and `effort`.
+  - `agent_invocations` rows carry `step_address`, `dispatch_mode`, `service_tier` and
+    `effort`, for Claude as well as Codex.
+  - A fan-out lane step's invocation records `<phaseId>/<fanOutStepId>/<innerStepId>`, and two
+    phases with the same step id get distinct addresses.
   - Ineligible or wrong-runtime entries fall back to delegated and are recorded in the stamp.
 - **No leakage.**
   - Direct mode never reaches OMP, pi or orchestrated turns; check every place `stepDispatch` is
@@ -1143,8 +1315,9 @@ retries and result parsing.
   - Canceling interrupts the turn, and no MCP write arrives afterwards.
 - **Handover.** A run handed over after a direct step keeps an accurate per-invocation stamp.
 - **Corrections (§8.6).** Test each intervention: timebox expiry with its one follow-up;
-  incomplete output with its one retry; an edit to a sibling lane's path causing a revert
-  loopback; branch drift causing a re-sync loopback. Each fails the step when its limit is
+  incomplete output with its one retry; an edit to a protected path causing a revert loopback;
+  a possible sibling conflict producing a finding and no revert; branch drift causing a re-sync
+  loopback. Each fails the step when its limit is
   exhausted.
 - **Compaction.**
   - The persistence and result contracts survive Claude auto-compaction, or are re-injected.
@@ -1192,13 +1365,15 @@ invocation stamps, not from in-process counters. `perfBump` does nothing unless
 - `descendant_input` and `descendant_output`;
 - `response_usage_missing`;
 - `oracle_mismatch`;
-- `descendant_usage_unattributed`;
+- `descendant_usage_unattributed` (its tokens are counted through the `codex-unattributed:` row);
+- `model_inferred` on Codex child rows;
 - `claude_child_delta_negative`, `claude_model_usage_missing` and `claude_outer_mismatch`;
 - capability-gate aborts and child-audit failures;
 - the capability mode (`warn` / `enforce` / audit switch) on every affected run.
 
-Per-invocation `dispatch_mode`, `service_tier`, model and effort come from the new
-`agent_invocations` columns (§8.3), not from diagnostics.
+Per-invocation `step_address`, `dispatch_mode`, `service_tier`, model and effort come from the
+new `agent_invocations` columns (§8.3), for both providers, not from diagnostics. Per-invocation
+comparisons use only runs whose `run_usage.coverage` is `complete`.
 
 **Compare**, per provider, per model and per step:
 - task outcomes;
@@ -1230,7 +1405,9 @@ Indicative, not exhaustive:
   - `codex/appServer/rawNotificationSink.ts`
   - `orchestrator/insightsQueries.ts`, plus a new shared-rollup file next to it
   - `orchestrator/runRecovery.ts` (the one-shot backfill) and `orchestrator/runUsageRollup.ts`
-  - a schema migration adding `run_usage.accounting_version` and `coverage`, plus `schema.sql`
+  - a schema migration adding `run_usage.accounting_version` and `coverage` and
+    `agent_invocations.codex_turn_id`, plus `schema.sql`
+  - the Claude ingestion path, to stamp `process_instance_id` on stored events
   - `test/fakes/fakeCodexAppServer.ts`
 - **Increment 2**
   - the PreToolUse Agent-dispatch merge and background pin in `claude/`, extracted (see below)
@@ -1245,8 +1422,11 @@ Indicative, not exhaustive:
   - ConfigManager
 - **Increment 4**
   - `orchestrator/workflowDefinitionSchema.ts` and a step-address helper
-  - `orchestrator/agentInvocationStore.ts`, plus a migration adding `dispatch_mode`,
-    `service_tier` and `effort`
+  - `orchestrator/agentInvocationStore.ts`, plus a migration adding `step_address`,
+    `dispatch_mode`, `service_tier` and `effort`
+  - `programmatic/types.ts` and `programmatic/workflowController.ts` (`stepAddress` on the step
+    context)
+  - a new Claude invocation-lifecycle file next to `claudeCodeManager.ts`
   - the controller's step-correction interventions (§8.6)
   - `programmatic/stepPrompt.ts`
   - `programmatic/spawnStepRunner.ts`
@@ -1278,11 +1458,14 @@ Read `main/src/services/panels/AGENTS.md` before editing under `panels/`.
 | Risk | Mitigation |
 | --- | --- |
 | `rawResponse/completed` is internal-only and could change | Protocol-shape test; the `total` fallback; the drift diagnostic |
-| The recompute migration mislabels old runs | Explicit root-only and not-recomputed markers, plus an accounting version |
+| The backfill mislabels old runs | Explicit coverage values (run-level, model-inferred, segments-inferred, root-only, legacy), plus an accounting version that selects the fold |
+| A partial backfill leaves stale or missing rollups | One transaction per run, a per-run progress table, and a completion marker written only after every run succeeds (§5.2 1d) |
+| Draining keeps single-shot Codex processes alive up to 30s longer | The lane's outcome is not delayed; the drain ends early once every descendant is terminal. Watch peak process count in the first Sprints |
+| Historical Claude segments are inferred | Marked `claude-segments-inferred`; new runs use `process_instance_id` |
 | A direct worker writes state before its file work is valid | The addendum keeps the step's order; controller gates and result contracts stay authoritative |
 | The role's "subagent / no state writes" wording conflicts with direct ownership | The addendum overrides only the listed persistence duties |
 | A direct worker loses the dispatcher's corrective follow-ups (timeboxes, scope reverts) | Controller interventions with defined triggers and limits (§8.6), gated on arm A's rates; their usage is charged to the step |
-| A late or unregistered Codex descendant escapes accounting | Descendant registry with a bounded drain; `descendant_usage_unattributed` records anything that escapes (§5.2) |
+| A late or unregistered Codex descendant escapes accounting | A drain before client stop; anything unregistered or late goes to a counted `codex-unattributed:` row (§5.2) |
 | The fail-open paths (`warn` mode, the audit switch) are left on | Every affected run carries a startup diagnostic and a raw event naming the mode (§7.5) |
 | Direct Claude review turns at the pinned model cost more than today's downgraded children | Arm A also runs at the pins (2a), so the comparison is fair. Accept the cost, or change the pin deliberately |
 | A workflow relied on inherited plugins, apps or web search | Warn phase that also mines built-in tool use; named failures in enforce mode |
@@ -1313,6 +1496,8 @@ Open decisions:
    decides (§8.4).
 3. When to extend eligibility beyond Sprint implement and write-tests, and in what order.
 4. How long the kill switches and the ConfigManager mode stay after validation.
+5. Whether to design a lane path-claim protocol, which automatic sibling reverts in §8.6 would
+   need.
 
 ## 13. Definition of done
 
@@ -1324,10 +1509,13 @@ Open decisions:
 
   The check values are:
   - Codex: the sum of `rawResponse/completed.usage`;
-  - Claude: deduplicated messages plus the differences between successive `modelUsage` readings.
+  - Claude: outer `result.usage` plus the non-negative per-segment child deltas
+    (Δ`modelUsage` − `result.usage`), exactly as in §5.2 1b. Deduplicated parentless messages
+    are a cross-check and supply the outer's per-model split, never tokens.
 
-  Descendant threads and mixed runs are included. Every new row carries an accounting version,
-  and the audit window has been recomputed.
+  Descendant threads, unattributed and top-up rows, and mixed runs are included. Every
+  `run_usage` row carries an accounting version and a coverage value, and the audit window has
+  been backfilled.
 - **Tiers, models and effort.** Workflow Codex threads run on the standard tier. Claude children
   run on their pinned model and effort.
 - **Capabilities.** By default, programmatic Codex root threads start only `cyboflow` plus
