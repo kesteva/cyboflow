@@ -617,6 +617,13 @@ function initScheduler(
     probePath?: string;
     /** A REAL artifacts dir, for the one row that writes a file into it and proves the harness ignores it. */
     artifactsDir?: string;
+    /**
+     * The runbook-optional KILL SWITCH (runbook-optional-verification.md §A1):
+     * `true` restores the pre-explore gate (3) — an unproven build/serve
+     * request skips. Rows that pin THAT contract set it; the default (off)
+     * lets them explore.
+     */
+    requireProvenRunbook?: boolean;
   },
 ): VerificationScheduler {
   const runbookStore = opts.runbookStore;
@@ -627,7 +634,7 @@ function initScheduler(
     backends: {},
     judge: fakeJudge,
     artifactsDirResolver: () => artifactsDir,
-    config: CONFIG,
+    config: opts.requireProvenRunbook === true ? { ...CONFIG, requireProvenRunbook: true } : CONFIG,
     leasePool: new ResourceLeasePool(new Mutex()),
     agentRunner: makeRunner(opts.world),
     capabilityStore: opts.capabilityStore ?? new VerifyCapabilityStore(dbAdapter(dbX)),
@@ -1280,6 +1287,9 @@ describe('§5.4 matrix — injected env fault (chromium removed)', () => {
 // ===========================================================================
 
 describe('§5.4 matrix — runbook drift refuses a proven record', () => {
+  // ROWS 8 + 9 pin the refusal, which since runbook-optional verification
+  // (§A1) is the KILL-SWITCH contract: with the switch off the same drifted
+  // request explores instead — see ROW 8's companion below.
   it("ROW 8: an edited dev script (project input-hash drift) reads 'unproven-draft' and the request skips with the setup CTA", async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
@@ -1292,7 +1302,7 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
 
     const world = makeWorld();
     seedRun(db, 'run-input-drift');
-    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const scheduler = initScheduler(db, { world, runbookStore: store, requireProvenRunbook: true });
     const requestId = await enqueueThroughSeam(scheduler, {
       runId: 'run-input-drift',
       task: composedTask(),
@@ -1318,6 +1328,32 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
     expect(world.deploys).toHaveLength(0);
   });
 
+  it('ROW 8, kill switch OFF: the same drifted request EXPLORES — unpinned, deployed once, never the drift skip', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+    io.inputHash = 'inputs-v2';
+
+    const world = makeWorld();
+    seedRun(db, 'run-input-drift-explore');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-input-drift-explore',
+      task: composedTask(),
+    });
+    await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    const row = readRow(db, requestId);
+    // The enqueue seam still declined the pin (the record reads drifted), and
+    // the engine explored instead of skipping on that absence. What the runner
+    // then concluded is the runner's contract, not this row's.
+    expect(row.runbook_hash).toBeNull();
+    expect(row.error_message).not.toBe(VERIFY_RUNBOOK_DRIFTED_REASON);
+    expect(world.deploys).toHaveLength(1);
+    // Nothing about exploring touched the proof: drift is still computed, never written.
+    expect(runbookRecord(db)?.status).toBe('proven');
+  });
+
   it('ROW 9: host-fingerprint drift refuses; a fresh derive + proof restores it and the build/serve task deploys again', async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
@@ -1329,7 +1365,7 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
 
     const world = makeWorld();
     seedRun(db, 'run-host-drift');
-    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const scheduler = initScheduler(db, { world, runbookStore: store, requireProvenRunbook: true });
 
     const demotedId = await enqueueThroughSeam(scheduler, {
       runId: 'run-host-drift',

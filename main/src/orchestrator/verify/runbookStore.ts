@@ -949,18 +949,31 @@ export class VerifyRunbookStore {
    * same consequence at the call site: no pin, no injection, and the §3.2
    * degrade gate handles it honestly rather than a half-applied runbook
    * executing.
+   *
+   * `origin` (migration 107 — WHO derived the record, see
+   * {@link VerifyRunbookStore.setOrigin}) rides along for the explore lever
+   * source (docs/proposals/runbook-optional-verification.md §A1.3), which
+   * records `{ hash, status, origin }` as provenance. It is read by
+   * {@link VerifyRunbookStore.readOrigin} in its own query, so a pre-107 DB
+   * answers `origin: null` rather than losing the record.
    */
   getCurrent(
     projectId: number,
     modality: VerificationModality,
-  ): (PinnedRunbookRecord & { hash: string }) | null {
+  ): (PinnedRunbookRecord & { hash: string; origin: string | null }) | null {
     try {
       const row = this.readRow(projectId, modality);
       if (!row) return null;
       if (!isPersistedStatus(row.status)) return null;
       const parsed = this.parsePortable(row.portable_json, `db:${projectId}/${modality}`);
       if (!parsed) return null;
-      return { runbook: parsed, version: row.version, status: row.status, hash: row.portable_hash };
+      return {
+        runbook: parsed,
+        version: row.version,
+        status: row.status,
+        hash: row.portable_hash,
+        origin: this.readOrigin(projectId, modality),
+      };
     } catch (err) {
       this.deps.logger?.warn('[VerifyRunbookStore] getCurrent failed (fail-soft)', {
         projectId,
@@ -990,6 +1003,23 @@ export class VerifyRunbookStore {
          WHERE project_id = ? AND modality = ?`,
       )
       .get(projectId, modality) as RunbookLocalRow | undefined;
+  }
+
+  /**
+   * Migration 107's `origin` for the (project, modality) record, or `null`.
+   * Its OWN fail-soft query, for the reason {@link VerifyRunbookStore.setOrigin}
+   * is not folded into `registerDraft`: widening {@link readRow} would make a
+   * pre-107 DB lose the whole record over a provenance badge.
+   */
+  private readOrigin(projectId: number, modality: VerificationModality): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT origin FROM verify_runbook_local WHERE project_id = ? AND modality = ?')
+        .get(projectId, modality) as { origin: unknown } | undefined;
+      return typeof row?.origin === 'string' && row.origin.length > 0 ? row.origin : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

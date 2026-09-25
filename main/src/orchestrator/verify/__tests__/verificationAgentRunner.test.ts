@@ -40,6 +40,7 @@ import {
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
   type VerificationAgentQueryOutcome,
+  type ReportMappingContext,
   driverScriptBody,
 } from '../verificationAgentRunner';
 import { SnapshotProvisionError, type SnapshotProvision } from '../snapshotProvisioner';
@@ -252,6 +253,10 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     resolveShellPath: async () => FAKE_SHELL_PATH,
     resolveNodeModulesRoot: async () => FAKE_NODE_MODULES,
     prepareDataDir,
+    // §A1.4 PATH shim: materialized as NOTHING by default, so the PATH suites
+    // below keep pinning the exact harness PATH and no test writes a shim dir.
+    // The prepend itself is covered in verificationAgentRunnerExplore.test.ts.
+    materializeDependencyGuardShim: async () => ({ binDir: null }),
     ...overrides,
   };
   return {
@@ -468,9 +473,23 @@ describe('resolveVerifyCodexModel', () => {
 
 describe('mapReportToResult', () => {
   const M = 'claude-x';
+  // The report-only defaults: a snapshot-mode, unmutated LEGACY request whose
+  // floor never ran — the shape every pre-explore expectation below was written
+  // against. The mode × corroboration × floor table lives in
+  // verificationAgentRunnerExplore.test.ts.
+  const ctx = (overrides: Partial<ReportMappingContext> = {}): ReportMappingContext => ({
+    provisionMode: 'snapshot',
+    mutated: false,
+    model: M,
+    executionMode: 'legacy',
+    modality: 'web',
+    floor: null,
+    corroboration: [],
+    ...overrides,
+  });
 
   it('pass → passed with a pass verdict + judged screenshot files', () => {
-    const r = mapReportToResult(validReport(), 'snapshot', false, M);
+    const r = mapReportToResult(validReport(), ctx());
     expect(r.status).toBe('passed');
     expect(r.verdict?.status).toBe('pass');
     expect(r.verdict?.judgedFileNames).toEqual(['s.png']);
@@ -482,7 +501,7 @@ describe('mapReportToResult', () => {
       outcome: 'fail',
       behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'missing' } }],
     });
-    const r = mapReportToResult(report, 'snapshot', false, M);
+    const r = mapReportToResult(report, ctx());
     expect(r.status).toBe('failed');
     expect(r.verdict?.status).toBe('fail');
   });
@@ -493,9 +512,7 @@ describe('mapReportToResult', () => {
   ])('unverifiable with %s → low_confidence, never passed', (_label, behaviors) => {
     const r = mapReportToResult(
       validReport({ outcome: 'unverifiable', diagnosis: 'FamilyControls needs a device', behaviors }),
-      'snapshot',
-      false,
-      M,
+      ctx(),
     );
     expect(r.status).toBe('low_confidence');
     expect(r.verdict?.status).toBe('low_confidence');
@@ -505,9 +522,7 @@ describe('mapReportToResult', () => {
   it('wrong_environment with no behaviours → low_confidence naming the needed modality, never passed', () => {
     const r = mapReportToResult(
       validReport({ outcome: 'wrong_environment', diagnosis: 'an iOS app', neededModality: 'mobile', behaviors: [] }),
-      'snapshot',
-      false,
-      M,
+      ctx(),
     );
     expect(r.status).toBe('low_confidence');
     expect(r.errorMessage).toBe('wrong environment (needs mobile): an iOS app');
@@ -515,7 +530,7 @@ describe('mapReportToResult', () => {
 
   it('build_failed IN A SNAPSHOT → failed (verdict-less, error = build log excerpt)', () => {
     const report = validReport({ outcome: 'build_failed', buildLogExcerpt: 'tsc error TS1005' });
-    const r = mapReportToResult(report, 'snapshot', false, M);
+    const r = mapReportToResult(report, ctx());
     expect(r.status).toBe('failed');
     expect(r.verdict).toBeUndefined();
     expect(r.errorMessage).toBe('tsc error TS1005');
@@ -523,7 +538,7 @@ describe('mapReportToResult', () => {
 
   it('build_failed IN THE DIRTY FALLBACK → skipped (unattributable)', () => {
     const report = validReport({ outcome: 'launch_failed', buildLogExcerpt: 'EADDRINUSE' });
-    const r = mapReportToResult(report, 'fallback', false, M);
+    const r = mapReportToResult(report, ctx({ provisionMode: 'fallback' }));
     expect(r.status).toBe('skipped');
     expect(r.errorMessage).toContain('unattributable');
     expect(r.errorMessage).toContain('EADDRINUSE');
@@ -533,13 +548,13 @@ describe('mapReportToResult', () => {
     const report = validReport({
       behaviors: [{ id: 'b1', result: 'not_testable', evidence: { screenshots: [], notes: 'n/a' } }],
     });
-    const r = mapReportToResult(report, 'snapshot', false, M);
+    const r = mapReportToResult(report, ctx());
     expect(r.status).toBe('low_confidence');
     expect(r.verdict?.status).toBe('low_confidence');
   });
 
   it('post-run mutation trips low_confidence on an otherwise-pass report', () => {
-    const r = mapReportToResult(validReport(), 'snapshot', true, M);
+    const r = mapReportToResult(validReport(), ctx({ mutated: true }));
     expect(r.status).toBe('low_confidence');
     expect(r.errorMessage).toContain('modified tracked sources');
   });
@@ -1983,6 +1998,7 @@ describe('VerificationAgentRunner — the harness execution env', () => {
       '/usr/bin/node',
       '/app/driverCli.js',
       FAKE_NODE_MODULES,
+      { driverPort: 29261 },
     );
     expect('NODE_PATH' in envOf(query)).toBe(false);
   });
@@ -2138,6 +2154,17 @@ describe('serveBindingTarget — when the binding applies, and against which por
     const task = makeTask({ serve: { cmd: 'pnpm dev' } });
     expect(serveBindingTarget(task, { kind: 'file-identity' }, ports)).toBeNull();
   });
+
+  it('EXPLORE with no serve still binds the port owner (serveCmd null), so a foreign listener is detectable', () => {
+    const unserved = makeTask({ target: { url: 'http://127.0.0.1:29260' } });
+    expect(serveBindingTarget(unserved, httpSpec, ports, { explore: true })).toEqual({
+      serveCmd: null,
+      probedPort: 29260,
+      portLever: 29260,
+    });
+    // Still never for a non-port-mediated channel.
+    expect(serveBindingTarget(unserved, { kind: 'file-identity' }, ports, { explore: true })).toBeNull();
+  });
 });
 
 describe('checkServeIdentityBinding', () => {
@@ -2157,10 +2184,10 @@ describe('checkServeIdentityBinding', () => {
     };
   }
 
-  const run = (world: Parameters<typeof probes>[0], overrides: { serveCmd?: string; probedPort?: number | null } = {}) =>
+  const run = (world: Parameters<typeof probes>[0], overrides: { serveCmd?: string | null; probedPort?: number | null } = {}) =>
     checkServeIdentityBinding({
       artifactsDir: '/artifacts',
-      serveCmd: overrides.serveCmd ?? SERVE_CMD,
+      serveCmd: overrides.serveCmd === undefined ? SERVE_CMD : overrides.serveCmd,
       probedPort: overrides.probedPort === undefined ? PORT : overrides.probedPort,
       portLever: PORT,
       probes: probes(world),
@@ -2176,6 +2203,21 @@ describe('checkServeIdentityBinding', () => {
       },
     });
     expect(result.bound).toBe(true);
+  });
+
+  it('serveCmd null: the port-owner half still runs — foreign is detected, an in-group listener binds with no command step', async () => {
+    const foreign = await run(
+      { servePid: 4242, listeners: { [PORT]: 9001 }, processes: { 9001: { pgid: 9001, command: 'node their-own' } } },
+      { serveCmd: null },
+    );
+    expect(foreign).toMatchObject({ bound: false, failure: 'port-owner', foreignListener: { pid: 9001, pgid: 9001, recordedGroup: 4242 } });
+    const inGroup = await run(
+      // The leader's command would NOT match any pinned command — and is never read.
+      { servePid: 4242, listeners: { [PORT]: 4243 }, processes: { 4243: { pgid: 4242, command: 'node x' } } },
+      { serveCmd: null },
+    );
+    expect(inGroup.bound).toBe(true);
+    expect(inGroup.detail).toContain('command binding was not checked');
   });
 
   it('BINDS when the leader is itself the listener (a single-process server)', async () => {

@@ -163,6 +163,14 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   mobileDriveEngine: VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
 };
 
+/**
+ * CONFIG with the runbook-optional KILL SWITCH on
+ * (docs/proposals/runbook-optional-verification.md §A1): gate (3) skips an
+ * unproven build/serve request exactly as it did before explore existed. The
+ * suites that pin that pre-explore contract run under it.
+ */
+const KILL_SWITCH_CONFIG: ResolvedVisualVerifyConfig = { ...CONFIG, requireProvenRunbook: true };
+
 const PASS_VERDICT: VerdictV1 = {
   status: 'pass',
   confidence: 0.95,
@@ -361,7 +369,10 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
       backends: {},
       judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
+      // Kill switch ON ⇒ legacy: the tiny injected deadline applies unfloored
+      // (an explore row would be floored at exploreDeadlineFloorMs — pinned
+      // separately below).
+      config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: { run },
       agentRequestTimeoutMs: 20, // tiny deadline
@@ -423,7 +434,9 @@ describe('VerificationScheduler — the agent deadline floor (F2)', () => {
       backends: {},
       judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
+      // F2 is the pinned/legacy floor; the kill switch keeps this unpinned row
+      // out of explore, whose own floor is asserted in the §A1 suite below.
+      config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: { run },
       runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
@@ -1019,7 +1032,7 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
   });
 });
 
-describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () => {
+describe('VerificationScheduler — §3.2 degrade path (no proven runbook, kill switch ON)', () => {
   /** Initialize a scheduler with a stub runner; returns the run spy. */
   function initWith(
     opts: Partial<Parameters<typeof VerificationScheduler.initialize>[0]> = {},
@@ -1030,7 +1043,9 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
       backends: {},
       judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
+      // Every row below pins the pre-explore §3.2 contract, which is exactly
+      // what the kill switch restores (runbook-optional-verification.md §A1).
+      config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
       capabilityStore: new VerifyCapabilityStore(dbAdapter(db)),
@@ -1631,6 +1646,62 @@ describe('VerificationScheduler — §3.1 classification + §3.4 capability feed
     await flushDrain();
 
     expect(requestRow(db).status).toBe('skipped');
+  });
+
+  it('a dirty-fallback pinned UNVERIFIABLE skip is exempt too — the runner maps it by the same rule', async () => {
+    seedRun(db, 'run-fallback-unverifiable', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      status: 'skipped',
+      fileNames: [],
+      deployed: true,
+      provisionMode: 'fallback',
+      errorMessage: 'unattributable shared-worktree unverifiable: no display',
+      report: {
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'unverifiable',
+        diagnosis: 'no display',
+        confidence: 0,
+        feedback: '',
+        issues: [],
+      },
+      preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+    });
+    enqueueOne(scheduler, 'run-fallback-unverifiable');
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('skipped');
+    expect(row.error_message).not.toContain(VERIFY_UNPROVEN_SKIP_BLOCKED);
+  });
+
+  it('a snapshot FAIL judged on a FOREIGN surface is ambiguous, never charged to the deliverable', async () => {
+    seedRun(db, 'run-foreign-fail', JSON.stringify(['agent']));
+    const { scheduler } = initWith({
+      status: 'failed',
+      fileNames: [],
+      deployed: true,
+      provisionMode: 'snapshot',
+      foreignSurface: true,
+      errorMessage: 'attestation: foreign surface (listener outside the serve group)',
+      report: {
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'the page is blank',
+        issues: [],
+      },
+      preflight: { ok: true, checks: [{ id: 'node', ok: true, detail: 'resolved' }] },
+    });
+    enqueueOne(scheduler, 'run-foreign-fail');
+    await flushDrain();
+
+    const row = requestRow(db);
+    expect(row.status).toBe('failed');
+    expect(row.failure_class).toBe('ambiguous');
   });
 
   it('the SAME shape in SNAPSHOT mode is NOT exempt — the carve-out is about provenance', async () => {
@@ -2290,7 +2361,7 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
       backends: {},
       judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
+      config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
       // Resolves on a later tick — a truthy Promise object would sail through a
@@ -2683,5 +2754,129 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     expect(await d.call()).toEqual({ kind: 'not-attempted', reason: 'disabled' });
     expect(d.seen).toEqual([]);
     d.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runbook-optional verification through the REAL drain
+// (docs/proposals/runbook-optional-verification.md §A1/§A3)
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — §A1 explore through the drain', () => {
+  it('kill switch OFF (the default): the unproven serve task DEPLOYS in explore — unpinned, port exported, explore floor', async () => {
+    seedRun(db, 'run-explore', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG, // requireProvenRunbook: false; runbookStatus defaults to 'absent'
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+    });
+    scheduler.enqueue({
+      runId: 'run-explore',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const req = run.mock.calls[0][0] as VerificationAgentRequest;
+    expect(req.executionMode).toBe('explore');
+    expect(req.runbookHash).toBeUndefined();
+    expect(req.verifyPort).toBe(CONFIG.devServerPorts[0]);
+    // Production constants: max(10-min default, 15-min explore floor), under the 20-min ceiling.
+    expect(req.timeoutMs).toBe(CONFIG.exploreDeadlineFloorMs);
+    expect(requestRow(db).status).toBe('passed');
+  });
+
+  it('the scheduler hands the engine its LIVE config: a switch turned on after boot binds the next request', async () => {
+    seedRun(db, 'run-live-switch', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG, // the boot snapshot says OFF
+      liveConfig: () => KILL_SWITCH_CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+    });
+    scheduler.enqueue({
+      runId: 'run-live-switch',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    await flushDrain();
+
+    expect(run).not.toHaveBeenCalled();
+    expect(requestRow(db).error_message).toBe(VERIFY_NO_RUNBOOK_REASON);
+  });
+});
+
+describe('VerificationScheduler — §A3 wrong-environment re-dispatch, end to end', () => {
+  it('requeues under the needed modality, re-drains it, and charges BOTH deployments', async () => {
+    seedRun(db, 'run-redispatch', JSON.stringify(['agent']));
+    const app = { platform: 'ios-simulator' as const, bundleId: 'com.example.app', scheme: 'App' };
+    const run = vi.fn(async (req: VerificationAgentRequest): Promise<VerificationAgentRunResult> => {
+      if (req.modality === 'web') {
+        return {
+          status: 'low_confidence',
+          fileNames: [],
+          deployed: true,
+          provisionMode: 'snapshot',
+          redispatch: { modality: 'mobile', app, diagnosis: 'an iOS app, not a web page' },
+        };
+      }
+      return { status: 'passed', fileNames: [], deployed: true, provisionMode: 'snapshot' };
+    });
+    const verdicts: string[] = [];
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: { run },
+      mobileToolchainProbe: async () => true,
+      onVerdict: (args) => {
+        verdicts.push(args.status);
+      },
+    });
+    const requestId = scheduler.enqueue({
+      runId: 'run-redispatch',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'x' },
+      chain: [],
+      task: SERVE_TASK,
+    });
+    const outcome = await scheduler.awaitTerminal(requestId, 5_000, 5);
+
+    expect(outcome.status).toBe('passed');
+    expect(run).toHaveBeenCalledTimes(2);
+    const second = run.mock.calls[1][0] as VerificationAgentRequest;
+    expect(second).toMatchObject({ modality: 'mobile', executionMode: 'explore', verifyPort: null });
+    expect(second.task.app).toEqual(app);
+    // ONE terminal and ONE delivery — the requeue wrote neither.
+    expect(verdicts).toEqual(['passed']);
+    const row = db
+      .prepare('SELECT modality, attempt, judge_calls_used, task_json FROM verification_requests WHERE id = ?')
+      .get(requestId) as { modality: string; attempt: number; judge_calls_used: number; task_json: string };
+    expect(row.modality).toBe('mobile');
+    expect(row.attempt).toBe(1);
+    // "Deploys twice, charged twice" (§A3) — the existing budget logic, unchanged.
+    expect(row.judge_calls_used).toBe(2);
+    expect(JSON.parse(row.task_json)._redispatchedFrom).toBe('web');
   });
 });

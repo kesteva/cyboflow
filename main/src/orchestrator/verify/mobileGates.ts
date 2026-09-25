@@ -151,6 +151,13 @@ export async function mobileToolchainDetail(
  * The CEILING still wins over the floor — an installation that configured a
  * floor above the 20-minute cap gets the cap and one warn line saying the
  * floor was clipped, never a request that outlives the scheduler's contract.
+ *
+ * EXPLORE raises it once more (docs/proposals/runbook-optional-verification.md
+ * §A1.1): a request with no proven recipe spends turns finding how the
+ * deliverable stands up before the first behavior is driven, so its floor is
+ * `max(modality floor, exploreFloorMs)`. The caller passes `exploreFloorMs`
+ * ONLY for an explore-mode request; pinned and legacy requests are unchanged,
+ * and the ceiling still wins.
  */
 export function resolveAgentDeadlineMs(args: {
   task: Pick<VerificationTaskV1, 'timeoutMs'>;
@@ -161,16 +168,21 @@ export function resolveAgentDeadlineMs(args: {
   ceilingMs: number;
   /** `ResolvedVisualVerifyConfig.mobileDeadlineFloorMs` — the mobile floor. */
   mobileFloorMs: number;
+  /** `ResolvedVisualVerifyConfig.exploreDeadlineFloorMs`, for an explore request only; absent ⇒ no explore floor. */
+  exploreFloorMs?: number;
   logger?: LoggerLike;
 }): number {
-  const { task, modality, defaultMs, ceilingMs, mobileFloorMs, logger } = args;
+  const { task, modality, defaultMs, ceilingMs, mobileFloorMs, exploreFloorMs, logger } = args;
   const requested = typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : defaultMs;
-  const floor = modality === 'mobile' ? Math.max(defaultMs, mobileFloorMs) : defaultMs;
+  const modalityFloor = modality === 'mobile' ? Math.max(defaultMs, mobileFloorMs) : defaultMs;
+  const floor = exploreFloorMs === undefined ? modalityFloor : Math.max(modalityFloor, exploreFloorMs);
   const deadline = Math.min(ceilingMs, Math.max(floor, requested));
   if (deadline < floor) {
-    logger?.warn('[VerificationScheduler] mobile deadline floor clipped by the request ceiling', {
+    logger?.warn('[VerificationScheduler] agent deadline floor clipped by the request ceiling', {
       floorMs: floor,
       ceilingMs,
+      modality,
+      explore: exploreFloorMs !== undefined,
     });
   }
   return deadline;

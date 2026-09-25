@@ -310,6 +310,8 @@ export class VerificationScheduler {
       db: this.db,
       logger: this.logger,
       config: this.config,
+      liveConfig: this.liveConfig,
+      nudge: () => this.nudge(),
       leasePool: this.leasePool,
       artifactsDirResolver: this.artifactsDirResolver,
       agentRunner: deps.agentRunner,

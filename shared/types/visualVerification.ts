@@ -551,6 +551,48 @@ export interface VerificationReportV1 {
    * round-trips unchanged.
    */
   attestation?: { verified: boolean; kind: AttestationSpec['kind']; detail: string };
+  /**
+   * HARNESS-owned run provenance (docs/proposals/runbook-optional-verification.md
+   * §A1.1): attached by the runner AFTER normalization, never accepted from the
+   * agent (the normalizer rebuilds the report, so an agent-supplied key is
+   * dropped before this is set).
+   */
+  provenance?: VerificationRunProvenance;
+}
+
+/**
+ * How a verification request runs (runbook-optional-verification.md §A1),
+ * selected by the agent engine's pre-lease gate (3):
+ *   - `'pinned'`  — the row carries a runbook pin (a proven record injected at
+ *                   enqueue, a setup/bootstrap proof, or a learned pin): today's
+ *                   contract, unchanged;
+ *   - `'explore'` — no pin, the kill switch is off and the modality is
+ *                   explore-eligible: deploy, treating the composed
+ *                   build/serve/target/app as hints;
+ *   - `'legacy'`  — everything else that runs (the kill switch is on, or an
+ *                   ineligible modality whose task derives no environment): the
+ *                   pre-explore unpinned contract, byte for byte.
+ */
+export const VERIFICATION_EXECUTION_MODES = ['pinned', 'explore', 'legacy'] as const;
+export type VerificationExecutionMode = (typeof VERIFICATION_EXECUTION_MODES)[number];
+
+/** Where an explore request's levers came from (§A1.3): the best record for (project, modality). */
+export interface VerificationLeverSource {
+  hash: string;
+  status: 'proven' | 'unproven-draft';
+  origin: string | null;
+}
+
+/** The harness-owned provenance block on {@link VerificationReportV1.provenance}. */
+export interface VerificationRunProvenance {
+  executionMode: VerificationExecutionMode;
+  /** Explore only, when a record supplied levers/hints (§A1.3). */
+  leverSource?: VerificationLeverSource;
+  /** Mobile only (§B3): the engine requested by config vs the one that drove. */
+  driveEngineRequested?: MobileDriveEngine;
+  driveEngineUsed?: 'xcode' | 'maestro' | 'none';
+  /** Why the drive engine (or attestation) degraded, when it did. */
+  degradeReason?: string;
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
@@ -1904,6 +1946,21 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   exploreDeadlineFloorMs: DEFAULT_EXPLORE_DEADLINE_FLOOR_MS,
   mobileDriveEngine: 'auto',
 };
+
+/**
+ * The runbook-optional KILL SWITCH (runbook-optional-verification.md §A1,
+ * RS-11): true when a missing proven runbook must SKIP again (the pre-explore
+ * contract). On when the LIVE config says so, or when
+ * `CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1` — the env override only ever turns it on.
+ * Callers pass the live config (`liveConfig()`), never a boot snapshot, so a
+ * Settings flip binds the next request.
+ */
+export function requireProvenRunbookEngaged(
+  config: { requireProvenRunbook?: boolean },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return config.requireProvenRunbook === true || env.CYBOFLOW_VERIFY_REQUIRE_RUNBOOK === '1';
+}
 
 /**
  * The lane-runbook-bootstrap KILL SWITCH: `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1`

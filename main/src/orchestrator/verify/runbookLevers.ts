@@ -96,6 +96,44 @@ export interface LeverValues {
   derivedData: string | null;
 }
 
+/**
+ * The harness var that already carries each lever's value — the one `VERIFY_*`
+ * spelling of a lever that {@link resolveLeverEnv}'s rule 1 treats as "already
+ * bound" rather than as a shadow (e.g. `dataDirEnv: "VERIFY_DATA_DIR"`).
+ */
+const HARNESS_VAR_FOR_LEVER: Readonly<Record<DroppedLever['lever'], string>> = {
+  portEnv: 'VERIFY_PORT',
+  nonceEnv: 'VERIFY_ATTEST_NONCE',
+  dataDirEnv: 'VERIFY_DATA_DIR',
+  simUdidEnv: 'VERIFY_SIM_UDID',
+  derivedDataEnv: 'VERIFY_DERIVED_DATA',
+};
+
+/** Rule 2's two static checks, shared by the binder and {@link isBindableLeverName}. */
+function staticLeverNameRejection(name: string): 'malformed' | 'denied' | null {
+  if (!LEVER_NAME_PATTERN.test(name)) return 'malformed';
+  if (LEVER_DENIED_ENV_NAMES.has(name)) return 'denied';
+  return null;
+}
+
+/**
+ * Would {@link resolveLeverEnv} actually EXPORT `name` for `lever` — i.e. leave
+ * the variable carrying this request's value in the agent's env — decided
+ * WITHOUT a base env? Pure, so a pre-lease caller can ask it: the explore
+ * selector (`isExploreEligible`) must not pick a cdp-app row for explore on the
+ * promise of a confined data dir that the binder then drops with a warn.
+ *
+ * `false` for a malformed or denied name (rule 2), and for any `VERIFY_*` name
+ * other than the lever's own harness var: every `VERIFY_*` key belongs to the
+ * harness's base env, and one carrying a DIFFERENT value is a rule-1 shadow the
+ * binder drops. The lever's own harness var is `true` — it already carries the
+ * value, so the binding is a correct no-op.
+ */
+export function isBindableLeverName(lever: DroppedLever['lever'], name: string): boolean {
+  if (staticLeverNameRejection(name) !== null) return false;
+  return !name.startsWith('VERIFY_') || name === HARNESS_VAR_FOR_LEVER[lever];
+}
+
 /** One rejected lever, for the caller to log. */
 export interface DroppedLever {
   lever: 'portEnv' | 'nonceEnv' | 'dataDirEnv' | 'simUdidEnv' | 'derivedDataEnv';
@@ -134,12 +172,9 @@ export function resolveLeverEnv(
 
   const bind = (lever: DroppedLever['lever'], name: string | undefined, value: string | null) => {
     if (name === undefined || value === null) return;
-    if (!LEVER_NAME_PATTERN.test(name)) {
-      dropped.push({ lever, name, reason: 'malformed' });
-      return;
-    }
-    if (LEVER_DENIED_ENV_NAMES.has(name)) {
-      dropped.push({ lever, name, reason: 'denied' });
+    const rejection = staticLeverNameRejection(name);
+    if (rejection !== null) {
+      dropped.push({ lever, name, reason: rejection });
       return;
     }
     // Rule 1. `Object.hasOwn` rather than a truthiness check: a harness var
