@@ -11,16 +11,64 @@
  * Mirrors NewTaskDialog: shared Modal primitives, inline error state, and a
  * submit latch (the `submitting` guard) so a double-click can't double-create.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { IdeaAttachmentStrip } from './IdeaAttachmentStrip';
 import { ScopeTag } from '../Backlog/markers';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
-import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import {
+  readDraft,
+  writeDraft,
+  clearDraft,
+  isIdeaAttachmentArray,
+  IDEA_PICKER_MODAL_DRAFT_KEY,
+} from '../../utils/ideaDraftStorage';
+import type { BacklogTaskItem, IdeaAttachment } from '../../../../shared/types/tasks';
 
 /** Empty seed for the create-form attachment hook (stable reference). */
-const NO_ATTACHMENTS: never[] = [];
+const NO_ATTACHMENTS: IdeaAttachment[] = [];
+
+/**
+ * Persisted draft shape (localStorage) — the "New idea" tab's typed fields,
+ * scoped to the project it was typed against. Restored ONLY when the
+ * component's current `projectId` prop matches the stored one; on mismatch
+ * the stored draft is left untouched (a later reopen against the matching
+ * project can still restore it).
+ */
+interface IdeaPickerModalDraft {
+  projectId: number;
+  title: string;
+  body: string;
+  pendingKey: string;
+  attachments: IdeaAttachment[];
+}
+
+function isIdeaPickerModalDraft(v: unknown): v is IdeaPickerModalDraft {
+  if (typeof v !== 'object' || v === null) return false;
+  const candidate = v as Record<string, unknown>;
+  return (
+    typeof candidate.projectId === 'number' &&
+    typeof candidate.title === 'string' &&
+    typeof candidate.body === 'string' &&
+    typeof candidate.pendingKey === 'string' &&
+    isIdeaAttachmentArray(candidate.attachments)
+  );
+}
+
+function mintPendingKey(): string {
+  return `pending_${Math.random().toString(36).slice(2)}`;
+}
+
+function serializeDraft(
+  projectId: number,
+  title: string,
+  body: string,
+  pendingKey: string,
+  attachments: IdeaAttachment[],
+): string {
+  return JSON.stringify({ projectId, title, body, pendingKey, attachments });
+}
 
 /** Multi-select planner batch cap (IDEA-009). */
 const MULTI_CAP = 4;
@@ -101,14 +149,51 @@ export function IdeaPickerModal({
   const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
   const [separateIds, setSeparateIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
+
+  // Restored once on mount — a persisted "New idea" draft from an earlier
+  // accidental close, but ONLY when it was typed against THIS `projectId`. A
+  // mismatch is treated as "no draft" and the stored value is left untouched
+  // (readDraft's contract already degrades corrupt/shape-invalid data to null).
+  const [initialDraft] = useState<IdeaPickerModalDraft | null>(() => {
+    const draft = readDraft(IDEA_PICKER_MODAL_DRAFT_KEY, isIdeaPickerModalDraft);
+    return draft !== null && draft.projectId === projectId ? draft : null;
+  });
+
+  const [title, setTitle] = useState(() => initialDraft?.title ?? '');
+  const [body, setBody] = useState(() => initialDraft?.body ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The idea has no id yet, so attachments are saved under a stable pending key;
-  // the resulting file paths are persisted with the create mutation.
-  const [pendingKey] = useState(() => `pending_${Math.random().toString(36).slice(2)}`);
-  const attachmentsCtl = useIdeaAttachments(pendingKey, NO_ATTACHMENTS);
+  // the resulting file paths are persisted with the create mutation. A
+  // restored draft reuses its pendingKey (so useIdeaAttachments re-hydrates the
+  // SAME on-disk files) and seeds `initial` with the restored metadata.
+  const [pendingKey, setPendingKey] = useState(() => initialDraft?.pendingKey ?? mintPendingKey());
+  const attachmentsCtl = useIdeaAttachments(pendingKey, initialDraft?.attachments ?? NO_ATTACHMENTS);
+
+  // Last-written serialized draft — guards the write effect below so it only
+  // calls writeDraft on an actual content change, not on every render (the
+  // attachments array is a fresh reference each render even when unchanged).
+  // Seeded from THIS render's initial state so mounting on an unchanged (or
+  // absent/mismatched) draft doesn't immediately re-write it.
+  const lastWrittenDraftRef = useRef<string>(
+    serializeDraft(projectId, title, body, pendingKey, attachmentsCtl.attachments),
+  );
+
+  useEffect(() => {
+    const serialized = serializeDraft(projectId, title, body, pendingKey, attachmentsCtl.attachments);
+    if (serialized === lastWrittenDraftRef.current) return;
+    lastWrittenDraftRef.current = serialized;
+    writeDraft(IDEA_PICKER_MODAL_DRAFT_KEY, {
+      projectId,
+      title,
+      body,
+      pendingKey,
+      attachments: attachmentsCtl.attachments,
+    });
+    // Only the "New idea" tab's inputs ever populate title/body/attachments, so
+    // this doesn't need to be conditioned on `mode` — it's a no-op write when
+    // those fields are untouched regardless of the active tab.
+  }, [projectId, title, body, pendingKey, attachmentsCtl.attachments]);
 
   // Load the project's ideas whenever the modal opens.
   useEffect(() => {
@@ -144,15 +229,29 @@ export function IdeaPickerModal({
       });
   }, [isOpen, projectId]);
 
-  const reset = (): void => {
+  // Transient UI state (tab, selection, error, submit latch) — cleared on
+  // close and after a successful pick, but NOT on picking an existing idea
+  // leaving "New idea" draft fields behind, and not part of the persisted draft.
+  const resetTransient = (): void => {
     setMode(defaultMode);
-    setTitle('');
-    setBody('');
+    setSelectedId(null);
     setError(null);
     setSubmitting(false);
     setMultiSelectedIds([]);
     setSeparateIds([]);
+  };
+
+  // The "New idea" tab's typed draft fields — cleared only after a successful
+  // create (the draft has been consumed) and mints a fresh pendingKey so a
+  // later draft never reuses a just-submitted idea's attachment directory.
+  // Returns the new pendingKey so the caller can pre-seed the write-effect ref.
+  const resetDraftFields = (): string => {
+    const newPendingKey = mintPendingKey();
+    setTitle('');
+    setBody('');
     attachmentsCtl.reset();
+    setPendingKey(newPendingKey);
+    return newPendingKey;
   };
 
   const toggleMulti = (id: string): void => {
@@ -172,8 +271,11 @@ export function IdeaPickerModal({
     setSeparateIds((prev) => prev.filter((x) => x !== id));
   };
 
+  // Closing leaves the "New idea" draft fields as-is — they become the
+  // persisted draft via the write effect above, so an accidental close no
+  // longer wipes a typed-but-unsaved idea. Only transient UI state resets.
   const handleClose = (): void => {
-    reset();
+    resetTransient();
     onClose();
   };
 
@@ -182,12 +284,12 @@ export function IdeaPickerModal({
     if (multi) {
       if (multiSelectedIds.length === 0 && separateIds.length === 0) return;
       onPicked(multiSelectedIds, { separateIdeaIds: separateIds });
-      reset();
+      resetTransient();
       return;
     }
     if (selectedId === null) return;
     onPicked([selectedId]);
-    reset();
+    resetTransient();
   };
 
   const handleCreateNew = async (): Promise<void> => {
@@ -206,7 +308,13 @@ export function IdeaPickerModal({
         priority: 'P2',
       });
       onPicked([result.taskId]);
-      reset();
+      resetTransient();
+      const newPendingKey = resetDraftFields();
+      clearDraft(IDEA_PICKER_MODAL_DRAFT_KEY);
+      // Pre-seed the ref to the post-reset (empty) state so the write effect's
+      // next run — reacting to the resetDraftFields() state updates above —
+      // sees no change and doesn't immediately re-persist a blank draft.
+      lastWrittenDraftRef.current = serializeDraft(projectId, '', '', newPendingKey, []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create idea');
       setSubmitting(false);
