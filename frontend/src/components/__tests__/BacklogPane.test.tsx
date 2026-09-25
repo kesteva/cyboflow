@@ -1,7 +1,7 @@
 /**
  * BacklogPane render tests.
  *
- * The backlogStore is mocked (mirrors ReviewQueueView.test.tsx) so we render
+ * The backlogStore is mocked (mirrors LandingHome.test.tsx) so we render
  * against a fixed task/board/project snapshot without a live tRPC connection.
  * The trpc client is mocked for the run-launch + create paths.
  *

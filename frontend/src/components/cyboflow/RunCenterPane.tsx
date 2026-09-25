@@ -31,6 +31,9 @@ import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
 import { pathBasename } from '../../utils/pathBasename';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useRunStepModels, indexStepModels } from '../../hooks/useRunStepModels';
+import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
+import { pendingSystemicPauseStepId } from '../../utils/systemicPause';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
@@ -113,6 +116,28 @@ export function RunCenterPane({
   // useArtifactTabsSync for the focus-steal / loading-vs-deleted-flicker fixes.
   useArtifactTabsSync(sessionKey, visibleArtifacts, loaded);
 
+  // Per-step resolved model info (IDEA-061 per-step model rail), indexed by
+  // (phaseId, stepId) for the step cards. Fetch/refresh/fail-soft semantics —
+  // once per run, re-fetched on an agent-target switch/revert, a SNAPSHOT
+  // otherwise — live in useRunStepModels (shared with WorkflowSummaryPanel).
+  // `null` while loading/errored — the canvases treat that identically to "no
+  // data yet" and render every card's pre-existing row.
+  const stepModelRows = useRunStepModels(activeRunId);
+  const stepModels = useMemo(
+    () => (stepModelRows === null ? null : indexStepModels(stepModelRows)),
+    [stepModelRows],
+  );
+
+  // The step a SYSTEMIC pause (usage / session limit) has parked the run on,
+  // read off the run's pending `gate:systemic-pause:<stepId>` item — the run
+  // row stays 'running' while parked, so the item is the only signal. Same
+  // slice subscription RunPendingInputStrip (mounted below) keeps alive.
+  const reviewItems = useReviewItemsSlice((s) => s.items);
+  const pausedStepId = useMemo(
+    () => pendingSystemicPauseStepId(reviewItems, activeRunId),
+    [reviewItems, activeRunId],
+  );
+
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
   // Active bottom-dock surface (RunBottomPane opens on Chat). The question strip
@@ -155,6 +180,8 @@ export function RunCenterPane({
           sprintStatus={activeRun?.status}
           projectId={projectId}
           sessionKey={sessionKey}
+          stepModels={stepModels}
+          pausedStepId={pausedStepId}
         />
       );
     }
@@ -169,6 +196,8 @@ export function RunCenterPane({
         paused={activeRun?.status === 'paused'}
         status={activeRun?.status}
         sessionKey={sessionKey}
+        stepModels={stepModels}
+        pausedStepId={pausedStepId}
       />
     );
   };

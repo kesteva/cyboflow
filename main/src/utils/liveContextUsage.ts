@@ -19,6 +19,8 @@
  * rather than a mask over a cumulative sum.
  */
 
+import { primaryModelContextWindow } from '../../../shared/utils/primaryModelUsage';
+
 /** Minimal shape of a buffered session output — `data` is the parsed JSON for
  *  `type === 'json'` outputs (the SDK message envelope). */
 export interface ContextOutput {
@@ -61,12 +63,8 @@ function assistantLivePrompt(data: Record<string, unknown>): number | null {
  */
 function contextWindowOf(data: Record<string, unknown>): number | null {
   if (data.type === 'result' && isRecord(data.modelUsage)) {
-    for (const modelData of Object.values(data.modelUsage)) {
-      if (!isRecord(modelData)) continue;
-      const cw = modelData.contextWindow;
-      if (typeof cw === 'number' && cw > 0) return cw;
-    }
-    return null;
+    // The MAIN model's window — modelUsage also carries Haiku side queries.
+    return primaryModelContextWindow(data.modelUsage);
   }
   if (data.type === 'system' && data.subtype === 'init') {
     const cw = data.context_window;

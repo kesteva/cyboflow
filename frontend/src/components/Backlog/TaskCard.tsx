@@ -408,6 +408,20 @@ export function TaskBody({
       {/* Title */}
       <div className="text-[13px] font-semibold leading-snug text-text-primary">{task.title}</div>
 
+      {/* Idea-only "planning" hint (TASK-224): explains the breathing glow
+          the moment an idea is seeded into a live, non-terminal Planner/Ship
+          run. Shows the WORKFLOW identity (planner/ship), not the current-step
+          agent — an idea is seeded into a workflow, not an agent, and the
+          overlay is already restricted to Planner/Ship (see
+          gatherIdeaRunOverlayRows), so workflowName is populated here. Falls
+          back to the agent label only for a pre-migration/unresolved row. */}
+      {task.type === 'idea' && task.inFlow.length > 0 && (
+        <p className="text-[10.5px] text-text-tertiary" data-testid="idea-planning-hint">
+          planning · {task.inFlow[0].workflowName ?? task.inFlow[0].agent}
+          {task.inFlow[0].stepId ? ` / ${task.inFlow[0].stepId}` : ''}
+        </p>
+      )}
+
       {/* Summary */}
       {task.summary && (
         <p className="line-clamp-3 text-[11.5px] leading-snug text-text-secondary">{task.summary}</p>

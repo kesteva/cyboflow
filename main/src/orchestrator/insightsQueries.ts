@@ -2545,6 +2545,7 @@ export function selectRotationDashboardRows(
 // ---------------------------------------------------------------------------
 
 interface DailyModelUsageRow {
+  runId: string;
   eventType: string;
   payloadJson: string;
   createdAt: string;
@@ -2559,6 +2560,58 @@ interface DailyModelBucket {
 
 /** Model id reported when an assistant message carried no `message.model`. */
 const UNKNOWN_MODEL = 'unknown';
+
+/**
+ * Terminal-event kinds scanned for the {@link selectDailyModelUsage} result-usage
+ * FALLBACK (TASK-290) — mirrors the `result`/`agent_result` reach of
+ * `scanRawEventRollups`'s own result-usage fallback (see its doc comment). Kept
+ * separate from `ASSISTANT_USAGE_EVENT_TYPES` because these events restate
+ * per-turn totals and are folded in ONLY for a run that reported no assistant-side
+ * usage at all (never alongside it — see `resultFallbackModelLabel` callers below).
+ */
+const RESULT_USAGE_EVENT_TYPES = ['result', 'agent_result'] as const;
+
+/** One raw `result`/`agent_result` row scanned for the fallback candidate pass. */
+interface ResultUsageRow {
+  runId: string;
+  payloadJson: string;
+  createdAt: string;
+}
+
+/** `workflow_runs` provider columns needed to label a fallback bucket. */
+interface RunProviderRow {
+  id: string;
+  model: string | null;
+  agentRuntime: string | null;
+  agentProvider: string | null;
+}
+
+/**
+ * Bucket label for a run's result-usage fallback (TASK-290): Codex/OMP runs
+ * report turn usage on the terminal `result`/`agent_result` event rather than on
+ * an assistant message, so `message.model` is never available for them — without
+ * this, every such run's tokens fell into the 'unknown' bucket even though
+ * `workflow_runs` already knows which provider ran it.
+ *
+ * Prefers `workflow_runs.model` (a real model id when the run pinned one via the
+ * Configure surface — migration 037); falls back to `agent_runtime`, then the
+ * bare `agent_provider`, when the run never pinned a model. Returns
+ * `'<provider>:<model-or-runtime>'` so the chart legend can tell a Codex/OMP
+ * bucket apart from a same-named Claude one at a glance.
+ *
+ * A `null`/blank provider (a deleted/unjoined run — should not happen since the
+ * caller only calls this for ids it just fetched) or the `'claude'` provider
+ * fall back to `UNKNOWN_MODEL`: Claude runs are excluded from this fallback path
+ * entirely by the caller's assistant-usage guard (see selectDailyModelUsage), so
+ * reaching 'claude' here would itself be a bug — never silently mislabel it as a
+ * real Claude bucket.
+ */
+function resultFallbackModelLabel(row: RunProviderRow): string {
+  const provider = row.agentProvider?.trim() || null;
+  if (provider === null || provider === 'claude') return UNKNOWN_MODEL;
+  const modelPart = row.model?.trim() || row.agentRuntime?.trim() || provider;
+  return `${provider}:${modelPart}`;
+}
 
 /**
  * Composite-key separator joining `day` and `model` into one Map key. A space
@@ -2590,11 +2643,21 @@ const DAY_MODEL_SEP = ' ';
  * `created_at` (the first 10 chars of SQLite's 'YYYY-MM-DD HH:MM:SS' UTC form).
  * `totalTokens` = inputTokens + outputTokens (cache EXCLUDED, matching the
  * RunUsageRollup convention). Primary/provider assistant events and synthetic
- * `subagent_usage` snapshots are scanned; `result` events (which restate
- * per-turn totals) are excluded by the WHERE clause so their totals can never
- * be double-counted. Synthetic snapshots do not increment
- * `assistantMessageCount`. The result is sorted by `day` ASC then `model` ASC;
- * days with no usage emit no bucket.
+ * `subagent_usage` snapshots are scanned; `result`/`agent_result` events (which
+ * restate per-turn totals) are excluded from THIS pass by the WHERE clause so
+ * their totals can never be double-counted against a run's own assistant usage.
+ * Synthetic snapshots do not increment `assistantMessageCount`. The result is
+ * sorted by `day` ASC then `model` ASC; days with no usage emit no bucket.
+ *
+ * TASK-290 result-usage fallback: Codex/OMP runs report turn usage on the
+ * terminal `result`/`agent_result` event, never on an assistant message, so a
+ * run with no assistant-side usage in this window is given a SECOND pass over
+ * `result`/`agent_result` rows (see `resultFallbackModelLabel`) and its tokens
+ * are bucketed under a `<provider>:<model-or-runtime>` label resolved from
+ * `workflow_runs` (never 'unknown' when the run's provider is known). A run that
+ * DID report assistant-side usage in this window is fully excluded from this
+ * second pass — the fallback and the primary scan are mutually exclusive per run,
+ * so a Claude run carrying both never double-counts.
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - When non-null, restricts to that project; null = all.
@@ -2615,11 +2678,11 @@ export function selectDailyModelUsage(
   // projectId is null we skip the joins entirely (a flat raw_events scan).
   const sql =
     projectId === null
-      ? `SELECT e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
+      ? `SELECT e.run_id AS runId, e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          WHERE e.event_type IN (${eventTypePlaceholders})
            AND e.created_at >= datetime('now', ?)`
-      : `SELECT e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
+      : `SELECT e.run_id AS runId, e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
          WHERE e.event_type IN (${eventTypePlaceholders})
@@ -2635,6 +2698,12 @@ export function selectDailyModelUsage(
 
   // Accumulate per (day, model); the key joins both on DAY_MODEL_SEP.
   const buckets = new Map<string, DailyModelBucket>();
+  // Runs that contributed at least one token via an assistant-side usage event
+  // in this window — the result-usage fallback below is folded in ONLY for runs
+  // NOT in this set (never alongside their own assistant usage — the
+  // double-count guard mirrored from scanRawEventRollups's assistantMessageCount
+  // check).
+  const runsWithAssistantTokens = new Set<string>();
 
   for (const row of rows) {
     let payload: unknown;
@@ -2661,10 +2730,121 @@ export function selectDailyModelUsage(
     };
     bucket.inputTokens += asNumber(usage.input_tokens);
     bucket.outputTokens += asNumber(usage.output_tokens);
+    // Only a REAL assistant message suppresses the result-usage fallback below —
+    // a subagent_usage-only run (e.g. a Codex/OMP step whose only "assistant-side"
+    // signal is a cumulative subagent snapshot) must still fall through to its
+    // result.usage, exactly like scanRawEventRollups's own fallback guard, which
+    // keys off assistantMessageCount (never incremented by subagent_usage) rather
+    // than "any usage event seen."
     if (row.eventType !== 'subagent_usage') {
       bucket.assistantMessageCount += 1;
+      runsWithAssistantTokens.add(row.runId);
     }
     buckets.set(key, bucket);
+  }
+
+  // TASK-290 result-usage fallback: Codex/OMP runs report turn usage on the
+  // terminal `result`/`agent_result` event rather than on an assistant message,
+  // so they never hit the loop above and their tokens vanished from this chart
+  // even though `selectRunUsageRollups` already counted them into the
+  // per-workflow cards via the same fallback (see scanRawEventRollups). Scanned
+  // as a SEPARATE query (not merged into the query above) so a DB whose
+  // raw_events happen to have no 'result'/'agent_result' rows in this window —
+  // every existing fixture but the new ones below — never pays for the extra
+  // WHERE branch or the targeted workflow_runs lookup that follows.
+  const resultEventTypePlaceholders = placeholders(RESULT_USAGE_EVENT_TYPES.length);
+  const resultSql =
+    projectId === null
+      ? `SELECT e.run_id AS runId, e.payload_json AS payloadJson, e.created_at AS createdAt
+         FROM raw_events e
+         WHERE e.event_type IN (${resultEventTypePlaceholders})
+           AND e.created_at >= datetime('now', ?)`
+      : `SELECT e.run_id AS runId, e.payload_json AS payloadJson, e.created_at AS createdAt
+         FROM raw_events e
+         JOIN workflow_runs r ON r.id = e.run_id
+         WHERE e.event_type IN (${resultEventTypePlaceholders})
+           AND e.created_at >= datetime('now', ?)
+           AND r.project_id = ?`;
+  const resultStmt = db.prepare(resultSql);
+  const resultRows = (
+    projectId === null
+      ? resultStmt.all(...RESULT_USAGE_EVENT_TYPES, windowArg)
+      : resultStmt.all(...RESULT_USAGE_EVENT_TYPES, windowArg, projectId)
+  ) as ResultUsageRow[];
+
+  // Fold each result row's usage into a per-(runId, day) staging accumulator —
+  // NOT yet into `buckets`, since the model-id bucket key depends on the run's
+  // provider/model, resolved in bulk below only for runs that turn out to need it.
+  const fallbackByRunAndDay = new Map<
+    string,
+    { runId: string; day: string; inputTokens: number; outputTokens: number; messageCount: number }
+  >();
+  for (const row of resultRows) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      continue; // malformed JSON -- skip silently
+    }
+    if (!isRecord(payload)) continue;
+    const usage = payload.usage;
+    if (!isRecord(usage)) continue; // no usage object -> not counted
+
+    const day = row.createdAt.slice(0, 10);
+    const staging = fallbackByRunAndDay.get(`${row.runId}${DAY_MODEL_SEP}${day}`) ?? {
+      runId: row.runId,
+      day,
+      inputTokens: 0,
+      outputTokens: 0,
+      messageCount: 0,
+    };
+    staging.inputTokens += asNumber(usage.input_tokens);
+    staging.outputTokens += asNumber(usage.output_tokens);
+    staging.messageCount += 1;
+    fallbackByRunAndDay.set(`${row.runId}${DAY_MODEL_SEP}${day}`, staging);
+  }
+
+  // Only runs that never contributed assistant-side tokens in this window are
+  // eligible — a Claude run that reports usage on BOTH assistant messages and its
+  // terminal result must count the result's numbers exactly zero times here.
+  const fallbackEligibleRunIds = Array.from(
+    new Set(
+      Array.from(fallbackByRunAndDay.values())
+        .map((s) => s.runId)
+        .filter((runId) => !runsWithAssistantTokens.has(runId)),
+    ),
+  );
+
+  if (fallbackEligibleRunIds.length > 0) {
+    const fallbackEligibleRunIdSet = new Set(fallbackEligibleRunIds);
+    const providerRows = db
+      .prepare(
+        `SELECT id, model, agent_runtime AS agentRuntime, agent_provider AS agentProvider
+         FROM workflow_runs
+         WHERE id IN (${placeholders(fallbackEligibleRunIds.length)})`,
+      )
+      .all(...fallbackEligibleRunIds) as RunProviderRow[];
+    const providerById = new Map(providerRows.map((r) => [r.id, r]));
+
+    for (const staging of fallbackByRunAndDay.values()) {
+      if (!fallbackEligibleRunIdSet.has(staging.runId)) continue;
+      const providerRow = providerById.get(staging.runId);
+      // Defensive: the run vanished between the raw_events scan and this lookup
+      // (deleted mid-read) — skip rather than mislabel it 'unknown'.
+      if (providerRow === undefined) continue;
+
+      const model = resultFallbackModelLabel(providerRow);
+      const key = `${staging.day}${DAY_MODEL_SEP}${model}`;
+      const bucket = buckets.get(key) ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        assistantMessageCount: 0,
+      };
+      bucket.inputTokens += staging.inputTokens;
+      bucket.outputTokens += staging.outputTokens;
+      bucket.assistantMessageCount += staging.messageCount;
+      buckets.set(key, bucket);
+    }
   }
 
   return Array.from(buckets.entries())

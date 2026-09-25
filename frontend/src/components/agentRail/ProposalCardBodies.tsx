@@ -140,7 +140,7 @@ function useProjectName(projectId: number): string {
 // to a muted "unresolved" marker rather than a blank cell (TASK-221).
 // ---------------------------------------------------------------------------
 
-export function EntityRefLabel({
+function EntityRefLabel({
   id,
   entity,
   className = '',
@@ -177,7 +177,7 @@ export function EntityRefLabel({
 }
 
 /** Board-stage badge: a color dot + the stage's label (falls back to the raw stage id, muted, if unresolved). */
-export function StageBadge({ stageId, stage }: { stageId: string; stage: ResolvedStage | undefined }): React.ReactElement {
+function StageBadge({ stageId, stage }: { stageId: string; stage: ResolvedStage | undefined }): React.ReactElement {
   return (
     <span className="flex shrink-0 items-center gap-1 text-text-tertiary" data-testid="reprioritize-stage" title={stageId}>
       &rarr;

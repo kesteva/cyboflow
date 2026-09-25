@@ -47,7 +47,9 @@ export type ArtifactCommitDirResolver = (projectId: number) => string | null;
 /**
  * Resolves the on-disk artifacts SUBTREE for a run (`CYBOFLOW_DIR/artifacts/
  * runs/<runId>`) — the source of committed bytes on snapshot, and the tree
- * `reapForRun` removes on merge / create-PR close-out. Injected at initialize()
+ * `reapForRun` removes on run close-out: merge / create-PR, and (TASK-084)
+ * the Won't-do stage-move and hard-delete cascades in taskChangeRouter.ts.
+ * Injected at initialize()
  * time from main/src/index.ts as a closure over `getCyboflowSubdirectory` — kept
  * a plain callback so the router never imports the electron-backed cyboflow
  * directory util (standalone-typecheck invariant). Returns null to SKIP (no

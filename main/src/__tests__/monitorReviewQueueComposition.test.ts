@@ -267,3 +267,38 @@ describe('composeMonitorReviewQueueActions.resolveReviewItem (TASK-222 provenanc
     expect(readItem(db, reviewItemId).status).toBe('pending');
   });
 });
+
+describe('composeMonitorReviewQueueActions.resolveReviewItem — systemic-pause reject ⇒ dismiss', () => {
+  /** A pending blocking systemic-pause item on an already-seeded run. */
+  function seedPauseItem(db: Database.Database, runId: string): string {
+    const reviewItemId = `rvw_pause_${runId}`;
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, 'Run paused — usage limit', NULL, NULL,
+               'gate:systemic-pause:implement', NULL, ?, ?, NULL, NULL)`,
+    ).run(reviewItemId, runId, now, now);
+    return reviewItemId;
+  }
+
+  it("a monitor 'reject' on a systemic-pause item DISMISSES it (stop waiting) through the real router", async () => {
+    const { db, adapter } = buildHarness();
+    // The approve-design seed supplies the run row; the pause item is the subject.
+    seedApproveDesignGate(db, 'run-pause');
+    const pauseId = seedPauseItem(db, 'run-pause');
+    const actions = composeMonitorReviewQueueActions({
+      db: adapter,
+      runProjectId: () => 1,
+      loggerLike: makeSpyLogger(),
+    });
+
+    const result = await actions.resolveReviewItem('run-pause', { reviewItemId: pauseId, outcome: 'reject' });
+
+    expect(result.ok).toBe(true);
+    const item = readItem(db, pauseId);
+    expect(item.status).toBe('dismissed');
+    expect(item.resolution).toBe('stop waiting');
+  });
+});

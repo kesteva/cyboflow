@@ -584,13 +584,15 @@ describe('cyboflowMcpServer ListTools compound-run findings tools', () => {
     expect(tool!.description.toLowerCase()).toContain('read-only');
   });
 
-  it('declares cyboflow_list_run_findings as a read-only, argument-free sibling', async () => {
+  it('declares cyboflow_list_run_findings as a read-only sibling with one optional scope arg', async () => {
     const tools = await listTools();
     expect(tools.map((t) => t.name)).toContain('cyboflow_list_run_findings');
 
     const tool = tools.find((t) => t.name === 'cyboflow_list_run_findings');
     expect(tool).toBeDefined();
-    expect(tool!.inputSchema.properties).toEqual({});
+    const scope = (tool!.inputSchema.properties as Record<string, { enum?: string[] }>)['scope'];
+    expect(Object.keys(tool!.inputSchema.properties as object)).toEqual(['scope']);
+    expect(scope.enum).toEqual(['session', 'project']);
     expect(tool!.inputSchema.required).toEqual([]);
     expect(tool!.description.toLowerCase()).toContain('read-only');
     // The whole point of the tool: it hands back the resolve handle that
@@ -608,7 +610,7 @@ describe('cyboflowMcpServer ListTools compound-run findings tools', () => {
     const schema = tool!.inputSchema;
     expect(schema.required).toEqual(['review_item_id', 'resolution_kind']);
     expect(schema.properties['review_item_id'].type).toBe('string');
-    expect(schema.properties['resolution_kind'].enum).toEqual(['fixed', 'triaged', 'promoted']);
+    expect(schema.properties['resolution_kind'].enum).toEqual(['fixed', 'triaged', 'promoted', 'dismissed']);
     expect(schema.properties['note'].type).toBe('string');
     expect(schema.properties['task_id'].type).toBe('string');
   });
@@ -629,7 +631,7 @@ describe('cyboflowMcpServer CallTool cyboflow_resolve_finding validation', () =>
       error: 'invalid_arguments',
     });
     expect(
-      await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1', resolution_kind: 'dismissed' }),
+      await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1', resolution_kind: 'deleted' }),
     ).toMatchObject({ error: 'invalid_arguments' });
   });
 

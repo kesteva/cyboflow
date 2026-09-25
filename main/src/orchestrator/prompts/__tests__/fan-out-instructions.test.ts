@@ -163,6 +163,26 @@ describe('buildFanOutAppend — canonical chain, default cap', () => {
     expect(block).toContain('REVIEW: BLOCKING');
     expect(block).toContain('Do NOT record a `## Blocking` defect as a finding');
   });
+
+  it('dedups code-review findings against the run before filing', () => {
+    expect(block).toContain('Before filing, call `cyboflow_list_run_findings`');
+  });
+
+  it("relays write-tests' `## Tests` section to code-review and task-verify", () => {
+    const codeReview = block.slice(block.indexOf('**`code-review`**'), block.indexOf('**`task-verify`**'));
+    const taskVerify = block.slice(block.indexOf('**`task-verify`**'), block.indexOf('**`visual-verify`**'));
+    expect(codeReview).toContain("write-tests' `## Tests` section VERBATIM");
+    expect(taskVerify).toContain("write-tests' `## Tests` section VERBATIM");
+  });
+
+  it('never names write-tests output when the chain has no write-tests step', () => {
+    const def = canonicalFanOutDef();
+    const fanOut = def.phases[0].steps[0].fanOut!;
+    fanOut.inner = fanOut.inner.filter((s) => s.id !== 'write-tests');
+    const withoutWriteTests = buildFanOutAppend(def);
+    expect(withoutWriteTests).toContain('**`code-review`**');
+    expect(withoutWriteTests).not.toContain('## Tests');
+  });
 });
 
 describe('buildFanOutAppend — explicit maxConcurrency', () => {

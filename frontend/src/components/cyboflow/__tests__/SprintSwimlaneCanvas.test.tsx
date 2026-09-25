@@ -60,6 +60,7 @@ vi.mock('../../../trpc/client', () => ({
 
 // Import after mocks so vi.mock hoisting is in effect.
 import { SprintSwimlaneCanvas } from '../SprintSwimlaneCanvas';
+import { MODEL_FAMILY_COLORS, stepModelKey, type ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -194,7 +195,14 @@ beforeEach(() => {
   lanesQuerySpy.mockResolvedValue(LANES);
 });
 
-async function renderCanvas(props: { projectId?: number | null; sessionKey?: string } = {}) {
+async function renderCanvas(
+  props: {
+    projectId?: number | null;
+    sessionKey?: string;
+    stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
+    pausedStepId?: string | null;
+  } = {},
+) {
   render(
     <SprintSwimlaneCanvas
       runId="run-1"
@@ -370,6 +378,40 @@ describe('SprintSwimlaneCanvas — summary, merge gate, plan + verify columns', 
 
     // Center header strip carries the parallel count.
     expect(screen.getByTestId('swimlane-execute-header')).toHaveTextContent('EXECUTE / PARALLEL ×7');
+  });
+
+  it('renders the resolved model on the plan and verify cards when stepModels is supplied', async () => {
+    // Regression: a sprint run's outer cards showed `agent ×N` with no model,
+    // because SprintSwimlaneCanvas never received the map even though these
+    // cards are ordinary phases[].steps that getStepModels already resolves.
+    await renderCanvas({
+      stepModels: new Map([
+        [stepModelKey('plan', 'analyze-dependencies'), { label: 'Opus 5', family: 'opus' as const }],
+        [stepModelKey('verify', 'sprint-verify'), { label: 'Sonnet 5', family: 'sonnet' as const }],
+      ]),
+    });
+
+    expect(screen.getByTestId('swimlane-plan')).toHaveTextContent('Opus 5');
+    expect(screen.getByTestId('step-card-model-analyze-dependencies')).toBeInTheDocument();
+    expect(screen.getByTestId('step-card-model-dot-analyze-dependencies')).toHaveStyle({
+      backgroundColor: MODEL_FAMILY_COLORS.opus,
+    });
+
+    expect(screen.getByTestId('step-card-sprint-verify')).toHaveTextContent('Sonnet 5');
+    expect(screen.getByTestId('step-card-model-dot-sprint-verify')).toHaveStyle({
+      backgroundColor: MODEL_FAMILY_COLORS.sonnet,
+    });
+
+    // A step with no entry keeps today's bare row, and the human gate never
+    // gets a model segment at all.
+    expect(screen.queryByTestId('step-card-model-sprint-review')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('step-card-model-human-review')).not.toBeInTheDocument();
+  });
+
+  it('renders exactly today\'s cards when stepModels is omitted', async () => {
+    await renderCanvas();
+    expect(screen.queryByTestId('step-card-model-analyze-dependencies')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('step-card-model-sprint-verify')).not.toBeInTheDocument();
   });
 });
 
@@ -693,5 +735,19 @@ describe('SprintSwimlaneCanvas — visual-check state (F8)', () => {
     expect(stepStatus('vr', 'code-review')).toBe('running');
     expect(stepStatus('vr', 'visual-verify')).toBe('pending');
     expect(stepTitle('vr', 'visual-verify')).toBeNull();
+  });
+});
+
+describe('SprintSwimlaneCanvas — systemic pause on an outer step', () => {
+  it('renders the collapsed PLAN card as PAUSED when the run is parked on a plan step', async () => {
+    await renderCanvas({ pausedStepId: 'analyze-dependencies' });
+    const plan = screen.getByTestId('swimlane-plan');
+    expect(plan.querySelector('[data-testid="step-card-analyze-dependencies"]')).toHaveTextContent('PAUSED');
+  });
+
+  it('renders a SPRINT-REVIEW card as PAUSED when the run is parked on it, leaving the lanes alone', async () => {
+    await renderCanvas({ pausedStepId: 'sprint-verify' });
+    expect(screen.getByTestId('step-card-sprint-verify')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-sprint-review')).toHaveTextContent('PENDING');
   });
 });

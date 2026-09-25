@@ -235,16 +235,17 @@ function buildDbWithIdeaComponents(): Database.Database {
 /** Seed a workflows + workflow_runs row carrying seed_idea_id / seed_idea_ids. */
 function seedRunWithSeedIdeas(
   db: Database.Database,
-  opts: { runId: string; seedIdeaId?: string | null; seedIdeaIds?: string[] | null },
+  opts: { runId: string; seedIdeaId?: string | null; seedIdeaIds?: string[] | null; status?: string },
 ): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
   ).run();
   db.prepare(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids)
-     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
   ).run(
     opts.runId,
+    opts.status ?? 'running',
     opts.seedIdeaId ?? null,
     opts.seedIdeaIds !== undefined && opts.seedIdeaIds !== null ? JSON.stringify(opts.seedIdeaIds) : null,
   );
@@ -3494,6 +3495,151 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(event.task.inFlow).toEqual([
         { agent: 'agent', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
       ]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // buildBacklogTaskItem — inFlow overlay for IDEAS seeded into a live
+  // Planner/Ship run (TASK-224: seed_idea_id / seed_idea_ids, migrations
+  // 017/061)
+  // -------------------------------------------------------------------------
+
+  describe('buildBacklogTaskItem — inFlow overlay for ideas seeded into a live Planner/Ship run', () => {
+    /** Force an emit without touching the stage. */
+    async function emitNoopUpdate(router: TaskChangeRouter, taskId: string): Promise<TaskChangedEvent> {
+      const events: TaskChangedEvent[] = [];
+      const off = (e: TaskChangedEvent): number => events.push(e);
+      taskChangeEvents.on(taskProjectChannel(1), off);
+      await router.applyChange(1, { actor: 'user', taskId, fields: { summary: 'noop' } });
+      taskChangeEvents.removeListener(taskProjectChannel(1), off);
+      return events[events.length - 1];
+    }
+
+    it('a single-idea seed_idea_id RUNNING run projects an inFlow entry', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      seedRunWithSeedIdeas(db, { runId: 'run-single', seedIdeaId: idea.taskId, status: 'running' });
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([
+        {
+          agent: 'agent',
+          runId: 'run-single',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: null,
+          sessionName: null,
+          workflowName: 'planner',
+        },
+      ]);
+    });
+
+    it('excludes a non-Planner/Ship workflow run seeded with the idea', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-launch', 1, 'launch', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id)
+         VALUES ('run-launch', 'wf-launch', 1, 'running', 'default', ?)`,
+      ).run(idea.taskId);
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([]);
+    });
+
+    it('a multi-idea seed_idea_ids JSON array run lights EVERY seeded idea', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const ideaA = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Idea A' });
+      const ideaB = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Idea B' });
+      seedRunWithSeedIdeas(db, {
+        runId: 'run-multi',
+        seedIdeaId: ideaA.taskId, // dual-written to the first element (production invariant)
+        seedIdeaIds: [ideaA.taskId, ideaB.taskId],
+        status: 'running',
+      });
+
+      const eventA = await emitNoopUpdate(router, ideaA.taskId);
+      const eventB = await emitNoopUpdate(router, ideaB.taskId);
+      expect(eventA.task.inFlow).toHaveLength(1);
+      expect(eventA.task.inFlow[0]?.runId).toBe('run-multi');
+      expect(eventB.task.inFlow).toHaveLength(1);
+      expect(eventB.task.inFlow[0]?.runId).toBe('run-multi');
+    });
+
+    it('a TERMINAL idea-seeded run (completed) projects NO inFlow entry', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      seedRunWithSeedIdeas(db, { runId: 'run-done', seedIdeaId: idea.taskId, status: 'completed' });
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([]);
+    });
+
+    it('pre-061 schema (seed_idea_ids column absent) falls back to seed_idea_id alone', async () => {
+      // buildDb() ALTER'd with ONLY seed_idea_id (migration 017) — mirrors a
+      // schema that predates migration 061 (seed_idea_ids).
+      const db = buildDb();
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT;');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id)
+         VALUES ('run-pre061', 'wf-1', 1, 'running', 'default', ?)`,
+      ).run(idea.taskId);
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([
+        {
+          agent: 'agent',
+          runId: 'run-pre061',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: null,
+          sessionName: null,
+          workflowName: 'planner',
+        },
+      ]);
+    });
+
+    it('an idea with no seeded run projects an empty inFlow (untouched idea)', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Untouched idea' });
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      expect(event.task.inFlow).toEqual([]);
+    });
+
+    it('emit-path SHAPE PARITY: the idea inFlow overlay agrees with taskListing.selectTaskById for the same fixture', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      // taskListing.selectTaskById's UNION reads experiment_id unconditionally
+      // (migration 049) — buildDb() doesn't carry it, so the parity read below
+      // would otherwise throw 'no such column: experiment_id'.
+      db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT;');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      seedRunWithSeedIdeas(db, {
+        runId: 'run-parity',
+        seedIdeaId: idea.taskId,
+        seedIdeaIds: [idea.taskId],
+        status: 'running',
+      });
+
+      const event = await emitNoopUpdate(router, idea.taskId);
+      const viaListing = selectTaskById(dbAdapter(db), idea.taskId)!;
+      expect(event.task.inFlow).toHaveLength(1);
+      expect(event.task.inFlow).toEqual(viaListing.inFlow);
     });
   });
 

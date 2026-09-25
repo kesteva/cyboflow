@@ -154,7 +154,7 @@ describe('Tier-2 chokepoint — report finding + resolve (ReviewItemRouter)', ()
     // resolve-finding is AWAITED — on reply the row is already committed resolved.
     const resolveRes = parseLastWrite(resolved.writes);
     expect(resolveRes.ok).toBe(true);
-    expect(resolveRes.data).toEqual({ resolved: true, review_item_id: reviewItemId });
+    expect(resolveRes.data).toEqual({ resolved: true, status: 'resolved', review_item_id: reviewItemId });
 
     const afterResolve = findingRow(db, reviewItemId);
     expect(afterResolve!.status).toBe('resolved');

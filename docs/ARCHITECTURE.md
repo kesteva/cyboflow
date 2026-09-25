@@ -87,6 +87,16 @@ without transitive imports from `electron`, `better-sqlite3`, or any service in
 `main/src/services/*`. This keeps the orchestrator extractable to a standalone Node process
 for the team-tier v2 target (ROADMAP-001 §6.3).
 
+**Injected collaborators.** When orchestrator/tRPC code needs a `services/*` collaborator, its
+shape is declared as a structural mirror under `main/src/orchestrator/trpc/contracts/*` (e.g.
+`sessionOps.ts`, `effectiveAgents.ts`), the concrete implementation is bound once in
+`main/src/index.ts` onto `ContextDeps` (`trpc/context.ts`), and procedures read it off `ctx`
+with a PRECONDITION_FAILED guard when unwired. Example: `runs.getStepModels`
+(`orchestrator/runStepModels.ts`, the per-step model rail) receives
+`ctx.resolveRunEffectiveAgents` + `ctx.stepModelGates`, and reduces each step through
+`orchestrator/stepSpawnTarget.ts` — the same pure function the programmatic spawn seam uses —
+so the rail reports what actually spawns.
+
 **Frozen exemptions.** `standaloneInvariant.test.ts` holds the exact set of files still allowed
 to import `electron` or a `services/*` value at value position — a list that may shrink but not
 grow (a stale entry fails the test). `runEventBridge.ts` is NOT on it: its former
@@ -133,6 +143,49 @@ chokepoint" — this section frames only what each one owns:
   035); see "Run artifacts" below.
 - **`ideaComponentRouter.ts` (`IdeaComponentRouter.applyChange`)** — the `idea_components` ledger
   (migration 101) tracking each idea's idea-spec/prototype/architecture/epics/stories progress.
+
+#### Programmatic plane: systemic pauses and run-scoped agent-target overrides
+
+A programmatic step that dies on a usage/session/rate limit parks the run behind a blocking
+`gate:systemic-pause:<stepId>` decision item (`programmatic/systemicPauseGate.ts`, wired by
+`systemicPauseGateWiring.ts`) whose `DecisionPayload` (gate `'systemic-pause'`) names what was
+blocked: the agent keys, the provider/runtime the failed spawn ran on, whether a fan-out is parked,
+and the `origin`. The pause card offers **Retry now** (a plain resolve), **Switch runtime & retry**,
+and **Stop waiting** (a dismiss; a `reject` outcome on this source is mapped to a dismiss by
+`resolveReviewItemHandler.ts` in both composition roots, because the gate reads any resolve as a
+retry). The switch (`switchRunAgentsHandler.ts`, tRPC `runs.switchPausedStepAgents`) validates the
+target, its provider's Settings toggle, and its readiness (installed and signed in) BEFORE its one
+write, then resolves the pause; switch and revert are serialized per run, so an overlapping second
+switch runs after the first resolved the pause and refuses (`item_not_pending`) instead of
+last-write-winning the column. That write goes to `workflow_runs.agent_target_overrides_json`
+(migration 144): an explicitly MUTABLE operator directive, unlike the launch stamps, and the
+highest-precedence target layer of `resolveRunEffectiveAgents`. The layers run builtin →
+project `agent_overrides` → the frozen spec's `agentConfigs` → variant deltas → run overrides, with
+prompt addenda appended last. It therefore binds on the very next spawn and also re-targets the
+visual verifier; `visual-verify` is skipped when the target provider has no verify runtime (only
+Claude and Codex have one). A fan-out retry replays every parked lane from inner step 0, so a
+fan-out pause covers EVERY inner-chain agent and offers no step-only scope. The run page's override
+chip reverts via `runs.clearRunAgentTargets`, which takes effect at the next spawn. The per-step model
+rail on the workflow canvas (`runs.getStepModels`, resolved through the same effective-agent layering)
+is fetched once per run, so a switch and a revert each bump a renderer-side per-run counter
+(`frontend/src/stores/runAgentTargetsStore.ts`) that the run pane and the chip re-fetch on; the step
+cards flip to the switched runtime/model without a main-process subscription, since those two
+mutations are the layer's only writers. While parked, the run row stays 'running'; the canvases
+read the pending pause item (`frontend/src/utils/systemicPause.ts`) and render that step's card as
+PAUSED (amber) with the paused pill, and the landing home's "Needs your input" row for the item
+offers the same Retry now / Switch & retry… (opens the session) / Stop waiting trio. Two Claude-only
+surfaces are NOT moved by a switch: the lane-triage consult and the run monitor both run on the
+run's supervisor. An `origin: 'triage'` pause says so, offers no switch (the handler refuses one with
+`origin_triage`), and a monitor "switch agents" chat action was deferred because it could not
+execute under a Claude limit. Known gaps: run close-out kills only the
+launch-stamped provider's manager after a mid-run provider flip (pre-existing with per-step mixing),
+and Insights and A/B buckets still key on the launch stamps, not on the agents that actually ran. Dev lever for smoking the whole path without burning a real limit:
+`CYBOFLOW_FAKE_SYSTEMIC_STEP=<stepId>` (optionally `CYBOFLOW_FAKE_SYSTEMIC_ERROR=<text>`) makes
+`spawnStepRunner.ts` fail that step's CLAUDE spawn with a fake epoch-suffixed usage-limit error
+instead of spawning (the text still goes through the real classifier); a step switched onto
+another provider spawns for real, which is what proves the switch. Live-smoked 2026-09-23 on a
+fresh data dir: pause → switch (provider and step scope) → resume on Codex, revert, Retry now,
+Stop waiting.
 
 #### Visual verification (`main/src/orchestrator/verify/`)
 

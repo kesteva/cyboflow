@@ -29,6 +29,7 @@ import type {
   ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
 import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { PendingBlockingItem } from './blockingItemsGate';
 
 /**
@@ -69,6 +70,37 @@ export interface StepRunResult {
    * (interactive, codex).
    */
   resultText?: string | null;
+  /**
+   * The provider this attempt actually spawned under (the per-agent runtime pin's
+   * provider, else the run's). Set ONLY on a `failed` result, so the controller
+   * can tell a systemic pause WHICH provider was blocked (the pause item's
+   * `blockedProvider`, which scopes "Switch runtime & retry").
+   */
+  provider?: AgentProvider;
+  /** The runtime this attempt spawned on (pin, else the run's). Set ONLY on `failed`. */
+  runtime?: string;
+}
+
+/**
+ * What a systemic pause blocked — threaded controller → host → gate → the pause
+ * item's `DecisionPayload` (gate 'systemic-pause') so the operator's "Switch
+ * runtime & retry" re-targets exactly the agents a retry will spawn.
+ *   - `blockedAgentKeys` — the agents a switch must cover: the failing step's
+ *     agent for a single step; EVERY inner-chain agent for a fan-out (its 'retry'
+ *     replays every parked lane from inner step 0).
+ *   - `blockedProvider` / `blockedRuntime` — what the failing spawn ran on, when
+ *     known (a fan-out whose step-origin lanes disagree leaves them undefined).
+ *   - `origin` — 'step' when a step agent's own spawn died; 'triage' when only
+ *     the lane-triage consult (the run's Claude-only supervisor) died.
+ *   - `fanOut` — the pause parks a whole fan-out (a 'step'-scoped switch is then
+ *     unavailable: the retry replays every lane).
+ */
+export interface SystemicPauseInfo {
+  blockedAgentKeys: readonly string[];
+  blockedProvider?: AgentProvider;
+  blockedRuntime?: string;
+  origin: 'step' | 'triage';
+  fanOut: boolean;
 }
 
 /**
@@ -1091,12 +1123,14 @@ export interface ControllerHost {
    * MAX_SYSTEMIC_PAUSES per step id. Absent (tests / hosts built without the
    * gate) ⇒ systemic failures follow the normal failure path (today's behavior).
    * Fail-soft is the host's responsibility; the controller only branches on the
-   * returned verdict.
+   * returned verdict. `info` (optional — a host/test may ignore it) says what
+   * was blocked, so the pause item can offer "Switch runtime & retry".
    */
   awaitSystemicPause?(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    info?: SystemicPauseInfo,
   ): Promise<SystemicPauseVerdict>;
 
   /**

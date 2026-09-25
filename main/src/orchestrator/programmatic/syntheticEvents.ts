@@ -17,6 +17,7 @@
  */
 
 import type { UserEvent, AssistantEvent } from '../../../../shared/types/claudeStream';
+import { CLAUDE_AUTHENTICATION_FAILED } from '../../../../shared/types/claudeAuth';
 
 let syntheticEventCounter = 0;
 
@@ -59,5 +60,27 @@ export function buildAssistantTextEvent(text: string, opts?: { model?: string })
       content: [{ type: 'text', text }],
     },
     parent_tool_use_id: null,
+  };
+}
+
+/**
+ * Build the monitor's reply to a turn that died on a missing/expired Claude
+ * login. Deliberately the SDK's OWN shape for that failure — a `<synthetic>`
+ * assistant message carrying `error: 'authentication_failed'` — which the
+ * projection renders as a system error row with `metadata.assistantError`, the
+ * exact row the chat's sign-in card (`findClaudeLoginRequired`) keys on. A
+ * plain assistant turn would render the text but never offer the sign-in.
+ */
+export function buildLoginRequiredEvent(text: string): AssistantEvent {
+  return {
+    type: 'assistant',
+    message: {
+      id: `monitor_${nextId()}`,
+      model: '<synthetic>',
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+    },
+    parent_tool_use_id: null,
+    error: CLAUDE_AUTHENTICATION_FAILED,
   };
 }

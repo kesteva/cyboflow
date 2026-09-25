@@ -359,38 +359,57 @@ export class ConfigManager extends EventEmitter {
     op: RunTypeDefaultsOp,
   ): Promise<{ previous: RunTypeDefaults | undefined; config: AppConfig }> {
     const previous = this.config.runTypeDefaults?.[key];
-    const runTypeDefaults = { ...this.config.runTypeDefaults };
+    // A Map, NOT a plain object: `key` is caller-controlled (the tRPC
+    // boundary validates it only as a non-blank string, no allowlist), and a
+    // plain `{ ...this.config.runTypeDefaults }` working object has
+    // Object.prototype as its [[Prototype]] — a key of '__proto__' then
+    // triggers the INHERITED accessor on a later bracket-assignment
+    // (`obj[key] = x`), reassigning the object's own prototype instead of
+    // creating an own property. Every other entry then silently vanishes
+    // once the (now-empty-looking) object is re-serialized. A Map's keys are
+    // always genuine entries no matter their name, so this class of bug
+    // cannot reach it. `Object.entries`/`Object.fromEntries` at the read/
+    // write edges are themselves safe: fromEntries creates properties via
+    // CreateDataPropertyOrThrow, which does not consult inherited setters.
+    const runTypeDefaults = new Map<string, RunTypeDefaults>(
+      Object.entries(this.config.runTypeDefaults ?? {}),
+    );
 
     if (op.kind === 'replace') {
       if (op.value === null || Object.keys(op.value).length === 0) {
-        delete runTypeDefaults[key];
+        runTypeDefaults.delete(key);
       } else {
         const replacement = { ...op.value };
         for (const field of Object.keys(replacement) as Array<keyof RunTypeDefaults>) {
           if (replacement[field] === undefined) delete replacement[field];
         }
-        if (Object.keys(replacement).length === 0) delete runTypeDefaults[key];
-        else runTypeDefaults[key] = replacement;
+        if (Object.keys(replacement).length === 0) runTypeDefaults.delete(key);
+        else runTypeDefaults.set(key, replacement);
       }
     } else {
       const merged: RunTypeDefaults = { ...previous };
-      const { model, permissionMode, substrate, agentRuntime, reasoningEffort } = op.value;
-      if (model === null) delete merged.model;
-      else if (model !== undefined) merged.model = model;
-      if (permissionMode === null) delete merged.permissionMode;
-      else if (permissionMode !== undefined) merged.permissionMode = permissionMode;
-      if (substrate === null) delete merged.substrate;
-      else if (substrate !== undefined) merged.substrate = substrate;
-      if (agentRuntime === null) delete merged.agentRuntime;
-      else if (agentRuntime !== undefined) merged.agentRuntime = agentRuntime;
-      if (reasoningEffort === null) delete merged.reasoningEffort;
-      else if (reasoningEffort !== undefined) merged.reasoningEffort = reasoningEffort;
-      if (Object.keys(merged).length === 0) delete runTypeDefaults[key];
-      else runTypeDefaults[key] = merged;
+      // Iterate every field the caller actually sent, rather than naming each
+      // RunTypeDefaults member individually: a fixed destructure list here
+      // means a member added to RunTypeDefaults later compiles clean (a wider
+      // type is structurally assignable to op.value's narrower one) and is
+      // then silently dropped on every merge write, with no error anywhere.
+      // The two `unknown` casts are scoped to this loop only — merged and
+      // op.value keep their strong RunTypeDefaults / RunTypeDefaultsPatch
+      // types everywhere else in this method.
+      const mergedRecord = merged as unknown as Record<string, unknown>;
+      const patchRecord = op.value as unknown as Record<string, unknown>;
+      for (const field of Object.keys(op.value)) {
+        const value = patchRecord[field];
+        if (value === null) delete mergedRecord[field];
+        else if (value !== undefined) mergedRecord[field] = value;
+      }
+      if (Object.keys(merged).length === 0) runTypeDefaults.delete(key);
+      else runTypeDefaults.set(key, merged);
     }
 
     const config = await this.updateConfig({
-      runTypeDefaults: Object.keys(runTypeDefaults).length > 0 ? runTypeDefaults : undefined,
+      runTypeDefaults:
+        runTypeDefaults.size > 0 ? Object.fromEntries(runTypeDefaults) : undefined,
     });
     return { previous, config };
   }

@@ -266,6 +266,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
     notifyOnComplete: true
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Whether a `RunTypeOverrideDetail` draft is open (Session settings →
+  // "Session type overrides" → Configure). That sub-screen's Save/Cancel are
+  // the ONLY sanctioned way to leave it — its writes go straight through
+  // `configStore.applyRunTypeDefault`, never through this form's handleSubmit
+  // (runTypeDefaults isn't part of that payload at all) — so the shared
+  // footer Save below must not be reachable while it is open, or it discards
+  // the in-progress draft with no warning. See RunTypeOverrideDetail's module
+  // doc for why routing it through handleSubmit isn't the fix instead.
+  const [runTypeOverrideDetailOpen, setRunTypeOverrideDetailOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'general' | 'shortcuts' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
   const { updateSettings } = useNotifications();
@@ -941,6 +950,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onCodeReviewEvalEnabledChange={setCodeReviewEvalEnabled}
               autoGradeVariantRuns={autoGradeVariantRuns}
               onAutoGradeVariantRunsChange={setAutoGradeVariantRuns}
+              onRunTypeOverrideDetailOpenChange={setRunTypeOverrideDetailOpen}
             />
 
             {error && (
@@ -1209,7 +1219,12 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             type={activeTab === 'general' || activeTab === 'shortcuts' || activeTab === 'ai' || activeTab === 'assistant' ? 'submit' : 'button'}
             form={activeTab === 'general' || activeTab === 'shortcuts' || activeTab === 'ai' || activeTab === 'assistant' ? 'settings-form' : undefined}
             onClick={activeTab === 'notifications' ? (e) => handleSubmit(e as React.FormEvent) : undefined}
-            disabled={isSubmitting}
+            disabled={isSubmitting || runTypeOverrideDetailOpen}
+            title={
+              runTypeOverrideDetailOpen
+                ? 'Finish (Save or Cancel) the open session type override first'
+                : undefined
+            }
             loading={isSubmitting}
             variant="primary"
           >

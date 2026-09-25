@@ -17,6 +17,8 @@
  * run-recovery stampers. That asymmetry is the whole point of the seam.
  */
 import type { AppServices } from './types';
+import type { DatabaseService } from '../database/database';
+import type { LoggerLike } from '../orchestrator/types';
 import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
 import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
 import { appendCommitFooter } from '../utils/commitFooter';
@@ -37,6 +39,7 @@ import {
   stampSessionRunsOutcome,
   stampSessionRunsPrOpen,
   stampSessionRunsCompleted,
+  stampSessionRunsLanded,
   sessionDeliveredWork,
   sessionCompletedNoCodeWork,
 } from '../orchestrator/runRecovery';
@@ -138,6 +141,370 @@ type OpsInput<K extends keyof SessionGitOpsLike> = Parameters<SessionGitOpsLike[
  */
 type OpsResult<K extends keyof SessionGitOpsLike> = Awaited<ReturnType<SessionGitOpsLike[K]>>;
 
+// ---------------------------------------------------------------------------
+// Sprint close-out on session merge (feat/parallel-sprint, single-run lane
+// model). MODULE SCOPE (TASK-296): the squash/rebase merge handlers, the
+// markComplete op, and the boot backfill all reach these through
+// {@link closeOutSessionAfterLanding} / directly — one code path, so a
+// session whose branch landed OUTSIDE the app (merged/rebased by hand) gets
+// the exact same treatment as an in-app merge instead of a bookkeeping-only
+// stamp.
+// ---------------------------------------------------------------------------
+
+/**
+ * A sprint run executes in the SESSION worktree; merging the session to main
+ * IS the sprint's merge close-out. For every batch-linked run hosted by the
+ * merged session: each lane whose status is 'integrated' moves its task to
+ * the done stage via the TaskChangeRouter chokepoint (mirrors
+ * recomputeTaskExecutionStage's outcome='merged' arm: board position 9, kind
+ * 'execution-stage', actor 'orchestrator'), then the batch is marked
+ * 'completed'. Entirely fail-soft: a task-side or batch-side failure is
+ * logged and NEVER affects the merge result (the git operation already
+ * succeeded). Lanes that are failed/blocked/queued are deliberately left
+ * alone — their tasks revert/stay per the normal stage rules.
+ */
+export async function finalizeSprintLanesOnSessionMerge(databaseService: DatabaseService, sessionId: string): Promise<void> {
+  try {
+    const db = databaseService.getDb();
+    const batchRuns = db
+      .prepare('SELECT id, batch_id FROM workflow_runs WHERE session_id = ? AND batch_id IS NOT NULL')
+      .all(sessionId) as Array<{ id: string; batch_id: string }>;
+    if (batchRuns.length === 0) return;
+
+    const laneStore = SprintLaneStore.getInstance();
+    const taskRouter = TaskChangeRouter.getInstance();
+
+    for (const run of batchRuns) {
+      const lanes = laneStore.listLanes(run.batch_id);
+      for (const lane of lanes) {
+        if (lane.status !== 'integrated') continue;
+        try {
+          const task = db
+            .prepare('SELECT id, project_id, board_id, stage_id FROM tasks WHERE id = ?')
+            .get(lane.taskId) as
+            | { id: string; project_id: number; board_id: string; stage_id: string }
+            | undefined;
+          if (!task) {
+            // After experiments.decide's lane remap (experiments.ts remapWinnerSeedLane),
+            // an A/B winner's lanes point at ORIGINAL task ids, never swept clones — so a
+            // missing task here should never fire for an experiment run. If it does, a lane
+            // still references a deleted clone: a real signal (defect a), not noise.
+            console.warn(
+              `[IPC:git] sprint close-out: lane task ${lane.taskId} (batch ${run.batch_id}) has no tasks row ` +
+                '— skipping (unexpected for an experiment run after decide lane remap)'
+            );
+            continue;
+          }
+          // DONE_POSITION = 9 — same stage resolution as TaskChangeRouter.
+          // recomputeTaskExecutionStage's outcome='merged' arm.
+          const doneStage = db
+            .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+            .get(task.board_id, 9) as { id: string } | undefined;
+          if (!doneStage || doneStage.id === task.stage_id) continue;
+          await taskRouter.applyChange(task.project_id, {
+            actor: 'orchestrator',
+            entityType: 'task',
+            taskId: lane.taskId,
+            stageId: doneStage.id,
+            kind: 'execution-stage',
+          });
+        } catch (taskError) {
+          console.error(
+            `[IPC:git] sprint close-out: failed to move task ${lane.taskId} to done (continuing):`,
+            taskError
+          );
+        }
+      }
+      try {
+        laneStore.markBatchTerminal(run.batch_id, 'completed');
+      } catch (batchError) {
+        console.error(
+          `[IPC:git] sprint close-out: failed to mark batch ${run.batch_id} completed (continuing):`,
+          batchError
+        );
+      }
+      // Recompute the batch's tasks (migration 066) so NON-integrated lanes
+      // (queued/failed/blocked) revert off 'In development' to their entry stage.
+      // The terminal-stage guard in recomputeTaskExecutionStage protects the
+      // just-Done tasks moved above (this runs BEFORE stampSessionRunsOutcome
+      // stamps outcome='merged', so a Done task must not be yanked back). Fail-
+      // soft — the merge already succeeded.
+      try {
+        await taskRouter.recomputeTasksForBatch(run.batch_id);
+      } catch (recomputeError) {
+        console.error(
+          `[IPC:git] sprint close-out: failed to recompute batch ${run.batch_id} task stages (continuing):`,
+          recomputeError
+        );
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[IPC:git] sprint close-out after session merge failed for session ${sessionId} (merge unaffected):`,
+      error
+    );
+  }
+}
+
+/**
+ * Re-derive the board stages a session's runs drove, AFTER a close-out has
+ * stamped those runs terminal / merged. Needed because the run-status flips
+ * happen OUTSIDE the TaskChangeRouter chokepoint (stampSessionRunsPrOpen /
+ * stampSessionRunsOutcome raw-UPDATE workflow_runs), so nothing recomputes the
+ * derived 'In development' stage (migration 066) afterward:
+ *   • A DIRECT task-linked run (workflow_runs.task_id, no batch) is never touched
+ *     by finalizeSprintLanesOnSessionMerge (batch-only) — arm 1 lands its task on
+ *     Done on merge here, instead of waiting for the next boot sweep.
+ *   • A BATCH run's lanes were recomputed by finalizeSprintLanesOnSessionMerge
+ *     while its run was still non-terminal (arm 2 held non-integrated tasks at
+ *     'In development'); re-running now the run is terminal reverts them to their
+ *     entry stage (pr_open ≠ merged). The terminal-stage guard in
+ *     recomputeTaskExecutionStage protects the just-Done integrated tasks.
+ * Entirely fail-soft + per-run isolated — the git operation already succeeded.
+ */
+export async function recomputeSessionRunTaskStages(databaseService: DatabaseService, sessionId: string): Promise<void> {
+  try {
+    const db = databaseService.getDb();
+    const runs = db
+      .prepare('SELECT batch_id, task_id FROM workflow_runs WHERE session_id = ?')
+      .all(sessionId) as Array<{ batch_id: string | null; task_id: string | null }>;
+    if (runs.length === 0) return;
+    const taskRouter = TaskChangeRouter.getInstance();
+    const seenBatches = new Set<string>();
+    for (const run of runs) {
+      if (run.batch_id && !seenBatches.has(run.batch_id)) {
+        seenBatches.add(run.batch_id);
+        try {
+          await taskRouter.recomputeTasksForBatch(run.batch_id);
+        } catch (batchError) {
+          console.error(
+            `[IPC:git] close-out recompute: batch ${run.batch_id} failed (continuing):`,
+            batchError
+          );
+        }
+      }
+      if (run.task_id) {
+        try {
+          await taskRouter.recomputeTaskExecutionStage(run.task_id);
+        } catch (taskError) {
+          console.error(
+            `[IPC:git] close-out recompute: task ${run.task_id} failed (continuing):`,
+            taskError
+          );
+        }
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[IPC:git] close-out recompute failed for session ${sessionId} (git operation unaffected):`,
+      error
+    );
+  }
+}
+
+/**
+ * The FULL sprint close-out for a session whose work has genuinely landed on
+ * main (TASK-296) — used by every path that reaches that conclusion: the
+ * in-app squash/rebase merge handlers (via `stampMergedOutcomeForSession`,
+ * below) AND `markComplete` when its server-side re-probe of the delivery
+ * state (`WorktreeManager.getBranchLandingState`) proves the branch already
+ * landed by hand. Runs the SAME three steps an in-app merge always ran:
+ *
+ *   1. finalizeSprintLanesOnSessionMerge — integrated lanes -> Done stage,
+ *      batch -> 'completed' terminal.
+ *   2. stamp outcome='merged' + merge_sha. The in-app merge handlers use
+ *      stampSessionRunsOutcome (outcome IS NULL guard, so a run that already
+ *      recorded its own decision is never clobbered). `markComplete` passes
+ *      `overrideUndelivered` to use stampSessionRunsLanded instead — the
+ *      human is asserting delivery, and the runs that action exists for
+ *      usually already read 'canceled'/'interrupted' (and may be linked only
+ *      by the legacy `sessions.run_id` back-link), where the NULL guard would
+ *      stamp zero rows and the follow-up archive would sweep the findings.
+ *   3. recomputeSessionRunTaskStages — re-derives the board stage a DIRECT
+ *      task-linked run drove, and reverts non-integrated batch lanes off
+ *      'In development' now the runs are terminal.
+ *
+ * Fail-soft throughout (see each step above); returns the number of runs
+ * actually stamped so callers can log/report it.
+ */
+export async function closeOutSessionAfterLanding(
+  databaseService: DatabaseService,
+  sessionId: string,
+  opts: { mergeSha?: string; overrideUndelivered?: boolean },
+): Promise<{ stampedRuns: number }> {
+  await finalizeSprintLanesOnSessionMerge(databaseService, sessionId);
+  let stampedRuns = 0;
+  try {
+    const dbLike = makeDatabaseLike(databaseService);
+    stampedRuns = opts.overrideUndelivered
+      ? stampSessionRunsLanded(dbLike, sessionId, opts.mergeSha)
+      : stampSessionRunsOutcome(dbLike, sessionId, 'merged', opts.mergeSha);
+  } catch (error) {
+    console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
+  }
+  await recomputeSessionRunTaskStages(databaseService, sessionId);
+  return { stampedRuns };
+}
+
+/**
+ * How many of a session's INTEGRATED sprint lanes have NOT (yet) reached the
+ * board's Done stage — the "would have moved to Done had the branch actually
+ * landed" count. Used by:
+ *   - `markComplete`'s `laneTasksLeftOpen` response field, when it stamps
+ *     `outcome='completed'` WITHOUT running the close-out (branch not landed) —
+ *     so the caller/dialog can say "N sprint tasks were NOT marked done
+ *     because the branch isn't on main" instead of silently stranding them.
+ *   - `backfillLandedSprintCloseOuts`'s boot-log task count.
+ * Read-only; never mutates a lane or a task. Fail-soft: any read error
+ * reports 0 rather than throwing.
+ */
+export function countIntegratedLaneTasksNotYetDone(databaseService: DatabaseService, sessionId: string): number {
+  try {
+    const db = databaseService.getDb();
+    const batchRuns = db
+      .prepare('SELECT id, batch_id FROM workflow_runs WHERE session_id = ? AND batch_id IS NOT NULL')
+      .all(sessionId) as Array<{ id: string; batch_id: string }>;
+    if (batchRuns.length === 0) return 0;
+    const laneStore = SprintLaneStore.getInstance();
+    let count = 0;
+    for (const run of batchRuns) {
+      for (const lane of laneStore.listLanes(run.batch_id)) {
+        if (lane.status !== 'integrated') continue;
+        const task = db
+          .prepare('SELECT stage_id, board_id FROM tasks WHERE id = ?')
+          .get(lane.taskId) as { stage_id: string; board_id: string } | undefined;
+        if (!task) continue;
+        const doneStage = db
+          .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+          .get(task.board_id, 9) as { id: string } | undefined;
+        if (doneStage && doneStage.id !== task.stage_id) count++;
+      }
+    }
+    return count;
+  } catch (error) {
+    console.error(`[IPC:git] failed to count integrated lane tasks for session ${sessionId}:`, error);
+    return 0;
+  }
+}
+
+/**
+ * `workflow_runs.updated_at` (SQLite UTC 'YYYY-MM-DD HH:MM:SS') before which a
+ * `completed` sprint run may have been stamped by the PRE-TASK-296
+ * markComplete (TASK-296 landed 2026-09-21). See
+ * {@link backfillLandedSprintCloseOuts}.
+ */
+export const LANDED_CLOSE_OUT_BACKFILL_CUTOFF = '2026-09-21 00:00:00';
+
+/**
+ * Boot backfill (TASK-296): before this task, `markComplete` on a session
+ * whose branch had ALREADY landed (merged/rebased by hand outside the app)
+ * only stamped `outcome='completed'` — it never ran the lane-finalize
+ * close-out an in-app merge performs, so a batch's `integrated` lanes stayed
+ * wherever the sprint left them instead of moving to Done. This is a
+ * ONE-SHOT sweep (mirrors the boot-backfill pattern in
+ * main/src/orchestrator/runRecovery.ts, wired at the same boot site in
+ * main/src/index.ts) to heal rows written under that old behaviour.
+ *
+ * Trigger, DB-only (cheaper and good-enough per the task spec — no git
+ * re-probe at boot): a run with `outcome='completed'`, a `batch_id`,
+ * `merge_sha IS NULL`, at least one 'integrated' lane whose task has not
+ * reached the board's Done stage yet, AND `updated_at` before
+ * {@link LANDED_CLOSE_OUT_BACKFILL_CUTOFF}. The cutoff is load-bearing: since
+ * TASK-296 the landed markComplete arm stamps 'merged', so every NEW
+ * `completed`+batch+`merge_sha IS NULL` row is one the non-landed arm wrote
+ * DELIBERATELY leaving its lane tasks open ("NOT marked done because the
+ * branch isn't on main"). Without the cutoff the next boot would move those
+ * exact tasks to Done, undoing that decision. Only rows stamped under the old
+ * behaviour are ambiguous enough to heal; a later write that bumps a legacy
+ * row's `updated_at` just excludes it (fail-closed — no unearned Done). Re-runs ONLY the lane/task side
+ * (finalizeSprintLanesOnSessionMerge + recomputeSessionRunTaskStages) —
+ * deliberately does NOT touch `outcome`: 'completed' is already a
+ * DELIVERED_RUN_OUTCOMES value, and rewriting it to 'merged' at boot would be
+ * an unearned upgrade of history this sweep has no fresh evidence for.
+ *
+ * Guarded off any session that is still live: a run still in flight for the
+ * SAME session owns its own close-out path and must never be raced by a boot
+ * sweep; the `sessions` row (if it still exists — a dismissed session's row
+ * may already be gone) must not read a live persisted status. Persisted
+ * session statuses are 'pending'|'running'|'stopped'|'completed'|'failed'
+ * (the renderer's 'initializing' is `sessionManager`'s display mapping of
+ * the DB's 'pending' — see its status translation — never a value actually
+ * stored), so the guard checks 'pending'/'running' here, not 'initializing'.
+ *
+ * Fail-soft + per-session isolated. Idempotent: a lane already on Done fails
+ * the trigger predicate on the next boot, so a second run finds no
+ * candidates. Logs what it fixed.
+ */
+export async function backfillLandedSprintCloseOuts(
+  databaseService: DatabaseService,
+  logger: Pick<LoggerLike, 'info' | 'error'> = {
+    info: (message: string, context?: Record<string, unknown>) => console.log(message, context ?? ''),
+    error: (message: string, context?: Record<string, unknown>) => console.error(message, context ?? ''),
+  },
+): Promise<{ sessionsFixed: number; tasksMoved: number }> {
+  const empty = { sessionsFixed: 0, tasksMoved: 0 };
+  try {
+    const db = databaseService.getDb();
+    const candidates = db
+      .prepare(
+        `SELECT DISTINCT wr.session_id AS sessionId
+           FROM workflow_runs wr
+           JOIN sprint_batch_tasks sbt ON sbt.batch_id = wr.batch_id
+           JOIN tasks t ON t.id = sbt.task_id
+           JOIN board_stages bs ON bs.board_id = t.board_id AND bs.position = 9
+          WHERE wr.outcome = 'completed'
+            AND wr.batch_id IS NOT NULL
+            AND wr.merge_sha IS NULL
+            AND wr.updated_at < ?
+            AND wr.session_id IS NOT NULL
+            AND sbt.status = 'integrated'
+            AND t.stage_id != bs.id
+            AND NOT EXISTS (
+              SELECT 1 FROM sessions s
+               WHERE s.id = wr.session_id
+                 AND s.status IN ('pending', 'running')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_runs wr2
+               WHERE wr2.session_id = wr.session_id
+                 AND wr2.status NOT IN ('completed', 'failed', 'canceled')
+            )`,
+      )
+      .all(LANDED_CLOSE_OUT_BACKFILL_CUTOFF) as Array<{ sessionId: string }>;
+    if (candidates.length === 0) return empty;
+
+    let sessionsFixed = 0;
+    let tasksMoved = 0;
+    for (const { sessionId } of candidates) {
+      try {
+        const stillOpen = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
+        await finalizeSprintLanesOnSessionMerge(databaseService, sessionId);
+        await recomputeSessionRunTaskStages(databaseService, sessionId);
+        if (stillOpen > 0) {
+          sessionsFixed++;
+          tasksMoved += stillOpen;
+        }
+      } catch (sessionError) {
+        logger.error(`[Main] boot backfill: landed sprint close-out for session ${sessionId} failed (continuing)`, {
+          sessionId,
+          error: sessionError instanceof Error ? sessionError.message : String(sessionError),
+        });
+      }
+    }
+    if (tasksMoved > 0) {
+      logger.info(
+        `[Main] Boot backfill: closed out ${sessionsFixed} landed sprint session(s), moved ${tasksMoved} task(s) to Done`,
+      );
+    }
+    return { sessionsFixed, tasksMoved };
+  } catch (error) {
+    logger.error('[Main] boot backfill for landed sprint close-outs failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return empty;
+  }
+}
+
 export function createGitOps(services: AppServices): SessionGitOpsLike {
   const { sessionManager, gitDiffManager, worktreeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
 
@@ -205,158 +572,21 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   // Sprint close-out on session merge (feat/parallel-sprint, single-run lane
-  // model). A sprint run executes in the SESSION worktree; merging the session
-  // to main IS the sprint's merge close-out. For every batch-linked run hosted
-  // by the merged session: each lane whose status is 'integrated' moves its task
-  // to the done stage via the TaskChangeRouter chokepoint (mirrors
-  // recomputeTaskExecutionStage's outcome='merged' arm: board position 9, kind
-  // 'execution-stage', actor 'orchestrator'), then the batch is marked
-  // 'completed'. Entirely fail-soft: a task-side or batch-side failure is
-  // logged and NEVER affects the merge result (the git operation already
-  // succeeded). Lanes that are failed/blocked/queued are deliberately left
-  // alone — their tasks revert/stay per the normal stage rules.
-  const finalizeSprintLanesOnSessionMerge = async (sessionId: string): Promise<void> => {
-    try {
-      const db = databaseService.getDb();
-      const batchRuns = db
-        .prepare('SELECT id, batch_id FROM workflow_runs WHERE session_id = ? AND batch_id IS NOT NULL')
-        .all(sessionId) as Array<{ id: string; batch_id: string }>;
-      if (batchRuns.length === 0) return;
-
-      const laneStore = SprintLaneStore.getInstance();
-      const taskRouter = TaskChangeRouter.getInstance();
-
-      for (const run of batchRuns) {
-        const lanes = laneStore.listLanes(run.batch_id);
-        for (const lane of lanes) {
-          if (lane.status !== 'integrated') continue;
-          try {
-            const task = db
-              .prepare('SELECT id, project_id, board_id, stage_id FROM tasks WHERE id = ?')
-              .get(lane.taskId) as
-              | { id: string; project_id: number; board_id: string; stage_id: string }
-              | undefined;
-            if (!task) {
-              // After experiments.decide's lane remap (experiments.ts remapWinnerSeedLane),
-              // an A/B winner's lanes point at ORIGINAL task ids, never swept clones — so a
-              // missing task here should never fire for an experiment run. If it does, a lane
-              // still references a deleted clone: a real signal (defect a), not noise.
-              console.warn(
-                `[IPC:git] sprint close-out: lane task ${lane.taskId} (batch ${run.batch_id}) has no tasks row ` +
-                  '— skipping (unexpected for an experiment run after decide lane remap)'
-              );
-              continue;
-            }
-            // DONE_POSITION = 9 — same stage resolution as TaskChangeRouter.
-            // recomputeTaskExecutionStage's outcome='merged' arm.
-            const doneStage = db
-              .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-              .get(task.board_id, 9) as { id: string } | undefined;
-            if (!doneStage || doneStage.id === task.stage_id) continue;
-            await taskRouter.applyChange(task.project_id, {
-              actor: 'orchestrator',
-              entityType: 'task',
-              taskId: lane.taskId,
-              stageId: doneStage.id,
-              kind: 'execution-stage',
-            });
-          } catch (taskError) {
-            console.error(
-              `[IPC:git] sprint close-out: failed to move task ${lane.taskId} to done (continuing):`,
-              taskError
-            );
-          }
-        }
-        try {
-          laneStore.markBatchTerminal(run.batch_id, 'completed');
-        } catch (batchError) {
-          console.error(
-            `[IPC:git] sprint close-out: failed to mark batch ${run.batch_id} completed (continuing):`,
-            batchError
-          );
-        }
-        // Recompute the batch's tasks (migration 066) so NON-integrated lanes
-        // (queued/failed/blocked) revert off 'In development' to their entry stage.
-        // The terminal-stage guard in recomputeTaskExecutionStage protects the
-        // just-Done tasks moved above (this runs BEFORE stampSessionRunsOutcome
-        // stamps outcome='merged', so a Done task must not be yanked back). Fail-
-        // soft — the merge already succeeded.
-        try {
-          await taskRouter.recomputeTasksForBatch(run.batch_id);
-        } catch (recomputeError) {
-          console.error(
-            `[IPC:git] sprint close-out: failed to recompute batch ${run.batch_id} task stages (continuing):`,
-            recomputeError
-          );
-        }
-      }
-    } catch (error) {
-      console.error(
-        `[IPC:git] sprint close-out after session merge failed for session ${sessionId} (merge unaffected):`,
-        error
-      );
-    }
-  };
-
-  // Re-derive the board stages a session's runs drove, AFTER a close-out has
-  // stamped those runs terminal / merged. Needed because the run-status flips
-  // happen OUTSIDE the TaskChangeRouter chokepoint (stampSessionRunsPrOpen /
-  // stampSessionRunsOutcome raw-UPDATE workflow_runs), so nothing recomputes the
-  // derived 'In development' stage (migration 066) afterward:
-  //   • A DIRECT task-linked run (workflow_runs.task_id, no batch) is never touched
-  //     by finalizeSprintLanesOnSessionMerge (batch-only) — arm 1 lands its task on
-  //     Done on merge here, instead of waiting for the next boot sweep.
-  //   • A BATCH run's lanes were recomputed by finalizeSprintLanesOnSessionMerge
-  //     while its run was still non-terminal (arm 2 held non-integrated tasks at
-  //     'In development'); re-running now the run is terminal reverts them to their
-  //     entry stage (pr_open ≠ merged). The terminal-stage guard in
-  //     recomputeTaskExecutionStage protects the just-Done integrated tasks.
-  // Entirely fail-soft + per-run isolated — the git operation already succeeded.
-  const recomputeSessionRunTaskStages = async (sessionId: string): Promise<void> => {
-    try {
-      const db = databaseService.getDb();
-      const runs = db
-        .prepare('SELECT batch_id, task_id FROM workflow_runs WHERE session_id = ?')
-        .all(sessionId) as Array<{ batch_id: string | null; task_id: string | null }>;
-      if (runs.length === 0) return;
-      const taskRouter = TaskChangeRouter.getInstance();
-      const seenBatches = new Set<string>();
-      for (const run of runs) {
-        if (run.batch_id && !seenBatches.has(run.batch_id)) {
-          seenBatches.add(run.batch_id);
-          try {
-            await taskRouter.recomputeTasksForBatch(run.batch_id);
-          } catch (batchError) {
-            console.error(
-              `[IPC:git] close-out recompute: batch ${run.batch_id} failed (continuing):`,
-              batchError
-            );
-          }
-        }
-        if (run.task_id) {
-          try {
-            await taskRouter.recomputeTaskExecutionStage(run.task_id);
-          } catch (taskError) {
-            console.error(
-              `[IPC:git] close-out recompute: task ${run.task_id} failed (continuing):`,
-              taskError
-            );
-          }
-        }
-      }
-    } catch (error) {
-      console.error(
-        `[IPC:git] close-out recompute failed for session ${sessionId} (git operation unaffected):`,
-        error
-      );
-    }
-  };
+  // model), plus the outcome-stamping + recompute that follow it. Moved to
+  // MODULE SCOPE above (TASK-296) as finalizeSprintLanesOnSessionMerge /
+  // recomputeSessionRunTaskStages / closeOutSessionAfterLanding so markComplete
+  // and the boot backfill can reach the SAME close-out an in-app merge runs,
+  // instead of duplicating it. `stampMergedOutcomeForSession` below is this
+  // closure's thin binder: it resolves the merge SHA from the project's
+  // checked-out worktree (squash/rebase-specific — an in-app merge just
+  // fast-forwarded/rebased the project root onto main) and delegates the rest.
 
   // After a successful session merge (squash or rebase), stamp outcome='merged'
   // on that session's child runs so the run-outcome stats (Insights) credit the
-  // merge. Runs link via workflow_runs.session_id — the sessionId here IS that
-  // key. Guarded by `outcome IS NULL` inside stampSessionRunsOutcome, so a run
-  // that already recorded its own decision is never clobbered.
+  // merge, and run the full lane/task close-out. Runs link via
+  // workflow_runs.session_id — the sessionId here IS that key. Guarded by
+  // `outcome IS NULL` inside stampSessionRunsOutcome, so a run that already
+  // recorded its own decision is never clobbered.
   //
   // Fail-soft: a stamping failure is logged and never propagates — the merge has
   // already succeeded and its response must not depend on this bookkeeping.
@@ -374,20 +604,10 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         console.error(`[IPC:git] Failed to read merged SHA for session ${sessionId}:`, error);
       }
     }
-    try {
-      const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'merged', mergeSha);
-      if (stamped > 0) {
-        console.log(`[IPC:git] Stamped outcome='merged' on ${stamped} run(s) for session ${sessionId}`);
-      }
-    } catch (error) {
-      console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
+    const { stampedRuns } = await closeOutSessionAfterLanding(databaseService, sessionId, { mergeSha });
+    if (stampedRuns > 0) {
+      console.log(`[IPC:git] Stamped outcome='merged' on ${stampedRuns} run(s) for session ${sessionId}`);
     }
-    // Migration 066: now outcome='merged' is stamped, re-derive the board stages
-    // the session's runs drove. finalizeSprintLanesOnSessionMerge (called just
-    // before this) closes out BATCH lanes, but a DIRECT task-linked run is never
-    // touched by it — arm 1 lands its task on Done immediately here instead of at
-    // the next boot sweep. Fail-soft (never blocks the merge response).
-    await recomputeSessionRunTaskStages(sessionId);
     // Merge close-out reached only after a successful squash/rebase merge.
     trackUsage('session_resolved', { action: 'merge', had_conflicts: false });
   };
@@ -582,9 +802,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
    * (TASK-212 wire field — resolved to a SHA via the TASK-208 resolver before
    * it can reach any git argv; an unresolvable ref falls back to the session
    * default rather than throwing), else the session's recorded branch point
-   * (`session.baseCommit`), else the comparison branch
-   * getSessionCommitHistory already derives (remote/local/main-branch
-   * fallback chain). Returns the resolved 40-char SHA, or null when nothing
+   * (`session.baseCommit`), else the merge-base of HEAD and the comparison
+   * branch getSessionCommitHistory already derives (remote/local/main-branch
+   * fallback chain) — the branch point, never the raw default-branch tip. Returns the resolved 40-char SHA, or null when nothing
    * resolves — the caller then has no base to diff since (the
    * working-dir-vs-HEAD rung).
    */
@@ -606,7 +826,22 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
     try {
       const { comparisonBranch } = await getSessionCommitHistory(session, 50);
-      return await resolveSessionDiffBaseRef(worktreePath, [comparisonBranch]);
+      const tip = await resolveSessionDiffBaseRef(worktreePath, [comparisonBranch]);
+      if (!tip) return null;
+      // Anchor on the branch point, not the default-branch TIP: a two-dot
+      // `git diff <tip>` against an advanced default branch carries reverse
+      // hunks for files HEAD never touched, and would disagree with the
+      // Committed group (getCommittedGroup takes the same merge-base). No
+      // common ancestor (unrelated histories) keeps the tip — the Committed
+      // group then reports itself unavailable on its own.
+      try {
+        const mergeBase = (
+          await runGitAsync(worktreePath, ['merge-base', END_OF_OPTIONS, tip, 'HEAD'])
+        ).trim();
+        return (await resolveSessionDiffBaseRef(worktreePath, [mergeBase])) ?? tip;
+      } catch {
+        return tip;
+      }
     } catch (error) {
       console.warn(`[IPC:git] Could not resolve a comparison branch for session ${session.id}:`, error);
       return null;
@@ -618,12 +853,11 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
    * corresponding getDiffGroups rollup uses (TASK-212 spec item 5): plain
    * `git diff` for unstaged, `--cached` for staged, `<merge-base>..HEAD` for
    * committed, the synthesized untracked block for untracked.
-   * GitDiffManager's own per-scope helpers (getStagedGroup / getUnstagedGroup
-   * / getCommittedGroup / getUntrackedGroup / createDiffForUntrackedFiles)
-   * are private and gitDiffManager.ts is do-not-touch for this task (widening
-   * its GitDiffResult would drag in executionTracker.ts) — the argv/blob
-   * construction is small enough to mirror here rather than adding a new
-   * public seam to that file.
+   * GitDiffManager's per-scope group helpers compute `--numstat` ROLLUPS, not
+   * blobs, so only the scope's argv (pathspec filters, merge-base anchoring)
+   * is mirrored here — keep the two in step. The untracked blob reuses
+   * gitDiffManager.ts's exported readUntrackedFileContent /
+   * createUntrackedFileDiffBlock rather than re-synthesizing it.
    */
   const buildScopedDiff = async (
     worktreePath: string,
@@ -1404,10 +1638,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       });
 
       // Sprint close-out (feat/parallel-sprint): integrated lanes → done stage,
-      // batch → completed. Fail-soft — never affects the merge result.
-      await finalizeSprintLanesOnSessionMerge(sessionId);
-
-      // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
+      // batch → completed, outcome='merged' stamped. Fail-soft — never affects
+      // the merge result. (finalizeSprintLanesOnSessionMerge is folded into
+      // stampMergedOutcomeForSession -> closeOutSessionAfterLanding, TASK-296.)
       await stampMergedOutcomeForSession(sessionId, project?.path);
 
       // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
@@ -1533,10 +1766,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       });
 
       // Sprint close-out (feat/parallel-sprint): integrated lanes → done stage,
-      // batch → completed. Fail-soft — never affects the merge result.
-      await finalizeSprintLanesOnSessionMerge(sessionId);
-
-      // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
+      // batch → completed, outcome='merged' stamped. Fail-soft — never affects
+      // the merge result. (finalizeSprintLanesOnSessionMerge is folded into
+      // stampMergedOutcomeForSession -> closeOutSessionAfterLanding, TASK-296.)
       await stampMergedOutcomeForSession(sessionId, project?.path);
 
       // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
@@ -1721,7 +1953,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // runs). Sprint lanes are finalized exactly as the merge close-out does.
       // Fail-soft: this bookkeeping must never fail the push response.
       try {
-        await finalizeSprintLanesOnSessionMerge(sessionId);
+        await finalizeSprintLanesOnSessionMerge(databaseService, sessionId);
         const closed = stampSessionRunsPrOpen(makeDatabaseLike(databaseService), sessionId);
         if (closed > 0) {
           console.log(`[IPC:git] Create-PR close-out: marked ${closed} run(s) completed/pr_open for session ${sessionId}`);
@@ -1735,7 +1967,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         // the just-Done integrated tasks. Without this the later sessions:delete
         // dismiss cannot heal them (cancelHostedRuns selects only non-terminal runs
         // → zero rows). Fail-soft.
-        await recomputeSessionRunTaskStages(sessionId);
+        await recomputeSessionRunTaskStages(databaseService, sessionId);
         // Reap UNCOMMITTED run artifacts for every run this session hosted
         // (IDEA-039) — create-PR is a delivering close-out, same as merge.
         // Committed snapshots survive.
@@ -1844,7 +2076,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         && ownCommits === 0
         && sessionCompletedNoCodeWork(makeDatabaseLike(databaseService), sessionId);
 
-      return { success: true, data: { delivered, landed, ownCommits, completedNoCode } };
+      // TASK-296: how many integrated sprint-lane tasks Mark-complete would
+      // move to Done — only meaningful (and only computed) when `landed`,
+      // since that is the ONLY condition under which markComplete's re-probe
+      // takes the close-out branch at all.
+      const integratedLaneCount = landed ? countIntegratedLaneTasksNotYetDone(databaseService, sessionId) : 0;
+
+      return { success: true, data: { delivered, landed, ownCommits, completedNoCode, integratedLaneCount } };
     } catch (error: unknown) {
       return {
         success: false,
@@ -1855,15 +2093,35 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
   /**
    * Record that this session's work LANDED by a path we never observed — the
-   * agent merged it in chat, or the branch was merged outside the app.
+   * agent merged it in chat, or the branch was merged/rebased outside the app.
    *
-   * Stamps outcome='completed' on the session's runs, reusing
-   * stampSessionRunsOutcome's `outcome IS NULL` guard so a run that already
-   * recorded its own decision is never clobbered. This is a bookkeeping stamp
-   * ONLY: it archives nothing and touches no git. The caller archives the
-   * session afterwards through the normal delete path, and because delivery is
-   * now stamped, that archive keeps the session's findings instead of sweeping
-   * them.
+   * TASK-296: re-probes delivery state SERVER-SIDE (the same
+   * WorktreeManager.getBranchLandingState probe getDeliveryState uses — never
+   * trusts a client-supplied flag, since time may have passed since the
+   * dismiss dialog last asked) and branches on what it finds:
+   *
+   *   - `landed`: the branch is ALREADY an ancestor of / diffless against
+   *     main. Runs the exact same close-out an in-app squash/rebase merge
+   *     performs — {@link closeOutSessionAfterLanding} — with outcome='merged'
+   *     and `merge_sha` = main's own current tip (there is no merge commit WE
+   *     made; main's tip IS where this session's code already lives).
+   *     Integrated sprint lanes move to Done, the batch goes terminal, and the
+   *     runs are stamped 'merged' via stampSessionRunsLanded (not-already-
+   *     delivered guard, both session link shapes — a 'canceled' sprint run
+   *     is corrected too, not skipped by an `outcome IS NULL` guard).
+   *   - otherwise: the pre-existing bookkeeping stamp — outcome='completed'
+   *     via stampSessionRunsCompleted (reusing its "not already delivered"
+   *     guard so a run that recorded a more specific outcome is never
+   *     clobbered). No git touched, no lane close-out — the branch's work is
+   *     not actually on main, so moving tasks to Done would be a lie. If the
+   *     session has real own commits not on main (not the DB-only
+   *     completedNoCode case), the response's `laneTasksLeftOpen` reports how
+   *     many integrated-lane tasks were left at their pre-close-out stage, so
+   *     the caller/dialog can surface it instead of silently stranding them.
+   *
+   * The caller archives the session afterwards through the normal delete
+   * path, and because delivery is now stamped, that archive keeps the
+   * session's findings instead of sweeping them.
    */
   const markComplete = async ({ sessionId }: OpsInput<'markComplete'>): Promise<OpsResult<'markComplete'>> => {
     try {
@@ -1872,9 +2130,64 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         return { success: false, error: 'Session not found' };
       }
 
+      // Re-probe delivery state SERVER-SIDE — mirrors getDeliveryState's own
+      // probe (never trust a client-supplied flag).
+      let landed = false;
+      let ownCommits = 0;
+      let ownCommitsProven = false;
+      let mainBranch: string | undefined;
+      const project = sessionManager.getProjectForSession(sessionId);
+      if (session.worktreePath && project) {
+        try {
+          mainBranch = await worktreeManager.getProjectMainBranch(project.path);
+          const state = await worktreeManager.getBranchLandingState(session.worktreePath, mainBranch);
+          landed = state.landed;
+          ownCommits = state.ownCommits;
+          ownCommitsProven = true;
+        } catch (error) {
+          console.error(`[IPC:git] markComplete landing probe failed for session ${sessionId}:`, error);
+        }
+      }
+
+      if (landed && session.worktreePath && mainBranch) {
+        // The branch was merged/rebased into main OUTSIDE the app — run the
+        // SAME close-out an in-app merge performs. mergeSha = main's own
+        // current tip in THIS worktree (a plain ref read; no mutation).
+        let mergeSha: string | undefined;
+        try {
+          mergeSha = (await runGitAsync(session.worktreePath, ['rev-parse', mainBranch])).trim();
+        } catch (error) {
+          console.error(`[IPC:git] Failed to resolve ${mainBranch} HEAD for session ${sessionId}:`, error);
+        }
+        // Counted BEFORE the close-out runs (finalizeSprintLanesOnSessionMerge
+        // is idempotent and would read 0 afterward) so the response can report
+        // how many integrated-lane tasks it is ABOUT to move to Done.
+        const tasksMovedToDone = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
+        const { stampedRuns } = await closeOutSessionAfterLanding(databaseService, sessionId, {
+          mergeSha,
+          overrideUndelivered: true,
+        });
+        console.log(
+          `[IPC:git] Mark complete: session ${sessionId}'s branch already landed on ${mainBranch} — ran the full close-out (stamped ${stampedRuns} run(s) outcome='merged', moved ${tasksMovedToDone} task(s) to Done)`,
+        );
+        trackUsage('session_resolved', { action: 'complete' });
+        return { success: true, data: { stamped: stampedRuns, tasksMovedToDone } };
+      }
+
       const stamped = stampSessionRunsCompleted(makeDatabaseLike(databaseService), sessionId);
       console.log(`[IPC:git] Marked session ${sessionId} complete (stamped ${stamped} run(s))`);
       trackUsage('session_resolved', { action: 'complete' });
+
+      // ownCommits > 0 (a real branch not on main — NOT the DB-only
+      // completedNoCode case) may be sitting on a sprint batch this stamp just
+      // left untouched. Report how many integrated-lane tasks so the
+      // caller/dialog can say so instead of silently stranding them.
+      const laneTasksLeftOpen = ownCommitsProven && ownCommits > 0
+        ? countIntegratedLaneTasksNotYetDone(databaseService, sessionId)
+        : 0;
+      if (laneTasksLeftOpen > 0) {
+        return { success: true, data: { stamped, laneTasksLeftOpen } };
+      }
       return { success: true, data: { stamped } };
     } catch (error: unknown) {
       console.error(`[IPC:git] Failed to mark session ${sessionId} complete:`, error);

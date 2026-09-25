@@ -774,6 +774,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         flashing={flashing}
         onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
         onOpenReviewItem={openReviewItem}
+        onReviewItemActed={afterLifecycleAction}
         onApprovalDecided={afterLifecycleAction}
         onQuickSessionAskDismissed={afterLifecycleAction}
       />

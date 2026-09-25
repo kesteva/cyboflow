@@ -17,12 +17,14 @@
  * frontmatter name to `cyboflow-<key>` regardless of any stored name).
  *
  * The effective set is composed low→high as
- * `builtin → project agent_overrides → WORKFLOW agentConfigs → variant deltas`: a
- * workflow-scoped agent config (from the run's frozen `spec_json.agentConfigs`) is
- * applied ON TOP of the project overrides, and an A/B variant's per-agent deltas are
- * applied LAST — so a workflow config beats the Agents-pane pin/body while a variant
- * delta still beats the workflow config. Every layer read is fail-soft (a broken
- * spec / variant is skipped, never a spawn break).
+ * `builtin → project agent_overrides → WORKFLOW agentConfigs → variant deltas →
+ * RUN agent-target overrides`: a workflow-scoped agent config (from the run's frozen
+ * `spec_json.agentConfigs`) is applied ON TOP of the project overrides, an A/B
+ * variant's per-agent deltas on top of that, and the run's operator-written
+ * runtime/model re-targets (migration 144) LAST — so a workflow config beats the
+ * Agents-pane pin/body, a variant delta beats the workflow config, and a mid-run
+ * "Switch runtime & retry" beats them all. Every layer read is fail-soft (a broken
+ * spec / variant / override blob is skipped, never a spawn break).
  *
  * NEVER removes/clears anything (the bundle writer owns the cyboflow-* lifecycle) and
  * NEVER throws — an overlay failure must not break a spawn (wrapped in try/catch +
@@ -48,14 +50,27 @@ import {
   applyWorkflowAgentConfigs,
   applyVariantAgentDeltas,
   applyPromptAddenda,
+  applyRunAgentTargetOverrides,
   type EffectiveAgent,
 } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
+import { computeAgentUsage } from '../../../orchestrator/agents/agentUsage';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
-import { parseWorkflowDefinition, type WorkflowAgentConfig } from '../../../../../shared/types/workflows';
+import {
+  parseRunAgentTargetOverrides,
+  parseWorkflowDefinition,
+  type RunAgentTargetOverrides,
+  type WorkflowAgentConfig,
+} from '../../../../../shared/types/workflows';
+import {
+  AGENT_PROVIDERS,
+  providerForRuntime,
+  type AgentProvider,
+} from '../../../../../shared/types/agentRuntime';
 import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/experiments';
 import { bareModelId } from '../../../../../shared/agents/modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
+import type { EffectiveAgentsResolver } from '../../../orchestrator/runStepModels';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */
 const AGENTS_DIR = ['.claude', 'agents'] as const;
@@ -178,6 +193,43 @@ function readWorkflowAgentConfigs(
   }
 }
 
+/** Run ids whose malformed agent_target_overrides_json was already warned about (warn once). */
+const warnedMalformedRunTargets = new Set<string>();
+
+/**
+ * Read a run's operator-written AGENT-TARGET overrides (migration 144 —
+ * workflow_runs.agent_target_overrides_json, written only by
+ * switchRunAgentsHandler). Returns `null` (apply nothing) when the column is
+ * absent (a pre-144 / fixture DB: `no such column`), NULL, or malformed — a broken
+ * override blob must NEVER break a spawn (fail-soft; a malformed blob warns once
+ * per run).
+ */
+export function readRunAgentTargetOverrides(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): RunAgentTargetOverrides | null {
+  let json: string | null;
+  try {
+    const row = db
+      .prepare('SELECT agent_target_overrides_json AS json FROM workflow_runs WHERE id = ?')
+      .get(runId) as { json?: unknown } | undefined;
+    json = typeof row?.json === 'string' ? row.json : null;
+  } catch {
+    // Pre-144 DB (column absent) — no run-level overrides can exist.
+    return null;
+  }
+  if (json === null) return null;
+  const parsed = parseRunAgentTargetOverrides(json);
+  if (parsed === null && !warnedMalformedRunTargets.has(runId)) {
+    warnedMalformedRunTargets.add(runId);
+    logger?.warn(
+      `[AgentOverlay] malformed agent_target_overrides_json for runId=${runId}; skipping run-level overrides`,
+    );
+  }
+  return parsed;
+}
+
 /**
  * Resolve the run's FULL effective agent set — the same assembly
  * `installAgentOverlay` writes to disk, exposed as a pure DB read for callers that
@@ -186,12 +238,16 @@ function readWorkflowAgentConfigs(
  * the run resolves to no project (mirrors `installAgentOverlay`'s no-op).
  *
  * Precedence (low → high), applied left-to-right below:
- *   builtin → project `agent_overrides` → WORKFLOW `agentConfigs` → variant deltas.
+ *   builtin → project `agent_overrides` → WORKFLOW `agentConfigs` → variant deltas
+ *   → RUN agent-target overrides.
  * The WORKFLOW layer (workflow-scoped agent configs) applies its per-agent config
  * ON TOP of the project-override effective set — so a workflow config WINS over the
  * project override — and a variant run's per-agent deltas (A/B testing, migration
- * 048) then apply LAST, so a variant delta still WINS over the workflow config for
- * the fields it touches.
+ * 048) then apply, so a variant delta still WINS over the workflow config for
+ * the fields it touches. The RUN layer (migration 144 — the operator's mid-run
+ * "Switch runtime & retry" on a limit-paused programmatic run) applies last among
+ * the target layers: it is a live directive and must beat every frozen/launch-time
+ * layer for runtime/model/providerModel/effort. It touches no prompt field.
  *
  * A workflow agent config's `promptAddendum` (tuning levels, plan D5) is then
  * APPENDED to whichever system prompt that merge resolved — after the variant
@@ -222,10 +278,99 @@ export function resolveRunEffectiveAgents(
   if (variantDeltas) {
     effective = applyVariantAgentDeltas(effective, variantDeltas);
   }
+  const runTargets = readRunAgentTargetOverrides(db, runId, logger);
+  if (runTargets) {
+    effective = applyRunAgentTargetOverrides(effective, runTargets);
+  }
   if (workflowConfigs) {
     effective = applyPromptAddenda(effective, workflowConfigs);
   }
   return effective;
+}
+
+/**
+ * The agents THIS RUN can spawn, each paired with the PROVIDER it resolves onto:
+ * its pinned runtime's provider when one is set, else the run row's
+ * `agent_provider` stamp (absent/unknown ⇒ 'claude'). Backs the "Switch runtime &
+ * retry" handler's 'provider' scope (every agent currently on the blocked
+ * provider).
+ *
+ * "This run's agents" = the keys its FROZEN definition binds (outer steps +
+ * fan-out inner chains, via computeAgentUsage) — not the whole built-in
+ * catalogue, which would make a switch write a dozen overrides for agents the
+ * run never deploys and pad the run's override chip with them. A run whose
+ * frozen spec cannot be resolved (a custom flow with no definition, a minimal
+ * fixture) falls back to the full effective set, so a switch is never silently
+ * empty. Fail-soft: an unresolvable run yields `[]`.
+ */
+export function listRunAgentTargets(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): Array<{ agentKey: string; provider: AgentProvider }> {
+  let runProvider: AgentProvider = 'claude';
+  try {
+    const row = db
+      .prepare('SELECT agent_provider AS provider FROM workflow_runs WHERE id = ?')
+      .get(runId) as { provider?: unknown } | undefined;
+    const p = row?.provider;
+    if (typeof p === 'string' && (AGENT_PROVIDERS as readonly string[]).includes(p)) {
+      runProvider = p as AgentProvider;
+    }
+  } catch {
+    // Pre-062 DB (column absent) — every run is a Claude run.
+  }
+  const used = usedAgentKeysForRun(db, runId, logger);
+  return resolveRunEffectiveAgents(db, runId, logger)
+    .filter((agent) => used === null || used.has(agent.agentKey))
+    .map((agent) => ({
+      agentKey: agent.agentKey,
+      provider: agent.runtime ? providerForRuntime(agent.runtime) : runProvider,
+    }));
+}
+
+/**
+ * The agent keys the run's frozen definition binds, or null when the definition
+ * cannot be resolved (⇒ callers fall back to the full effective set). Read
+ * through the same frozen-spec seam the workflow-config layer uses, so the
+ * agent set and the per-agent configs always describe the same revision.
+ */
+function usedAgentKeysForRun(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): ReadonlySet<string> | null {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    const definition = parseWorkflowDefinition(frozen?.specJson);
+    if (!definition) return null;
+    // computeAgentUsage pre-seeds EVERY canonical key (the catalogue shows
+    // unused agents too) — only an entry some step actually binds counts.
+    const usage = computeAgentUsage([{ name: frozen?.workflowName ?? 'run', definition }]);
+    const used = new Set<string>();
+    for (const [key, entry] of usage) if (entry.usedBy.length > 0) used.add(key);
+    return used.size > 0 ? used : null;
+  } catch (err) {
+    logger?.warn(
+      `[AgentOverlay] frozen definition read failed for runId=${runId}; listing every effective agent: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Bind {@link resolveRunEffectiveAgents} to a live db-handle getter, producing
+ * the `ContextDeps.resolveRunEffectiveAgents` closure `attachOrchestratorTrpcToWindow`
+ * (main/src/index.ts) wires into the tRPC context for `runs.getStepModels`
+ * (IDEA-061 per-step model rail) — the standalone orchestrator tree never
+ * imports this file directly (see `runStepModels.ts`'s "DEPENDENCY INJECTION"
+ * note). `getDb` is read LIVE on every call (the real better-sqlite3 handle
+ * this function needs) rather than the narrowed `DatabaseLike` the closure
+ * itself receives. Extracted here (out of index.ts, which sits at its frozen
+ * size ratchet, issue #19) rather than left inline at the call site.
+ */
+export function createRunEffectiveAgentsResolver(getDb: () => Database.Database): EffectiveAgentsResolver {
+  return (_db, runId, logger) => resolveRunEffectiveAgents(getDb(), runId, logger);
 }
 
 /**

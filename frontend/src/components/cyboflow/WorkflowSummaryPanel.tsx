@@ -19,6 +19,8 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
 import { computeSessionCostUsd } from '../../utils/modelPricing';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
+import { useRunStepModels, type StepModelRow } from '../../hooks/useRunStepModels';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import type { ExperimentArm, ComparisonStatus } from '../../../../shared/types/experiments';
@@ -57,6 +59,17 @@ function compactTokens(n: number): string {
 
 function formatCost(n: number | null): string {
   return n === null ? '—' : `$${n.toFixed(2)}`;
+}
+
+/** One flattened step's resolved model, as returned by `runs.getStepModels`
+ * (via {@link useRunStepModels}). */
+type StepModelInfo = StepModelRow;
+
+/** One distinct-label group of {@link StepModelInfo} for the "Models used" section. */
+interface ModelGroup {
+  label: string;
+  family: ModelFamily;
+  steps: StepModelInfo[];
 }
 
 interface TokenCategory {
@@ -225,6 +238,11 @@ export function WorkflowSummaryPanel({
 }: WorkflowSummaryPanelProps): React.JSX.Element {
   const [usage, setUsage] = useState<RunUsageRollup | null>(null);
   const [loading, setLoading] = useState(true);
+  // "Models used" configuration section (TASK-275). `null` is the sentinel for
+  // "not available yet, or the query failed" — never rendered as an error, just
+  // as "nothing to show" (see the guard on `modelGroups.length > 0` below).
+  // Shared with RunCenterPane's canvas rail (one fetch, deduped in flight).
+  const stepModels = useRunStepModels(runId);
   const computeCostFromRates = useConfigStore(
     (state) => state.config?.computeCostFromRates ?? false,
   );
@@ -434,6 +452,34 @@ export function WorkflowSummaryPanel({
   const maxCategory = categories.reduce((m, c) => Math.max(m, c.value), 0);
 
   const runtime = usage === null ? null : formatRuntime(usage.startedAt, usage.endedAt);
+
+  // Group step-models by distinct label (TASK-275). Sorted by step count
+  // descending; ties broken by first-appearance order in the original array —
+  // NOT an arbitrary reorder of equal-count groups. `order` collects each
+  // label's first-seen position exactly once, so its index already IS that
+  // tiebreak key.
+  const modelGroups = useMemo<ModelGroup[]>(() => {
+    // `Array.isArray` rather than a `!== null` check: this section is
+    // fail-soft by design (any resolver problem must render nothing, never
+    // throw), so a non-array resolve must degrade to "no data" instead of
+    // exploding on `.length` inside a render-phase memo.
+    if (!Array.isArray(stepModels) || stepModels.length === 0) return [];
+    const byLabel = new Map<string, ModelGroup>();
+    const order: string[] = [];
+    for (const step of stepModels) {
+      let group = byLabel.get(step.label);
+      if (group === undefined) {
+        group = { label: step.label, family: step.family, steps: [] };
+        byLabel.set(step.label, group);
+        order.push(step.label);
+      }
+      group.steps.push(step);
+    }
+    return order
+      .map((label, firstIndex) => ({ group: byLabel.get(label) as ModelGroup, firstIndex }))
+      .sort((a, b) => b.group.steps.length - a.group.steps.length || a.firstIndex - b.firstIndex)
+      .map((x) => x.group);
+  }, [stepModels]);
 
   const handleSendChanges = async (): Promise<void> => {
     const text = changeText.trim();
@@ -670,6 +716,51 @@ export function WorkflowSummaryPanel({
           </div>
         )}
       </div>
+
+      {/* "Models used — configuration" (TASK-275, IDEA-061): which model each
+          non-human step was CONFIGURED to run, not a per-step cost split (the
+          cost above is reported per run and cannot be attributed to individual
+          steps). Renders only when step-model data resolved and is non-empty —
+          `stepModels === null` (not yet loaded, or the router threw) and an
+          empty array both render nothing, no wrapper/heading/error text. */}
+      {modelGroups.length > 0 && (
+        <div className="mt-5" data-testid="run-summary-step-models">
+          <div className="eyebrow mb-2 text-text-tertiary">Models used — configuration</div>
+          <p className="text-xs text-text-muted">
+            Which model each step was configured to run. Not a per-step cost split — the cost
+            above is reported per run and cannot be attributed to individual steps. Human review
+            gates are excluded.
+          </p>
+          <div className="mt-3 space-y-3">
+            {modelGroups.map((group) => (
+              <div key={group.label} data-testid="run-summary-step-model-group">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
+                    style={{ backgroundColor: modelFamilyColor(group.family) }}
+                  />
+                  <span className="text-sm text-text-secondary" data-testid="run-summary-step-model-group-label">
+                    {group.label} — {group.steps.length} {group.steps.length === 1 ? 'step' : 'steps'}
+                  </span>
+                </div>
+                {/* ml-3.5 = the approved snapshot's 14px chip indent: the
+                    pills hang under their group's label, not under its dot. */}
+                <div className="ml-3.5 mt-1.5 flex flex-wrap gap-1.5">
+                  {group.steps.map((step) => (
+                    <span
+                      key={stepModelKey(step.phaseId, step.stepId)}
+                      data-testid="run-summary-step-model-chip"
+                      className="rounded-button border border-border-primary px-2 py-0.5 text-xs text-text-secondary"
+                    >
+                      {step.stepName}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Score summary (advisory code-review eval). Renders in the review and
           complete states whenever an eval row exists — in review it is exactly the

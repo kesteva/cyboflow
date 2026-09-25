@@ -575,6 +575,38 @@ describe('ProgrammaticRunHost', () => {
     expect(texts[1]).toContain('Resuming');
   });
 
+  it('threads the SystemicPauseInfo to the gate and names the three pause actions in the chat note', async () => {
+    const awaitClear = vi.fn<(req: unknown) => Promise<SystemicPauseVerdict>>().mockResolvedValue('retry');
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'run-9',
+      projectId: 7,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      systemicGate: { awaitClear },
+      injectEvent: (e) => injected.push(e),
+    });
+    const info = {
+      blockedAgentKeys: ['implement'],
+      blockedProvider: 'claude' as const,
+      blockedRuntime: 'claude-sdk',
+      origin: 'step' as const,
+      fanOut: false,
+    };
+
+    await host.awaitSystemicPause(step({ id: 'a', name: 'Build epics' }), ctx, 'usage limit reached', info);
+
+    expect(awaitClear).toHaveBeenCalledWith(expect.objectContaining({ info }));
+    const first = injected[0];
+    const text =
+      'type' in first && first.type === 'assistant' && Array.isArray(first.message.content)
+        ? first.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '';
+    expect(text).toContain('Retry now');
+    expect(text).toContain('Switch runtime & retry');
+    expect(text).toContain('Stop waiting');
+  });
+
   it("injects the pause + dismissed turns on 'giveup'", async () => {
     const systemicGate: SystemicPauseResolver = { awaitClear: vi.fn().mockResolvedValue('giveup') };
     const injected: ClaudeStreamEvent[] = [];

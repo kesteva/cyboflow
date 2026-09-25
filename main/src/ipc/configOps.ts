@@ -1,5 +1,6 @@
 import type { AppServices } from './types';
 import type { ConfigOpsLike, SessionCreationPreferences } from '../orchestrator/trpc/contracts/configOps';
+import type { UpdateConfigRequest } from '../types/config';
 import {
   isAgentProviderAccess,
   resolveAgentProviderAccess,
@@ -44,6 +45,18 @@ export function createConfigOps(
         const claudePathChanged = updates.claudeExecutablePath !== undefined &&
                                  updates.claudeExecutablePath !== oldConfig.claudeExecutablePath;
 
+        // Defense-in-depth for the "two write channels cannot race" invariant
+        // declared on UpdateConfigRequest (main/src/types/config.ts): that type
+        // omits `runTypeDefaults`, but the tRPC boundary (routers/config.ts)
+        // only asserts "is a plain object" and does not itself strip unknown
+        // keys, so a caller whose own static type still includes the field (a
+        // stale cast, a future drift on either side of the IPC boundary) would
+        // reach here and clobber the whole map through this generic channel
+        // instead of the dedicated config.applyRunTypeDefault mutation. Strip
+        // it unconditionally rather than trusting the type system alone.
+        const strippedUpdates: UpdateConfigRequest = { ...updates };
+        delete (strippedUpdates as Record<string, unknown>).runTypeDefaults;
+
         // Validate the untyped provider-access patch at the IPC boundary: a
         // malformed shape is rejected outright, and a well-formed one is stored
         // normalized (both members explicit, never all-off) so every downstream
@@ -53,8 +66,8 @@ export function createConfigOps(
           return { success: false, error: 'Invalid agentProviderAccess payload' };
         }
         let normalized = updates.agentProviderAccess === undefined
-          ? updates
-          : { ...updates, agentProviderAccess: resolveAgentProviderAccess(updates.agentProviderAccess) };
+          ? strippedUpdates
+          : { ...strippedUpdates, agentProviderAccess: resolveAgentProviderAccess(updates.agentProviderAccess) };
 
         // Same treatment for the sprint cap override: reject a malformed shape at
         // the boundary, and STORE the clamped map so config.json never holds a 0 or

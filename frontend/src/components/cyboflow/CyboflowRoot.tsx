@@ -188,6 +188,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useEditWorkflowShortcut(handleOpenEditor, { enabled: canEditWorkflow });
 
+  // Declared ahead of handleEditorSaved (below), which closes over the setter —
+  // keeps the ordering use-before-define-clean even though the callback only
+  // ever runs post-render, when the const binding is already initialized.
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
   const handleEditorSaved = useCallback((_workflowId: string, savedAsNewScopeNote?: string) => {
     setIsEditorOpen(false);
     // Force the canvas to re-resolve its phase state: clear + reselect the run so
@@ -226,7 +231,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // End-workflow confirm — the human gate that returns a finished (completed /
   // failed) run's centre pane to the session's resting QuickSessionCanvas.
   const [isEndOpen, setIsEndOpen] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Return the centre pane to the session's resting view (QuickSessionCanvas):
   // drop the active-run overlay while preserving its parent session selection
@@ -648,9 +652,17 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             isOpen={isDismissOpen}
             onClose={() => setIsDismissOpen(false)}
             sessionId={lifecycleTarget.session.id}
-            onSuccess={(completed) => {
+            onSuccess={(completed, result) => {
               setIsDismissOpen(false);
-              handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
+              const tasksMovedToDone = result?.tasksMovedToDone;
+              const laneTasksLeftOpen = result?.laneTasksLeftOpen;
+              if (completed && tasksMovedToDone) {
+                handleActionSuccess(`Session marked complete (moved ${tasksMovedToDone} task${tasksMovedToDone === 1 ? '' : 's'} to Done)`);
+              } else if (completed && laneTasksLeftOpen) {
+                handleActionSuccess(`Session marked complete — ${laneTasksLeftOpen} sprint task${laneTasksLeftOpen === 1 ? '' : 's'} ${laneTasksLeftOpen === 1 ? 'was' : 'were'} NOT marked done because the branch isn't on main`);
+              } else {
+                handleActionSuccess(completed ? 'Session marked complete' : 'Session dismissed');
+              }
             }}
           />
         </>

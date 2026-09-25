@@ -88,6 +88,10 @@ vi.mock('../../../trpc/client', () => ({
         },
         // Sprint lanes (single-run parallel sprint) — RunRightRail mounts SprintLanesPanel.
         sprintLanes: { query: vi.fn().mockResolvedValue([]) },
+        // Run-scoped agent-target overrides — the chip in RunPendingInputStrip
+        // stays mounted standalone even when nothing is pending.
+        runAgentTargets: { query: vi.fn().mockResolvedValue(null) },
+        clearRunAgentTargets: { mutate: vi.fn().mockResolvedValue({ delivered: true }) },
         onSprintLaneChanged: {
           subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
@@ -106,6 +110,10 @@ vi.mock('../../../trpc/client', () => ({
         end: { mutate: vi.fn().mockResolvedValue({ ended: true }) },
         // Interactive "request changes" relay (end-of-workflow summary CTA).
         relayInput: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        // Resolved per-step model info (RunCenterPane + WorkflowSummaryPanel both
+        // fetch this on mount). Empty array = "no resolvable step models", the
+        // path under which neither consumer renders anything extra.
+        getStepModels: { query: vi.fn().mockResolvedValue([]) },
       },
       workflows: {
         list: {
@@ -260,6 +268,35 @@ vi.mock('../QuickSessionCanvas', () => ({
   QuickSessionCanvas: (props: { projectId: number }) => (
     <div data-testid="quick-session-canvas" data-project-id={props.projectId} />
   ),
+}));
+
+// Stub WorkflowEditorModal — its internals (spec editing, save/scope flow) are
+// covered by WorkflowEditorModal.test.tsx. Here we only need to exercise
+// CyboflowRoot's own host wiring: opening it (Cmd/Ctrl+E) and its onSaved
+// callback (handleEditorSaved → the "save as new flow" scope toast, rvw_ff7ef8f9).
+vi.mock('../WorkflowEditorModal', () => ({
+  WorkflowEditorModal: (props: {
+    isOpen: boolean;
+    onSaved: (workflowId: string, savedAsNewScopeNote?: string) => void;
+  }) =>
+    props.isOpen ? (
+      <>
+        <button
+          type="button"
+          data-testid="mock-workflow-editor-save-as-new"
+          onClick={() => props.onSaved('wf-2', 'Saved to Global')}
+        >
+          trigger-saved-as-new
+        </button>
+        <button
+          type="button"
+          data-testid="mock-workflow-editor-save-overwrite"
+          onClick={() => props.onSaved('wf-2')}
+        >
+          trigger-saved-overwrite
+        </button>
+      </>
+    ) : null,
 }));
 
 // Import after mocks so vi.mock hoisting is in effect
@@ -957,6 +994,58 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
 
     const cancelMock = (trpc.cyboflow.runs as unknown as { cancel: { mutate: ReturnType<typeof vi.fn> } }).cancel.mutate;
     expect(cancelMock).toHaveBeenCalledWith({ runId: run.id });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow editor host wiring (rvw_ff7ef8f9) — CyboflowRoot mounts the third
+// consumer of the "save as new flow" scope toast (WorkflowsView and
+// WorkflowPicker are covered in their own suites); this exercises
+// handleEditorSaved → setToastMessage via the real Cmd/Ctrl+E open path.
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — workflow editor "save as new" toast', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: {} });
+    });
+  });
+
+  it('opening the editor via Cmd+E and saving as new surfaces the scope-note toast', () => {
+    const run = makeActiveRun();
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: { 1: [run] } });
+      useCyboflowStore.getState().setActiveRun(run.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByTestId('mock-workflow-editor-save-as-new')).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    fireEvent.click(screen.getByTestId('mock-workflow-editor-save-as-new'));
+
+    expect(screen.getByText('Saved to Global')).toBeInTheDocument();
+  });
+
+  it('a save with no scope note (overwrite / reset) stays silent — no toast', () => {
+    const run = makeActiveRun();
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: { 1: [run] } });
+      useCyboflowStore.getState().setActiveRun(run.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    fireEvent.click(screen.getByTestId('mock-workflow-editor-save-overwrite'));
+
+    expect(screen.queryByText('Saved to Global')).not.toBeInTheDocument();
+    // The editor itself closed (isEditorOpen reset) — no residual toast text
+    // and no stray "Saved" banner from the silent overwrite/reset path.
+    expect(screen.queryByTestId('mock-workflow-editor-save-as-new')).not.toBeInTheDocument();
   });
 });
 

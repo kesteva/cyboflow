@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildUserTextEvent, buildAssistantTextEvent } from '../syntheticEvents';
+import { buildUserTextEvent, buildAssistantTextEvent, buildLoginRequiredEvent } from '../syntheticEvents';
 import { MessageProjection } from '../../../../../shared/streamParser/messageProjection';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
@@ -89,5 +89,18 @@ describe('syntheticEvents', () => {
     if (msg.segments[0].type === 'text') {
       expect(msg.segments[0].content).toBe('Escalating to a human.');
     }
+  });
+
+  it('buildLoginRequiredEvent projects to the system error row the sign-in card keys on', () => {
+    // RunChatView shows ClaudeSignInCard when the transcript ends in a
+    // role:'system' / systemSubtype:'error' row carrying assistantError
+    // 'authentication_failed' (frontend/src/utils/findClaudeLoginRequired.ts).
+    const projection = new MessageProjection('run-synthetic-login');
+    const msg = projection.project(buildLoginRequiredEvent('Sign in again.')) as UnifiedMessage;
+
+    expect(msg.role).toBe('system');
+    expect(msg.metadata?.systemSubtype).toBe('error');
+    expect(msg.metadata?.assistantError).toBe('authentication_failed');
+    expect(msg.segments).toEqual([{ type: 'text', content: 'Sign in again.' }]);
   });
 });

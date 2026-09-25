@@ -53,6 +53,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
+import { SYSTEMIC_PAUSE_SOURCE } from './programmatic/systemicPauseGate';
 import { GateSideEffects, gateDecisionFromResolution } from './gateSideEffects';
 import { listApproveIdeasBatchRows, listRunDecomposedIdeaIds } from './runEntityOwnership';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
@@ -436,6 +437,21 @@ export interface ResolveReviewItemDeps {
   /** Aggregate-unblock resume (awaiting_review -> running): HumanStepManager.maybeResumeRun. */
   maybeResumeRun: (runId: string) => Promise<boolean>;
   /**
+   * Dismiss op through the chokepoint (ReviewItemRouter.applyReviewItem,
+   * op='dismiss'). Consumed ONLY for a systemic-pause item
+   * (`gate:systemic-pause:*`) resolved with `outcome: 'reject'`: that pause's
+   * gate reads a RESOLVE as "retry now" and a DISMISS as "stop waiting", so a
+   * reject must become a dismiss or both decline buttons would retry. Optional
+   * so hand-built dep bags keep compiling; ABSENT ⇒ such a reject is REFUSED
+   * (invalid_payload) — fail closed rather than silently retry. Wired in BOTH
+   * composition roots (reviewItems.ts buildResolveDeps +
+   * monitorReviewQueueComposition.ts).
+   */
+  applyReviewItemDismiss?: (
+    projectId: number,
+    args: { reviewItemId: string; actor: 'user'; resolution?: string },
+  ) => Promise<{ reviewItemId: string }>;
+  /**
    * Drained-rest strand guard: true when the trailing resume MUST be SKIPPED because
    * the run's programmatic walk has already ended (no live executor holds it).
    * Production: reviewItems.ts's probe-backed resumeWouldStrandEndedWalk. Optional —
@@ -786,6 +802,36 @@ export async function resolveReviewItem(
           'invalid_payload',
           `the '${GATE_RESOLUTION_MODIFIER_NO_FINDINGS}' modifier is only valid on the '${APPROVE_DESIGN_GATE_SOURCE}' gate`,
         );
+      }
+    }
+
+    // SYSTEMIC-PAUSE item (a programmatic run parked on a usage/rate limit):
+    // its gate maps RESOLVE ⇒ 'retry' and DISMISS ⇒ 'giveup', so the generic
+    // decision verdicts must be translated here. No outcome / 'approve' ⇒ the
+    // plain resolve below (Retry now). 'reject' ⇒ DISMISS (Stop waiting) — left
+    // as a resolve it would RETRY, the opposite of what a decline means. 'revise'
+    // has no meaning for a pause ⇒ refused. The item's run is NOT resumed here:
+    // the pause gate resumes it itself when it settles on the dismiss event.
+    if (before?.source?.startsWith(`${SYSTEMIC_PAUSE_SOURCE}:`) === true) {
+      if (input.outcome === 'revise') {
+        throw new ReviewItemError(
+          'invalid_payload',
+          "a systemic-pause item has no 'revise' — retry it (resolve) or stop waiting (dismiss)",
+        );
+      }
+      if (input.outcome === 'reject') {
+        if (!deps.applyReviewItemDismiss) {
+          throw new ReviewItemError(
+            'invalid_payload',
+            'rejecting a systemic-pause item means stop waiting, but no dismiss seam is wired — dismiss the item instead',
+          );
+        }
+        const { reviewItemId } = await deps.applyReviewItemDismiss(input.projectId, {
+          reviewItemId: input.reviewItemId,
+          actor: 'user',
+          resolution: 'stop waiting',
+        });
+        return { ok: true, reviewItemId, resumed: false, gateStepId, outcome: 'reject' };
       }
     }
 

@@ -417,6 +417,12 @@ interface RunOverlayRow {
   session_id: string | null;
   /** `sessions.name` via LEFT JOIN; null when the sessions table/join is unavailable or the row is gone. */
   session_name: string | null;
+  /**
+   * `workflows.name` via LEFT JOIN on `workflow_id` (TASK-224). Only projected by the idea
+   * arm (which also uses it to restrict matches to Planner/Ship) — undefined on the task/epic
+   * arm, mirrors taskListing.ts's RunOverlayRow so the emit-path and read-path shapes agree.
+   */
+  workflow_name?: string | null;
 }
 
 interface FieldDelta {
@@ -1697,7 +1703,24 @@ export class TaskChangeRouter {
     // the post-commit rollup hook can re-derive the epic the task LEFT (not just
     // the one it joined). Stays null when the change is not an actual re-parent.
     let previousParentEpicId: string | null = null;
+    // Resolved BEFORE the write txn opens, mirroring how the delete path
+    // resolves its cascade's artifactRunIds ahead of its own transaction: this
+    // is a stage MOVE, not a delete, so the runs still exist post-commit, and
+    // the idea arm of listRunIdsForEntity issues ~5 queries (including a full
+    // seed_idea_ids scan) that have no reason to hold the write lock. Re-reads
+    // (locateEntity/lookupStage) redo cheap, cached-column-check SELECTs
+    // rather than the real ones below — harmless when the update ultimately
+    // fails validation, since this value is then simply never read.
     let wontDoRunIds: string[] | undefined;
+    if (change.stageId !== undefined) {
+      const targetStageForWontDo = this.lookupStage(change.stageId);
+      if (targetStageForWontDo && targetStageForWontDo.position === WONT_DO_POSITION) {
+        const preLocated = this.locateEntity(projectId, taskId, change.entityType);
+        if (preLocated) {
+          wontDoRunIds = listRunIdsForEntity(this.db, preLocated.type, taskId);
+        }
+      }
+    }
     // Hoisted out of the txn closure (mirrors previousParentEpicId/wontDoRunIds
     // above) so the STALENESS post-commit hook in applyChange can act on this
     // update's `body` delta — deltas itself is txn-closure-local and never
@@ -1791,7 +1814,11 @@ export class TaskChangeRouter {
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
         action = 'stageMoved';
-        if (targetStage.position === WONT_DO_POSITION) {
+        // wontDoRunIds is already resolved above, BEFORE this txn opened — this
+        // guard only covers the defensive case where that pre-read somehow
+        // missed it (it can't, in practice: an entity readable here was
+        // readable by the identical pre-txn locateEntity call too).
+        if (targetStage.position === WONT_DO_POSITION && wontDoRunIds === undefined) {
           wontDoRunIds = listRunIdsForEntity(this.db, type, taskId);
         }
 
@@ -3446,6 +3473,57 @@ export class TaskChangeRouter {
   }
 
   /**
+   * Idea sibling of {@link gatherTaskRunOverlayRows}'s task/epic arm (TASK-224)
+   * — mirrors taskListing.ts's `gatherIdeaRunOverlayRows` (kept in lockstep so
+   * the emit-path overlay and the read/list-path overlay never disagree, per
+   * foundation note #4). An idea is never linked via `workflow_runs.task_id`/
+   * `batch_id` — a live Planner/Ship run instead records the idea it was
+   * SEEDED with via `seed_idea_id` (migration 017, single-idea) or
+   * `seed_idea_ids` (migration 061, JSON array — multi-idea planner batches).
+   * Both are soft links (no FK), so a run seeded from a since-deleted idea
+   * simply matches nothing here.
+   *
+   * Guarded per-column via columnExists so a pre-017 schema (neither column)
+   * returns [] and a pre-061 schema (seed_idea_id only) falls back to the
+   * single-idea arm alone. `json_valid()` guards the `json_each` arm against a
+   * malformed/non-array stored value throwing 'malformed JSON' and taking the
+   * whole emit-path read down with it.
+   */
+  private gatherIdeaRunOverlayRows(ideaId: string, sessionSelect: string, sessionJoin: string): RunOverlayRow[] {
+    const hasSeedIdeaId = this.columnExists('workflow_runs', 'seed_idea_id');
+    const hasSeedIdeaIds = this.columnExists('workflow_runs', 'seed_idea_ids');
+    if (!hasSeedIdeaId && !hasSeedIdeaIds) return [];
+
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (hasSeedIdeaId) {
+      clauses.push('wr.seed_idea_id = ?');
+      params.push(ideaId);
+    }
+    if (hasSeedIdeaIds) {
+      clauses.push(
+        'wr.seed_idea_ids IS NOT NULL AND json_valid(wr.seed_idea_ids) AND EXISTS (SELECT 1 FROM json_each(wr.seed_idea_ids) je WHERE je.value = ?)',
+      );
+      params.push(ideaId);
+    }
+    const whereClause = clauses.map((c) => `(${c})`).join(' OR ');
+
+    // Restrict to Planner/Ship (TASK-224): seed_idea_id/seed_idea_ids is a soft
+    // link written by more than those two workflows, so without this join+filter
+    // an idea would pulse and action-gate for an out-of-scope workflow run that
+    // merely happens to name it. Mirrors taskListing.ts's read-path arm.
+    return this.db
+      .prepare(
+        `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, wr.workflow_id, w.name AS workflow_name, ${sessionSelect}
+           FROM workflow_runs wr
+           JOIN workflows w ON w.id = wr.workflow_id
+           ${sessionJoin}
+          WHERE (${whereClause}) AND w.name IN ('planner', 'ship')`,
+      )
+      .all(...params) as RunOverlayRow[];
+  }
+
+  /**
    * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
    * runs whose lane names it — the SAME "live association" set
    * hasNonTerminalRun / recomputeTaskExecutionStage aggregate over, so a
@@ -3458,9 +3536,11 @@ export class TaskChangeRouter {
    * pre-022 (no sprint_batch_tasks/batch_id) or pre-019 (no session_id) schema
    * degrades gracefully — batch runs are simply excluded / session fields read
    * back null — instead of throwing 'no such column/table'.
+   *
+   * `entityType === 'idea'` delegates to {@link gatherIdeaRunOverlayRows}
+   * instead (TASK-224) — an idea has no task_id/batch_id association at all.
    */
-  private gatherTaskRunOverlayRows(taskId: string): RunOverlayRow[] {
-    const hasBatch = this.columnExists('workflow_runs', 'batch_id');
+  private gatherTaskRunOverlayRows(taskId: string, entityType?: TaskType): RunOverlayRow[] {
     // The `sessions` table is legacy (schema.sql, not a numbered migration) —
     // some partial-migration test DBs add workflow_runs.session_id (migration
     // 019) WITHOUT ever creating it, so the column check alone is not enough;
@@ -3468,16 +3548,20 @@ export class TaskChangeRouter {
     // this doubles as a table-existence probe.
     const hasSession =
       this.columnExists('workflow_runs', 'session_id') && this.columnExists('sessions', 'name');
-
-    const whereClause = hasBatch
-      ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
-      : 'wr.task_id = ?';
-    const params = hasBatch ? [taskId, taskId] : [taskId];
-
     const sessionSelect = hasSession
       ? 'wr.session_id AS session_id, s.name AS session_name'
       : 'NULL AS session_id, NULL AS session_name';
     const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+
+    if (entityType === 'idea') {
+      return this.gatherIdeaRunOverlayRows(taskId, sessionSelect, sessionJoin);
+    }
+
+    const hasBatch = this.columnExists('workflow_runs', 'batch_id');
+    const whereClause = hasBatch
+      ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
+      : 'wr.task_id = ?';
+    const params = hasBatch ? [taskId, taskId] : [taskId];
 
     return this.db
       .prepare(
@@ -3549,7 +3633,7 @@ export class TaskChangeRouter {
     const isTerminal = stage ? stage.is_terminal === 1 : false;
     const isDonePosition = stage ? stage.position === DONE_POSITION : false;
 
-    const runs = this.gatherTaskRunOverlayRows(taskId);
+    const runs = this.gatherTaskRunOverlayRows(taskId, type);
 
     const inFlow: FlowOverlay[] = runs
       .filter((r) => !TERMINAL_RUN_STATUS_SET.has(r.status))
@@ -3560,6 +3644,10 @@ export class TaskChangeRouter {
         runStatus: r.status,
         sessionId: r.session_id,
         sessionName: r.session_name,
+        // Only the idea arm selects workflow_name (undefined on the task/epic
+        // arm) — omit the key entirely rather than projecting an always-null
+        // field onto every task's FlowMarker overlay too.
+        ...(r.workflow_name !== undefined ? { workflowName: r.workflow_name } : {}),
       }));
 
     const runIds = runs.map((r) => r.id);

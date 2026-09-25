@@ -1861,8 +1861,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const cliProcess = this.processes.get(panelId);
     if (!cliProcess) return;
     this.sendInput(panelId, body);
+    // Pin the EXACT process the body went to (mirrors CodexPtyManager's
+    // beginComposerTurn/TASK-206 fix): a presence-only `processes.has()` check
+    // would let this deferred '\r' fire into a REPLACED PTY under the same
+    // panelId (continuePanel/restart within the delay window) that never
+    // received the body above.
+    const target = cliProcess.process;
     setTimeout(() => {
-      if (!this.processes.has(panelId)) return;
+      if (this.processes.get(panelId)?.process !== target) return;
       try {
         this.sendInput(panelId, '\r');
       } catch (err) {

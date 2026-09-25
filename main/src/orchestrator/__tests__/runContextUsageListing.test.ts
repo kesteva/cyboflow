@@ -110,6 +110,19 @@ describe('selectRunContextUsage', () => {
     });
   });
 
+  it('takes the MAIN model window when a Haiku side query is listed first (regression: 1M read as 200k)', () => {
+    const db = makeMockDb(
+      [],
+      [
+        resultRow({
+          'claude-haiku-4-5-20251001': { contextWindow: 200000, inputTokens: 897 },
+          'claude-opus-5-5[1m]': { contextWindow: 1000000, inputTokens: 2 },
+        }),
+      ],
+    );
+    expect(selectRunContextUsage(db, 'r').contextWindow).toBe(1000000);
+  });
+
   it('returns both facts when both event kinds are present', () => {
     const db = makeMockDb(
       [assistantRow({ input_tokens: 1000, cache_read_input_tokens: 61000 })],

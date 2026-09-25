@@ -16,35 +16,16 @@
  * against a fake db without the orchestrator layering rule being violated.
  */
 import { isSessionSummarySupported } from '../../../shared/types/sessionSummary';
-import { hashAskText } from './sessionAskHash';
+import { hashAskText } from '../database/sessionAskHash';
+// One source of truth for the read/write-boundary normalization (migration
+// 121's 300-char clamp + known-state set) — this module reads the joined
+// column straight from SQL (bypassing DatabaseService's own read-boundary
+// normalization on the write side), so it re-validates here rather than
+// trusting the raw column, but shares the exact same predicate database.ts's
+// SESSION_SUMMARY_STATES/clamp uses instead of keeping a private copy.
+import { normalizeSummaryState, normalizeWaitingOn } from '../database/sessionSummaries';
 import type { DatabaseLike, PreparedStatement } from './types';
 import type { QuickSessionRow, QuickSessionState } from '../../../shared/types/quickSessions';
-
-/**
- * `session_summaries.state` values the review-home board understands
- * (migration 121). Mirrors database.ts's SESSION_SUMMARY_STATES — this
- * module reads the joined column straight from SQL (bypassing
- * DatabaseService's own read-boundary normalization), so it re-validates
- * here rather than trusting the raw column.
- */
-const SESSION_SUMMARY_STATES = new Set(['working', 'complete', 'needs_input']);
-
-const WAITING_ON_MAX_LENGTH = 300;
-
-/** Validate a joined `summary_state` value; anything outside the known set (including non-string) degrades to null. */
-function normalizeSummaryState(value: unknown): 'working' | 'complete' | 'needs_input' | null {
-  return typeof value === 'string' && SESSION_SUMMARY_STATES.has(value)
-    ? (value as 'working' | 'complete' | 'needs_input')
-    : null;
-}
-
-/** Validate/clamp a joined `waiting_on` value: non-string or blank (after trim) becomes null; over-length is truncated. */
-function normalizeWaitingOn(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-  return trimmed.length > WAITING_ON_MAX_LENGTH ? trimmed.slice(0, WAITING_ON_MAX_LENGTH) : trimmed;
-}
 
 /** A candidate quick-session row as read from SQLite. */
 export interface QuickSessionCandidateRow {
@@ -155,7 +136,7 @@ export function deriveQuickSessionState(
  * clear an in-flight AskUserQuestion/permission gate.
  */
 function isAskDismissed(
-  summaryState: 'working' | 'complete' | 'needs_input' | null,
+  summaryState: string | null,
   waitingOn: string | null,
   askDismissedHash: string | null,
 ): boolean {
@@ -196,7 +177,10 @@ export function toQuickSessionRow(
     rawStatus: row.status,
     exitCode: row.exit_code,
     summary: row.summary,
-    summaryState: suppressed ? null : rawSummaryState,
+    // normalizeSummaryState is typed string|null (matching SessionSummary.state
+    // in models.ts) but its runtime check already only ever returns one of
+    // SESSION_SUMMARY_STATES's three members or null, so this cast is safe.
+    summaryState: suppressed ? null : (rawSummaryState as 'working' | 'complete' | 'needs_input' | null),
     waitingOn: suppressed ? null : rawWaitingOn,
     // The SAME predicate the summarizer's own eligibility gate reads
     // (shared/types/sessionSummary.ts) — a row must never render "unsupported"

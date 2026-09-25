@@ -3,11 +3,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ScoreSummary, WorkflowSummaryPanel } from '../WorkflowSummaryPanel';
 import type { RunUsageRollup, RunEval } from '../../../../../shared/types/insights';
+import { MODEL_FAMILY_COLORS } from '../../../../../shared/types/agents';
 import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
 
 const runUsageQuery = vi.fn();
 const runEvalQuery = vi.fn();
+const getStepModelsQuery = vi.fn();
 const reviewItemsListQuery = vi.fn();
 const relayInputMutate = vi.fn();
 const restartMutate = vi.fn();
@@ -28,6 +30,7 @@ vi.mock('../../../trpc/client', () => ({
         restart: { mutate: (...a: unknown[]) => restartMutate(...a) },
         retryStep: { mutate: (...a: unknown[]) => retryStepMutate(...a) },
         retryEval: { mutate: (...a: unknown[]) => retryEvalMutate(...a) },
+        getStepModels: { query: (...a: unknown[]) => getStepModelsQuery(...a) },
       },
     },
   },
@@ -121,6 +124,8 @@ beforeEach(() => {
   retryStepMutate.mockResolvedValue({ delivered: true, stepId: 'step-1' });
   retryEvalMutate.mockReset();
   retryEvalMutate.mockResolvedValue(undefined);
+  getStepModelsQuery.mockReset();
+  getStepModelsQuery.mockResolvedValue([]);
   showError.mockReset();
 });
 
@@ -796,5 +801,140 @@ describe('WorkflowSummaryPanel — dismiss / continue-in-chat controls', () => {
     await screen.findByTestId('run-summary-complete');
     expect(screen.queryByTestId('run-summary-dismiss')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-continue-in-chat')).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)', () => {
+  it('groups steps by label, sorted by descending count with first-appearance tiebreak', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's5', stepName: 'Final gate', phaseId: 'p3', label: 'Opus 5', family: 'opus' },
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText('Models used — configuration')).toBeInTheDocument();
+    const labels = screen.getAllByTestId('run-summary-step-model-group-label').map((el) => el.textContent);
+    // Opus 5 (2) and Sonnet 5 (2) tie on count; Opus 5 appeared first (s1, before
+    // Sonnet 5's first appearance at s2) so it leads. gpt-5.6-sol (1) trails both.
+    expect(labels).toEqual([
+      'Opus 5 — 2 steps',
+      'Sonnet 5 — 2 steps',
+      'gpt-5.6-sol — 1 step',
+    ]);
+  });
+
+  it('uses singular "1 step" and plural "N steps" correctly', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+    ]);
+    renderPanel();
+
+    const labels = await screen.findAllByTestId('run-summary-step-model-group-label');
+    expect(labels.map((el) => el.textContent)).toEqual(
+      expect.arrayContaining(['Opus 5 — 1 step', 'Sonnet 5 — 2 steps']),
+    );
+    expect(screen.queryByText(/1 steps/)).not.toBeInTheDocument();
+  });
+
+  it('renders exactly as many chips as returned step-model entries', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+    ]);
+    renderPanel();
+
+    const chips = await screen.findAllByTestId('run-summary-step-model-chip');
+    expect(chips).toHaveLength(4);
+    expect(chips.map((c) => c.textContent)).toEqual(
+      expect.arrayContaining(['Draft plan', 'Write code', 'Review code', 'Judge diff']),
+    );
+  });
+
+  it('omits the section entirely when getStepModels rejects, without disturbing other panel content', async () => {
+    getStepModelsQuery.mockRejectedValue(new Error('PRECONDITION_FAILED'));
+    renderPanel();
+
+    // Other panel content still renders.
+    expect(await screen.findByTestId('run-summary-categories')).toBeInTheDocument();
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledWith({ runId: 'run-1' }));
+    expect(screen.queryByText('Models used — configuration')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument();
+  });
+
+  it('omits the section when getStepModels resolves empty (e.g. an eval-less/human-only flow)', async () => {
+    getStepModelsQuery.mockResolvedValue([]);
+    renderPanel();
+
+    expect(await screen.findByTestId('run-summary-categories')).toBeInTheDocument();
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalled());
+    expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument();
+  });
+
+  it('paints each group dot from MODEL_FAMILY_COLORS — the shared swatch source, not a local palette', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', label: 'Auto', family: 'auto' },
+    ]);
+    renderPanel();
+
+    const groups = await screen.findAllByTestId('run-summary-step-model-group');
+    // Groups all tie at 1 step, so they keep first-appearance order.
+    const dots = groups.map((g) => g.querySelector('span.rounded-full') as HTMLElement);
+    expect(dots).toHaveLength(4);
+    expect(dots[0]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.opus });
+    expect(dots[1]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.sonnet });
+    expect(dots[2]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.other });
+    expect(dots[3]).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.auto });
+    // Distinct swatches, not one repeated fallback.
+    expect(new Set(dots.map((d) => d.style.backgroundColor)).size).toBe(4);
+  });
+
+  it('carries the "not a per-step cost split" disclaimer — the section must never read as cost attribution', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+    ]);
+    renderPanel();
+
+    const section = await screen.findByTestId('run-summary-step-models');
+    expect(section).toHaveTextContent(
+      'Not a per-step cost split — the cost above is reported per run and cannot be attributed to individual steps.',
+    );
+    expect(section).toHaveTextContent('Human review gates are excluded.');
+  });
+
+  it('clears the previous run\'s groups when runId changes (panel is mounted without a key)', async () => {
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+    ]);
+    const { rerender } = renderPanel();
+    expect(await screen.findByText('Opus 5 — 1 step')).toBeInTheDocument();
+
+    // Run B's query is still in flight. Without a reset-on-runId the panel
+    // keeps rendering run A's "Opus 5" group while the header already reads
+    // run B — the wrong models attributed to the wrong run.
+    getStepModelsQuery.mockReturnValue(new Promise(() => {}));
+    rerender(
+      <WorkflowSummaryPanel
+        runId="run-2"
+        status="awaiting_review"
+        substrate="sdk"
+        workflowLabel="planner"
+        onComplete={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledWith({ runId: 'run-2' }));
+    await waitFor(() =>
+      expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument(),
+    );
   });
 });

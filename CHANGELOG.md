@@ -6,6 +6,64 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-09-24
+
+### Added
+
+- **Switch runtime and retry when a run pauses on a systemic error.** When a programmatic run parks on
+  a usage limit, an expired login or a similar environment problem, the pause item now names the
+  agents that were blocked and offers *Retry now*, *Switch runtime & retry* and *Stop waiting*. The
+  switch form lists only providers that are installed and signed in and defaults to a ready one other
+  than the blocked provider. Its choice is stored as a per-run agent-target override (migration 144),
+  the top layer of the run's effective agents, so it applies from the very next spawn. An override chip
+  shows active switches with a Revert. The parked step card reads **PAUSED**, and the landing's
+  needs-input row can settle the pause directly.
+- **Opus 5.5.** The Opus picker alias now pins `claude-opus-5-5[1m]`. This needed Agent SDK 0.3.280,
+  which bundles CLI 2.1.280. Opus 5 moves to "Other models".
+- **Models are visible at every step.** The live workflow canvas, sprint fan-out lanes and a new
+  "Models used" section on the run summary show the concrete model each step resolved to.
+- **Sprint lanes prove their tests.** Write-tests must show a test failing before the fix and passing
+  after it, without touching the shared tree. Its output is passed to code-review and task-verify.
+  Defects inside the lane's own scope are fixed in the lane rather than filed as findings, and lane
+  review findings are deduplicated against the run's open findings.
+- **Chat sessions can triage any finding in their project.** `cyboflow_list_run_findings` gains a
+  project scope, and `cyboflow_resolve_finding` gains a `dismissed` resolution.
+- **Insights code quality shows tallies with a drill-down** in place of a flat list of findings, and
+  can seed a Compound run with a whole set of findings at once.
+- **Idea cards pulse on the backlog board** while a Planner or Ship run is working on them, with a
+  "planning · agent / step" hint.
+- *Mark complete* reports sprint tasks it left open because the branch is not on `main` yet.
+- The launch wizard seeds `openrouter/auto` when you switch it to an OMP runtime.
+
+### Fixed
+
+- **The context meter read the wrong model's window.** It took the first `modelUsage` entry, which
+  could be a Haiku side query, rather than the main model's.
+- **89 review findings fixed across the app.** Mutation failures that were swallowed now surface, the
+  diff anchors on the merge base, Restore failures are reported, and close-out is stamped when a
+  session lands. Also fixed: disclosure when the eval's pairwise judge degrades, run-type defaults
+  writes and launch save-as-default, workflow archive read surfaces, Insights sparklines and trend
+  metrics, and invalid design tokens.
+- **Systemic environment errors no longer reach Sentry** from any capture point.
+- **The monitor chat offers the sign-in card** when Claude's login has expired.
+- The MCP `request_verification` path now runs the lane runbook bootstrap, as the controller path
+  already did.
+- The assistant rail's live tail dropped in-flight deltas under load.
+- Codex and OMP `result.usage` now shows up in the Insights token chart, and subagent usage no longer
+  hides it.
+- *Mark complete* runs sprint close-out when the session has already landed.
+- WorkflowPicker launches send the model coerced to the runtime's family at render time, so a quick
+  Start Run can no longer launch with a stale model from another provider.
+- Fixes to hidden/empty segments in the chat transcript, to the approve-design gate body and
+  accepted-risk filing, and to a boot backfill guard that checked the wrong status values.
+
+### Changed
+
+- The unmounted `ReviewQueueView` is deleted.
+- `McpQueryHandler`'s verify/eval tool family moved into `VerifyToolHandlers` (issue #19, step 9).
+- CI rebuilds cyboflow.com after a stable release publishes, and fails a Windows build whose
+  installer is not validly signed.
+
 ## [0.4.3] — 2026-09-21
 
 ### Added

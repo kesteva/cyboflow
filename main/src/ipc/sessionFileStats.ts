@@ -24,9 +24,8 @@
  * beside it is the bug this whole module exists to fix. Isolating them would
  * need a dirty-tree baseline captured at session start, which nothing records.
  */
-import type { GitDiffManager } from '../services/gitDiffManager';
+import { resolveGitRefToSha, type GitDiffManager } from '../services/gitDiffManager';
 import type { Logger } from '../utils/logger';
-import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 
 /** The `files` block of the sessions:get-statistics payload, minus executionCount. */
 export interface SessionFileStats {
@@ -50,37 +49,13 @@ export async function resolveSessionDiffBaseRef(
   candidates: Array<string | null | undefined>,
 ): Promise<string | null> {
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      assertNotOptionLike(candidate, 'base ref candidate');
-    } catch {
-      // A `-`-prefixed candidate would be parsed by git as an OPTION, not a
-      // value (TASK-208) — reject it locally rather than even attempting to
-      // resolve it, and try the next candidate.
-      continue;
-    }
-    try {
-      // `^{commit}` forces a commit-ish resolution, so a branch name, a tag and
-      // a raw sha all validate the same way; --quiet keeps git silent on miss;
-      // --end-of-options forces the value position (TASK-208). Return the
-      // RESOLVED sha (rev-parse's stdout), not the candidate string, so the
-      // caller diffs against a concrete commit rather than a moving/ambiguous
-      // ref name. If rev-parse succeeds with empty stdout (git-cannot-happen
-      // in practice, but this function must never hand back the raw candidate
-      // string on any path), fall through and try the next candidate instead.
-      const resolved = (
-        await runGitAsync(worktreePath, [
-          'rev-parse',
-          '--verify',
-          '--quiet',
-          END_OF_OPTIONS,
-          `${candidate}^{commit}`,
-        ])
-      ).trim();
-      if (resolved) return resolved;
-    } catch {
-      // Unresolvable in this worktree — try the next candidate.
-    }
+    // THE shared ref-safety resolver (TASK-208): rejects a `-`-prefixed
+    // candidate before git sees it, forces the value position with
+    // --end-of-options and a commit-ish via `^{commit}`, and returns the
+    // RESOLVED sha — never the raw candidate string — or null, in which case
+    // the next candidate is tried.
+    const resolved = await resolveGitRefToSha(worktreePath, candidate ?? undefined);
+    if (resolved) return resolved;
   }
   return null;
 }

@@ -91,6 +91,22 @@ describe('deriveLiveContextUsage', () => {
     expect(deriveLiveContextUsage(outputs)).toBe('1000k/1000k tokens (100%)');
   });
 
+  it('takes the MAIN model window when a Haiku side query is listed first (regression: 1M read as 200k)', () => {
+    const sideQueryFirst: ContextOutput = {
+      type: 'json',
+      data: {
+        type: 'result',
+        modelUsage: {
+          'claude-haiku-4-5-20251001': { contextWindow: 200000, inputTokens: 897 },
+          'claude-opus-5-5[1m]': { contextWindow: 1_000_000, inputTokens: 2 },
+        },
+      },
+    };
+    expect(deriveLiveContextUsage([assistant({ input: 1000, cacheRead: 56000 }), sideQueryFirst])).toBe(
+      '57k/1000k tokens (6%)',
+    );
+  });
+
   it('sources the context window from an init message when no result is present', () => {
     const outputs = [assistant({ input: 5000, cacheRead: 49000 }), init(200000)];
     expect(deriveLiveContextUsage(outputs)).toBe('54k/200k tokens (27%)');

@@ -74,8 +74,26 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
  *     `costBasis`, a widened `ApiKeySource`, and `requestId` + a `| null` return on
  *     the elicitation / userDialog callbacks (cyboflow implements neither — its
  *     `elicitation` hits are the unrelated Codex app-server protocol).
+ *
+ * 0.3.257 → 0.3.280 re-verification (bumped to reach a bundled CLI, 2.1.280, new
+ * enough for `claude-opus-5-5`):
+ *   - `SDKMessage` union, `CanUseTool`, `PermissionResult`, `SDKMessageOrigin`
+ *     declarations: UNCHANGED, so `EXPECTED_DISCRIMINANTS` needs no edit.
+ *   - `CanUseTool`'s options object gained three optional, additive fields:
+ *     `mcpServer` (provenance of an `mcp__*` tool), `defaultToNo` (open the prompt
+ *     on decline, no one-key approve) and `suppressAlwaysAllowRule` (offer no
+ *     persistent "don't ask again"). cyboflow never writes `updatedPermissions`,
+ *     so the last is already honored; the other two are advisory for the
+ *     approval UI and not consumed here.
+ *   - `SDKAssistantMessageError` gained `'verification_required'` and
+ *     `'cloud_credential_error'`; the error arm reads it as a bare string and only
+ *     special-cases `'authentication_failed'`, so both render as generic errors.
+ *   - Additive only, none of it used: `Options.permissionPrompts`,
+ *     `Options.pluginDelivery`, `verbatimPrompts`, `omitClaudeMd` on agent defs,
+ *     and new control requests (hooks listing, permission rules, MCP resource
+ *     read, reload output styles).
  */
-const PINNED_SDK_VERSION = '0.3.257';
+const PINNED_SDK_VERSION = '0.3.280';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.
