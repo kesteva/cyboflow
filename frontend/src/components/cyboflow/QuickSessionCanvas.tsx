@@ -28,7 +28,7 @@ import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
 import { useSessionSummary } from '../../hooks/useSessionSummary';
 import { computeSessionCostUsd, formatCostUsd } from '../../utils/modelPricing';
-import { DEFAULT_QUICK_MODEL } from './ModelSelector';
+import { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
