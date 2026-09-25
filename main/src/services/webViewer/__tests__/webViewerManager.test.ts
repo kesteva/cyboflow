@@ -13,7 +13,9 @@ const fakes = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter } = require('events') as typeof import('events');
 
+  let nextId = 1;
   class FakeWebContents extends EventEmitter {
+    id = nextId++;
     destroyed = false;
     focused = false;
     loads: string[] = [];
@@ -67,6 +69,7 @@ vi.mock('electron', () => ({
       setDevicePermissionHandler: vi.fn(),
       setDisplayMediaRequestHandler: vi.fn(),
       on: vi.fn(),
+      webRequest: { onSendHeaders: vi.fn(), onCompleted: vi.fn(), onErrorOccurred: vi.fn() },
     }),
   },
 }));
@@ -220,5 +223,45 @@ describe('crash', () => {
     expect(created).toHaveLength(2);
     expect(created[0].webContents.isDestroyed()).toBe(true);
     expect((await manager.get('t1'))?.state).not.toBe('crashed');
+  });
+});
+
+describe('telemetry wiring', () => {
+  it('records console output and navigation for the tab, and keeps it across an eviction', async () => {
+    await open('t0');
+    const wc = created[0].webContents;
+    wc.emit('console-message', {
+      level: 'error',
+      message: 'boom',
+      lineNumber: 3,
+      sourceId: 'https://example.com/app.js',
+      frame: { url: 'https://example.com/t0' },
+    });
+    wc.emit('did-navigate', {}, 'https://example.com/t0/next');
+    expect(manager.telemetry.read('t0', 'console')!.entries[0]).toMatchObject({ level: 'error', message: 'boom' });
+    expect(manager.telemetry.read('t0', 'navigation')!.entries.map((e) => e.kind)).toEqual(['commit']);
+
+    for (let i = 1; i <= WEB_VIEWER_LIMITS.maxLoadedViews; i += 1) await open(`t${i}`);
+    expect((await manager.get('t0'))?.state).toBe('evicted');
+    // An evicted tab keeps its history — that is what an agent reads it for.
+    expect(manager.telemetry.read('t0', 'console')!.entries).toHaveLength(1);
+  });
+
+  it('forgets a closed tab’s telemetry', async () => {
+    await open('t0');
+    created[0].webContents.emit('console-message', { level: 'info', message: 'x', lineNumber: 1, sourceId: '' });
+    await manager.close('t0');
+    expect(manager.telemetry.read('t0', 'console')).toBeNull();
+  });
+
+  it('survives a console message from a frame that is already gone', async () => {
+    await open('t0');
+    const gone = {
+      get url(): string {
+        throw new Error('Render frame was disposed');
+      },
+    };
+    created[0].webContents.emit('console-message', { level: 'warning', message: 'late', lineNumber: 1, sourceId: '', frame: gone });
+    expect(manager.telemetry.read('t0', 'console')!.entries[0]).toMatchObject({ message: 'late', frameUrl: null });
   });
 });

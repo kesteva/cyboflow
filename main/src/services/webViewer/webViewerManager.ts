@@ -44,6 +44,7 @@ import {
 } from './webViewerGuard';
 import { hardenPartition, partitionFor } from './webViewerPartitions';
 import { DEFAULT_CAP_LIMITS, checkOpen, selectEvictions, type CapRecord } from './webViewerCaps';
+import { WebViewerTelemetry } from './webViewerTelemetry';
 
 /** Channel names on the manager's emitter, bridged by the tRPC subscriptions. */
 export const WEB_VIEWER_TAB_STATE = 'web-viewer:tab-state';
@@ -109,10 +110,18 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   private attachedWindow: BrowserWindow | null = null;
   /** Per-session timestamps of recent agent opens, for the rate limit. */
   private readonly agentOpens = new Map<string, number[]>();
+  /** Partitions whose `webRequest` observers are installed (one set per session). */
+  private readonly instrumented = new Set<string>();
+  /**
+   * Always-on, non-CDP telemetry (console, navigation, network). Read by the
+   * observe tools; nothing here reaches an agent without the consent layer.
+   */
+  readonly telemetry: WebViewerTelemetry;
 
   constructor(deps: WebViewerManagerDeps) {
     super();
     this.deps = deps;
+    this.telemetry = new WebViewerTelemetry(() => this.now());
   }
 
   // -------------------------------------------------------------------------
@@ -232,6 +241,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     if (!record) return { ok: false, error: 'tab_not_found' };
     this.destroyView(record);
     this.tabs.delete(tabId);
+    this.telemetry.forget(tabId);
     this.emit(WEB_VIEWER_TAB_CLOSED, {
       sessionId: record.sessionId,
       tabId,
@@ -317,6 +327,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       if (record.sessionId !== sessionId) continue;
       this.destroyView(record);
       this.tabs.delete(tabId);
+      this.telemetry.forget(tabId);
       this.emit(WEB_VIEWER_TAB_CLOSED, { sessionId, tabId, reason: 'disposed' as const });
     }
     this.agentOpens.delete(sessionId);
@@ -327,6 +338,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     for (const [tabId, record] of [...this.tabs]) {
       this.destroyView(record);
       this.tabs.delete(tabId);
+      this.telemetry.forget(tabId);
       this.emit(WEB_VIEWER_TAB_CLOSED, {
         sessionId: record.sessionId,
         tabId,
@@ -418,6 +430,8 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       },
     });
     record.view = view;
+    this.instrumentPartition(record.partition, ses);
+    this.telemetry.attach(record.tabId, view.webContents.id);
     this.wireView(record, view.webContents, ses);
     if (record.visible) {
       window.contentView.addChildView(view);
@@ -483,11 +497,13 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     // --- lifecycle --------------------------------------------------------
     wc.on('did-start-navigation', (details) => {
       if (!details.isMainFrame) return;
+      this.telemetry.appendNavigation(record.tabId, 'start', details.url);
       record.loading = true;
       this.publish(record);
     });
 
     wc.on('did-navigate', (_event, url) => {
+      this.telemetry.appendNavigation(record.tabId, 'commit', url);
       this.commitNavigation(record, url);
     });
 
@@ -498,6 +514,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     // route can carry the sensitive part of the URL.
     wc.on('did-navigate-in-page', (_event, url, isMainFrame) => {
       if (!isMainFrame) return;
+      this.telemetry.appendNavigation(record.tabId, 'in_page', url);
       this.commitNavigation(record, url);
     });
 
@@ -507,10 +524,11 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       this.publish(record);
     });
 
-    wc.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
+    wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
       if (!isMainFrame) return;
       // -3 is ERR_ABORTED — a navigation the user or a redirect superseded.
       if (errorCode === -3) return;
+      this.telemetry.appendNavigation(record.tabId, 'fail', validatedUrl, `${errorCode} ${errorDescription}`);
       record.loading = false;
       record.blockedReason = errorDescription;
       this.publish(record);
@@ -525,6 +543,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     // would otherwise be reported as `live`/`hidden` while every capture,
     // navigation and evaluate call fails inconsistently.
     wc.on('render-process-gone', (_event, details) => {
+      this.telemetry.appendNavigation(record.tabId, 'crash', record.currentUrl, details.reason);
       record.state = 'crashed';
       record.blockedReason = details.reason;
       record.loading = false;
@@ -534,6 +553,25 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
         sessionId: record.sessionId,
         tabId: record.tabId,
         reason: 'crashed' as const,
+      });
+    });
+
+    // --- telemetry: console ---------------------------------------------
+    // WebContents-wide (subframes included), with the logging frame attached —
+    // so an artifact iframe's errors are visible without any CDP session.
+    wc.on('console-message', (event) => {
+      this.telemetry.appendConsole(record.tabId, {
+        level: event.level,
+        message: event.message,
+        sourceId: event.sourceId,
+        lineNumber: event.lineNumber,
+        frame: (() => {
+          try {
+            return event.frame ? { url: event.frame.url } : null;
+          } catch {
+            return null; // the frame navigated or was destroyed
+          }
+        })(),
       });
     });
 
@@ -647,6 +685,56 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     return view.webContents;
   }
 
+  /**
+   * Install the partition's network observers, once. Observational listeners
+   * only (`onSendHeaders` / `onCompleted` / `onErrorOccurred`) — no blocking
+   * `onBeforeRequest`, so telemetry never adds a round trip to a request. A
+   * session holds ONE listener per webRequest event, which is safe here because
+   * these partitions belong to the viewer alone.
+   */
+  private instrumentPartition(partition: string, ses: Electron.Session): void {
+    if (this.instrumented.has(partition)) return;
+    this.instrumented.add(partition);
+    const t = this.telemetry;
+    // Explicit fields, never a spread of `details`: it also carries the request
+    // and response HEADERS (Cookie / Set-Cookie / Authorization), and reading a
+    // destroyed frame's getter throws.
+    const frameOf = (d: { frame?: Electron.WebFrameMain | null }) => {
+      try {
+        return d.frame ? { url: d.frame.url } : null;
+      } catch {
+        return null;
+      }
+    };
+    ses.webRequest.onSendHeaders((d) => t.requestStarted(partition, { id: d.id, timestamp: d.timestamp }));
+    ses.webRequest.onCompleted((d) =>
+      t.requestFinished(partition, {
+        id: d.id,
+        url: d.url,
+        method: d.method,
+        resourceType: d.resourceType,
+        timestamp: d.timestamp,
+        webContentsId: d.webContentsId,
+        frame: frameOf(d),
+        statusCode: d.statusCode,
+        fromCache: d.fromCache,
+      }),
+    );
+    ses.webRequest.onErrorOccurred((d) =>
+      t.requestFinished(partition, {
+        id: d.id,
+        url: d.url,
+        method: d.method,
+        resourceType: d.resourceType,
+        timestamp: d.timestamp,
+        webContentsId: d.webContentsId,
+        frame: frameOf(d),
+        fromCache: d.fromCache,
+        error: d.error,
+      }),
+    );
+  }
+
   private now(): number {
     return (this.deps.now ?? Date.now)();
   }
@@ -718,6 +806,9 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     const view = record.view;
     record.view = null;
     if (!view) return;
+    // The rings outlive the view (an evicted tab keeps its history); only the
+    // webContents → tab attribution goes.
+    this.telemetry.detach(view.webContents.id);
     const window = this.attachedWindow;
     if (window && !window.isDestroyed()) {
       try {
