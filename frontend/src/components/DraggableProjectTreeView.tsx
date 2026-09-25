@@ -32,6 +32,7 @@ import {
 import { experimentDisplayName } from '../utils/experimentDisplay';
 import { ExperimentCancelDialog } from './cyboflow/ExperimentCancelDialog';
 import { groupIdeaSessions } from '../utils/ideaSessionGrouping';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -502,6 +503,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   const [selectedProjectForSettings, setSelectedProjectForSettings] = useState<Project | null>(null);
   const [showAddProjectDialog, setShowAddProjectDialog] = useState(false);
   const [showCreateFolderDialog, setShowCreateFolderDialog] = useState(false);
+  useOcclusion(showCreateFolderDialog, 'create-folder-dialog');
   const [refreshingProjects, setRefreshingProjects] = useState<Set<number>>(new Set());
   const [runningProjectId, setRunningProjectId] = useState<number | null>(null);
   const [closingProjectId, setClosingProjectId] = useState<number | null>(null);
@@ -571,6 +573,9 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   // types 'session' | 'folder', so the experiment menu lives here — plus the
   // cancel-experiment confirm target.
   const [experimentMenu, setExperimentMenu] = useState<{ group: RailExperimentGroup; name: string; x: number; y: number } | null>(null);
+  // Local-state menu (the shared ContextMenuContext, which holds its own lease,
+  // only types 'session' | 'folder').
+  useOcclusion(experimentMenu !== null, 'experiment-context-menu');
   const [cancelExperiment, setCancelExperiment] = useState<{ id: string; name: string } | null>(null);
 
   // Performance monitoring

@@ -4,6 +4,7 @@ import { trpc } from '../../trpc/client';
 import { useErrorStore } from '../../stores/errorStore';
 import type { GuardedAction } from '../../utils/armDismissGuard';
 import type { ExperimentArm, ExperimentStatus } from '../../../../shared/types/experiments';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 /** Per-action copy: the confirm-button label + the verb forms used in the body text. */
 const ACTION_COPY: Record<GuardedAction, { confirmLabel: string; gerund: string; verb: string }> = {
@@ -62,6 +63,7 @@ export function ArmDismissGuardDialog({
   action,
   onConfirm,
 }: ArmDismissGuardDialogProps) {
+  useOcclusion(isOpen, 'arm-dismiss-guard-dialog');
   const [abandoning, setAbandoning] = useState(false);
 
   // Escape closes the guard (parity with ConfirmDialog). Enter is intentionally

@@ -8,6 +8,7 @@ import { trpc } from '../../../trpc/client';
 import type { CombinedDiffViewProps } from '../../../types/diff';
 import type { ExecutionDiff, GitDiffResult } from '../../../types/diff';
 import { Maximize2, Minimize2, RefreshCw } from 'lucide-react';
+import { useOcclusion } from '../../../hooks/useOcclusion';
 
 const HISTORY_LIMIT = 50;
 
@@ -30,6 +31,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  useOcclusion(isFullscreen, 'diff-fullscreen');
   const [modifiedFiles, setModifiedFiles] = useState<Set<string>>(new Set());
   const [showCommitDialog, setShowCommitDialog] = useState(false);
   const [mainBranch, setMainBranch] = useState<string>('main');

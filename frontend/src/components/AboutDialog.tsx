@@ -3,6 +3,7 @@ import { X, ExternalLink, Download, RefreshCw, CheckCircle, AlertCircle } from '
 import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
 import { useUpdater } from '../hooks/useUpdater';
 import { pathBasename } from '../utils/pathBasename';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface VersionInfo {
   current: string;
@@ -22,6 +23,7 @@ interface AboutDialogProps {
 }
 
 export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
+  useOcclusion(isOpen, 'about-dialog');
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const { state: update, check: checkForUpdates, download: downloadUpdate, install: installUpdate, reset } = useUpdater();
 

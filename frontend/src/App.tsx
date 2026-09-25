@@ -56,6 +56,7 @@ import {
   useAggregatedReviewItems,
   useLandingStore,
 } from './stores/landingStore';
+import { useOcclusion } from './hooks/useOcclusion';
 
 /**
  * What stands in for the shell row while the first-run tour owns the window:
@@ -119,6 +120,7 @@ function App() {
     (s) => s.items.filter((it) => it.kind === 'finding' && it.status === 'pending').length,
   );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
+  useOcclusion(isTokenTestOpen, 'token-test-modal');
   const { currentError, clearError } = useErrorStore();
   const { fetchConfig } = useConfigStore();
   // Global assistant on/off (Settings → Assistant). Reactive off the shared

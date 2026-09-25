@@ -46,6 +46,7 @@ import {
   type PermissionMode,
 } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 /** First-load skeleton — two placeholder section blocks under the header. */
 function LoadingSkeleton(): React.JSX.Element {
@@ -189,6 +190,7 @@ export function WorkflowsView(): React.JSX.Element {
    * unmounts before a toast inside it could ever be seen.
    */
   const [savedFlowNotice, setSavedFlowNotice] = useState<string | null>(null);
+  useOcclusion(savedFlowNotice !== null, 'saved-flow-toast');
 
   /** "New workflow" template picker; carries the project the new flow lands in. */
   const [newWorkflowProjectId, setNewWorkflowProjectId] = useState<number | null>(null);

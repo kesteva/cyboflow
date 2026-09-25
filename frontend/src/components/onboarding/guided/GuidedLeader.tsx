@@ -17,6 +17,7 @@
  */
 import { useEffect, useId, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { useOcclusion } from '../../../hooks/useOcclusion';
 
 /** The shell elements guided callouts may point at. */
 export const GUIDED_TARGETS = {
@@ -84,6 +85,7 @@ function sameGeometry(x: Geometry | null, y: Geometry | null): boolean {
 export function GuidedLeader({ from, card, to, testId }: GuidedLeaderProps): React.JSX.Element | null {
   const [geo, setGeo] = useState<Geometry | null>(null);
   const markerId = useId();
+  useOcclusion(geo !== null, 'guided-leader');
 
   useEffect(() => {
     let frame = 0;

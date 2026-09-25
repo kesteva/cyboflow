@@ -67,6 +67,7 @@ import { useRunSummaryDismissStore, useRunSummaryDismissed } from '../../stores/
 import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
 import { QuickSessionDockTabs } from './QuickSessionDockTabs';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -227,6 +228,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // failed) run's centre pane to the session's resting QuickSessionCanvas.
   const [isEndOpen, setIsEndOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  useOcclusion(toastMessage !== null, 'session-action-toast');
 
   // Return the centre pane to the session's resting view (QuickSessionCanvas):
   // drop the active-run overlay while preserving its parent session selection

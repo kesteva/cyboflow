@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 /**
  * Portal host for the onboarding surfaces. Mirrors ui/Modal's document.body
@@ -9,6 +10,8 @@ import { createPortal } from 'react-dom';
  * target beneath.
  */
 export function OnboardingOverlay({ children }: { children: React.ReactNode }): React.JSX.Element {
+  // One lease for every onboarding card, spiral and coachmark mounted inside it.
+  useOcclusion(true, 'onboarding-overlay');
   return createPortal(
     <div className="pointer-events-none fixed inset-0 z-popover">{children}</div>,
     document.body,

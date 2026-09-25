@@ -20,6 +20,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../utils/cn';
 import { useMcpHealthStore } from '../stores/mcpHealthStore';
 import type { McpHealthStatus } from '../stores/mcpHealthStore';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 // ---------------------------------------------------------------------------
 // Dot color + label maps
@@ -86,6 +87,7 @@ export function McpHealthIndicator() {
     })),
   );
   const [open, setOpen] = useState(false);
+  useOcclusion(open, 'mcp-health-popover');
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Close the popover when the user clicks outside of it.

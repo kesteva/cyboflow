@@ -1,4 +1,5 @@
 import { Settings, X, Play, AlertCircle } from 'lucide-react';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface RunScriptConfigDialogProps {
   isOpen: boolean;
@@ -11,6 +12,7 @@ export function RunScriptConfigDialog({
   onClose,
   onOpenSettings
 }: RunScriptConfigDialogProps) {
+  useOcclusion(isOpen, 'run-script-config-dialog');
   if (!isOpen) return null;
 
   const handleOpenSettings = () => {

@@ -62,6 +62,7 @@ import {
 } from './agentRuntimeUi';
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 /**
  * The model this picker falls back to when the current selection belongs to
@@ -797,6 +798,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     key: selectedId === null ? null : workflowRunTypeKey(selectedId),
     label: selectedWorkflowTitle,
   });
+  useOcclusion(editorSavedNotice !== null || saveToast !== null, 'workflow-picker-toast');
 
   const handleSaveDefault = useCallback(() => {
     saveDefault({
