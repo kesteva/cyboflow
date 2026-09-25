@@ -340,6 +340,84 @@ describe('decideRunbookBootstrap', () => {
   });
 });
 
+// ── §A7: bootstrap under explore (runbook-optional-verification.md) ─────────
+describe('decideRunbookBootstrap — explore (§A7)', () => {
+  const on = { enabled: true, derivesEnvironment: true, modality: 'web' as const };
+  const explore = { ...on, explores: true };
+
+  it('declines AUTHORING from scratch as explore-mode — the request will run without a runbook', () => {
+    expect(decideRunbookBootstrap({ ...explore, status: status('no-record') })).toEqual({
+      proceed: false,
+      reason: 'explore-mode',
+    });
+  });
+
+  it('declines ADOPTING a committed file as explore-mode too — adopting is authoring a record', () => {
+    expect(decideRunbookBootstrap({ ...explore, status: status('file-only') })).toEqual({
+      proceed: false,
+      reason: 'explore-mode',
+    });
+  });
+
+  it('a registered DRAFT becomes prove-only — the proof still runs, drafting never does', () => {
+    expect(decideRunbookBootstrap({ ...explore, status: status('draft') })).toEqual({
+      proceed: true,
+      mode: 'derive',
+      adopt: false,
+      proveRegistered: true,
+      proveOnly: true,
+    });
+    expect(
+      decideRunbookBootstrap({ ...explore, status: { ...status('draft'), fileDeclaresModality: true } }),
+    ).toEqual({ proceed: true, mode: 'derive', adopt: true, proveRegistered: true, proveOnly: true });
+  });
+
+  it("keeps 'drifted' → reprove EXACTLY as it is today", () => {
+    expect(decideRunbookBootstrap({ ...explore, status: status('drifted') })).toEqual(
+      decideRunbookBootstrap({ ...on, status: status('drifted') }),
+    );
+    expect(decideRunbookBootstrap({ ...explore, status: status('drifted') })).toEqual({
+      proceed: true,
+      mode: 'reprove',
+    });
+  });
+
+  it.each<VerifyRunbookStatusReason>([
+    'content-drifted',
+    'proven',
+    'proven-file-absent-here',
+    'indeterminate',
+  ])('leaves the %s decline untouched', (reason) => {
+    expect(decideRunbookBootstrap({ ...explore, status: status(reason) })).toEqual(
+      decideRunbookBootstrap({ ...on, status: status(reason) }),
+    );
+  });
+
+  it('the toggle, the modality policy and the task shape still answer first', () => {
+    expect(decideRunbookBootstrap({ ...explore, enabled: false, status: status('no-record') })).toEqual({
+      proceed: false,
+      reason: 'disabled',
+    });
+    expect(decideRunbookBootstrap({ ...explore, modality: 'mobile', status: status('no-record') })).toEqual({
+      proceed: false,
+      reason: 'auto-derive-unsupported',
+    });
+    expect(
+      decideRunbookBootstrap({ ...explore, derivesEnvironment: false, status: status('no-record') }),
+    ).toEqual({ proceed: false, reason: 'no-environment' });
+  });
+
+  it.each<VerifyRunbookStatusReason>(['no-record', 'file-only', 'draft', 'drifted', 'content-drifted'])(
+    'with explores false/absent (kill switch on, or a modality that cannot explore) %s is decided exactly as before',
+    (reason) => {
+      const legacy = decideRunbookBootstrap({ ...on, status: status(reason) });
+      expect(decideRunbookBootstrap({ ...on, explores: false, status: status(reason) })).toEqual(legacy);
+      expect(legacy).not.toHaveProperty('proveOnly');
+      expect(legacy).not.toEqual({ proceed: false, reason: 'explore-mode' });
+    },
+  );
+});
+
 describe('bootstrapRemedyText', () => {
   it('tells a pre-merge branch to MERGE, and explicitly not to re-run setup', () => {
     // The remedy is the opposite of the default CTA, and following the default
@@ -362,7 +440,7 @@ describe('bootstrapRemedyText', () => {
     expect(text).toContain('Run verification setup');
   });
 
-  it.each<BootstrapDeclineReason>(['disabled', 'no-environment', 'already-proven'])(
+  it.each<BootstrapDeclineReason>(['disabled', 'no-environment', 'already-proven', 'explore-mode'])(
     'has nothing to say about %s',
     (reason) => {
       // These are not problems. Attaching prose to them would put advice on a

@@ -11,7 +11,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { runbookBootstrapPreflight } from '../runbookBootstrapPreflight';
-import type { RunbookBootstrapPreflightDeps } from '../runbookBootstrapPreflight';
+import type {
+  ExploreStaleProofFinding,
+  RunbookBootstrapPreflightDeps,
+} from '../runbookBootstrapPreflight';
+import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
+import type { VerificationModality } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail } from '../runbookStore';
 
 const SERVE_TASK = { serve: { cmd: 'pnpm dev --port ${PORT}' } };
@@ -169,5 +174,203 @@ describe('runbookBootstrapPreflight', () => {
     await runbookBootstrapPreflight(ARGS, d);
     expect(debug).toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
+  });
+});
+
+// ── §A7: bootstrap under explore (runbook-optional-verification.md) ──────────
+describe('runbookBootstrapPreflight — explore (§A7)', () => {
+  let runSeq = 0;
+  /** A fresh run id per case: the drift-finding dedupe is per (run, modality), process-wide. */
+  const freshArgs = (
+    over: Partial<Omit<typeof ARGS, 'modality'>> & { modality?: VerificationModality } = {},
+  ): Omit<typeof ARGS, 'modality'> & { modality: VerificationModality } => ({
+    ...ARGS,
+    runId: `explore-run-${++runSeq}`,
+    ...over,
+  });
+
+  const EXPLORE_ON = { requireProvenRunbook: false, record: () => null };
+  const KILL_SWITCH_ON = { requireProvenRunbook: true, record: () => null };
+  const statusOf = (detail: VerifyRunbookStatusDetail) => async (): Promise<VerifyRunbookStatusDetail> => detail;
+  const CDP_WITH_LEVER: VerifyRunbookV1 = {
+    version: 1,
+    modalities: {
+      'cdp-app': {
+        serve: { cmd: 'x', attach: 'cdp' },
+        attestation: { kind: 'cdp-token', expression: 'window.__BUILD__', expected: 'v1' },
+      },
+    },
+    levers: { dataDirEnv: 'CYBOFLOW_DIR' },
+  };
+
+  it('answers explore-mode instead of deriving for a web request that will explore', async () => {
+    await expect(runbookBootstrapPreflight(freshArgs(), deps({ explore: EXPLORE_ON }))).resolves.toEqual({
+      proceed: false,
+      reason: 'explore-mode',
+    });
+  });
+
+  it('turns the draft arm prove-only under explore', async () => {
+    const d = deps({ explore: EXPLORE_ON, status: statusOf({ status: 'unproven-draft', reason: 'draft' }) });
+    await expect(runbookBootstrapPreflight(freshArgs(), d)).resolves.toEqual({
+      proceed: true,
+      mode: 'derive',
+      adopt: false,
+      proveRegistered: true,
+      proveOnly: true,
+    });
+  });
+
+  it("keeps 'drifted' → reprove exactly", async () => {
+    const d = deps({ explore: EXPLORE_ON, status: statusOf({ status: 'unproven-draft', reason: 'drifted' }) });
+    await expect(runbookBootstrapPreflight(freshArgs(), d)).resolves.toEqual({ proceed: true, mode: 'reprove' });
+  });
+
+  it('a cdp-app request explores only when the record carries a bindable data-dir lever (isExploreEligible)', async () => {
+    const noLever = deps({ explore: EXPLORE_ON });
+    await expect(
+      runbookBootstrapPreflight(freshArgs({ modality: 'cdp-app' }), noLever),
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: false });
+    const withLever = deps({
+      explore: { requireProvenRunbook: false, record: () => ({ runbook: CDP_WITH_LEVER }) },
+    });
+    await expect(
+      runbookBootstrapPreflight(freshArgs({ modality: 'cdp-app' }), withLever),
+    ).resolves.toEqual({ proceed: false, reason: 'explore-mode' });
+  });
+
+  it('a record read that throws reads as "no record" (cdp-app does not explore), never as a throw', async () => {
+    const d = deps({
+      explore: {
+        requireProvenRunbook: false,
+        record: () => {
+          throw new Error('store gone');
+        },
+      },
+    });
+    await expect(
+      runbookBootstrapPreflight(freshArgs({ modality: 'cdp-app' }), d),
+    ).resolves.toMatchObject({ proceed: true, mode: 'derive' });
+  });
+
+  it('native-screen never explores: derived exactly as before, and its record is not read', async () => {
+    const record = vi.fn(() => ({ runbook: CDP_WITH_LEVER }));
+    const d = deps({ explore: { requireProvenRunbook: false, record } });
+    await expect(
+      runbookBootstrapPreflight(freshArgs({ modality: 'native-screen' }), d),
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: false });
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Partial<RunbookBootstrapPreflightDeps>]>([
+    ['the kill switch is engaged', { explore: KILL_SWITCH_ON }],
+    ['the explore deps are not wired', {}],
+  ])('behaves exactly as before when %s — derive arms, draft arm, no finding', async (_label, over) => {
+    const sink = vi.fn();
+    await expect(
+      runbookBootstrapPreflight(freshArgs(), deps({ ...over, reportStaleProofFinding: sink })),
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: false });
+    await expect(
+      runbookBootstrapPreflight(
+        freshArgs(),
+        deps({ ...over, status: statusOf({ status: 'unproven-draft', reason: 'draft' }) }),
+      ),
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: true });
+    // A content-drifted record under the switch: the same decline, and NO finding.
+    const drifted = deps({
+      ...over,
+      status: statusOf({ status: 'unproven-draft', reason: 'content-drifted' }),
+      reportStaleProofFinding: sink,
+    });
+    await expect(runbookBootstrapPreflight(freshArgs(), drifted)).resolves.toEqual({
+      proceed: false,
+      reason: 'stale-proof',
+    });
+    // And the feature-off / mobile paths still read nothing.
+    const off = deps({ ...over, enabled: false, reportStaleProofFinding: sink });
+    await runbookBootstrapPreflight(freshArgs({ modality: 'mobile' }), off);
+    expect(off.calls).toEqual([]);
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  describe('the drift finding', () => {
+    it('files bootstrapRemedyText(stale-proof) ONCE per run and modality for a content-drifted record', async () => {
+      const findings: ExploreStaleProofFinding[] = [];
+      const d = deps({
+        explore: EXPLORE_ON,
+        status: statusOf({ status: 'unproven-draft', reason: 'content-drifted' }),
+        reportStaleProofFinding: (f) => {
+          findings.push(f);
+        },
+      });
+      const args = freshArgs();
+      await expect(runbookBootstrapPreflight(args, d)).resolves.toEqual({ proceed: false, reason: 'stale-proof' });
+      await runbookBootstrapPreflight({ ...args, laneTaskRef: 'TASK-8' }, d);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatchObject({
+        projectId: 1,
+        runId: args.runId,
+        modality: 'web',
+        dedupeKey: `visual-verify:explore-stale-proof:${args.runId}:web`,
+      });
+      expect(findings[0].body).toContain('re-registered');
+      expect(findings[0].body).toContain('content-drifted');
+      // A second modality in the same run is its own finding.
+      await runbookBootstrapPreflight({ ...args, modality: 'mobile' }, d);
+      expect(findings).toHaveLength(2);
+    });
+
+    it('files for a MOBILE lane (which still declines the bootstrap) and with the toggle OFF — both still explore', async () => {
+      const sink = vi.fn();
+      const drifted = statusOf({ status: 'unproven-draft', reason: 'drifted' });
+      const mobile = deps({ explore: EXPLORE_ON, status: drifted, reportStaleProofFinding: sink });
+      await expect(
+        runbookBootstrapPreflight(freshArgs({ modality: 'mobile' }), mobile),
+      ).resolves.toEqual({ proceed: false, reason: 'auto-derive-unsupported' });
+      const off = deps({ enabled: false, explore: EXPLORE_ON, status: drifted, reportStaleProofFinding: sink });
+      await expect(runbookBootstrapPreflight(freshArgs(), off)).resolves.toEqual({
+        proceed: false,
+        reason: 'disabled',
+      });
+      expect(sink).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT file for a drifted record the bootstrap is about to REPROVE', async () => {
+      const sink = vi.fn();
+      const d = deps({
+        explore: EXPLORE_ON,
+        status: statusOf({ status: 'unproven-draft', reason: 'drifted' }),
+        reportStaleProofFinding: sink,
+      });
+      await expect(runbookBootstrapPreflight(freshArgs(), d)).resolves.toEqual({ proceed: true, mode: 'reprove' });
+      expect(sink).not.toHaveBeenCalled();
+    });
+
+    it('does not file for a request that cannot explore, or for a record that is not drifted', async () => {
+      const sink = vi.fn();
+      const native = deps({
+        explore: EXPLORE_ON,
+        status: statusOf({ status: 'unproven-draft', reason: 'content-drifted' }),
+        reportStaleProofFinding: sink,
+      });
+      await runbookBootstrapPreflight(freshArgs({ modality: 'native-screen' }), native);
+      const absent = deps({ explore: EXPLORE_ON, reportStaleProofFinding: sink });
+      await runbookBootstrapPreflight(freshArgs(), absent);
+      expect(sink).not.toHaveBeenCalled();
+    });
+
+    it('a sink that throws never escapes the preflight', async () => {
+      const d = deps({
+        explore: EXPLORE_ON,
+        status: statusOf({ status: 'unproven-draft', reason: 'content-drifted' }),
+        reportStaleProofFinding: () => {
+          throw new Error('queue down');
+        },
+      });
+      await expect(runbookBootstrapPreflight(freshArgs(), d)).resolves.toEqual({
+        proceed: false,
+        reason: 'stale-proof',
+      });
+    });
   });
 });

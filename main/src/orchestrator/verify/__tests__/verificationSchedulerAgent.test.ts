@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import type { ExploreStaleProofFinding } from '../runbookBootstrapPreflight';
 import {
   VerificationScheduler,
   ResourceLeasePool,
@@ -996,6 +997,46 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     // the harness's own number for a cold xcodebuild + first simulator boot.
     expect(req.timeoutMs).toBeGreaterThanOrEqual(900_000);
     expect(requestRow(db).status).toBe('passed');
+  });
+
+  it.each([
+    ['an INFERRED app block (§A2) tells the runner appInferred', true],
+    ['a composed (untagged) app block does not', false],
+  ])('%s', async (_label, inferred) => {
+    seedRun(db, 'run-mobile-inferred', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      capabilityStore: new VerifyCapabilityStore(dbAdapter(db)),
+      mobileToolchainProbe: async () => true,
+    });
+    const app = { platform: 'ios', bundleId: 'com.example.fixtureapp', scheme: 'FixtureApp' };
+    scheduler.enqueue({
+      runId: 'run-mobile-inferred',
+      projectId: 1,
+      type: 'mobile-flow',
+      input: { intent: 'x' },
+      chain: [],
+      task: { version: 1, summary: 'x', modality: 'mobile', app, behaviors: [] } as VerificationTaskV1,
+    });
+    // The wire parser drops the engine-only tag, so stamp it the way the
+    // surface probe's enqueue path persists it, before the drain leases the row.
+    if (inferred) {
+      db.prepare('UPDATE verification_requests SET task_json = ?').run(
+        JSON.stringify({ version: 1, summary: 'x', modality: 'mobile', app: { ...app, _inferred: true }, behaviors: [] }),
+      );
+    }
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const req = run.mock.calls[0][0] as VerificationAgentRequest;
+    expect(req.appInferred === true).toBe(inferred);
   });
 
   it('an ACTIVE suppression short-circuits the request before any lease', async () => {
@@ -2666,13 +2707,17 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
   function dispatcher(
     reason: 'draft' | 'file-only' | 'drifted' | 'content-drifted',
     enabled = true,
+    /** §A7 — false pins the runbook-optional kill switch on (the pre-explore contract). */
+    explore = false,
   ): {
-    seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean }>;
+    seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean; proveOnly?: boolean }>;
+    staleProof: ExploreStaleProofFinding[];
     call: () => Promise<unknown>;
     close: () => void;
   } {
     const own = new Database(':memory:');
-    const seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean }> = [];
+    const seen: Array<{ mode: string; adopt?: boolean; proveRegistered?: boolean; proveOnly?: boolean }> = [];
+    const staleProof: ExploreStaleProofFinding[] = [];
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(own),
       backends: {
@@ -2680,14 +2725,22 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
       },
       judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
-      config: { ...CONFIG, autoBootstrapRunbook: enabled },
+      config: { ...CONFIG, autoBootstrapRunbook: enabled, requireProvenRunbook: !explore },
       leasePool: new ResourceLeasePool(new Mutex()),
       onVerdict: () => {},
       runbookStatus: async () => ({ status: 'unproven-draft', reason }),
+      staleProofFinding: (f) => {
+        staleProof.push(f);
+      },
       runbookBootstrap: async (args) => {
         seen.push(
           args.mode === 'derive'
-            ? { mode: args.mode, adopt: args.adopt, proveRegistered: args.proveRegistered }
+            ? {
+                mode: args.mode,
+                adopt: args.adopt,
+                proveRegistered: args.proveRegistered,
+                ...(args.proveOnly ? { proveOnly: true } : {}),
+              }
             : { mode: args.mode },
         );
         return { kind: 'declined', reason: 'unavailable', detail: 'test' };
@@ -2695,6 +2748,7 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     });
     return {
       seen,
+      staleProof,
       call: () =>
         scheduler.maybeBootstrapRunbook({
           projectId: 1,
@@ -2753,6 +2807,38 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     const d = dispatcher('drifted', false);
     expect(await d.call()).toEqual({ kind: 'not-attempted', reason: 'disabled' });
     expect(d.seen).toEqual([]);
+    d.close();
+  });
+
+  // §A7 — the scheduler hands the preflight its LIVE kill switch and record read,
+  // so an exploring request stops authoring runbooks.
+  it("explore on: a committed-but-unproven runbook authors nothing — 'explore-mode'", async () => {
+    const d = dispatcher('file-only', true, true);
+    expect(await d.call()).toEqual({ kind: 'not-attempted', reason: 'explore-mode' });
+    expect(d.seen).toEqual([]);
+    d.close();
+  });
+
+  it('explore on: a registered draft is PROVE-ONLY — the proveOnly flag reaches the runner', async () => {
+    const d = dispatcher('draft', true, true);
+    await d.call();
+    expect(d.seen).toEqual([{ mode: 'derive', adopt: false, proveRegistered: true, proveOnly: true }]);
+    d.close();
+  });
+
+  it("explore on: a drifted proof still dispatches 'reprove' exactly", async () => {
+    const d = dispatcher('drifted', true, true);
+    await d.call();
+    expect(d.seen).toEqual([{ mode: 'reprove' }]);
+    d.close();
+  });
+
+  it('explore on: a content-drifted record files the stale-proof finding through the wired sink', async () => {
+    const d = dispatcher('content-drifted', true, true);
+    await d.call();
+    expect(d.seen).toEqual([]);
+    expect(d.staleProof).toHaveLength(1);
+    expect(d.staleProof[0]).toMatchObject({ runId: 'run-mode', modality: 'web' });
     d.close();
   });
 });

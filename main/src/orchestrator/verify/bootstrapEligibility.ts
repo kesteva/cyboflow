@@ -136,6 +136,16 @@ export type BootstrapDeclineReason =
    * the lane still declines to fill it.
    */
   | 'auto-derive-unsupported'
+  /**
+   * The request will run in EXPLORE mode (runbook-optional-verification.md §A7,
+   * RS-7, F9): no proven runbook is no longer a skip, so the bootstrap's reason
+   * to AUTHOR one — keep this lane from skipping — is gone, and a drafting agent
+   * plus up to two commits on the lane's branch would buy nothing the explore
+   * run is not already doing. Explore disables authoring ONLY: a drifted proof
+   * still re-proves, and a registered draft is still proven (prove-only). Not a
+   * problem a human has to fix, so it carries no remedy text.
+   */
+  | 'explore-mode'
   /** The store could not observe enough to answer. Never write on a guess. */
   | 'unobservable';
 
@@ -165,7 +175,19 @@ export type BootstrapDeclineReason =
  *    read an `adopt` flag would be reading a decision that was never made.
  */
 export type BootstrapDecision =
-  | { proceed: true; mode: 'derive'; adopt: boolean; proveRegistered: boolean }
+  | {
+      proceed: true;
+      mode: 'derive';
+      adopt: boolean;
+      proveRegistered: boolean;
+      /**
+       * §A7 — present (and `true`) only on the `'draft'` arm of a request that
+       * will EXPLORE: prove the registered record (`proveRegistered`) and stop
+       * there, whatever the proof says — no drafting agent, no file, no commit.
+       * Absent everywhere else, so every pre-explore decision is byte-identical.
+       */
+      proveOnly?: true;
+    }
   | { proceed: true; mode: 'reprove' }
   | { proceed: false; reason: BootstrapDeclineReason };
 
@@ -268,6 +290,13 @@ export function declineForRunbookStatus(
  * {@link VerifyRunbookStatusReason} later still defaults to not bootstrapping —
  * in BOTH senses, since the reprove arm is keyed on an exact reason rather than
  * on "not one of the others".
+ *
+ * EXPLORE DISABLES AUTHORING ONLY (runbook-optional-verification.md §A7). For a
+ * request that will explore (`explores`), the two derive arms that AUTHOR
+ * (`'no-record'` from scratch, `'file-only'` adopting) answer `'explore-mode'`;
+ * the `'draft'` arm becomes prove-only (`proveOnly`); the `'drifted'` reprove and
+ * every decline are untouched. A modality that cannot explore reaches here with
+ * `explores` false and is decided exactly as before.
  */
 export function decideRunbookBootstrap(args: {
   /** The resolved toggle AND kill switch, already combined by the caller. */
@@ -280,6 +309,15 @@ export function decideRunbookBootstrap(args: {
   modality: VerificationModality;
   derivesEnvironment: boolean;
   status: VerifyRunbookStatusDetail;
+  /**
+   * §A7 — will this request run in EXPLORE mode (kill switch off, and
+   * `isExploreEligible` for its modality and best registered record)? Computed
+   * by the caller, which holds the live config and the record; this module stays
+   * pure and cannot import the engine (the engine imports it). Absent/false ⇒
+   * today's decision exactly — the kill-switch arm (§A1 (5): "A7's derive arms
+   * are reachable again").
+   */
+  explores?: boolean;
 }): BootstrapDecision {
   if (!args.enabled) return { proceed: false, reason: 'disabled' };
   // Ahead of `no-environment` on purpose. A mobile lane's task carries `app`
@@ -303,8 +341,16 @@ export function decideRunbookBootstrap(args: {
       mode: 'derive',
       adopt: args.status.fileDeclaresModality === true,
       proveRegistered: true,
+      // §A7: a registered draft is still worth PROVING under explore — one
+      // verification, no agent, and a pass pins every later lane — but a failed
+      // proof must not fall through to drafting a rival.
+      ...(args.explores === true ? { proveOnly: true as const } : {}),
     };
   }
+  // §A7: authoring (from scratch, or adopting a committed file) is what explore
+  // makes unnecessary. After the reprove and draft arms on purpose: those two
+  // write no runbook and stay reachable under explore.
+  if (args.explores === true) return { proceed: false, reason: 'explore-mode' };
   return { proceed: true, mode: 'derive', adopt: args.status.reason === 'file-only', proveRegistered: false };
 }
 
@@ -351,6 +397,7 @@ export function bootstrapRemedyText(reason: BootstrapDeclineReason): string | nu
     case 'disabled':
     case 'no-environment':
     case 'already-proven':
+    case 'explore-mode':
       return null;
   }
 }

@@ -314,6 +314,14 @@ export interface DefaultProgrammaticRunnerDeps {
    * resolves 'available' and behaves exactly as it did before the seam.
    */
   verifyRunbookStatus?: VerificationPostureDeps['runbookStatus'];
+  /**
+   * The LIVE visual-verify config (`configManager.getVisualVerifyConfig`) — the
+   * same read the agent engine's gate 3 makes for the runbook-optional kill
+   * switch, so the RUN-LEVEL posture and the per-request execution mode agree
+   * (runbook-optional-verification.md §A6). Absent ⇒ the posture consults only
+   * the env override, whose default is explore-on — the engine's own default.
+   */
+  verifyLiveConfig?: VerificationPostureDeps['liveConfig'];
   logger?: LoggerLike;
 }
 
@@ -985,6 +993,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // callback (where TS cannot keep the narrowing).
     const postureDb = this.deps.db;
     const verifyRunbookStatus = this.deps.verifyRunbookStatus;
+    const verifyLiveConfig = this.deps.verifyLiveConfig;
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -1082,6 +1091,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
                 {
                   readRunStamp: (runId: string) => readVerificationRunStamp(postureDb, runId),
                   runbookStatus: verifyRunbookStatus,
+                  ...(verifyLiveConfig !== undefined ? { liveConfig: verifyLiveConfig } : {}),
                 },
                 ctx.runId,
               ),

@@ -34,12 +34,53 @@
 import type { VerificationModality, VerificationTaskV1 } from '../../../../shared/types/visualVerification';
 import type { LoggerLike } from '../types';
 import type { VerifyRunbookStatusDetail } from './runbookStore';
+import type { ExploreRunbookRecord } from './verificationAgentRunner';
+import { isExploreEligible } from './agentEngine';
 import {
+  bootstrapRemedyText,
   bootstrapSupportsModality,
   decideRunbookBootstrap,
   taskDerivesEnvironment,
   type BootstrapDecision,
 } from './bootstrapEligibility';
+
+/**
+ * The runbook-optional half of the preflight's inputs
+ * (runbook-optional-verification.md §A7): what the caller must know for the
+ * preflight to tell a request that will EXPLORE from one that will skip.
+ */
+export interface RunbookBootstrapExploreDeps {
+  /**
+   * The runbook-optional KILL SWITCH (`requireProvenRunbookEngaged`), read by
+   * the caller from the LIVE config — the same read the engine's gate 3 makes,
+   * so the preflight and the gate cannot disagree about whether a request
+   * explores. `true` ⇒ nothing explores and every decision is today's.
+   */
+  requireProvenRunbook: boolean;
+  /**
+   * The best registered record for (project, modality), any status or origin —
+   * the SAME read the engine's `exploreRecordFor` makes, fed to the SAME
+   * `isExploreEligible`. Only its levers matter here (cdp-app explores only with
+   * a bindable `dataDirEnv`). A throw reads as "no record".
+   */
+  record: (projectId: number, modality: VerificationModality) => Pick<ExploreRunbookRecord, 'runbook'> | null;
+}
+
+/**
+ * The §A7 drift finding, as the preflight hands it to its sink: a NON-BLOCKING
+ * review-queue item, never a lane verdict. `dedupeKey` is stable per (run,
+ * modality) so a durable sink (`createIfNoPending` on `source`) can dedupe
+ * across a restart as well; the preflight also dedupes in memory.
+ */
+export interface ExploreStaleProofFinding {
+  projectId: number;
+  runId: string;
+  laneTaskRef: string;
+  modality: VerificationModality;
+  title: string;
+  body: string;
+  dedupeKey: string;
+}
 
 /**
  * What the preflight needs from the world. Injected rather than imported for the
@@ -61,7 +102,53 @@ export interface RunbookBootstrapPreflightDeps {
     modality: VerificationModality,
     probePath?: string,
   ) => Promise<VerifyRunbookStatusDetail>;
+  /**
+   * §A7 — absent ⇒ the preflight never considers explore and decides exactly as
+   * it did before the runbook-optional contract (the kill-switch behaviour).
+   */
+  explore?: RunbookBootstrapExploreDeps;
+  /**
+   * §A7 drift finding sink. Called at most once per (run, modality) per process,
+   * when a request will explore BECAUSE its record reads `drifted` /
+   * `content-drifted` (and no reprove is about to fix it). Absent ⇒ no finding,
+   * and no extra status read. Must not block; a throw is swallowed.
+   */
+  reportStaleProofFinding?: (finding: ExploreStaleProofFinding) => void | Promise<void>;
   logger?: LoggerLike;
+}
+
+/**
+ * (run, modality) pairs this process already filed the §A7 drift finding for.
+ * In memory on purpose — it is a noise guard (one card per run, not per lane;
+ * the MCP plane asks the preflight twice per deferred request), and the sink's
+ * `dedupeKey` is the durable half. Bounded so a long-lived process cannot grow
+ * it without limit: clearing costs, at worst, one repeated card.
+ */
+const filedStaleProofFindings = new Set<string>();
+const FILED_STALE_PROOF_CAP = 2048;
+
+/**
+ * Will this request run in EXPLORE mode? The engine's gate-3 answer for an
+ * UNPINNED row (the preflight only matters for a request with no proven record
+ * to pin): the kill switch off, and {@link isExploreEligible} over the same
+ * record the engine would read — `null` for native-screen, which is
+ * pinned-only, exactly as the engine passes it.
+ */
+function requestWillExplore(
+  explore: RunbookBootstrapExploreDeps | undefined,
+  projectId: number,
+  modality: VerificationModality,
+): boolean {
+  if (explore === undefined || explore.requireProvenRunbook) return false;
+  let record: Pick<ExploreRunbookRecord, 'runbook'> | null = null;
+  if (modality !== 'native-screen') {
+    try {
+      record = explore.record(projectId, modality);
+    } catch {
+      record = null;
+    }
+  }
+  return isExploreEligible(modality, record);
 }
 
 /**
@@ -92,6 +179,11 @@ export async function runbookBootstrapPreflight(
   deps: RunbookBootstrapPreflightDeps,
 ): Promise<BootstrapDecision> {
   const derivesEnvironment = taskDerivesEnvironment(args.task);
+  const explores = requestWillExplore(deps.explore, args.projectId, args.modality);
+  // The §A7 drift finding needs the record's status for EVERY exploring request
+  // — a mobile lane and a disabled toggle included, since both still explore —
+  // so with a sink wired the read below widens to that case too.
+  const wantsDriftStatus = explores && deps.reportStaleProofFinding !== undefined;
 
   // Ask about the runbook ONLY when the answer could matter. A disabled feature,
   // a modality the lane never authors for (`mobile` — the verify-setup flow owns
@@ -101,7 +193,7 @@ export async function runbookBootstrapPreflight(
   // `decideRunbookBootstrap` declines by, not a second copy of the policy.
   let status: VerifyRunbookStatusDetail = { status: 'absent', reason: 'indeterminate' };
   let consulted = false;
-  if (deps.enabled && bootstrapSupportsModality(args.modality) && derivesEnvironment) {
+  if ((deps.enabled && bootstrapSupportsModality(args.modality) && derivesEnvironment) || wantsDriftStatus) {
     consulted = true;
     try {
       status = await deps.status(args.projectId, args.modality, args.probePath);
@@ -122,14 +214,20 @@ export async function runbookBootstrapPreflight(
     modality: args.modality,
     derivesEnvironment,
     status,
+    explores,
   });
+
+  if (wantsDriftStatus && consulted) await maybeFileStaleProofFinding(args, deps, status, decision);
 
   // Logged at DEBUG for the two non-events (feature off, nothing to derive) and
   // INFO for everything else: a project where the bootstrap would fire, or
   // declines for a reason a human may need to know, is worth finding in a log
   // without turning verbose logging on for every degenerate task in every run.
+  // `explore-mode` is quiet too: it is the NORMAL answer for every lane on a
+  // project with no runbook once explore is on, not a situation to go find.
   const quiet =
-    !decision.proceed && (decision.reason === 'disabled' || decision.reason === 'no-environment');
+    !decision.proceed &&
+    (decision.reason === 'disabled' || decision.reason === 'no-environment' || decision.reason === 'explore-mode');
   // The three proceed shapes read very differently to whoever is looking at this
   // log to decide whether the feature did the right thing — deriving a rival
   // runbook and re-proving an existing one are opposite actions (F4 / Codex #2),
@@ -139,7 +237,9 @@ export async function runbookBootstrapPreflight(
     ? `[runbookBootstrapPreflight] would bootstrap (${
         decision.mode === 'reprove'
           ? 're-prove the existing runbook'
-          : decision.adopt
+          : decision.proveOnly === true
+            ? 'prove the registered draft only — the request explores'
+            : decision.adopt
             ? 'adopt committed runbook'
             : 'derive a new runbook'
       })`
@@ -155,9 +255,63 @@ export async function runbookBootstrapPreflight(
     // logging it for a decision that never asked would send whoever reads this
     // line hunting a store fault that does not exist.
     runbookReason: consulted ? status.reason : null,
+    explores,
   };
   if (quiet) deps.logger?.debug(line, detail);
   else deps.logger?.info(line, detail);
 
   return decision;
+}
+
+/**
+ * §A7 drift finding: a request that will EXPLORE because its proven record
+ * reads `drifted` / `content-drifted` files `bootstrapRemedyText('stale-proof')`
+ * as a non-blocking finding, once per (run, modality).
+ *
+ * NOT for a `'drifted'` record the bootstrap is about to REPROVE: if the
+ * reprove passes, the request pins rather than explores and the finding would
+ * be false; if it fails, the reprove's own artifact already says so. A
+ * `'content-drifted'` record never reproves (a proof cannot re-stamp the
+ * content hash), so it always files.
+ *
+ * NEVER THROWS — a sink failure is logged and dropped; the finding is advisory.
+ */
+async function maybeFileStaleProofFinding(
+  args: { projectId: number; runId: string; laneTaskRef: string; modality: VerificationModality },
+  deps: RunbookBootstrapPreflightDeps,
+  status: VerifyRunbookStatusDetail,
+  decision: BootstrapDecision,
+): Promise<void> {
+  const sink = deps.reportStaleProofFinding;
+  if (sink === undefined) return;
+  if (status.reason !== 'drifted' && status.reason !== 'content-drifted') return;
+  if (decision.proceed && decision.mode === 'reprove') return;
+  const remedy = bootstrapRemedyText('stale-proof');
+  if (remedy === null) return;
+  const dedupeKey = `visual-verify:explore-stale-proof:${args.runId}:${args.modality}`;
+  if (filedStaleProofFindings.has(dedupeKey)) return;
+  if (filedStaleProofFindings.size >= FILED_STALE_PROOF_CAP) filedStaleProofFindings.clear();
+  filedStaleProofFindings.add(dedupeKey);
+  try {
+    await sink({
+      projectId: args.projectId,
+      runId: args.runId,
+      laneTaskRef: args.laneTaskRef,
+      modality: args.modality,
+      title: `Verification runbook (${args.modality}) needs re-proving — lanes explore meanwhile`,
+      body:
+        `Verification for this run's \`${args.modality}\` lanes is running in EXPLORE mode (no pinned ` +
+        'recipe) because the proven runbook no longer matches this tree ' +
+        `(\`${status.reason}\`). Explore verdicts stand on their own, but they are slower and cap ` +
+        'more often at low confidence than a pinned run.\n\n' +
+        remedy,
+      dedupeKey,
+    });
+  } catch (err) {
+    deps.logger?.warn('[runbookBootstrapPreflight] stale-proof finding could not be filed (advisory)', {
+      runId: args.runId,
+      modality: args.modality,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

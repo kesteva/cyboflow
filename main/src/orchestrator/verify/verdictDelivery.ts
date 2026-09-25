@@ -53,6 +53,7 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import type { CapabilityBreakerFindingFn, OnVerdict } from './verificationScheduler';
 import { VERIFY_NO_RUNBOOK_REASON, runbookDeclineForSkipReason } from './verificationScheduler';
 import { bootstrapRemedyText } from './bootstrapEligibility';
+import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
 import type {
   CaptureOrigin,
   VerdictV1,
@@ -981,6 +982,47 @@ export function createCapabilityBreakerFinding(deps: {
       });
     } catch (err) {
       logger?.error('[verdictDelivery] capability-breaker finding failed (fail-soft)', {
+        projectId,
+        runId,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+}
+
+/**
+ * §A7 drift finding — the concrete sink behind
+ * `VerificationSchedulerDeps.staleProofFinding`. ONE non-blocking human finding
+ * per (run, modality): the preflight dedupes in memory, and `createIfNoPending`
+ * on the finding's stable `dedupeKey` keeps a restart from filing it twice.
+ * Fail-soft like {@link createCapabilityBreakerFinding}.
+ */
+export function createExploreStaleProofFinding(deps: {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+}): (finding: ExploreStaleProofFinding) => Promise<void> {
+  const { db, logger } = deps;
+  return async ({ projectId, runId, modality, title, body, dedupeKey }) => {
+    try {
+      const taskId = resolveRunTaskId(db, runId, logger);
+      await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title,
+        body,
+        blocking: false,
+        audience: 'human',
+        severity: 'warning',
+        source: dedupeKey,
+        entityType: taskId ? 'task' : null,
+        entityId: taskId ?? null,
+        runId,
+        payload: { kind: 'finding', category: 'visual-regression' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      logger?.error('[verdictDelivery] explore stale-proof finding failed (fail-soft)', {
         projectId,
         runId,
         modality,

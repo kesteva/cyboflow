@@ -46,6 +46,7 @@ import {
   VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
   isVerificationModality,
+  requireProvenRunbookEngaged,
   resolveTaskModality,
   runbookBootstrapKillSwitchEngaged,
 } from '../../../../shared/types/visualVerification';
@@ -200,6 +201,7 @@ export class VerificationScheduler {
     probePath?: string,
   ) => Promise<VerifyRunbookStatusDetail>;
   private readonly runbookStore?: VerifyRunbookStore;
+  private readonly staleProofFinding?: VerificationSchedulerDeps['staleProofFinding'];
   private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
@@ -286,6 +288,7 @@ export class VerificationScheduler {
       // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
       (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
+    this.staleProofFinding = deps.staleProofFinding;
     this.runbookBootstrap = deps.runbookBootstrap;
     this.capture = new CapturePipeline({
       judge: deps.judge,
@@ -1577,6 +1580,12 @@ export class VerificationScheduler {
           (this.liveConfig?.() ?? this.config).autoBootstrapRunbook === true &&
           !runbookBootstrapKillSwitchEngaged(),
         status: (projectId, modality, path) => this.runbookStatus(projectId, modality, path),
+        // §A7 — the SAME kill-switch read and record the engine's gate 3 uses.
+        explore: {
+          requireProvenRunbook: requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config),
+          record: (projectId, modality) => this.runbookStore?.getCurrent(projectId, modality) ?? null,
+        },
+        ...(this.staleProofFinding ? { reportStaleProofFinding: this.staleProofFinding } : {}),
         ...(this.logger ? { logger: this.logger } : {}),
       },
     );
@@ -1656,7 +1665,7 @@ export class VerificationScheduler {
       // Codex #2 — see RunbookBootstrapArgs).
       return await this.runbookBootstrap(
         decision.mode === 'derive'
-          ? { ...common, mode: 'derive', adopt: decision.adopt, proveRegistered: decision.proveRegistered }
+          ? { ...common, mode: 'derive', adopt: decision.adopt, proveRegistered: decision.proveRegistered, ...(decision.proveOnly ? { proveOnly: true } : {}) }
           : { ...common, mode: 'reprove' },
       );
     } catch (err) {

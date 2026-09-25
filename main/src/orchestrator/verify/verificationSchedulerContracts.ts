@@ -33,6 +33,7 @@ import type { AgentPreflightResult } from './preflight';
 import type { VerifyCapabilityStore } from './capabilityStore';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
+import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
 import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import { ResourceLeasePool } from './verificationLeases';
 
@@ -644,6 +645,14 @@ export interface VerificationSchedulerDeps {
    * it just does so silently.
    */
   capabilityFinding?: CapabilityBreakerFindingFn;
+  /**
+   * §A7 drift finding — files the non-blocking "runbook needs re-proving, lanes
+   * explore meanwhile" notice the bootstrap preflight raises. Injected for the
+   * same standalone-typecheck reason as {@link capabilityFinding}; the concrete
+   * implementation is verdictDelivery's `createExploreStaleProofFinding`.
+   * Absent ⇒ no finding.
+   */
+  staleProofFinding?: (finding: ExploreStaleProofFinding) => void | Promise<void>;
   /**
    * §4 roster — whether this host can capture the screen at all, the ONE gate
    * that decides whether a `native-screen` request is deployable. The intended
