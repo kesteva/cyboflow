@@ -466,6 +466,39 @@ describe('CodexAppServerTurnSession', () => {
     ]);
   });
 
+  it('parses 0.156.1 fileId-backed image userMessage content instead of degrading to raw', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+
+    session.handleNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: 1,
+        item: {
+          type: 'userMessage',
+          id: 'user-message',
+          clientId: 'nudge-1',
+          content: [
+            { type: 'image', fileId: 'file-abc', detail: 'high' },
+            { type: 'image', url: 'https://example.com/a.png' },
+          ],
+        },
+      },
+    });
+
+    const event = events[0];
+    if (event.type !== 'item.completed' || event.item.type !== 'userMessage') {
+      throw new Error(`expected a parsed userMessage item, got ${JSON.stringify(event)}`);
+    }
+    expect(event.item.content).toEqual([
+      { type: 'image', fileId: 'file-abc', detail: 'high' },
+      { type: 'image', url: 'https://example.com/a.png' },
+    ]);
+  });
+
   it('maps retry errors and terminal completion, interruption, and failure', async () => {
     const client = new FakeTurnSessionClient();
     const events: TurnSessionEvent[] = [];
