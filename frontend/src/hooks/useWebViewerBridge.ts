@@ -21,7 +21,7 @@
 import { useEffect } from 'react';
 import { trpc } from '../trpc/client';
 import { useCenterPaneStore } from '../stores/centerPaneStore';
-import { useErrorStore } from '../stores/errorStore';
+import { openUserWebTab } from '../utils/openWebLink';
 import { publishReservedChord } from './useReservedChord';
 
 export function useWebViewerBridge(sessionKey: string | null): void {
@@ -66,28 +66,8 @@ export function useWebViewerBridge(sessionKey: string | null): void {
       { sessionId: sessionKey },
       {
         onData: (ev) => {
-          // The store mints the id and returns it; main then opens that exact
-          // tab. A popup does NOT steal focus — the user did not ask for it.
-          const tabId = useCenterPaneStore
-            .getState()
-            .openWebTab(sessionKey, { url: ev.url, focus: false });
-          void trpc.cyboflow.webViewer.open
-            .mutate({ sessionId: sessionKey, tabId, url: ev.url, openedBy: 'user' })
-            .then((res) => {
-              if (res.ok) return;
-              // A rejected open (the tab cap, the kill switch) created no view:
-              // drop the strip entry rather than leave a tab with nothing behind it.
-              useCenterPaneStore.getState().closeTab(sessionKey, tabId);
-              if (res.error === 'tab_limit_reached') {
-                useErrorStore.getState().showError({
-                  title: 'Too many web tabs',
-                  error: 'Close a web tab in this session to open another.',
-                });
-              }
-            })
-            .catch((err: unknown) =>
-              console.warn('[useWebViewerBridge] popup open failed:', err),
-            );
+          // A popup does NOT steal focus — the user did not ask for it.
+          openUserWebTab(sessionKey, ev.url, { focus: false });
         },
         onError: (err: unknown) =>
           console.warn('[useWebViewerBridge] onPopupRequested error:', err),

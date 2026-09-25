@@ -30,6 +30,7 @@ import {
 import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
+import { WebLinkProvider } from '../../contexts/WebLinkContext';
 import { formatContextUsage } from './unified/runContextUsage';
 import { LiveTail } from '../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
@@ -297,55 +298,58 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Full conversation view — the shared chat surface.
   // -------------------------------------------------------------------------
   return (
-    <UnifiedChatView
-      name={isInteractive ? 'Terminal' : agentName}
-      transport={isInteractive ? 'interactive' : 'sdk'}
-      mode="flow"
-      running={running}
-      runStatus={run?.status ?? null}
-      messages={messages}
-      loadError={loadError}
-      isWaitingForResponse={running}
-      liveTail={liveTail}
-      transcriptEndSlot={unanchoredQuestionSlot}
-      folderLabel={folderLabel}
-      folderTitle={worktreePath}
-      branchName={branchName}
-      contextUsage={contextUsage}
-      railId={runId}
-      renderToolCallExtra={renderToolCallExtra}
-      pendingSends={isInteractive ? undefined : pendingSends}
-      onReopenPending={(entry) => {
-        // A server-buffered 'queued' entry must also be dropped from the run's
-        // queue so the reopened text is not ALSO delivered at the rest boundary
-        // (behavior 3 — no double delivery). Matched by text on the server.
-        if (entry.status === 'queued') {
-          void trpc.cyboflow.runs.dequeueInput.mutate({ runId, text: entry.text });
-        }
-        requestReopenPending(runId, entry.id);
-      }}
-      interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
-      bottomSlot={
-        <>
-          <PendingApprovalsForRun runId={runId} />
+    // Chat links open as web tabs in THIS run's center pane — same key it uses.
+    <WebLinkProvider sessionKey={run?.session_id ?? runId}>
+      <UnifiedChatView
+        name={isInteractive ? 'Terminal' : agentName}
+        transport={isInteractive ? 'interactive' : 'sdk'}
+        mode="flow"
+        running={running}
+        runStatus={run?.status ?? null}
+        messages={messages}
+        loadError={loadError}
+        isWaitingForResponse={running}
+        liveTail={liveTail}
+        transcriptEndSlot={unanchoredQuestionSlot}
+        folderLabel={folderLabel}
+        folderTitle={worktreePath}
+        branchName={branchName}
+        contextUsage={contextUsage}
+        railId={runId}
+        renderToolCallExtra={renderToolCallExtra}
+        pendingSends={isInteractive ? undefined : pendingSends}
+        onReopenPending={(entry) => {
+          // A server-buffered 'queued' entry must also be dropped from the run's
+          // queue so the reopened text is not ALSO delivered at the rest boundary
+          // (behavior 3 — no double delivery). Matched by text on the server.
+          if (entry.status === 'queued') {
+            void trpc.cyboflow.runs.dequeueInput.mutate({ runId, text: entry.text });
+          }
+          requestReopenPending(runId, entry.id);
+        }}
+        interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
+        bottomSlot={
+          <>
+            <PendingApprovalsForRun runId={runId} />
 
-          {/* Permission-change confirmation — copy supplied by ChatInput's pill
-              (SDK runs apply the change on the next message). */}
-          {permissionToast !== null && (
-            <div className="pointer-events-none relative">
-              <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
-                <SessionActionToast
-                  message={permissionToast}
-                  isVisible={permissionToast !== null}
-                  onDismiss={() => setPermissionToast(null)}
-                />
+            {/* Permission-change confirmation — copy supplied by ChatInput's pill
+                (SDK runs apply the change on the next message). */}
+            {permissionToast !== null && (
+              <div className="pointer-events-none relative">
+                <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
+                  <SessionActionToast
+                    message={permissionToast}
+                    isVisible={permissionToast !== null}
+                    onDismiss={() => setPermissionToast(null)}
+                  />
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          <ChatInput runId={runId} onPermissionApplied={setPermissionToast} />
-        </>
-      }
-    />
+            <ChatInput runId={runId} onPermissionApplied={setPermissionToast} />
+          </>
+        }
+      />
+    </WebLinkProvider>
   );
 }
