@@ -16,12 +16,16 @@
  * See docs/proposals/native-web-viewer.md §3.6.
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import { ArrowLeft, ArrowRight, ExternalLink, RotateCw, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ExternalLink, RotateCw, Shield, ShieldAlert } from 'lucide-react';
 import type { TabItem } from '../../../../shared/types/centerPane';
 import type { WebTabSnapshot } from '../../../../shared/types/webViewer';
 import { useWebViewBounds } from '../../hooks/useWebViewBounds';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../../trpc/client';
+import { selectTabConsents, useWebConsentStore } from '../../stores/webConsentStore';
+import { WebConsentSheet } from './WebConsentSheet';
+import { WebAccessModal } from './WebAccessModal';
 
 export interface WebViewTabProps {
   tab: TabItem;
@@ -35,6 +39,9 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<WebTabSnapshot | null>(null);
   const updateWebTab = useCenterPaneStore((s) => s.updateWebTab);
+  // useShallow: an unrelated tab's prompt does not re-render this one.
+  const consents = useWebConsentStore(useShallow(selectTabConsents(tab.id)));
+  const [accessOpen, setAccessOpen] = useState(false);
 
   useWebViewBounds({ tabId: tab.id, anchorRef, active });
 
@@ -140,6 +147,16 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
         )}
         <button
           type="button"
+          aria-label="Agent access"
+          title="Agent access"
+          data-testid="web-view-tab-access"
+          onClick={() => setAccessOpen(true)}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover"
+        >
+          <Shield className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
           aria-label="Open in your browser"
           data-testid="web-view-tab-open-external"
           onClick={() => void window.electronAPI?.openExternal(url)}
@@ -160,6 +177,12 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           has no page painting over it. Both auth and TLS fail closed and are a
           human's to resolve — never something a drive grant can unlock.
         */}
+        {/*
+          A pending agent request covers the tab. The sheet takes an occlusion
+          lease, so the native page is hidden while the human decides — it would
+          otherwise paint over the sheet.
+        */}
+        {consents.length > 0 && <WebConsentSheet request={consents[0]} />}
         {blocked && (
           <div
             data-testid="web-view-tab-blocked"
@@ -200,6 +223,13 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           </div>
         )}
       </div>
+      <WebAccessModal
+        isOpen={accessOpen}
+        onClose={() => setAccessOpen(false)}
+        sessionKey={sessionKey}
+        tabId={tab.id}
+      />
     </div>
   );
 }
+

@@ -101,6 +101,8 @@ vi.mock('../trpc/client', () => ({
       // a pane needs these stubbed. Inert by default: never emits, so no test
       // sees a chord, a popup or a teardown it did not ask for.
       webViewer: {
+        pendingConsents: { query: vi.fn().mockResolvedValue([]) },
+        onConsent: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         restore: { mutate: vi.fn().mockResolvedValue([]) },
         onReservedChord: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         onPopupRequested: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },

@@ -36,7 +36,11 @@ import type {
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
-import type { WebViewerEventsLike, WebViewerLike } from './contracts/webViewerOps';
+import type {
+  WebViewerConsentLike,
+  WebViewerEventsLike,
+  WebViewerLike,
+} from './contracts/webViewerOps';
 import type { ClaudeAuthOpsLike } from './contracts/claudeAuthOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
@@ -570,6 +574,11 @@ export interface ContextDeps {
    * with the viewer off has no open streams.
    */
   webViewerEvents?: WebViewerEventsLike;
+  /**
+   * The human side of web-viewer consent (prompts, grants, activity). Absent ⇒
+   * the consent procedures fail PRECONDITION_FAILED like the viewer's own.
+   */
+  webViewerConsent?: WebViewerConsentLike;
 
   /**
    * The in-app Claude sign-in (the `claudeAuth` router's business logic —
@@ -733,6 +742,7 @@ export function createContext(deps: ContextDeps = {}): {
   gitPrerequisiteOps?: GitPrerequisiteOpsLike;
   webViewer?: WebViewerLike;
   webViewerEvents?: WebViewerEventsLike;
+  webViewerConsent?: WebViewerConsentLike;
   claudeAuthOps?: ClaudeAuthOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
@@ -764,6 +774,7 @@ export function createContext(deps: ContextDeps = {}): {
     gitPrerequisiteOps,
     webViewer,
     webViewerEvents,
+    webViewerConsent,
     claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,
@@ -802,6 +813,7 @@ export function createContext(deps: ContextDeps = {}): {
     gitPrerequisiteOps,
     webViewer,
     webViewerEvents,
+    webViewerConsent,
     claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,

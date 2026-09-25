@@ -22,6 +22,7 @@ import { useEffect } from 'react';
 import { trpc } from '../trpc/client';
 import { useCenterPaneStore } from '../stores/centerPaneStore';
 import { openUserWebTab } from '../utils/openWebLink';
+import { useWebConsentStore } from '../stores/webConsentStore';
 import { publishReservedChord } from './useReservedChord';
 
 export function useWebViewerBridge(sessionKey: string | null): void {
@@ -52,6 +53,25 @@ export function useWebViewerBridge(sessionKey: string | null): void {
         }
       })
       .catch((err: unknown) => console.warn('[useWebViewerBridge] restore failed:', err));
+
+    // Agent access prompts: seed what is already pending (a remount), then follow.
+    void trpc.cyboflow.webViewer.pendingConsents
+      .query({ sessionId: sessionKey })
+      .then((pending) => {
+        if (!cancelled) useWebConsentStore.getState().seed(sessionKey, pending);
+      })
+      .catch((err: unknown) => console.warn('[useWebViewerBridge] pendingConsents failed:', err));
+    const consents = trpc.cyboflow.webViewer.onConsent.subscribe(
+      { sessionId: sessionKey },
+      {
+        onData: (ev) => {
+          const store = useWebConsentStore.getState();
+          if (ev.kind === 'requested') store.add(ev.request);
+          else store.resolve(ev.requestId);
+        },
+        onError: (err: unknown) => console.warn('[useWebViewerBridge] onConsent error:', err),
+      },
+    );
 
     const chords = trpc.cyboflow.webViewer.onReservedChord.subscribe(
       { sessionId: sessionKey },
@@ -90,6 +110,7 @@ export function useWebViewerBridge(sessionKey: string | null): void {
 
     return () => {
       cancelled = true;
+      consents.unsubscribe();
       chords.unsubscribe();
       popups.unsubscribe();
       closed.unsubscribe();

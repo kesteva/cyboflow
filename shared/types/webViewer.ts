@@ -183,3 +183,54 @@ export interface WebViewerPopupEvent {
   openerTabId: string;
   url: string;
 }
+
+// ---------------------------------------------------------------------------
+// Consent (docs/proposals/native-web-viewer.md §7)
+// ---------------------------------------------------------------------------
+
+/** What an agent asks to do with a tab. `drive` implies `observe`. */
+export type WebConsentCapability = 'observe' | 'drive';
+
+/**
+ * A pending consent prompt, rendered as a sheet ON THE TAB it concerns. Carries
+ * the ORIGIN only — the full URL is exactly what the agent is not yet allowed
+ * to see, and the human decides on "this site", not on a path.
+ */
+export interface WebConsentRequest {
+  requestId: string;
+  sessionId: string;
+  tabId: string;
+  runId: string;
+  capability: WebConsentCapability;
+  origin: string | null;
+  /** The agent's stated reason, clipped. Shown as the agent's claim, not fact. */
+  reason: string | null;
+  requestedAt: number;
+}
+
+/** Push payload for `onConsent`: a prompt opened, or one was resolved elsewhere. */
+export type WebConsentEvent =
+  | { kind: 'requested'; sessionId: string; request: WebConsentRequest }
+  | { kind: 'resolved'; sessionId: string; requestId: string; tabId: string };
+
+/** An active grant, as listed in the tab's Agent access view. */
+export interface WebConsentGrant {
+  grantId: string;
+  sessionId: string;
+  tabId: string;
+  runId: string;
+  capability: WebConsentCapability;
+  origin: string | null;
+  grantedAt: number;
+}
+
+/** One audit row, as shown in the tab's activity list. Origin only, never a URL. */
+export interface WebActivityEntry {
+  id: string;
+  tabId: string | null;
+  runId: string | null;
+  kind: string;
+  origin: string | null;
+  detail: string | null;
+  createdAt: string;
+}

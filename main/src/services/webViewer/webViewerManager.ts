@@ -39,6 +39,7 @@ import type {
 } from '../../orchestrator/trpc/contracts/webViewerOps';
 import {
   popupDisposition,
+  redactToOrigin,
   resolveViewableUrl,
   shouldBlockViewerNavigation,
 } from './webViewerGuard';
@@ -53,6 +54,32 @@ export const WEB_VIEWER_CHORD = 'web-viewer:chord';
 export const WEB_VIEWER_HUMAN_TOUCH = 'web-viewer:human-touch';
 export const WEB_VIEWER_POPUP = 'web-viewer:popup';
 export const WEB_VIEWER_CONTEXT_MENU = 'web-viewer:context-menu';
+/** A committed main-frame navigation: consent rebinds or drops grants on it. */
+export const WEB_VIEWER_NAVIGATED = 'web-viewer:navigated';
+
+export interface WebViewerNavigatedEvent {
+  sessionId: string;
+  tabId: string;
+  epoch: number;
+  /** Redacted top-frame origin after the navigation. */
+  principal: string | null;
+  /** Same-document change (pushState / hash). */
+  inPage: boolean;
+}
+
+/** What the consent layer needs to know about a tab, resolved at the moment of use. */
+export interface WebTabConsentView {
+  sessionId: string;
+  tabId: string;
+  openedBy: WebTabOpener;
+  openedByRunId: string | null;
+  humanTouched: boolean;
+  partitionHumanTouched: boolean;
+  principal: string | null;
+  epoch: number;
+  state: WebTabState;
+  loading: boolean;
+}
 
 /** Everything the manager needs from the rest of main, injected. */
 export interface WebViewerManagerDeps {
@@ -110,6 +137,12 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   private attachedWindow: BrowserWindow | null = null;
   /** Per-session timestamps of recent agent opens, for the rate limit. */
   private readonly agentOpens = new Map<string, number[]>();
+  /**
+   * Partitions any tab of which a human has touched. Latched: cookies outlive
+   * the tab, so a credential typed into one agent tab is reachable from its
+   * siblings in the same jar — consent treats the whole jar as touched.
+   */
+  private readonly touchedPartitions = new Set<string>();
   /** Partitions whose `webRequest` observers are installed (one set per session). */
   private readonly instrumented = new Set<string>();
   /**
@@ -173,6 +206,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       lastAgentReadAt: null,
     };
     this.tabs.set(args.tabId, record);
+    if (record.humanTouched) this.touchedPartitions.add(partition);
 
     if (args.deferLoad !== true) {
       const created = this.createView(record);
@@ -331,6 +365,8 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       this.emit(WEB_VIEWER_TAB_CLOSED, { sessionId, tabId, reason: 'disposed' as const });
     }
     this.agentOpens.delete(sessionId);
+    // The agent jar is per session and is discarded with it.
+    this.touchedPartitions.delete(partitionFor('agent', sessionId, false));
   }
 
   /** Destroy everything (app quit, or the main window going away). */
@@ -354,6 +390,24 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   noteAgentRead(tabId: string): void {
     const record = this.tabs.get(tabId);
     if (record) record.lastAgentReadAt = this.now();
+  }
+
+  /** The tab as the consent layer sees it, resolved now. Null for an unknown tab. */
+  consentView(tabId: string): WebTabConsentView | null {
+    const r = this.tabs.get(tabId);
+    if (!r) return null;
+    return {
+      sessionId: r.sessionId,
+      tabId: r.tabId,
+      openedBy: r.openedBy,
+      openedByRunId: r.openedByRunId,
+      humanTouched: r.humanTouched,
+      partitionHumanTouched: this.touchedPartitions.has(r.partition),
+      principal: redactToOrigin(r.currentUrl),
+      epoch: r.navigationEpoch,
+      state: r.state,
+      loading: r.loading,
+    };
   }
 
   /** Tab ids of one session, for callers that persist or audit. */
@@ -504,7 +558,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
 
     wc.on('did-navigate', (_event, url) => {
       this.telemetry.appendNavigation(record.tabId, 'commit', url);
-      this.commitNavigation(record, url);
+      this.commitNavigation(record, url, false);
     });
 
     // `did-navigate` is NOT emitted for in-page navigation. Without this a
@@ -515,7 +569,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     wc.on('did-navigate-in-page', (_event, url, isMainFrame) => {
       if (!isMainFrame) return;
       this.telemetry.appendNavigation(record.tabId, 'in_page', url);
-      this.commitNavigation(record, url);
+      this.commitNavigation(record, url, true);
     });
 
     wc.on('page-title-updated', (_event, title) => {
@@ -548,6 +602,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
       record.blockedReason = details.reason;
       record.loading = false;
       record.navigationEpoch += 1; // invalidates grants bound to the old epoch
+      this.emitNavigated(record, false);
       this.publish(record);
       this.emit(WEB_VIEWER_TAB_CLOSED, {
         sessionId: record.sessionId,
@@ -646,13 +701,15 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   private markHumanTouched(record: TabRecord): void {
     if (record.humanTouched) return;
     record.humanTouched = true;
+    this.touchedPartitions.add(record.partition);
     this.emit(WEB_VIEWER_HUMAN_TOUCH, { sessionId: record.sessionId, tabId: record.tabId });
     this.publish(record);
   }
 
-  private commitNavigation(record: TabRecord, url: string): void {
+  private commitNavigation(record: TabRecord, url: string, inPage: boolean): void {
     record.currentUrl = url;
     record.navigationEpoch += 1;
+    this.emitNavigated(record, inPage);
     record.blockedReason = null;
     // A successful commit clears a previous auth/TLS block.
     if (record.state === 'auth_required' || record.state === 'certificate_error') {
@@ -660,6 +717,17 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     }
     record.lastActiveAt = this.now();
     this.publish(record);
+  }
+
+  private emitNavigated(record: TabRecord, inPage: boolean): void {
+    const event: WebViewerNavigatedEvent = {
+      sessionId: record.sessionId,
+      tabId: record.tabId,
+      epoch: record.navigationEpoch,
+      principal: redactToOrigin(record.currentUrl),
+      inPage,
+    };
+    this.emit(WEB_VIEWER_NAVIGATED, event);
   }
 
   private fail(record: TabRecord, reason: string, err: unknown): void {

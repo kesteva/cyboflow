@@ -12,6 +12,7 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { acquireOcclusion, resetOcclusionForTests } from '../../../utils/occlusion';
+import { useWebConsentStore } from '../../../stores/webConsentStore';
 import type { TabItem } from '../../../../../shared/types/centerPane';
 import type { WebTabSnapshot } from '../../../../../shared/types/webViewer';
 
@@ -121,6 +122,21 @@ describe('WebViewTab', () => {
     expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: false });
     act(() => release());
     expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: true });
+  });
+
+  it('covers the tab with the consent sheet while an agent request is pending — and hides the page', async () => {
+    act(() =>
+      useWebConsentStore.getState().add({
+        requestId: 'r1', sessionId: 'sess-1', tabId: TAB.id, runId: 'run-1',
+        capability: 'observe', origin: 'https://docs.anthropic.com', reason: null, requestedAt: 1,
+      }),
+    );
+    render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
+    expect(screen.getByTestId('web-consent-sheet')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: false }),
+    );
+    act(() => useWebConsentStore.setState({ byRequestId: {} }));
   });
 
   it('never makes an inactive tab visible', async () => {

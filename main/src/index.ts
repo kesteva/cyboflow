@@ -993,6 +993,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         gitPrerequisiteOps,
         webViewer: webViewerComposition?.webViewer,
         webViewerEvents: webViewerComposition?.webViewerEvents,
+        webViewerConsent: webViewerComposition?.webViewerConsent,
         claudeAuthOps: claudeAuthOps ?? undefined,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),

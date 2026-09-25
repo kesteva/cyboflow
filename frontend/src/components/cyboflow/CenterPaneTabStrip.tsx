@@ -14,6 +14,8 @@
  */
 import type { ReactElement } from 'react';
 import type { TabItem } from '../../../../shared/types/centerPane';
+import { useShallow } from 'zustand/react/shallow';
+import { useWebConsentStore } from '../../stores/webConsentStore';
 import {
   ARTIFACT_COLORS,
   ARTIFACT_GLYPHS,
@@ -85,6 +87,11 @@ export function CenterPaneTabStrip({
   onTabClick,
   onTabClose,
 }: CenterPaneTabStripProps): ReactElement {
+  // Web tabs with an agent access request waiting on the human. A prompt on a
+  // BACKGROUND tab is otherwise invisible — its sheet renders only when shown.
+  const askingTabIds = useWebConsentStore(
+    useShallow((s) => [...new Set(Object.values(s.byRequestId).map((r) => r.tabId))].sort()),
+  );
   return (
     <div
       role="tablist"
@@ -176,6 +183,20 @@ export function CenterPaneTabStrip({
             >
               <span style={glyphStyle}>{glyph}</span>
               <span style={labelStyle}>{tab.label}</span>
+              {isWeb && askingTabIds.includes(tab.id) && (
+                <span
+                  data-testid={`center-pane-tab-consent-${tab.id}`}
+                  title="An agent is asking for access to this tab"
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: 'var(--color-status-warning)',
+                    flexShrink: 0,
+                  }}
+                  aria-label="Agent access request"
+                />
+              )}
               {tab.isNew && (
                 <span
                   data-testid={`center-pane-tab-new-${tab.id}`}

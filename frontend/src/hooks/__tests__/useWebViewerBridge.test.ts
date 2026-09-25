@@ -5,10 +5,12 @@
  * switch) must not leave a strip entry with no view behind it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 
 type PopupHandler = (ev: { sessionId: string; openerTabId: string; url: string }) => void;
 let popupHandler: PopupHandler | null = null;
+type ConsentHandler = (ev: unknown) => void;
+let consentHandler: ConsentHandler | null = null;
 const openMutate = vi.fn();
 const restoreMutate = vi.fn();
 const sub = () => ({ unsubscribe: vi.fn() });
@@ -27,6 +29,13 @@ vi.mock('../../trpc/client', () => ({
         },
         open: { mutate: (...a: unknown[]) => openMutate(...a) },
         restore: { mutate: (...a: unknown[]) => restoreMutate(...a) },
+        pendingConsents: { query: () => Promise.resolve([]) },
+        onConsent: {
+          subscribe: vi.fn((_input: unknown, opts: { onData: ConsentHandler }) => {
+            consentHandler = opts.onData;
+            return sub();
+          }),
+        },
       },
     },
   },
@@ -35,6 +44,7 @@ vi.mock('../../trpc/client', () => ({
 const { useWebViewerBridge } = await import('../useWebViewerBridge');
 const { useCenterPaneStore } = await import('../../stores/centerPaneStore');
 const { useErrorStore } = await import('../../stores/errorStore');
+const { useWebConsentStore } = await import('../../stores/webConsentStore');
 
 const KEY = 'sess-1';
 const webTabs = () =>
@@ -116,5 +126,20 @@ describe('useWebViewerBridge restore', () => {
     renderHook(() => useWebViewerBridge(KEY));
     await waitFor(() => expect(restoreMutate).toHaveBeenCalledTimes(2));
     expect(webTabs()).toHaveLength(1);
+  });
+});
+
+describe('useWebViewerBridge consent', () => {
+  it('follows prompts opening and resolving', async () => {
+    renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(consentHandler).not.toBeNull());
+    const request = {
+      requestId: 'r1', sessionId: KEY, tabId: 'web:1', runId: 'run-1',
+      capability: 'observe', origin: 'https://x.test', reason: null, requestedAt: 1,
+    };
+    act(() => consentHandler!({ kind: 'requested', sessionId: KEY, request }));
+    expect(Object.keys(useWebConsentStore.getState().byRequestId)).toEqual(['r1']);
+    act(() => consentHandler!({ kind: 'resolved', sessionId: KEY, requestId: 'r1', tabId: 'web:1' }));
+    expect(useWebConsentStore.getState().byRequestId).toEqual({});
   });
 });

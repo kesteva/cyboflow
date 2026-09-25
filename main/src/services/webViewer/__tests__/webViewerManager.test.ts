@@ -74,7 +74,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { WebViewerManager, WEB_VIEWER_TAB_STATE } from '../webViewerManager';
+import { WebViewerManager, WEB_VIEWER_NAVIGATED, WEB_VIEWER_TAB_STATE } from '../webViewerManager';
 import { WEB_VIEWER_LIMITS } from '../webViewerGuard';
 import { resetPartitionHardeningForTests } from '../webViewerPartitions';
 
@@ -263,5 +263,40 @@ describe('telemetry wiring', () => {
     };
     created[0].webContents.emit('console-message', { level: 'warning', message: 'late', lineNumber: 1, sourceId: '', frame: gone });
     expect(manager.telemetry.read('t0', 'console')!.entries[0]).toMatchObject({ message: 'late', frameUrl: null });
+  });
+});
+
+describe('consent inputs', () => {
+  it('reports in-page vs cross-document navigation with the redacted principal', async () => {
+    const events: Array<{ inPage: boolean; principal: string | null; epoch: number }> = [];
+    manager.on(WEB_VIEWER_NAVIGATED, (e: { inPage: boolean; principal: string | null; epoch: number }) => events.push(e));
+    await open('t0');
+    created[0].webContents.emit('did-navigate', {}, 'https://example.com/a?token=x');
+    created[0].webContents.emit('did-navigate-in-page', {}, 'https://example.com/a#b', true);
+    expect(events).toEqual([
+      expect.objectContaining({ inPage: false, principal: 'https://example.com', epoch: 1 }),
+      expect.objectContaining({ inPage: true, principal: 'https://example.com', epoch: 2 }),
+    ]);
+  });
+
+  it('latches the WHOLE agent jar once a human touches any of its tabs', async () => {
+    await open('a1', { openedBy: 'agent' });
+    await open('a2', { openedBy: 'agent' });
+    await open('other-session', { openedBy: 'agent', sessionId: 's2' });
+    expect(manager.consentView('a2')?.partitionHumanTouched).toBe(false);
+    created[0].webContents.emit('focus');
+    expect(manager.consentView('a1')?.humanTouched).toBe(true);
+    // The sibling was never touched, but it shares the cookie jar.
+    expect(manager.consentView('a2')).toMatchObject({ humanTouched: false, partitionHumanTouched: true });
+    // Another session's agent jar is a different jar.
+    expect(manager.consentView('other-session')?.partitionHumanTouched).toBe(false);
+  });
+
+  it('forgets the agent jar latch with the session', async () => {
+    await open('a1', { openedBy: 'agent' });
+    created[0].webContents.emit('focus');
+    manager.disposeSession('s1');
+    await open('a3', { openedBy: 'agent' });
+    expect(manager.consentView('a3')?.partitionHumanTouched).toBe(false);
   });
 });

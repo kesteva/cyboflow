@@ -18,6 +18,9 @@
  */
 import type {
   RestoredWebTab,
+  WebActivityEntry,
+  WebConsentGrant,
+  WebConsentRequest,
   WebTabBounds,
   WebTabSnapshot,
 } from '../../../../../shared/types/webViewer';
@@ -108,4 +111,23 @@ export interface WebViewerEventsLike {
    * the tab id and the store entry.
    */
   popupChannel: string;
+  /**
+   * Consent prompts opening and resolving. A SEPARATE emitter from the manager's:
+   * consent is its own service with its own lifecycle (§7).
+   */
+  consentEmitter?: import('events').EventEmitter;
+  consentChannel?: string;
+}
+
+/**
+ * The human side of consent, for the renderer: answer prompts, list and revoke
+ * grants, and read a tab's activity (the audit trail, origin only).
+ */
+export interface WebViewerConsentLike {
+  listPending(sessionId: string): WebConsentRequest[];
+  respond(requestId: string, decision: 'allow' | 'deny'): boolean;
+  listGrants(sessionId: string): WebConsentGrant[];
+  revokeGrant(grantId: string): boolean;
+  revokeTab(tabId: string): void;
+  activity(sessionId: string, tabId?: string): WebActivityEntry[];
 }

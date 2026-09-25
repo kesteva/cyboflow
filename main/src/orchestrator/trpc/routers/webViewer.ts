@@ -16,6 +16,10 @@ import { router, protectedProcedure } from '../trpc';
 import { eventToAsyncIterable } from './events';
 import type {
   RestoredWebTab,
+  WebActivityEntry,
+  WebConsentEvent,
+  WebConsentGrant,
+  WebConsentRequest,
   WebTabClosedEvent,
   WebTabSnapshot,
   WebTabStateEvent,
@@ -24,6 +28,7 @@ import type {
 } from '../../../../../shared/types/webViewer';
 import type {
   WebViewerAck,
+  WebViewerConsentLike,
   WebViewerLike,
   WebViewerOpenResult,
 } from '../contracts/webViewerOps';
@@ -38,7 +43,18 @@ function requireViewer(viewer: WebViewerLike | undefined): WebViewerLike {
   return viewer;
 }
 
+function requireConsent(consent: WebViewerConsentLike | undefined): WebViewerConsentLike {
+  if (!consent) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'webViewer consent not wired into tRPC context',
+    });
+  }
+  return consent;
+}
+
 const tabIdInput = z.object({ tabId: z.string().min(1) });
+const sessionInput = z.object({ sessionId: z.string().min(1) });
 
 export const webViewerRouter = router({
   /**
@@ -211,6 +227,66 @@ export const webViewerRouter = router({
       for await (const ev of eventToAsyncIterable<WebViewerPopupEvent>(
         events.emitter,
         events.popupChannel,
+        abortSignal,
+      )) {
+        if (ev.sessionId === input.sessionId) yield ev;
+      }
+    }),
+
+  // -------------------------------------------------------------------------
+  // Consent (§7). The HUMAN side only — agents reach consent through the MCP
+  // tools, which raise prompts; they can never answer one.
+  // -------------------------------------------------------------------------
+
+  /** Prompts currently waiting on the human, for a (re)mounted session. */
+  pendingConsents: protectedProcedure
+    .input(sessionInput)
+    .query(({ ctx, input }): WebConsentRequest[] => requireConsent(ctx.webViewerConsent).listPending(input.sessionId)),
+
+  /** Answer a prompt from the tab sheet. `ok:false` when it already resolved. */
+  respondConsent: protectedProcedure
+    .input(z.object({ requestId: z.string().min(1), decision: z.enum(['allow', 'deny']) }))
+    .mutation(({ ctx, input }): WebViewerAck => {
+      return requireConsent(ctx.webViewerConsent).respond(input.requestId, input.decision)
+        ? { ok: true }
+        : { ok: false, error: 'request_not_found' };
+    }),
+
+  grants: protectedProcedure
+    .input(sessionInput)
+    .query(({ ctx, input }): WebConsentGrant[] => requireConsent(ctx.webViewerConsent).listGrants(input.sessionId)),
+
+  revokeGrant: protectedProcedure
+    .input(z.object({ grantId: z.string().min(1) }))
+    .mutation(({ ctx, input }): WebViewerAck => {
+      return requireConsent(ctx.webViewerConsent).revokeGrant(input.grantId)
+        ? { ok: true }
+        : { ok: false, error: 'grant_not_found' };
+    }),
+
+  /** Revoke every grant on a tab and deny its open prompts. */
+  revokeTab: protectedProcedure.input(tabIdInput).mutation(({ ctx, input }): WebViewerAck => {
+    requireConsent(ctx.webViewerConsent).revokeTab(input.tabId);
+    return { ok: true };
+  }),
+
+  /** The audit trail (origin only), newest first; optionally one tab's. */
+  activity: protectedProcedure
+    .input(z.object({ sessionId: z.string().min(1), tabId: z.string().min(1).optional() }))
+    .query(({ ctx, input }): WebActivityEntry[] =>
+      requireConsent(ctx.webViewerConsent).activity(input.sessionId, input.tabId),
+    ),
+
+  /** Consent prompts opening and resolving, for this session. */
+  onConsent: protectedProcedure
+    .input(sessionInput)
+    .subscription(async function* ({ ctx, input, signal }): AsyncGenerator<WebConsentEvent> {
+      const events = ctx.webViewerEvents;
+      if (!events?.consentEmitter || !events.consentChannel) return;
+      const abortSignal = signal ?? new AbortController().signal;
+      for await (const ev of eventToAsyncIterable<WebConsentEvent>(
+        events.consentEmitter,
+        events.consentChannel,
         abortSignal,
       )) {
         if (ev.sessionId === input.sessionId) yield ev;

@@ -17,15 +17,23 @@ import type { SessionManager } from './services/sessionManager';
 import type { DatabaseService } from './database/database';
 import { WebTabsRepository } from './database/webTabsRepository';
 import { PersistingWebViewer } from './services/webViewer/webViewerPersistence';
+import { WebViewerConsent, WEB_CONSENT_EVENT } from './services/webViewer/webViewerConsent';
+import { onRunTerminal } from './services/cyboflow/transitions';
 import {
   WebViewerManager,
   WEB_VIEWER_CHORD,
   WEB_VIEWER_CONTEXT_MENU,
+  WEB_VIEWER_NAVIGATED,
   WEB_VIEWER_POPUP,
   WEB_VIEWER_TAB_CLOSED,
   WEB_VIEWER_TAB_STATE,
 } from './services/webViewer/webViewerManager';
-import type { WebViewerEventsLike, WebViewerLike } from './orchestrator/trpc/contracts/webViewerOps';
+import type {
+  WebViewerConsentLike,
+  WebViewerEventsLike,
+  WebViewerLike,
+} from './orchestrator/trpc/contracts/webViewerOps';
+import type { WebViewerNavigatedEvent } from './services/webViewer/webViewerManager';
 
 export interface WebViewerCompositionDeps {
   configManager: ConfigManager;
@@ -44,6 +52,10 @@ export interface WebViewerCompositionDeps {
 export interface WebViewerComposition {
   webViewer: WebViewerLike;
   webViewerEvents: WebViewerEventsLike;
+  webViewerConsent: WebViewerConsentLike;
+  /** The consent service itself, for the MCP tool handlers. */
+  consent: WebViewerConsent;
+  manager: WebViewerManager;
   /** Destroy every view for one cyboflow session (archive / merge / delete). */
   disposeSession: (sessionId: string) => void;
 }
@@ -63,7 +75,51 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
   });
   // The router sees the PERSISTING wrapper, so every open/close is recorded and
   // audited by construction. The bare manager stays the event source.
-  const viewer = new PersistingWebViewer(manager, new WebTabsRepository(databaseService.getDb()));
+  const repo = new WebTabsRepository(databaseService.getDb());
+  const viewer = new PersistingWebViewer(manager, repo);
+
+  // ---------------------------------------------------------------------
+  // Consent (§7): its own prompts, never QuestionRouter. Every request,
+  // grant, denial, timeout and revocation lands in the audit trail.
+  // ---------------------------------------------------------------------
+  const consent = new WebViewerConsent({
+    audit: (ev) => {
+      repo.appendEvent({
+        sessionId: ev.sessionId,
+        tabId: ev.tabId,
+        runId: ev.runId,
+        kind: ev.kind,
+        origin: ev.origin,
+        detail: ev.detail ?? null,
+      });
+    },
+  });
+  // Grants follow the tab's principal: an in-page same-origin change keeps
+  // them, anything else drops them.
+  manager.on(WEB_VIEWER_NAVIGATED, (ev: WebViewerNavigatedEvent) => {
+    consent.onNavigation(ev.tabId, { epoch: ev.epoch, principal: ev.principal, inPage: ev.inPage });
+  });
+  manager.on(WEB_VIEWER_TAB_CLOSED, (ev: { tabId: string; reason: string }) => {
+    if (ev.reason !== 'evicted') consent.revokeTab(ev.tabId, `tab_${ev.reason}`);
+  });
+  // A finished run keeps nothing: grants go, open prompts are denied.
+  onRunTerminal((runId) => consent.revokeRun(runId));
+
+  const webViewerConsent: WebViewerConsentLike = {
+    listPending: (sessionId) => consent.listPending(sessionId),
+    respond: (requestId, decision) => consent.respond(requestId, decision),
+    listGrants: (sessionId) => consent.listGrants(sessionId),
+    revokeGrant: (grantId) => consent.revokeGrant(grantId, 'revoked_by_user'),
+    revokeTab: (tabId) => consent.revokeTab(tabId, 'revoked_by_user'),
+    activity: (sessionId, tabId) => {
+      try {
+        return repo.listEvents(sessionId, 200, tabId);
+      } catch (err) {
+        console.warn('[WebViewer] activity read failed:', err);
+        return [];
+      }
+    },
+  };
 
   // ---------------------------------------------------------------------
   // Per-tab context menu.
@@ -124,6 +180,7 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
   // ---------------------------------------------------------------------
   sessionManager.on('session-deleted', (session: { id: string }) => {
     // Views AND tab rows (archive never cascades); the audit trail is kept.
+    consent.disposeSession(session.id);
     viewer.disposeSession(session.id);
   });
   app.on('before-quit', () => {
@@ -139,7 +196,15 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
       tabClosedChannel: WEB_VIEWER_TAB_CLOSED,
       chordChannel: WEB_VIEWER_CHORD,
       popupChannel: WEB_VIEWER_POPUP,
+      consentEmitter: consent,
+      consentChannel: WEB_CONSENT_EVENT,
     },
-    disposeSession: (sessionId: string) => viewer.disposeSession(sessionId),
+    webViewerConsent,
+    consent,
+    manager,
+    disposeSession: (sessionId: string) => {
+      consent.disposeSession(sessionId);
+      viewer.disposeSession(sessionId);
+    },
   };
 }

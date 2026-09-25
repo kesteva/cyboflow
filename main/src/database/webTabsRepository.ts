@@ -47,7 +47,12 @@ export type WebEventKind =
   | 'tab_evicted'
   | 'tab_crashed'
   | 'human_touched'
-  | 'session_disposed';
+  | 'session_disposed'
+  | 'consent_requested'
+  | 'consent_granted'
+  | 'consent_denied'
+  | 'consent_timeout'
+  | 'consent_revoked';
 
 export interface WebEventInput {
   sessionId: string;
@@ -238,14 +243,23 @@ export class WebTabsRepository {
     return res.changes > 0;
   }
 
-  /** Newest first. */
-  listEvents(sessionId: string, limit = 200): WebEventRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM session_web_events WHERE session_id = ?
-         ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-      )
-      .all(sessionId, limit) as EventDbRow[];
+  /** Newest first; optionally one tab's. */
+  listEvents(sessionId: string, limit = 200, tabId?: string): WebEventRow[] {
+    const rows = (
+      tabId === undefined
+        ? this.db
+            .prepare(
+              `SELECT * FROM session_web_events WHERE session_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+            )
+            .all(sessionId, limit)
+        : this.db
+            .prepare(
+              `SELECT * FROM session_web_events WHERE session_id = ? AND tab_id = ?
+               ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+            )
+            .all(sessionId, tabId, limit)
+    ) as EventDbRow[];
     return rows.map((r) => ({
       id: r.id,
       sessionId: r.session_id,
