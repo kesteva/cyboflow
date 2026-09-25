@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   PROVIDER_PROMPT_ENVELOPES,
   renderWorkflowPromptForRuntime,
-  selectMentionedRoleBriefs,
-  type RoleBrief,
 } from '../workflowPromptRenderer';
 import type { WorkflowPrompt } from '../workflowPromptReader';
 
@@ -175,76 +173,5 @@ describe('renderWorkflowPromptForRuntime', () => {
     for (const provider of ['codex', 'omp', 'pi'] as const) {
       expect(PROVIDER_PROMPT_ENVELOPES[provider], provider).not.toBeNull();
     }
-  });
-});
-
-describe('role briefs for runtimes without agent files', () => {
-  const BRIEFS: RoleBrief[] = [
-    { agentKey: 'sprint-review', body: 'SPRINT-REVIEW BODY' },
-    { agentKey: 'implement', body: 'IMPLEMENT BODY\n\n## Result\n\nReturn `## Implementation`.' },
-    { agentKey: 'code-review', body: 'CODE-REVIEW BODY' },
-    { agentKey: 'context', body: 'PLANNER CONTEXT BODY' },
-  ];
-  const BODY: WorkflowPrompt = {
-    prompt: 'Delegate to `cyboflow-code-review`, then `cyboflow-implement`, then `cyboflow-sprint-review`.',
-    systemPromptAppend: '',
-  };
-
-  it('inlines only the named roles, in first-mention order, for every non-Claude provider', () => {
-    for (const [provider, runtime] of [['codex', 'codex-sdk'], ['omp', 'omp-sdk'], ['pi', 'pi-sdk']] as const) {
-      const { prompt } = renderWorkflowPromptForRuntime(BODY, {
-        provider,
-        runtime,
-        turnKind: 'launch',
-        roleBriefs: BRIEFS,
-      });
-      expect(prompt, provider).toContain('# Cyboflow role briefs');
-      const at = (key: string) => prompt.indexOf(`<role-brief name="cyboflow-${key}">`);
-      expect(at('code-review'), provider).toBeGreaterThan(prompt.indexOf(BODY.prompt));
-      expect(at('code-review')).toBeLessThan(at('implement'));
-      expect(at('implement')).toBeLessThan(at('sprint-review'));
-      expect(prompt).toContain('IMPLEMENT BODY\n\n## Result');
-      expect(prompt, 'an unnamed role is not inlined').not.toContain('PLANNER CONTEXT BODY');
-    }
-  });
-
-  it('tells each envelope to hand the brief over verbatim', () => {
-    for (const provider of ['codex', 'omp', 'pi'] as const) {
-      expect(PROVIDER_PROMPT_ENVELOPES[provider], provider).toContain('`# Cyboflow role briefs`');
-    }
-    expect(PROVIDER_PROMPT_ENVELOPES.omp).not.toContain('Give the delegate the role\'s brief in your own words');
-  });
-
-  it('leaves Claude byte-identical even when briefs are supplied', () => {
-    const rendered = { ...BODY };
-    expect(
-      renderWorkflowPromptForRuntime(rendered, { provider: 'claude', runtime: 'claude-sdk', roleBriefs: BRIEFS }),
-    ).toBe(rendered);
-  });
-
-  it('never inlines briefs into a nudge or resume turn', () => {
-    for (const turnKind of ['nudge', 'resume'] as const) {
-      const { prompt } = renderWorkflowPromptForRuntime(BODY, {
-        provider: 'codex',
-        runtime: 'codex-sdk',
-        turnKind,
-        roleBriefs: BRIEFS,
-      });
-      expect(prompt).toBe(BODY.prompt);
-    }
-  });
-
-  it('does not match a role name that is a prefix of another', () => {
-    const picked = selectMentionedRoleBriefs(
-      [{ agentKey: 'sprint', body: 'X' }, { agentKey: 'sprint-review', body: 'Y' }],
-      'use `cyboflow-sprint-review` only',
-    );
-    expect(picked.map((b) => b.agentKey)).toEqual(['sprint-review']);
-  });
-
-  it('adds nothing when no brief is named or supplied', () => {
-    const plain = renderWorkflowPromptForRuntime(BODY, { provider: 'codex', runtime: 'codex-sdk', turnKind: 'launch' });
-    expect(plain.prompt.endsWith(BODY.prompt)).toBe(true);
-    expect(selectMentionedRoleBriefs(BRIEFS, 'no roles here')).toEqual([]);
   });
 });

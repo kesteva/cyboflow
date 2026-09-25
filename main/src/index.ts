@@ -74,7 +74,7 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { listRunAgentTargets, resolveRunEffectiveAgents, resolveRunRoleBriefs, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
+import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
@@ -2735,8 +2735,6 @@ async function initializeServices(): Promise<boolean> {
     // overlay's `model:` frontmatter never binds on this plane and this resolver is
     // the pin's only channel. The alias is resolved to its concrete snapshot here
     // (mirroring the overlay writer) so the spawn receives a real model id.
-    // Role prompts for steps that spawn OFF Claude — they get no agent files.
-    resolveRoleBriefs: (runId) => resolveRunRoleBriefs(rawDb, runId),
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
@@ -3185,8 +3183,6 @@ async function initializeServices(): Promise<boolean> {
     // through tryGetInstance so boot ordering (tracker initialized above, but
     // defensively) can never throw here.
     (runId) => DynamicWorkflowTracker.tryGetInstance()?.hasRunningForRun(runId) === true,
-    // Role prompts inlined into a non-Claude orchestrated launch prompt.
-    (runId) => resolveRunRoleBriefs(rawDb, runId),
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'

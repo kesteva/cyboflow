@@ -525,57 +525,6 @@ describe('SpawnStepRunner', () => {
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).not.toContain('cyboflow_list_tasks');
   });
 
-  // ── role briefs for steps that spawn off Claude ────────────────────────────
-  describe('resolveRoleBriefs (role prompt inlined for non-Claude steps)', () => {
-    const briefs = [
-      { agentKey: 'implement', body: 'IMPLEMENT ROLE BODY\n\n## Tuning-level addendum\n\nBe terse.' },
-      { agentKey: 'context', body: 'UNRELATED ROLE BODY' },
-    ];
-
-    it("inlines the step's own role brief — addendum included — when the step is routed to Codex", async () => {
-      const spawner = makeSpawner();
-      const runner = new SpawnStepRunner(spawner, {
-        ...opts,
-        resolveStepAgent: (agentKey) => (agentKey === 'implement' ? { runtime: 'codex-sdk' } : undefined),
-        resolveRoleBriefs: () => briefs,
-      });
-
-      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
-
-      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
-      expect(passed.prompt).toContain('<role-brief name="cyboflow-implement">');
-      expect(passed.prompt).toContain('IMPLEMENT ROLE BODY\n\n## Tuning-level addendum\n\nBe terse.');
-      expect(passed.prompt).not.toContain('UNRELATED ROLE BODY');
-    });
-
-    it('inlines the brief when the whole run is on a non-Claude provider (no per-step override)', async () => {
-      const spawner = makeSpawner();
-      const runner = new SpawnStepRunner(spawner, {
-        ...opts,
-        promptRenderContext: { provider: 'omp', runtime: 'omp-sdk', executionModel: 'programmatic' },
-        resolveRoleBriefs: () => briefs,
-      });
-
-      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
-
-      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
-      expect(passed.prompt).toContain('# Runtime adapter: OMP');
-      expect(passed.prompt).toContain('IMPLEMENT ROLE BODY');
-    });
-
-    it('never consults the resolver for a Claude step', async () => {
-      const spawner = makeSpawner();
-      const resolveRoleBriefs = vi.fn(() => briefs);
-      const runner = new SpawnStepRunner(spawner, { ...opts, resolveRoleBriefs });
-
-      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
-
-      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
-      expect(resolveRoleBriefs).not.toHaveBeenCalled();
-      expect(passed.prompt).not.toContain('# Cyboflow role briefs');
-    });
-  });
-
   // ── per-step agent runtime (Codex-per-step mixing) ─────────────────────────
   describe('resolveStepAgent (per-step agent runtime override)', () => {
     it('is byte-identical when NO resolveStepAgent thunk is bound: model === opts.model and NO agentProvider/agentRuntime keys', async () => {
