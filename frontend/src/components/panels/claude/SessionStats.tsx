@@ -282,6 +282,17 @@ export const SessionStats: React.FC<SessionStatsProps> = ({ sessionId }) => {
             <div className="flex items-center gap-3 mb-3">
               <FileText className="w-5 h-5 text-text-tertiary" />
               <h3 className="text-sm font-semibold text-text-primary">File Changes</h3>
+              {/* TASK-278: this panel always diffs against the session's
+                  recorded branch point (getStatistics with no `baseRef`) —
+                  unlike the quick-session card, it does NOT follow the Diff
+                  tab's BaseSelector selection. Labeled explicitly so it is
+                  never a third, silent, unlabeled base. */}
+              <span
+                data-testid="session-stats-files-base-label"
+                className="text-xs text-text-quaternary"
+              >
+                vs branch point
+              </span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between items-center">

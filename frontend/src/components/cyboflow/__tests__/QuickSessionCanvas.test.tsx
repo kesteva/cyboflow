@@ -27,6 +27,7 @@ vi.mock('../../../hooks/useSessionMetrics', () => ({
     tokenBreakdown: { input: 10_000, output: 2_400, cacheWrite: 184_000, cacheRead: 418_000 },
     filesSeen: 18,
     diff: { plus: 0, minus: 0 },
+    baseLabel: 'branch point',
     model: 'sonnet 4.5',
     branch: 'quick-20260607',
   }),

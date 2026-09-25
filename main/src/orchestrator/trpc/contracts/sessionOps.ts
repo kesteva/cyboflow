@@ -226,9 +226,18 @@ export interface SessionOpsLike {
    */
   listQuick(request: { projectId?: number }): Promise<{ success: true; data: QuickSessionRow[] } | SessionOpsError>;
 
-  /** Mirrors legacy `sessions:get-statistics`. See {@link SessionStatisticsPayload}. */
+  /**
+   * Mirrors legacy `sessions:get-statistics`. See {@link SessionStatisticsPayload}.
+   *
+   * `baseRef` (TASK-278) is the caller's persisted comparison-base SELECTION
+   * (BaseSelector / `cyboflow.runRightRail.comparisonBase`, threaded through
+   * by `useSessionMetrics`) — tried FIRST, ahead of the session's recorded
+   * `base_commit`, in `files.*`'s git diff. Omitted/undefined preserves
+   * today's behavior exactly (diffs against the branch point).
+   */
   getStatistics(request: {
     sessionId: string;
+    baseRef?: string | null;
   }): Promise<{ success: true; data: SessionStatisticsPayload } | SessionOpsError>;
 
   /**

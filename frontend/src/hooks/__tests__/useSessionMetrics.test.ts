@@ -20,6 +20,7 @@ vi.mock('../../utils/api', () => ({
 }));
 
 import { useSessionMetrics, formatElapsed, formatTokenCount } from '../useSessionMetrics';
+import { COMPARISON_BASE_KEY } from '../../utils/comparisonBase';
 import type { Session } from '../../types/session';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -48,6 +49,7 @@ const STATS = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetStatistics.mockResolvedValue(STATS);
+  localStorage.removeItem(COMPARISON_BASE_KEY);
 });
 
 describe('formatElapsed', () => {
@@ -94,11 +96,53 @@ describe('useSessionMetrics', () => {
     await waitFor(() => {
       expect(result.current.tokens).toBe('12.4k');
     });
+    // No persisted BaseSelector selection (TASK-278) — the pre-existing call
+    // shape (sessionId only, no baseRef) must be preserved exactly.
     expect(mockGetStatistics).toHaveBeenCalledWith('s1');
     expect(result.current.filesSeen).toBe(18);
     expect(result.current.diff).toEqual({ plus: 5, minus: 2 });
+    expect(result.current.baseLabel).toBe('branch point');
     expect(result.current.model).toBe('sonnet 4.5');
     expect(result.current.branch).toBe('quick-20260607-120000');
+  });
+
+  // TASK-278: filesSeen/diff must follow the SAME comparison base the Diff
+  // tab's BaseSelector has selected (persisted under COMPARISON_BASE_KEY,
+  // keyed by session id — see RunRightRail.tsx / utils/comparisonBase.ts),
+  // not always the session's recorded branch point.
+  it('threads the persisted BaseSelector selection through as getStatistics baseRef', async () => {
+    localStorage.setItem(COMPARISON_BASE_KEY, JSON.stringify({ s1: 'main' }));
+
+    const { result } = renderHook(() => useSessionMetrics(makeSession()));
+
+    await waitFor(() => {
+      expect(result.current.tokens).toBe('12.4k');
+    });
+    expect(mockGetStatistics).toHaveBeenCalledWith('s1', 'main');
+    expect(result.current.baseLabel).toBe('main');
+  });
+
+  it('re-reads the persisted selection on every poll tick — a base switch is picked up within one cycle', async () => {
+    vi.useFakeTimers();
+    try {
+      renderHook(() => useSessionMetrics(makeSession()));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenNthCalledWith(1, 's1');
+
+      // Simulate BaseSelector's onChange writing a new selection (RunRightRail's
+      // handleComparisonBaseChange) between polls.
+      localStorage.setItem(COMPARISON_BASE_KEY, JSON.stringify({ s1: 'origin/main' }));
+
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenNthCalledWith(2, 's1', 'origin/main');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('zeroes the token breakdown when the session is null', () => {

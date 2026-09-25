@@ -685,6 +685,15 @@ export function QuickSessionCanvas({
   const model = metrics.model ?? '—';
   const { plus, minus } = metrics.diff;
   const diffIsEmpty = plus === 0 && minus === 0;
+  // TASK-278: FILES SEEN / DIFF are computed against whichever base the Diff
+  // tab's BaseSelector currently has selected for this session (falling back
+  // to "branch point" with no persisted selection) — label both cells with
+  // it so the card can never again silently disagree with the panel beside
+  // it. `metrics.baseLabel` is already either "branch point" or the raw ref
+  // string ("main", "origin/main", …), matching BaseSelector's own label
+  // vocabulary.
+  const diffBaseLabel = `diff vs ${metrics.baseLabel}`;
+  const filesBaseLabel = `files seen vs ${metrics.baseLabel}`;
   const { input, output, cacheWrite, cacheRead } = metrics.tokenBreakdown;
   const tokenCategories = [
     { key: 'input', label: 'Input', value: input },
@@ -929,10 +938,10 @@ export function QuickSessionCanvas({
               >
                 <StatCell value={metrics.elapsed} label="elapsed" testId="quick-session-stat-elapsed" />
                 <StatCell value={metrics.tokens} label="tokens" testId="quick-session-stat-tokens" />
-                <StatCell value={metrics.filesSeen} label="files seen" testId="quick-session-stat-files" />
+                <StatCell value={metrics.filesSeen} label={filesBaseLabel} testId="quick-session-stat-files" />
                 <StatCell
                   testId="quick-session-stat-diff"
-                  label="diff"
+                  label={diffBaseLabel}
                   value={
                     <span>
                       <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>

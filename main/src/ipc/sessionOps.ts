@@ -491,7 +491,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
   };
 
   // Session statistics handler
-  const getStatistics = async ({ sessionId }: OpsInput<'getStatistics'>): Promise<OpsResult<'getStatistics'>> => {
+  const getStatistics = async ({ sessionId, baseRef }: OpsInput<'getStatistics'>): Promise<OpsResult<'getStatistics'>> => {
     try {
       console.log('[IPC] sessions:get-statistics called for sessionId:', sessionId);
 
@@ -538,6 +538,10 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // ipc/sessionFileStats.ts for the full rationale.
       const gitFileStats = await computeSessionFileStats({
         worktreePath: session.worktreePath,
+        // TASK-278: the caller's persisted BaseSelector selection (when any)
+        // wins over the recorded branch point, so the card agrees with
+        // whatever base the Diff panel beside it is showing.
+        baseRef,
         baseCommit: session.baseCommit,
         // Only consulted when the recorded branch point no longer resolves —
         // which is the normal case for a main-repo session, since those are

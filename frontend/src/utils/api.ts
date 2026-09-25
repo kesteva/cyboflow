@@ -186,8 +186,15 @@ export class API {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getOutput(sessionId, limit);
     },
-    async getStatistics(sessionId: string) {
-      return trpc.cyboflow.sessions.getStatistics.query({ sessionId });
+    // baseRef (TASK-278): the caller's persisted BaseSelector selection for
+    // this session, when any — threaded through so the quick-session card
+    // agrees with whatever base the Diff panel beside it is showing. Omitted
+    // (not merely undefined — the key itself absent from the query input)
+    // when null, preserving the pre-TASK-278 branch-point-only call shape.
+    async getStatistics(sessionId: string, baseRef?: string | null) {
+      return trpc.cyboflow.sessions.getStatistics.query(
+        baseRef != null ? { sessionId, baseRef } : { sessionId },
+      );
     },
 
     async getConversation(sessionId: string) {
