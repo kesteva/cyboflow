@@ -1527,10 +1527,37 @@ async function defaultResolveChromiumExecutable(): Promise<string | null> {
     const { chromium } = await import('playwright');
     const p = chromium.executablePath();
     if (typeof p !== 'string' || p.length === 0) return null;
-    return existsSync(p) ? p : null;
+    if (!existsSync(p)) return null;
+    return headlessShellSibling(p, existsSync) ?? p;
   } catch {
     return null;
   }
+}
+
+/**
+ * The `chrome-headless-shell` binary Playwright installs NEXT TO the full
+ * browser (`<cache>/chromium-<rev>/…` → `<cache>/chromium_headless_shell-<rev>/
+ * chrome-headless-shell-<platform>/chrome-headless-shell[.exe]`), or `null`.
+ *
+ * WHY THE DRIVER PREFERS IT (measured 2026-09-25, macOS 26, Chrome for Testing
+ * 151 / Playwright 1.62.1): the detached full "Google Chrome for Testing.app"
+ * never sends a single HTTP request — every `goto` to a local page hangs on
+ * `load` (the server logs nothing), and the next `connectOverCDP` times out
+ * behind it. `data:` URLs load, and the headless shell spawned with the SAME
+ * flags loads the same page in ~100ms. The shell is a plain executable, not an
+ * app bundle, so none of the app-level network gating applies. Playwright has
+ * no public API for this path, hence the sibling derivation; absent ⇒ the full
+ * browser, exactly as before.
+ */
+export function headlessShellSibling(fullPath: string, exists: (p: string) => boolean): string | null {
+  const m = /^(.*[\\/])chromium-(\d+)[\\/]/.exec(fullPath);
+  if (m === null) return null;
+  const root = `${m[1]}chromium_headless_shell-${m[2]}`;
+  for (const platform of ['mac-arm64', 'mac-x64', 'linux64', 'linux-arm64', 'win64']) {
+    const exe = join(root, `chrome-headless-shell-${platform}`, platform === 'win64' ? 'chrome-headless-shell.exe' : 'chrome-headless-shell');
+    if (exists(exe)) return exe;
+  }
+  return null;
 }
 
 /**

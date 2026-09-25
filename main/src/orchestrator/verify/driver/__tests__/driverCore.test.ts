@@ -34,6 +34,7 @@ import {
   windowsScreenCaptureArgs,
   type DriverAttestRecord,
   type DriverDeps,
+  headlessShellSibling,
 } from '../driverCore';
 import { ShellDetector } from '../../../../utils/shellDetector';
 
@@ -1752,5 +1753,35 @@ describe.skipIf(process.platform === 'win32')('attest bundle', () => {
     const parsed = parseArgv(['attest', 'nonsense']);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) expect(parsed.message).toContain('http|dom|cdp|window|bundle');
+  });
+});
+
+describe('headlessShellSibling — the driver prefers chrome-headless-shell', () => {
+  const full =
+    '/Users/me/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
+  const shell = '/Users/me/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell';
+
+  it('resolves the same-revision headless shell when it is installed', () => {
+    expect(headlessShellSibling(full, (p) => p === shell)).toBe(shell);
+  });
+
+  it('is null when the shell is absent, so the full browser is used as before', () => {
+    expect(headlessShellSibling(full, () => false)).toBeNull();
+  });
+
+  it('never crosses revisions', () => {
+    const other = shell.replace('1234', '1233');
+    expect(headlessShellSibling(full, (p) => p === other)).toBeNull();
+  });
+
+  it('is null for a path outside the Playwright cache layout', () => {
+    expect(headlessShellSibling('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', () => true)).toBeNull();
+  });
+
+  it('finds the Windows shell', () => {
+    const win = 'C:\\Users\\me\\AppData\\Local\\ms-playwright\\chromium-1234\\chrome-win64\\chrome.exe';
+    const seen: string[] = [];
+    headlessShellSibling(win, (p) => (seen.push(p), false));
+    expect(seen.some((p) => p.includes('chromium_headless_shell-1234') && p.endsWith('chrome-headless-shell.exe'))).toBe(true);
   });
 });
