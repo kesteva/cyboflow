@@ -60,12 +60,13 @@ export const DELEGATED_ONLY_AGENTS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Built-in delegation tools a DIRECT Claude step turn is denied. No cyboflow role
- * grants either, so denying them only removes the path back to delegation.
+ * Built-in delegation tools a DIRECT Claude step turn is denied: Task/Agent spawn
+ * a subagent, Workflow fans work out to many. No cyboflow role grants any of
+ * them, so denying them only removes the paths back to delegation.
  * Codex has no equivalent: `spawn_agent` cannot be removed from its tool list, so
  * a direct Codex step relies on its runtime adapter's instruction alone.
  */
-export const DIRECT_STEP_DISALLOWED_TOOLS: readonly string[] = ['Task', 'Agent'];
+export const DIRECT_STEP_DISALLOWED_TOOLS: readonly string[] = ['Task', 'Agent', 'Workflow'];
 
 export function directStepsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env[DIRECT_STEPS_KILL_SWITCH_ENV];
@@ -124,7 +125,7 @@ ${roleSystemPrompt.trim()}
 
 You are running the \`cyboflow-${agentKey}\` role DIRECTLY as this workflow step's only agent. Do the role's work yourself, in this turn.
 
-- Do not spawn, delegate to, or hand off to another agent for this work — no Task or Agent tool, no \`spawn_agent\`.
+- Do not spawn, delegate to, or hand off to another agent for this work — no Task, Agent or Workflow tool, no \`spawn_agent\`.
 - Keep the role's scope, test scope, and required output sections and verdict lines exactly as the role instructions state them.
 - Where the role instructions say you return results to an orchestrator or parent, or that you never write cyboflow state: for this step YOU are the orchestrator. Perform the cyboflow state writes and the commit/report actions the step prompt lists — and only those.
 - Stop after this one step.`;

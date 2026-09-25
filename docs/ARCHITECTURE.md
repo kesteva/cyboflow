@@ -153,7 +153,7 @@ overlay) and sends it, followed by a host addendum, as the spawn's `systemPrompt
 `systemPrompt.append`, Codex's thread `developerInstructions`. `composeStepPrompt` then says "do the
 work yourself" instead of "delegate", and the Codex runtime adapter switches to a direct-step
 envelope that forbids `spawn_agent` for the step's work. A direct Claude turn is also denied the
-`Task` and `Agent` tools; Codex cannot remove `spawn_agent`, so there the rule is prompt-only.
+`Task`, `Agent` and `Workflow` tools; Codex cannot remove `spawn_agent`, so there the rule is prompt-only.
 
 A step stays delegated when it spawns on OMP or pi, when its role has no resolvable prompt, for
 `verify-setup/prove` (its contract already runs in-turn and the read-only role would contradict it),

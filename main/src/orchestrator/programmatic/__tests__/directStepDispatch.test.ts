@@ -95,7 +95,7 @@ describe('composeDirectStepSystemPrompt', () => {
     expect(out.indexOf(ROLE_PROMPT)).toBeLessThan(out.indexOf('# Direct step'));
     expect(out).toContain('`cyboflow-implement`');
     expect(out).toMatch(/YOU are the orchestrator/);
-    expect(out).toMatch(/no Task or Agent tool, no `spawn_agent`/);
+    expect(out).toMatch(/no Task, Agent or Workflow tool, no `spawn_agent`/);
   });
 });
 
@@ -190,7 +190,7 @@ describe('SpawnStepRunner — direct dispatch', () => {
     await new SpawnStepRunner(spawner, baseOpts).runStep(step({ id: 'implement' }), ctx);
     const passed = spawned(spawner);
     expect(passed.systemPromptAppend).toBe(composeDirectStepSystemPrompt('implement', ROLE_PROMPT));
-    expect(passed.disallowedTools).toEqual([...PROGRAMMATIC_STEP_DISALLOWED_TOOLS, 'Task', 'Agent']);
+    expect(passed.disallowedTools).toEqual([...PROGRAMMATIC_STEP_DISALLOWED_TOOLS, 'Task', 'Agent', 'Workflow']);
     expect(passed.prompt).toContain('**Do the work yourself.**');
   });
 
