@@ -154,4 +154,11 @@ export const WEB_VIEWER_LIMITS = {
    * renderers alive without ever asking a human.
    */
   pinTtlMs: 10 * 60 * 1000,
+  /**
+   * Agent opens per session within `agentOpenWindowMs`. Past it an agent open is
+   * rejected with `rate_limited` — the loaded cap bounds what stays alive, this
+   * bounds the churn of creating and destroying renderers to get there.
+   */
+  agentOpenBurst: 10,
+  agentOpenWindowMs: 60 * 1000,
 } as const;

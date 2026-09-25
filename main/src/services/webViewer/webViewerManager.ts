@@ -9,10 +9,12 @@
  * `deny`), and the packaged renderer CSP's `frame-src` would break an iframe
  * viewer in shipped builds only.
  *
- * Suspension, agent pins and the hard caps land in a later commit; this module
- * owns creation, chrome, the security handlers and the event plumbing.
+ * Suspension is detach-not-unload: a background tab keeps its document, JS
+ * context and committed URL. The hard caps (loaded views per session and
+ * globally, tab rows, agent-open rate) are pure policy in `webViewerCaps.ts`;
+ * this module applies the verdict and reports every eviction.
  *
- * See docs/proposals/native-web-viewer.md §3.1–3.2, §3.6.
+ * See docs/proposals/native-web-viewer.md §3.1–3.2, §3.4, §3.6.
  */
 import { EventEmitter } from 'events';
 import { WebContentsView, shell, type BrowserWindow, type WebContents } from 'electron';
@@ -41,6 +43,7 @@ import {
   shouldBlockViewerNavigation,
 } from './webViewerGuard';
 import { hardenPartition, partitionFor } from './webViewerPartitions';
+import { DEFAULT_CAP_LIMITS, checkOpen, selectEvictions, type CapRecord } from './webViewerCaps';
 
 /** Channel names on the manager's emitter, bridged by the tRPC subscriptions. */
 export const WEB_VIEWER_TAB_STATE = 'web-viewer:tab-state';
@@ -68,6 +71,8 @@ export interface WebViewerManagerDeps {
   /** True in development — gates the dev-only Cmd-Shift-T chord. */
   devMode: boolean;
   platform: 'mac' | 'other';
+  /** Clock seam for the caps' LRU and rate window. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 interface TabRecord {
@@ -93,6 +98,8 @@ interface TabRecord {
    */
   navigationEpoch: number;
   lastActiveAt: number;
+  /** Last agent telemetry read — refreshes the agent pin (§3.4). */
+  lastAgentReadAt: number | null;
 }
 
 export class WebViewerManager extends EventEmitter implements WebViewerLike {
@@ -100,6 +107,8 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
   private readonly deps: WebViewerManagerDeps;
   /** The window these views are currently parented to, for reap-on-close. */
   private attachedWindow: BrowserWindow | null = null;
+  /** Per-session timestamps of recent agent opens, for the rate limit. */
+  private readonly agentOpens = new Map<string, number[]>();
 
   constructor(deps: WebViewerManagerDeps) {
     super();
@@ -118,6 +127,16 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
 
     const url = resolveViewableUrl(args.url);
     if (url === null) return { ok: false, error: 'invalid_arguments: url must be http(s)' };
+
+    const now = this.now();
+    const verdict = checkOpen(
+      this.tabIdsForSession(args.sessionId).length,
+      args.openedBy,
+      this.agentOpens.get(args.sessionId) ?? [],
+      now,
+    );
+    if (!verdict.ok) return { ok: false, error: verdict.error };
+    if (args.openedBy === 'agent') this.recordAgentOpen(args.sessionId, now);
 
     const partition = partitionFor(args.openedBy, args.sessionId, this.deps.persistLogin());
     const record: TabRecord = {
@@ -139,7 +158,8 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
       visible: false,
       bounds: null,
       navigationEpoch: 0,
-      lastActiveAt: Date.now(),
+      lastActiveAt: now,
+      lastAgentReadAt: null,
     };
     this.tabs.set(args.tabId, record);
 
@@ -154,6 +174,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
         record.loading = false;
         this.fail(record, 'did_fail_load', err);
       });
+      this.enforceLoadedCaps(record.tabId);
     }
 
     this.publish(record);
@@ -233,7 +254,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
     if (visible) {
       const wc = this.ensureLoaded(record);
       if (!wc) return { ok: false, error: 'no_window' };
-      record.lastActiveAt = Date.now();
+      record.lastActiveAt = this.now();
     }
 
     const view: WebContentsView | null = record.view;
@@ -296,6 +317,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
       this.tabs.delete(tabId);
       this.emit(WEB_VIEWER_TAB_CLOSED, { sessionId, tabId, reason: 'disposed' as const });
     }
+    this.agentOpens.delete(sessionId);
   }
 
   /** Destroy everything (app quit, or the main window going away). */
@@ -309,6 +331,15 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
         reason: 'disposed' as const,
       });
     }
+  }
+
+  /**
+   * Record that an agent read this tab's telemetry. Refreshes the agent pin, so
+   * the tab is among the last chosen for eviction for `pinTtlMs` — never exempt.
+   */
+  noteAgentRead(tabId: string): void {
+    const record = this.tabs.get(tabId);
+    if (record) record.lastAgentReadAt = this.now();
   }
 
   /** Tab ids of one session, for callers that persist or audit. */
@@ -587,7 +618,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
     if (record.state === 'auth_required' || record.state === 'certificate_error') {
       record.state = record.visible ? 'live' : 'hidden';
     }
-    record.lastActiveAt = Date.now();
+    record.lastActiveAt = this.now();
     this.publish(record);
   }
 
@@ -610,7 +641,51 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
       record.loading = false;
       this.fail(record, 'did_fail_load', err);
     });
+    this.enforceLoadedCaps(record.tabId);
     return view.webContents;
+  }
+
+  private now(): number {
+    return (this.deps.now ?? Date.now)();
+  }
+
+  private recordAgentOpen(sessionId: string, now: number): void {
+    const windowMs = DEFAULT_CAP_LIMITS.agentOpenWindowMs;
+    const kept = (this.agentOpens.get(sessionId) ?? []).filter((t) => now - t < windowMs);
+    kept.push(now);
+    this.agentOpens.set(sessionId, kept);
+  }
+
+  /**
+   * Destroy loaded views past the per-session and global caps. `protectTabId` is
+   * the tab that just loaded — evicting it would make the open a no-op.
+   *
+   * Eviction DESTROYS the view (a URL row that re-navigates on demand) and is
+   * always published as `state: 'evicted'`, never silent. The committed URL is
+   * kept, so the re-navigation lands where the page was.
+   */
+  private enforceLoadedCaps(protectTabId: string): void {
+    const records: CapRecord[] = [];
+    for (const r of this.tabs.values()) {
+      const wc = r.view?.webContents;
+      records.push({
+        tabId: r.tabId,
+        sessionId: r.sessionId,
+        openedBy: r.openedBy,
+        loaded: wc !== undefined && !wc.isDestroyed() && r.state !== 'crashed',
+        visible: r.visible,
+        lastActiveAt: r.lastActiveAt,
+        lastAgentReadAt: r.lastAgentReadAt,
+      });
+    }
+    for (const tabId of selectEvictions(records, this.now(), { protectTabId })) {
+      const record = this.tabs.get(tabId);
+      if (!record) continue;
+      this.destroyView(record);
+      record.state = 'evicted';
+      record.loading = false;
+      this.publish(record);
+    }
   }
 
   /**
