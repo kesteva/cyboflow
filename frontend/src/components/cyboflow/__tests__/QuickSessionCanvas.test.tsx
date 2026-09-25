@@ -470,18 +470,59 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(screen.getByTestId('quick-session-summary-history')).toBeInTheDocument();
     expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
     // TASK-144 specifies the summary/history node's edge as LEADING (session
-    // node → edge → summary/history node), not trailing — pin actual DOM
-    // order, not just the edge count, so a swap to the trailing side would
-    // fail this test even though the count-only assertion above stays green.
+    // node → edge → summary/history node), not trailing. Each edge is now
+    // grouped with the node it leads into inside its own wrapper flex item
+    // (so flex-wrap never strands an edge alone on a row) — pin the actual
+    // nesting, not a flat body.children walk.
     const body = screen.getByTestId('quick-session-canvas-body');
-    const order = Array.from(body.children).map((el) => el.getAttribute('data-testid'));
-    expect(order).toEqual([
-      'quick-session-node',
-      'quick-session-edge',
-      'quick-session-summary-history',
-      'quick-session-edge',
-      'quick-session-add-workflow',
-    ]);
+    const topLevel = Array.from(body.children) as HTMLElement[];
+    expect(topLevel).toHaveLength(3);
+    expect(topLevel[0]).toHaveAttribute('data-testid', 'quick-session-node');
+    const summaryGroup = Array.from(topLevel[1].children).map((el) => el.getAttribute('data-testid'));
+    expect(summaryGroup).toEqual(['quick-session-edge', 'quick-session-summary-history']);
+    const addWorkflowGroup = Array.from(topLevel[2].children).map((el) => el.getAttribute('data-testid'));
+    expect(addWorkflowGroup).toEqual(['quick-session-edge', 'quick-session-add-workflow']);
+  });
+
+  it('reserves the summary/history node footprint with a skeleton while the initial summary fetch is in flight', () => {
+    mockUseSessionSummary.mockReturnValue({ summary: null, loading: true, error: null });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary-history-skeleton')).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+    // Skeleton is grouped with its own leading edge, same as the real node.
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
+  });
+
+  it('drops the skeleton once loading settles with nothing to show (no layout reservation left behind)', () => {
+    mockUseSessionSummary.mockReturnValue({ summary: null, loading: false, error: null });
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-summary-history-skeleton')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(1);
+  });
+
+  it('never shows the skeleton alongside the real summary/history node', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      // Even if the hook reported loading:true (shouldn't happen post-resolve,
+      // but the render logic must not double up regardless).
+      loading: true,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary-history')).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history-skeleton')).not.toBeInTheDocument();
+  });
+
+  it('the canvas body wraps rather than overflowing horizontally on a narrow pane', () => {
+    renderCanvas();
+    const body = screen.getByTestId('quick-session-canvas-body');
+    expect(body).toHaveStyle({ flexWrap: 'wrap' });
   });
 
   it('renders a hairline divider above the history section only when both the summary and history sections are present', () => {

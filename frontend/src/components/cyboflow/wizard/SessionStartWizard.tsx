@@ -105,7 +105,7 @@ import { LaunchPromptModal } from '../LaunchPromptModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
-import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_OMP_LAUNCH_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_OMP_LAUNCH_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
@@ -156,6 +156,7 @@ import {
 } from '../../../../../shared/types/agentCapabilities';
 import {
   DEFAULT_PERMISSION_MODE,
+  DEFAULT_QUICK_MODEL,
   QUICK_RUN_TYPE_KEY,
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,

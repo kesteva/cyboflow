@@ -250,7 +250,7 @@ export function WorkflowStepCard({
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: 4,
+                gap: 3,
                 whiteSpace: 'nowrap',
                 flexShrink: 0,
                 // Hard cap from the approved design: the card is a fixed 138px
@@ -263,9 +263,6 @@ export function WorkflowStepCard({
               }}
               data-testid={`step-card-model-${step.id}`}
             >
-              <span aria-hidden style={{ letterSpacing: '0.02em' }}>
-                ·
-              </span>
               <span
                 aria-hidden
                 style={{

@@ -66,6 +66,7 @@ import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } f
 import { resolveIdeaComponents } from './ideaComponents/resolveIdeaComponents';
 import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
 import { loadMembershipsForTaskIds } from './taskListing';
+import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -646,6 +647,7 @@ export class TaskChangeRouter {
     // POST-COMMIT ARTIFACT FOLLOW-ON: parking an entity at Won't-do retires
     // every run associated with it. The update has already committed; router
     // lookup/reap failures are deliberately swallowed and never fail the move.
+    // Still-running runs are skipped (see reapArtifactsForRunIds' in-flight guard).
     if (result.wontDoRunIds) {
       await this.reapArtifactsForRunIds(projectId, result.wontDoRunIds);
     }
@@ -829,7 +831,8 @@ export class TaskChangeRouter {
     };
 
     // The reverse associations were captured per cascade entity before those
-    // rows/events vanished. Reap only after the delete transaction committed.
+    // rows/events vanished. Reap only after the delete transaction committed —
+    // skipping any run still in flight (see reapArtifactsForRunIds).
     await this.reapArtifactsForRunIds(projectId, result.artifactRunIds);
 
     // POST-COMMIT LEDGER CASCADE (idea component ledger, migration 101): purge
@@ -2237,9 +2240,25 @@ export class TaskChangeRouter {
     };
   }
 
-  /** Best-effort post-commit artifact reap; entity writes never report cleanup failures. */
+  /**
+   * Best-effort post-commit artifact reap; entity writes never report cleanup failures.
+   *
+   * IN-FLIGHT GUARD: a run that is still NON-TERMINAL is SKIPPED (deferred), for
+   * EVERY actor. The Won't-do / delete active-run guards exempt the orchestrator
+   * (it owns derived stage moves and run teardown — e.g. deleteRunCreatedEntities
+   * sweeps a declined plan's drafts while that very run is still live and about
+   * to replan), and ideas/epics carry no active-run guard at all, so without this
+   * filter a Won't-do / delete would wipe a live run's uncommitted artifacts
+   * mid-flight. Rejecting the orchestrator's write instead would break those
+   * teardown paths, so the protection lives at the reap. A skipped run's
+   * artifacts are reaped by its own close-out when it settles through merge /
+   * create-PR (ArtifactRouter.reapForRun at those seams); a skipped run that
+   * later ends via cancel / dismiss leaks them, exactly like the accepted
+   * dismiss-without-merge leak — there is no terminal-run GC sweep.
+   */
   private async reapArtifactsForRunIds(projectId: number, runIds: string[]): Promise<void> {
     for (const runId of new Set(runIds)) {
+      if (this.isRunNonTerminal(runId)) continue;
       try {
         await ArtifactRouter.getInstance().reapForRun(projectId, runId);
       } catch {
@@ -3286,6 +3305,24 @@ export class TaskChangeRouter {
       )
       .get(taskId, taskId) as { 1: number } | undefined;
     return row !== undefined;
+  }
+
+  /**
+   * True when the run exists and is NOT in a terminal status. A vanished run
+   * (or an unreadable workflow_runs table) is treated as terminal — there is no
+   * live run left to protect, so the reap proceeds as before.
+   */
+  private isRunNonTerminal(runId: string): boolean {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT 1 FROM workflow_runs WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN} LIMIT 1`,
+        )
+        .get(runId) as { 1: number } | undefined;
+      return row !== undefined;
+    } catch {
+      return false;
+    }
   }
 
   private hasPendingApprovals(runIds: string[]): boolean {

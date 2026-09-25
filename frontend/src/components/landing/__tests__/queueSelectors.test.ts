@@ -9,7 +9,7 @@ import type { QueueItem } from '../../../utils/reviewQueueSelectors';
 import type { Approval } from '../../../../../shared/types/approvals';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
-import type { QuickSessionTriage } from '../../../utils/quickSessionTriage';
+import { describeReadyState, type QuickSessionTriage } from '../../../utils/quickSessionTriage';
 import {
   applyFlowRunPrecedence,
   compactAge,
@@ -291,6 +291,125 @@ describe('significantFlowRunBySession (TASK-226 — Ready-for-review navigation/
       significantFlowRunBySession([done]),
     );
     expect(target).toEqual({ kind: 'run', runId: 'run-done', projectId: 4 });
+  });
+
+  describe('"most recent activity wins" (product decision 2026-09-25)', () => {
+    it('keeps flow precedence when the flow run finished at/after the chat\'s own last activity', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'completed',
+        session_id: 'sess-a',
+        created_at: '2026-07-06 12:00:00',
+        ended_at: '2026-07-06 13:00:00',
+      });
+      const chatActivityBySession = new Map([['sess-a', '2026-07-06T13:00:00.000Z']]);
+      expect(significantFlowRunBySession([done], chatActivityBySession).get('sess-a')).toEqual(done);
+    });
+
+    it('drops flow precedence when the chat has fresher activity than the flow run\'s finish', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'completed',
+        session_id: 'sess-a',
+        created_at: '2026-07-06 12:00:00',
+        ended_at: '2026-07-06 13:00:00',
+      });
+      const chatActivityBySession = new Map([['sess-a', '2026-07-06T14:00:00.000Z']]);
+      expect(significantFlowRunBySession([done], chatActivityBySession).has('sess-a')).toBe(false);
+    });
+
+    it('falls back to created_at when the flow run never ended', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'canceled',
+        session_id: 'sess-a',
+        created_at: '2026-07-06 12:00:00',
+        ended_at: null,
+      });
+      const staleActivity = new Map([['sess-a', '2026-07-06T11:00:00.000Z']]);
+      expect(significantFlowRunBySession([done], staleActivity).get('sess-a')).toEqual(done);
+
+      const freshActivity = new Map([['sess-a', '2026-07-06T13:00:00.000Z']]);
+      expect(significantFlowRunBySession([done], freshActivity).has('sess-a')).toBe(false);
+    });
+
+    it('fails open to flow precedence when the session has no chat-activity entry', () => {
+      const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a' });
+      expect(significantFlowRunBySession([done], new Map()).get('sess-a')).toEqual(done);
+      expect(significantFlowRunBySession([done]).get('sess-a')).toEqual(done);
+    });
+
+    it('fails open when the chat-activity entry is null or unparseable', () => {
+      const done = makeRun({ id: 'run-done', status: 'completed', session_id: 'sess-a' });
+      expect(
+        significantFlowRunBySession([done], new Map([['sess-a', null]])).get('sess-a'),
+      ).toEqual(done);
+      expect(
+        significantFlowRunBySession([done], new Map([['sess-a', 'not-a-date']])).get('sess-a'),
+      ).toEqual(done);
+    });
+
+    it('never gates a NON-terminal run behind chat recency', () => {
+      const live = makeRun({ id: 'run-live', status: 'running', session_id: 'sess-a' });
+      const freshActivity = new Map([['sess-a', '2099-01-01T00:00:00.000Z']]);
+      expect(significantFlowRunBySession([live], freshActivity).get('sess-a')).toEqual(live);
+    });
+
+    it('end-to-end: resolveOpenTarget falls back to the quick session once the chat outpaces the finished flow run', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'completed',
+        session_id: 'sess-a',
+        project_id: 4,
+        ended_at: '2026-07-06 13:00:00',
+      });
+      const chatActivityBySession = new Map([['sess-a', '2026-07-06T14:00:00.000Z']]);
+      const target = resolveOpenTarget(
+        { sessionId: 'sess-a', runId: 'quick-run-1', projectId: 4 },
+        significantFlowRunBySession([done], chatActivityBySession),
+      );
+      expect(target).toEqual({ kind: 'quick', sessionId: 'sess-a', runId: 'quick-run-1', projectId: 4 });
+    });
+
+    it('end-to-end: describeReadyState reflects the chat\'s own failed state once the chat outpaces the finished flow run', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'completed',
+        session_id: 'sess-a',
+        ended_at: '2026-07-06 13:00:00',
+      });
+      const freshFailedChat = makeQuickRow({
+        sessionId: 'sess-a',
+        rawStatus: 'failed',
+        restedAtIso: '2026-07-06T14:00:00.000Z',
+      });
+      const map = significantFlowRunBySession([done], new Map([['sess-a', freshFailedChat.restedAtIso]]));
+      const flowRun = map.get('sess-a');
+      // Not present -> ReadyForReviewSection's readFacts passes `undefined`,
+      // so describeReadyState reads the row's OWN failed/exitCode signal.
+      expect(flowRun).toBeUndefined();
+      expect(describeReadyState(freshFailedChat, flowRun)).toEqual({ label: 'stopped early', tone: 'error' });
+    });
+
+    it('end-to-end: describeReadyState still reads the flow run when it postdates the chat', () => {
+      const done = makeRun({
+        id: 'run-done',
+        status: 'canceled',
+        session_id: 'sess-a',
+        ended_at: '2026-07-06 13:00:00',
+      });
+      const staleChat = makeQuickRow({
+        sessionId: 'sess-a',
+        rawStatus: 'failed', // the interrupted __quick__ chat's own dead status
+        restedAtIso: '2026-07-06T12:00:00.000Z',
+      });
+      const map = significantFlowRunBySession([done], new Map([['sess-a', staleChat.restedAtIso]]));
+      const flowRun = map.get('sess-a');
+      expect(flowRun).toEqual(done);
+      // The row's own `failed` status is ignored — the flow run's `canceled`
+      // status is what actually happened (TASK-226).
+      expect(describeReadyState(staleChat, flowRun)).toEqual({ label: 'stopped by you', tone: 'neutral' });
+    });
   });
 });
 

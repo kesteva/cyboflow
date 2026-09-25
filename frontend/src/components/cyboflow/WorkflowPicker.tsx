@@ -25,7 +25,7 @@ import { SessionActionToast } from './SessionActionToast';
 import { workflowTitleForName } from './wizard/workflowMeta';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
@@ -47,6 +47,7 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import {
   DEFAULT_PERMISSION_MODE,
+  DEFAULT_WORKFLOW_MODEL,
   QUICK_RUN_TYPE_KEY,
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,
