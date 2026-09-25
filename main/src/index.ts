@@ -1918,6 +1918,7 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
+    additionalOptions: { db: databaseService.getDb() },
     skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {

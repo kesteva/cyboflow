@@ -350,6 +350,72 @@ describe('Codex app-server run configuration', () => {
     expect(withIsolation).toEqual(without);
   });
 
+  describe('native agent roles (config.agents)', () => {
+    const roles = {
+      'cyboflow-implement': {
+        description: 'Implements one task.',
+        config_file: '/data/codex/agent-roles/cyboflow-implement-0123456789abcdef.toml',
+      },
+      'cyboflow-code-review': {
+        description: 'Reviews the lane diff.',
+        config_file: '/data/codex/agent-roles/cyboflow-code-review-fedcba9876543210.toml',
+      },
+    };
+    const runOptions = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    };
+    const configOf = (params: { config?: unknown }): Record<string, unknown> =>
+      params.config as Record<string, unknown>;
+
+    it('registers the roles next to the MCP config on thread/start AND thread/resume', () => {
+      const start = buildCodexAppServerThreadStartParams(
+        'run-1', runOptions, runtimeConfig, undefined, roles,
+      );
+      const resume = buildCodexAppServerThreadResumeParams(
+        'run-1', 'thread-1', runOptions, runtimeConfig, undefined, roles,
+      );
+      for (const params of [start, resume]) {
+        expect(configOf(params).agents).toEqual(roles);
+        // Registering roles must not displace the cyboflow bridge.
+        expect(configOf(params).mcp_servers).toMatchObject({ cyboflow: { required: true } });
+      }
+    });
+
+    it('omits the agents key entirely when no roles are passed or the map is empty', () => {
+      const without = buildCodexAppServerThreadStartParams('run-1', runOptions, runtimeConfig);
+      const empty = buildCodexAppServerThreadStartParams('run-1', runOptions, runtimeConfig, undefined, {});
+      expect(configOf(without)).not.toHaveProperty('agents');
+      expect(configOf(empty)).not.toHaveProperty('agents');
+      // A role-less spawn's configuration (and so its warm fingerprint) is unchanged.
+      expect(empty).toEqual(without);
+      expect(buildCodexAppServerThreadResumeParams(
+        'run-1', 'thread-1', runOptions, runtimeConfig, undefined, {},
+      ).config).not.toHaveProperty('agents');
+    });
+
+    it('never registers roles on a hermetic isolation thread, even when passed', () => {
+      const isolated = {
+        panelId: 'agent:thread-1',
+        sessionId: 'agent:thread-1',
+        worktreePath: '/Users/me',
+        prompt: 'hi',
+        isolation: 'agent' as const,
+        mcpScope: 'global-agent' as const,
+      };
+      const start = buildCodexAppServerThreadStartParams(
+        'agent:thread-1', isolated, runtimeConfig, { disabledMcpServers: [] }, roles,
+      );
+      const resume = buildCodexAppServerThreadResumeParams(
+        'agent:thread-1', 'codex-thread-1', isolated, runtimeConfig, { disabledMcpServers: [] }, roles,
+      );
+      expect(configOf(start)).not.toHaveProperty('agents');
+      expect(configOf(resume)).not.toHaveProperty('agents');
+    });
+  });
+
   it('leaves a resumed isolation thread under the same confinement', () => {
     const params = buildCodexAppServerThreadResumeParams('agent:thread-1', 'codex-thread-1', {
       panelId: 'agent:thread-1',
