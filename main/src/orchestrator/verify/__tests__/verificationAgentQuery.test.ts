@@ -37,6 +37,7 @@ const FAKE_CLAUDE_EXECUTABLE_PATH = '/fake/claude';
 
 import {
   createTranscriptAccumulator,
+  forbiddenDepCommandDenyMessage,
   makeDependencyCommandCanUseTool,
   makeVerificationAgentQuery,
   VERIFICATION_REPORT_JSON_SCHEMA,
@@ -256,6 +257,122 @@ describe('makeDependencyCommandCanUseTool — the §7.2 execution-time guard', (
   });
 });
 
+// ---------------------------------------------------------------------------
+// A1.4 explore guards — `guards` is OPTIONAL and gated per call: absent (the
+// pinned/legacy shape every existing test above uses) means no change from
+// before; present, each of its two members turns on exactly one extra deny.
+// ---------------------------------------------------------------------------
+
+describe('makeDependencyCommandCanUseTool — A1.4 explore guards (guards param)', () => {
+  const VERIFY_SET = ['Bash', 'Read', 'Grep', 'Glob'] as const;
+
+  it('guards absent ⇒ a kill/simctl command is allowed unchanged (no behavior change for pinned/legacy)', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET);
+
+    const killDecision = await decide(guard, 'Bash', { command: 'kill -9 1234' });
+    expect(killDecision).toEqual({ behavior: 'allow', updatedInput: { command: 'kill -9 1234' } });
+
+    const simctlDecision = await decide(guard, 'Bash', { command: 'xcrun simctl boot $VERIFY_SIM_UDID' });
+    expect(simctlDecision).toEqual({
+      behavior: 'allow',
+      updatedInput: { command: 'xcrun simctl boot $VERIFY_SIM_UDID' },
+    });
+  });
+
+  it('guards={} (every member absent) ⇒ same as guards absent', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, {});
+    const decision = await decide(guard, 'Bash', { command: 'kill -9 1234' });
+    expect(decision?.behavior).toBe('allow');
+  });
+
+  it('denyProcessKill: true denies a command-position kill/pkill/killall', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denyProcessKill: true });
+
+    const decision = await decide(guard, 'Bash', { command: 'lsof -ti :3000 | xargs kill -9' });
+    expect(decision?.behavior).toBe('deny');
+    if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+    expect(decision.message).toContain('lsof -ti :3000 | xargs kill -9');
+    expect(decision.message).toContain('harness-owned');
+    expect(decision.interrupt).toBeUndefined();
+  });
+
+  it('denyProcessKill: true still allows the documented false-positive shapes', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denyProcessKill: true });
+
+    for (const command of ['pnpm dev --kill-others', 'echo "kill this process"', '$VERIFY_DRIVER stop']) {
+      const decision = await decide(guard, 'Bash', { command });
+      expect(decision).toEqual({ behavior: 'allow', updatedInput: { command } });
+    }
+  });
+
+  it('denySimctlLifecycle: true denies an xcrun simctl lifecycle verb (including bare simctl)', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denySimctlLifecycle: true });
+
+    const decision = await decide(guard, 'Bash', { command: 'xcrun simctl terminate $VERIFY_SIM_UDID com.example.app' });
+    expect(decision?.behavior).toBe('deny');
+    if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+    expect(decision.message).toContain('xcrun simctl terminate $VERIFY_SIM_UDID com.example.app');
+    expect(decision.message).toContain('harness-owned');
+
+    const bareDecision = await decide(guard, 'Bash', { command: 'simctl boot $VERIFY_SIM_UDID' });
+    expect(bareDecision?.behavior).toBe('deny');
+  });
+
+  it('each guard is independently gated: denyProcessKill alone does not deny a simctl command', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denyProcessKill: true });
+    const decision = await decide(guard, 'Bash', { command: 'xcrun simctl boot $VERIFY_SIM_UDID' });
+    expect(decision?.behavior).toBe('allow');
+  });
+
+  it('the dependency deny still applies first, even with every explore guard on', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, {
+      denyProcessKill: true,
+      denySimctlLifecycle: true,
+    });
+    // Matches ALL THREE patterns, so only the order decides which message wins.
+    const command = 'pnpm install && xcrun simctl boot $VERIFY_SIM_UDID && kill -9 1234';
+    const decision = await decide(guard, 'Bash', { command });
+    expect(decision?.behavior).toBe('deny');
+    if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+    expect(decision.message).toBe(forbiddenDepCommandDenyMessage(command));
+  });
+
+  // Adversarial-review fix: the deny text is the instruction the agent sees at
+  // the moment of action, so in explore it must route to "unverifiable" (design
+  // A2), never contradict BUILD_RULE_EXPLORE with "build_failed".
+  it('words the dependency deny by guards.executionMode: explore → unverifiable, pinned/absent → build_failed', async () => {
+    const command = 'pod install';
+    const explore = await decide(makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { executionMode: 'explore' }), 'Bash', { command });
+    if (explore?.behavior !== 'deny') throw new Error('expected a deny');
+    expect(explore.message).toBe(forbiddenDepCommandDenyMessage(command, 'explore'));
+    expect(explore.message).toContain('"unverifiable"');
+    expect(explore.message).not.toContain('report outcome "build_failed"');
+
+    for (const guards of [{ executionMode: 'pinned' as const }, undefined]) {
+      const decision = await decide(makeDependencyCommandCanUseTool(VERIFY_SET, undefined, guards), 'Bash', { command });
+      if (decision?.behavior !== 'deny') throw new Error('expected a deny');
+      expect(decision.message).toContain('report outcome "build_failed"');
+    }
+  });
+
+  it('denyProcessKill reads quoting: a `sh -c "kill …"` body is denied, a quoted grep alternation and `timeout -s KILL` are not', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denyProcessKill: true });
+    expect((await decide(guard, 'Bash', { command: 'sh -c "kill -9 $(lsof -ti :3000)"' }))?.behavior).toBe('deny');
+    for (const command of ['timeout -s KILL 120 pnpm build', 'grep -E "error|kill" serve.log']) {
+      expect(await decide(guard, 'Bash', { command })).toEqual({ behavior: 'allow', updatedInput: { command } });
+    }
+  });
+
+  it('denySimctlLifecycle denies targeting "booted" / "all", and allows the leased UDID', async () => {
+    const guard = makeDependencyCommandCanUseTool(VERIFY_SET, undefined, { denySimctlLifecycle: true });
+    for (const command of ['xcrun simctl io booted screenshot shot.png', 'xcrun simctl openurl booted myapp://x', 'xcrun simctl shutdown all']) {
+      expect((await decide(guard, 'Bash', { command }))?.behavior).toBe('deny');
+    }
+    const command = 'xcrun simctl io $VERIFY_SIM_UDID screenshot shot.png';
+    expect(await decide(guard, 'Bash', { command })).toEqual({ behavior: 'allow', updatedInput: { command } });
+  });
+});
+
 describe('makeVerificationAgentQuery — sandbox wiring', () => {
   it('installs the dependency guard as canUseTool WITHOUT weakening the hermetic options', async () => {
     install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
@@ -287,6 +404,41 @@ describe('makeVerificationAgentQuery — sandbox wiring', () => {
     expect(denied?.behavior).toBe('deny');
     const allowed = await decide(canUseTool, 'Bash', { command: 'pnpm run build' });
     expect(allowed?.behavior).toBe('allow');
+  });
+
+  it('threads args.guards through to canUseTool (A1.4 explore guards)', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+
+    await fn({
+      prompt: 'p',
+      systemPrompt: 's',
+      cwd: '/wt',
+      allowedTools: ['Bash'],
+      env: {},
+      guards: { denyProcessKill: true, denySimctlLifecycle: true },
+    });
+
+    const canUseTool = (lastOptions ?? {}).canUseTool as CanUseTool | undefined;
+    if (!canUseTool) throw new Error('expected canUseTool to be installed');
+
+    const killDenied = await decide(canUseTool, 'Bash', { command: 'kill -9 1234' });
+    expect(killDenied?.behavior).toBe('deny');
+    const simctlDenied = await decide(canUseTool, 'Bash', { command: 'xcrun simctl boot $VERIFY_SIM_UDID' });
+    expect(simctlDenied?.behavior).toBe('deny');
+  });
+
+  it('omitting args.guards leaves kill/simctl commands allowed (pinned/legacy behavior)', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+
+    await fn({ prompt: 'p', systemPrompt: 's', cwd: '/wt', allowedTools: ['Bash'], env: {} });
+
+    const canUseTool = (lastOptions ?? {}).canUseTool as CanUseTool | undefined;
+    if (!canUseTool) throw new Error('expected canUseTool to be installed');
+
+    const killAllowed = await decide(canUseTool, 'Bash', { command: 'kill -9 1234' });
+    expect(killAllowed?.behavior).toBe('allow');
   });
 
   // Property, not a list: whatever the runner hands over, NO `mcp__*` name may

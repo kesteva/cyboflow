@@ -12,22 +12,41 @@
  * `mcpServers: {}` — an EMPTY MCP scope so every cyboflow-state write stays
  * harness-mediated), the `outputFormat: json_schema` for VerificationReportV1, the
  * packaged-build `pathToClaudeCodeExecutable`, and the §7.2 dependency-mutation
- * Bash guard (`canUseTool` — see makeDependencyCommandCanUseTool). The runner
- * passes only what it controls (prompt/systemPrompt/cwd/model/allowedTools/env);
- * this file bakes the rest so an edited agent prompt can never widen the sandbox.
+ * Bash guard (`canUseTool` — see makeDependencyCommandCanUseTool), which since
+ * runbook-optional-verification.md A1.4 also carries the two explore-only
+ * structural guards (process-kill, simctl lifecycle) when the request's
+ * `guards` asks for them. The runner passes only what it controls
+ * (prompt/systemPrompt/cwd/model/allowedTools/env/guards); this file bakes the
+ * rest so an edited agent prompt can never widen the sandbox.
  *
  * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call).
  */
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
-import { VerificationAgentQueryError, type VerificationAgentQueryFn } from './verificationAgentRunner';
-import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
+import {
+  VerificationAgentQueryError,
+  type VerificationAgentQueryArgs,
+  type VerificationAgentQueryFn,
+} from './verificationAgentRunner';
+import {
+  FORBIDDEN_DEP_COMMAND_PATTERN,
+  SIMCTL_LIFECYCLE_DENY_PATTERN,
+  forbiddenDepCommandDenyMessage,
+  forbiddenProcessKillDenyMessage,
+  forbiddenSimctlLifecycleDenyMessage,
+  isProcessKillCommand,
+} from './dependencyCommandGuard';
 import {
   ATTESTATION_KINDS,
   VERIFICATION_MODALITIES,
   VERIFICATION_REPORT_OUTCOMES,
 } from '../../../../shared/types/visualVerification';
+
+// Re-exported for API stability — the function itself now lives in
+// dependencyCommandGuard.ts (see that module's doc) so dependencyGuardShim.ts
+// can import it without pulling in this file's SDK-boundary imports.
+export { forbiddenDepCommandDenyMessage } from './dependencyCommandGuard';
 
 /**
  * Default per-deployment deadline (10 min, §5.4 step 6), used only when the request
@@ -330,37 +349,19 @@ export function createTranscriptAccumulator(): TranscriptAccumulator {
 }
 
 // ---------------------------------------------------------------------------
-// Dependency-mutation Bash guard (verification-setup-flow §7.2, "runner guard")
+// Dependency-mutation + A1.4 explore Bash guards (verification-setup-flow §7.2
+// "runner guard"; docs/proposals/runbook-optional-verification.md "A1.4
+// Explore guardrails" → "Structural guards (RS-8)"). The three patterns +
+// their deny messages live in dependencyCommandGuard.ts (imported above) —
+// see that module's doc for why they're colocated there instead of here.
 // ---------------------------------------------------------------------------
 
 /**
- * The deny message for a blocked dependency-mutating Bash command.
- *
- * It is written FOR THE AGENT, and every clause is load-bearing. It names the
- * exact command back (the agent composed it, possibly several turns ago, and
- * "denied" without a subject invites a shotgun retry). It states the rule and
- * WHY the rule exists — a snapshot's `node_modules` is a SYMLINK into a shared
- * dependency tree (the live sprint worktree, or the §7.2 prepared-set mirror),
- * so the write is never local to this verification. It closes off the
- * workarounds an agent reliably reaches for next (a different package manager,
- * a `cd` elsewhere, writing into `node_modules` by hand). And it names
- * the sanctioned exit: report `build_failed` carrying this message, which is a
- * DELIVERABLE-honest outcome a human can act on, rather than a green verdict
- * obtained by corrupting three sibling lanes.
- */
-export function forbiddenDepCommandDenyMessage(command: string): string {
-  return [
-    `Blocked: \`${command}\` mutates dependencies.`,
-    'Dependency install/rebuild is forbidden inside verification snapshots — deps are prepared and',
-    'ABI-rebuilt OUTSIDE the snapshot, so an install here would silently redo that work against the wrong ABI and burn your deadline.',
-    'Do not work around it (no alternate package manager, no cd elsewhere, no hand-editing node_modules):',
-    'if the deliverable cannot be built without it, report outcome "build_failed" with this message instead.',
-  ].join(' ');
-}
-
-/**
- * The EXECUTION-TIME half of the §7.2 dependency guard: a `canUseTool` callback
- * that refuses a `Bash` command matching {@link FORBIDDEN_DEP_COMMAND_PATTERN}.
+ * The EXECUTION-TIME half of the §7.2 dependency guard, now widened by A1.4 to
+ * carry two EXPLORE-ONLY structural guards on top: a `canUseTool` callback
+ * that refuses a `Bash` command matching {@link FORBIDDEN_DEP_COMMAND_PATTERN}
+ * unconditionally, plus — only when `guards` asks for it —
+ * {@link isProcessKillCommand} and {@link SIMCTL_LIFECYCLE_DENY_PATTERN}.
  *
  * WHY IT EXISTS ALONGSIDE THE ENQUEUE CHECK. `enqueueFromTask` already rejects a
  * composed task whose `build`/`serve` carry an install — but that only covers
@@ -368,13 +369,29 @@ export function forbiddenDepCommandDenyMessage(command: string): string {
  * Bash tool and, faced with a missing module, will reach for `pnpm install` on
  * its own initiative; no lint or enqueue-time validator can see a command that
  * does not exist until the agent types it. This callback sits where both meet:
- * the shell itself.
+ * the shell itself. The same reasoning applies to a live kill or a live simctl
+ * call — no enqueue-time check has ever seen a Bash command the agent has not
+ * typed yet.
  *
- * BOTH LAYERS SHARE ONE PATTERN, deliberately (see dependencyCommandGuard's
- * module doc). A widened pattern must widen both seams at once, or the guard
+ * BOTH THE DEPENDENCY PATTERN AND THE TWO EXPLORE PATTERNS ARE SHARED, SINGLE
+ * SOURCE OF TRUTH, deliberately (see dependencyCommandGuard's module doc). A
+ * widened pattern must widen every consuming seam at once, or the guard
  * silently stops covering the case someone just discovered.
  *
- * SCOPE, PRECISELY: `Bash` gets the content check on its string `command`; the
+ * `guards` IS ABSENT ⇒ NO CHANGE FROM BEFORE (existing callers/tests):
+ * `denyProcessKill`/`denySimctlLifecycle` default to no extra denies and the
+ * dependency deny keeps its pinned wording, so a caller that never sets
+ * `guards` sees exactly the dependency-only behavior. The runner sets
+ * `guards.executionMode` in every mode (it refuses nothing by itself), and the
+ * two deny flags only for an EXPLORE request (it decides which apply per
+ * modality — `denySimctlLifecycle` only for mobile). THE DEPENDENCY DENY STILL APPLIES FIRST, whatever `guards`
+ * says: a command that both installs a dependency AND kills a process is
+ * denied for the dependency reason, which is the more universally-true one.
+ * Its WORDING, though, follows `guards.executionMode`: explore routes the agent
+ * to `unverifiable`, pinned/legacy (or no mode at all) to `build_failed` —
+ * see forbiddenDepCommandDenyMessage's doc.
+ *
+ * SCOPE, PRECISELY: `Bash` gets the content checks on its string `command`; the
  * other members of the verify tool set (Read/Grep/Glob) are allowed untouched;
  * ANY tool outside `allowed` is DENIED. The default-deny matters because a
  * `canUseTool` handler becomes the decision-maker for every non-auto-approved
@@ -395,12 +412,15 @@ export function forbiddenDepCommandDenyMessage(command: string): string {
  * can_use_tool control-response and a bare `{ behavior: 'allow' }` fails as
  * `invalid_union`, reaching the model as an is_error tool_result rather than an
  * approval (see ClaudeCodeManager.makeCanUseTool for the same footgun). Echo the
- * input unchanged. `interrupt` is deliberately NOT set on deny: the agent should
- * keep going and either build without the install or report `build_failed`.
+ * input unchanged. `interrupt` is deliberately NOT set on any deny (dependency
+ * or explore-guard alike): the agent should keep going — build without the
+ * install, drive the app without the kill/simctl call, or report the honest
+ * outcome — never be interrupted mid-turn.
  */
 export function makeDependencyCommandCanUseTool(
   allowed: readonly string[],
   logger?: LoggerLike,
+  guards?: VerificationAgentQueryArgs['guards'],
 ): CanUseTool {
   return async (toolName, input) => {
     if (!allowed.includes(toolName)) {
@@ -421,9 +441,20 @@ export function makeDependencyCommandCanUseTool(
     if (toolName !== 'Bash') return { behavior: 'allow', updatedInput: input };
 
     const command = input.command;
-    if (typeof command === 'string' && FORBIDDEN_DEP_COMMAND_PATTERN.test(command)) {
-      logger?.warn('[verificationAgentQuery] denied a dependency-mutating Bash command', { command });
-      return { behavior: 'deny', message: forbiddenDepCommandDenyMessage(command) };
+    if (typeof command === 'string') {
+      // The dependency deny applies first and unconditionally — see the doc above.
+      if (FORBIDDEN_DEP_COMMAND_PATTERN.test(command)) {
+        logger?.warn('[verificationAgentQuery] denied a dependency-mutating Bash command', { command });
+        return { behavior: 'deny', message: forbiddenDepCommandDenyMessage(command, guards?.executionMode) };
+      }
+      if (guards?.denyProcessKill && isProcessKillCommand(command)) {
+        logger?.warn('[verificationAgentQuery] denied a process-kill Bash command (A1.4 explore guard)', { command });
+        return { behavior: 'deny', message: forbiddenProcessKillDenyMessage(command) };
+      }
+      if (guards?.denySimctlLifecycle && SIMCTL_LIFECYCLE_DENY_PATTERN.test(command)) {
+        logger?.warn('[verificationAgentQuery] denied a simctl-lifecycle Bash command (A1.4 explore guard)', { command });
+        return { behavior: 'deny', message: forbiddenSimctlLifecycleDenyMessage(command) };
+      }
     }
     return { behavior: 'allow', updatedInput: input };
   };
@@ -448,7 +479,7 @@ export function makeVerificationAgentQuery(
   logger?: LoggerLike,
   timeoutMs: number = VERIFICATION_AGENT_TIMEOUT_MS,
 ): VerificationAgentQueryFn {
-  return async ({ prompt, systemPrompt, cwd, model, allowedTools, env, timeoutMs: requestTimeoutMs, signal }) => {
+  return async ({ prompt, systemPrompt, cwd, model, allowedTools, env, timeoutMs: requestTimeoutMs, signal, guards }) => {
     // The scheduler's effective per-request deadline wins over the module default
     // (adversarial-review fix) — else a task deadline above 10 min is silently cut.
     const effectiveTimeoutMs = requestTimeoutMs ?? timeoutMs;
@@ -485,11 +516,13 @@ export function makeVerificationAgentQuery(
           strictMcpConfig: true,
           mcpServers: {},
           // §7.2 runner guard: refuse dependency-mutating Bash, default-deny any
-          // tool outside the verify set. Composed WITH the hermetic options above
-          // (it narrows what the agent may run; it never widens the sandbox), and
+          // tool outside the verify set, PLUS whichever A1.4 explore guards this
+          // request carries (absent on a pinned/legacy request — see the
+          // function's own doc). Composed WITH the hermetic options above (it
+          // narrows what the agent may run; it never widens the sandbox), and
           // mutually exclusive with `permissionPromptToolName`, which this file
           // sets nowhere.
-          canUseTool: makeDependencyCommandCanUseTool(allowedTools, logger),
+          canUseTool: makeDependencyCommandCanUseTool(allowedTools, logger, guards),
           pathToClaudeCodeExecutable: claudeExecutablePath,
           outputFormat: { type: 'json_schema', schema: VERIFICATION_REPORT_JSON_SCHEMA },
           abortController: controller,

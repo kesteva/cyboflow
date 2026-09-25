@@ -12,8 +12,9 @@
  * `sandbox: 'danger-full-access'` / `approvalPolicy: 'never'` with a turn-level
  * `sandboxPolicy: { type: 'dangerFullAccess' }` — parity with the Claude verifier's
  * actual (OS-unsandboxed) posture, since the verifier must build/serve/drive a real
- * deliverable. It is nevertheless HERMETIC in config terms: NO `config` is attached
- * to the thread, so there is no cyboflow MCP server and no cyboflow-state write path.
+ * deliverable. It is nevertheless HERMETIC in config terms: the thread's only `config`
+ * key is `allow_login_shell: false` (see startThread below), so there is no cyboflow
+ * MCP server and no cyboflow-state write path.
  * The workflow persona + immutable harness contract ride as `developerInstructions`.
  *
  * Like verificationAgentQuery, on timeout/error this THROWS a
@@ -518,8 +519,17 @@ export function makeCodexVerificationAgentQuery(
         turnSession.startThread({
           ...(args.cwd ? { cwd: args.cwd } : {}),
           // Parity with the Claude verifier's OS-unsandboxed posture; hermetic in
-          // config terms — NO `config` attached, so no cyboflow MCP server.
+          // config terms — no MCP server config is attached, so no cyboflow MCP
+          // server.
           sandbox: 'danger-full-access',
+          // The ONE config key: keep the shell tool out of LOGIN shells. A login
+          // shell re-sorts PATH on macOS (path_helper + `brew shellenv` put
+          // `/opt/homebrew/bin` back in front), which pushes the runner's
+          // dependency-guard PATH shim (dependencyGuardShim.ts, §A1.4 F8 — the
+          // ONLY dependency guard on this runtime) behind the real package
+          // managers. Measured on 0.153.3: the default puts homebrew first; this
+          // keeps the prepended shim dir ahead of it.
+          config: { allow_login_shell: false },
           approvalPolicy: 'never',
           // The workflow persona + immutable harness contract ride here.
           developerInstructions: args.systemPrompt,

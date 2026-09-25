@@ -194,8 +194,10 @@ describe('makeCodexVerificationAgentQuery', () => {
     expect(thread.approvalPolicy).toBe('never');
     expect(thread.ephemeral).toBe(true);
     expect(thread.developerInstructions).toBe(SYSTEM_PROMPT);
-    // Hermetic in config terms — NO cyboflow MCP server attached.
-    expect('config' in thread).toBe(false);
+    // Hermetic in config terms — NO cyboflow MCP server attached; the only
+    // config key keeps the shell tool out of login shells, so the
+    // dependency-guard PATH shim stays ahead of /opt/homebrew/bin.
+    expect(thread.config).toEqual({ allow_login_shell: false });
 
     const turn = asRecord(client.requests.find((r) => r.method === 'turn/start')?.params);
     expect(turn.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
