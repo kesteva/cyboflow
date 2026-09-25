@@ -13,6 +13,7 @@ import {
   parseVerificationTaskV1,
   requireProvenRunbookEngaged,
   resolveTaskModality,
+  taskJsonHasInferredApp,
 } from '../../../../shared/types/visualVerification';
 import type {
   MobileAppSpec,
@@ -48,6 +49,7 @@ import {
 } from './verificationSkipReasons';
 import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
 import { isBindableLeverName } from './runbookLevers';
+import { probeProjectSurface, tagInferredApp } from './projectSurfaceProbe';
 import type { VerificationRequestRow } from './verificationRequestRows';
 import type { TerminalDelivery } from './terminalDelivery';
 
@@ -981,6 +983,11 @@ export class AgentEngine {
         // levers bind the env and whose build/serve are hints (§A1.3).
         executionMode: selection.mode,
         ...(explore ? { exploreRecord: selection.exploreRecord } : {}),
+        // §A2 — an app block the surface probe INFERRED: the runner reads a
+        // bundle-id / scheme / dependency-step failure on it as unverifiable.
+        ...(modality === 'mobile' && taskJsonHasInferredApp(this.agentColumnsForRow(row.id).taskJson)
+          ? { appInferred: true }
+          : {}),
         // §5.3 — which half of the runner's pin check applies. A proof run may
         // legitimately execute an 'unproven-draft' record (proving it is the
         // point) but must pin to the EXACT version it was enqueued against;
@@ -1392,7 +1399,7 @@ export class AgentEngine {
     const { taskJson } = this.agentColumnsForRow(row.id);
     const stored = parseRawTaskObject(taskJson);
     const previous = stored?.[REDISPATCHED_FROM_KEY];
-    const app = needed === 'mobile' ? (redispatch.app ?? task.app ?? this.inferRedispatchApp(row)) : undefined;
+    const app = needed === 'mobile' ? (redispatch.app ?? task.app ?? (await this.inferRedispatchApp(row))) : undefined;
 
     let declined: string | null = null;
     if (proof.setupProof || proof.bootstrapProof) declined = 'a proof request is never re-dispatched';
@@ -1521,15 +1528,26 @@ export class AgentEngine {
   }
 
   /**
-   * PHASE 3 SEAM (runbook-optional-verification.md §A2/§A3): a `mobile`
-   * re-dispatch with no `app` on the report or the task runs the project
-   * surface probe here (`projectSurfaceProbe.ts`, not built yet) to infer the
-   * bundle id + scheme from the project's own Xcode files. Until then there is
-   * nothing to infer from, and the caller's terminal path — `unverifiable` —
-   * is the honest answer.
+   * §A2/§A3: a `mobile` re-dispatch with no `app` on the report or the task
+   * runs the project surface probe (`projectSurfaceProbe.ts`) over the run's
+   * worktree (the deploy that just returned required one) to infer the bundle
+   * id + scheme from the project's own Xcode files. The
+   * block comes back TAGGED as inferred, so the tag rides the requeued
+   * `task_json` and the re-drain maps an inference-shaped stand-up failure to
+   * `unverifiable` (§A2). A miss, an inconclusive project or no tree at all is
+   * `undefined`, and the caller's terminal path — `unverifiable` — is the
+   * honest answer.
    */
-  private inferRedispatchApp(_row: VerificationRequestRow): MobileAppSpec | undefined {
-    return undefined;
+  private async inferRedispatchApp(row: VerificationRequestRow): Promise<MobileAppSpec | undefined> {
+    const root = this.worktreePathForRun(row.run_id);
+    if (root === null) return undefined;
+    const found = await probeProjectSurface(root);
+    this.logger?.info('[VerificationScheduler] wrong-environment re-dispatch: project surface probe', {
+      requestId: row.id,
+      result: found.kind,
+      detail: found.detail,
+    });
+    return found.kind === 'ios-app' ? tagInferredApp(found.app) : undefined;
   }
 
   /**

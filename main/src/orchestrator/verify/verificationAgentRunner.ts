@@ -111,6 +111,7 @@ import {
   type VerifyExploreHints,
 } from './verifyHarnessContract';
 import { materializeDependencyGuardShim, type DependencyGuardShimOptions } from './dependencyGuardShim';
+import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
 
 // The contract text moved to its own module when it became mode-conditional
 // (runbook-optional-verification.md §A1.1); re-exported so every existing
@@ -337,6 +338,14 @@ export interface VerificationAgentRequest {
    * EXPLORE block. `null`/absent ⇒ no record exists.
    */
   exploreRecord?: ExploreRunbookRecord | null;
+  /**
+   * §A2 — `task.app` was INFERRED by the project-surface probe from the
+   * project's own Xcode files, not composed or runbook-supplied. The engine
+   * reads it off the RAW `task_json` (`taskJsonHasInferredApp`): the tag is an
+   * engine-only key the wire parser drops, so `task` itself never carries it.
+   * Drives {@link reclassifyInferredAppFailure}. Absent ⇒ false.
+   */
+  appInferred?: boolean;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -1784,6 +1793,68 @@ export function reapplyUnverifiableAfterDriveCoercion(
   return {
     report: { ...report, outcome: 'unverifiable', diagnosis: own.length > 0 ? `${head}. Agent: ${own}` : head },
     reapplied: true,
+  };
+}
+
+/**
+ * §A2 — the three ways a build/launch failure can be the INFERRED `app` block's
+ * fault rather than the change's, each keyed on the tool's own wording so a
+ * paraphrase in the agent's prose is not needed to match:
+ *   - `mobile-install`'s own refusal (driver/mobileCommands.ts) when the built
+ *     product's CFBundleIdentifier is not the inferred one;
+ *   - xcodebuild's refusal of a scheme the project does not have;
+ *   - a build that needs a forbidden dependency step — the guard's own deny
+ *     message ("… mutates dependencies"), or the forbidden command named.
+ */
+const INFERRED_APP_FAILURE_SIGNATURES: ReadonlyArray<{ reason: string; pattern: RegExp }> = [
+  { reason: 'a bundle-id mismatch at mobile-install', pattern: /\bbundle id mismatch\b/i },
+  // xcodebuild: `The project named "X" does not contain a scheme named "Y"`.
+  { reason: 'an unknown scheme', pattern: /does not contain a scheme named/i },
+  { reason: 'a forbidden dependency step', pattern: /\bmutates dependencies\b/i },
+  { reason: 'a forbidden dependency step', pattern: FORBIDDEN_DEP_COMMAND_PATTERN },
+];
+
+/**
+ * §A2 — ON AN INFERRED `app` BLOCK, a bundle-id mismatch at `mobile-install`,
+ * an unknown scheme, or a build that needs a forbidden dependency step is
+ * `unverifiable`, never `build_failed`. The block is the harness's own guess at
+ * the project (literal values read out of its Xcode files), so a failure that
+ * names exactly the parts of the guess that can be wrong — the id, the scheme —
+ * or an environment gap the snapshot cannot close is evidence against the
+ * GUESS, not against the change; a `build_failed` there would loop implement
+ * over a harness mistake. Every other `build_failed`/`launch_failed` (a compile
+ * break, a missing `CFBundleExecutable`) keeps its classification: the
+ * `e26dcc9`/`e8a7ef1` defects were real, and an inferred block must not hide
+ * them.
+ *
+ * Pure. Applies only to a `mobile` request whose block was inferred, and only
+ * to the two stand-up outcomes; the text searched is everything the agent
+ * reported about the failure (excerpt, diagnosis, feedback, issues). The
+ * rewritten report then maps through A4's `unverifiable` row, which for an
+ * unpinned (explore) request — the only kind that carries an inferred block —
+ * is an advisory `low_confidence`.
+ */
+export function reclassifyInferredAppFailure(
+  report: VerificationReportV1,
+  ctx: { appInferred: boolean; modality: VerificationModality },
+): { report: VerificationReportV1; reason: string | null } {
+  if (!ctx.appInferred || ctx.modality !== 'mobile') return { report, reason: null };
+  if (report.outcome !== 'build_failed' && report.outcome !== 'launch_failed') return { report, reason: null };
+  const evidence = [
+    report.buildLogExcerpt ?? '',
+    report.diagnosis ?? '',
+    report.feedback,
+    ...report.issues.map((issue) => issue.description),
+  ].join('\n');
+  const hit = INFERRED_APP_FAILURE_SIGNATURES.find((signature) => signature.pattern.test(evidence));
+  if (hit === undefined) return { report, reason: null };
+  const own = (report.buildLogExcerpt ?? report.feedback).trim();
+  const head =
+    `unverifiable: the iOS app block (bundle id + scheme) was INFERRED from the project's own Xcode files, ` +
+    `and the ${report.outcome} names ${hit.reason} — evidence against the inference, not against the change`;
+  return {
+    report: { ...report, outcome: 'unverifiable', diagnosis: own.length > 0 ? `${head}. Agent: ${own}` : head },
+    reason: hit.reason,
   };
 }
 
@@ -3669,12 +3740,24 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // (d1') §A4 once more over the COERCED behavior set: a `fail` whose only
       // failing behavior was a drive claim the harness just struck is an
       // `unverifiable`, not a judged defect.
-      const { report, reapplied } = reapplyUnverifiableAfterDriveCoercion(coercion.report, expectedIds.length, coerced);
-      if (reapplied) {
+      const reapply = reapplyUnverifiableAfterDriveCoercion(coercion.report, expectedIds.length, coerced);
+      if (reapply.reapplied) {
         logger?.info('[VerificationAgentRunner] fail with no failing behavior after drive coercion; unverifiable', {
           runId: req.runId,
           requestId: req.requestId,
           modality,
+          executionMode,
+        });
+      }
+      // (d1'') §A2 — a stand-up failure that indicts the INFERRED app block
+      // (its bundle id or scheme) or an environment gap is `unverifiable`.
+      const inferred = reclassifyInferredAppFailure(reapply.report, { appInferred: req.appInferred === true, modality });
+      const report = inferred.report;
+      if (inferred.reason !== null) {
+        logger?.info('[VerificationAgentRunner] stand-up failure on an inferred app block; unverifiable (§A2)', {
+          runId: req.runId,
+          requestId: req.requestId,
+          reason: inferred.reason,
           executionMode,
         });
       }

@@ -32,6 +32,7 @@ import type { ProvenRunbookRevision } from './verificationScheduler';
 import { captureSnapshotSha } from './snapshotProvisioner';
 import { findForbiddenTaskCommands } from './dependencyCommandGuard';
 import { taskDerivesEnvironment } from './bootstrapEligibility';
+import { probeProjectSurface, withInferredApp } from './projectSurfaceProbe';
 import {
   deriveLegacyInputFromTask,
   FALLBACK_CHAINS,
@@ -260,6 +261,47 @@ export function declaredWebModality(
 }
 
 /**
+ * The task shape {@link resolveEnqueueModality} reads: the shape discriminants,
+ * the build/serve that decide whether records are consulted, and the `target`
+ * the §A2 surface rung needs to see absent.
+ */
+export type EnqueueResolvableTask = Pick<VerificationTaskV1, 'build' | 'serve' | 'modality' | 'app' | 'target'>;
+
+/**
+ * What {@link resolveEnqueueModality} settled on (§A2): the modality AND the
+ * task that carries it. The task is the caller's own, untouched, except on a
+ * surface-probe hit, where it gains `modality: 'mobile'` and an inferred `app`
+ * block — which is what makes the row's shape-derived stamp agree with the
+ * answer. Every downstream consumer (the bootstrap decision, the MCP deferral,
+ * {@link prepareVerificationEnqueue}) must therefore use THIS task, never the
+ * one it passed in.
+ */
+export interface EnqueueModalityResolution<T> {
+  modality: VerificationModality;
+  task: T;
+}
+
+/**
+ * §A2 — may the project-surface probe fire for this request at all? Every
+ * condition but the last (no cdp-app or web record, which needs the store) is
+ * read off the request here:
+ *   - no USABLE declaration: nothing declared, a declared `mobile` with no
+ *     `app`, or a declared `native-screen` on a web-typed run — exactly the
+ *     cases {@link declaredWebModality} answers `null` for;
+ *   - no `app` and no `serve` of any form;
+ *   - no `target.url` / `target.htmlPath`.
+ * A task naming ANY surface of its own was composed for that surface, and the
+ * probe must never talk it out of it.
+ */
+export function surfaceProbeMayFire(type: VerificationType, task: EnqueueResolvableTask): boolean {
+  if (declaredWebModality(type, task) !== null) return false;
+  if (task.app !== undefined || task.serve !== undefined) return false;
+  const url = task.target?.url?.trim() ?? '';
+  const htmlPath = task.target?.htmlPath?.trim() ?? '';
+  return url.length === 0 && htmlPath.length === 0;
+}
+
+/**
  * Resolve the modality this enqueue runs under.
  *
  *   1. A declaration that MATCHES the task's own shape wins outright, with no
@@ -271,14 +313,27 @@ export function declaredWebModality(
  *      is adopted only when a proven record backs it (one probe, for exactly
  *      that modality); a task that declared nothing at all probes
  *      {@link RECORD_PROBE_ORDER}, `cdp-app` first.
- *   4. Failing all of that, the task's SHAPE — `web` for anything without
+ *   4. §A2 — the PROJECT SURFACE probe (`projectSurfaceProbe.ts`), after the
+ *      proven- and present-record probes and before the shape fallback: when
+ *      {@link surfaceProbeMayFire} holds and NO cdp-app or web record exists
+ *      for the project (whatever its status), an iOS application found in the
+ *      project's own Xcode files answers `mobile` with a synthesized, tagged
+ *      `app` block. It is the one rung that changes the TASK as well as the
+ *      modality, and it also applies to a surfaceless degenerate task (step 2
+ *      would otherwise hand the shiny-eagle rows `web`) and to a lane whose only
+ *      record is an unproven `mobile` one (the present rung would otherwise
+ *      answer `mobile` for a task with no `app`, which re-derives to `web`). A
+ *      miss, an inconclusive project or any probe error changes nothing.
+ *   5. Failing all of that, the task's SHAPE — `web` for anything without
  *      `serve.attach`, i.e. today's default.
  *
- * Every answer is therefore either the shape or a proven modality, which is the
- * stamp-consistency invariant this section's header spells out.
+ * Every answer is therefore either the shape, a proven modality, or `mobile`
+ * with the `app` block that makes the shape say so — the stamp-consistency
+ * invariant this section's header spells out.
  *
  * FAIL-SOFT BY CONSTRUCTION. No scheduler wired, or any throw out of the probe,
- * skips the record consultation entirely and falls through to the shape. This
+ * skips the record consultation entirely and falls through to the shape (the
+ * surface rung needs the record-presence answer, so it is skipped too). This
  * runs before a request row exists, on the lane's critical path, and the enqueue
  * seam's contract is NEVER THROWS; a resolution hiccup must cost the lane its
  * record-derived modality, never the lane itself.
@@ -286,20 +341,27 @@ export function declaredWebModality(
  * Logs at info WHICH precedence step decided, because that is the one fact that
  * makes a "no proven runbook for modality X" skip legible after the fact.
  */
-export async function resolveEnqueueModality(args: {
+export async function resolveEnqueueModality<T extends EnqueueResolvableTask | null>(args: {
   type: VerificationType;
-  task: Pick<VerificationTaskV1, 'build' | 'serve' | 'modality' | 'app'> | null;
+  task: T;
   projectId: number;
   runId: string;
   /** The requesting run's worktree, when it has one (the store's probe path). */
   probePath?: string;
+  /**
+   * §A2 — the tree the project-surface probe reads. Defaults to `probePath`;
+   * separate because the MCP path leaves `probePath` to the scheduler's own
+   * ladder yet still knows the run's worktree. Absent both ⇒ no surface rung.
+   */
+  surfaceRoot?: string;
   logger?: LoggerLike;
-}): Promise<VerificationModality> {
+}): Promise<EnqueueModalityResolution<T>> {
   const { logger, task } = args;
   // The modality the request row would be stamped with if NOTHING is merged into
   // the task: `scheduler.enqueue` re-derives the stamp from exactly this call.
   const shape = resolveTaskModality(args.type, task);
   const declared = declaredWebModality(args.type, task);
+  const keep = (modality: VerificationModality): EnqueueModalityResolution<T> => ({ modality, task });
 
   if (declared !== null && declared === shape) {
     logger?.info('[resolveEnqueueModality] modality declared by the request', {
@@ -308,10 +370,46 @@ export async function resolveEnqueueModality(args: {
       modality: declared,
       source: task?.modality === declared ? 'task.modality' : 'type-or-serve-shape',
     });
-    return declared;
+    return keep(declared);
   }
 
+  const surfaceRoot = args.surfaceRoot ?? args.probePath;
+  const mayProbeSurface = task !== null && surfaceRoot !== undefined && surfaceProbeMayFire(args.type, task);
+  /**
+   * The §A2 rung itself. The caller has ALREADY established that no cdp-app or
+   * web record exists; this only reads the project's files.
+   */
+  const probeSurface = async (): Promise<EnqueueModalityResolution<T> | null> => {
+    if (task === null || surfaceRoot === undefined) return null;
+    const found = await probeProjectSurface(surfaceRoot);
+    logger?.info('[resolveEnqueueModality] project surface probe', {
+      projectId: args.projectId,
+      runId: args.runId,
+      result: found.kind,
+      detail: found.detail,
+    });
+    if (found.kind !== 'ios-app') return null;
+    return { modality: 'mobile', task: withInferredApp(task as NonNullable<T>, found.app) };
+  };
+
   if (task === null || !taskDerivesEnvironment(task)) {
+    if (mayProbeSurface) {
+      // A surfaceless task: the records are still not consulted for a MERGE, but
+      // the rung's own precondition — no web-axis record — must be read.
+      try {
+        const scheduler = VerificationScheduler.tryGetInstance();
+        if (scheduler !== null && !(await webAxisRecordPresent(scheduler, args))) {
+          const inferred = await probeSurface();
+          if (inferred !== null) return inferred;
+        }
+      } catch (err) {
+        logger?.debug('[resolveEnqueueModality] surface probe unavailable; keeping the shape', {
+          projectId: args.projectId,
+          runId: args.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     logger?.info('[resolveEnqueueModality] degenerate task keeps its shape; records not consulted', {
       projectId: args.projectId,
       runId: args.runId,
@@ -319,7 +417,7 @@ export async function resolveEnqueueModality(args: {
       declared,
       source: 'no-environment',
     });
-    return shape;
+    return keep(shape);
   }
 
   // Either the composer declared a modality its own task shape does not express
@@ -345,7 +443,7 @@ export async function resolveEnqueueModality(args: {
             source: 'proven-record',
             runbookHash: revision.hash,
           });
-          return candidate;
+          return keep(candidate);
         }
       }
       // F4 ∘ F5 (Codex review of the fix round): with drift non-writing, a
@@ -365,14 +463,24 @@ export async function resolveEnqueueModality(args: {
             ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
           });
           if (present) {
+            // §A2 — an unproven `mobile` record is the only present one (the
+            // order put cdp-app and web first): the rung may still supply the
+            // `app` this lane has none of, under the same modality.
+            const inferred = candidate === 'mobile' && mayProbeSurface ? await probeSurface() : null;
             logger?.info('[resolveEnqueueModality] modality resolved from an unproven runbook record (bootstrap will re-prove or derive it)', {
               projectId: args.projectId,
               runId: args.runId,
               modality: candidate,
               source: 'present-record',
+              appInferred: inferred !== null,
             });
-            return candidate;
+            return inferred ?? keep(candidate);
           }
+        }
+        // §A2 — no record of ANY modality, so certainly no web-axis one.
+        if (mayProbeSurface) {
+          const inferred = await probeSurface();
+          if (inferred !== null) return inferred;
         }
       }
     }
@@ -393,7 +501,24 @@ export async function resolveEnqueueModality(args: {
     declared,
     source: 'shape-fallback',
   });
-  return shape;
+  return keep(shape);
+}
+
+/** §A2's record precondition: does a cdp-app or web record exist for the project, whatever its status? */
+async function webAxisRecordPresent(
+  scheduler: VerificationScheduler,
+  args: { projectId: number; runId: string; probePath?: string },
+): Promise<boolean> {
+  for (const modality of ['cdp-app', 'web'] as const) {
+    const present = await scheduler.runbookRecordPresent({
+      projectId: args.projectId,
+      runId: args.runId,
+      modality,
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+    });
+    if (present) return true;
+  }
+  return false;
 }
 
 /**
@@ -519,40 +644,56 @@ export async function prepareVerificationEnqueue(args: {
    * about `modality` and the proven runbook has to hold there too.
    */
   modality?: VerificationModality;
+  /**
+   * §A2 — the tree the project-surface rung reads when this function resolves
+   * the modality itself (see {@link resolveEnqueueModality}); defaults to
+   * `probePath`. Ignored when `modality` is supplied: that caller resolved (and
+   * passes) the task the rung already produced.
+   */
+  surfaceRoot?: string;
   logger?: LoggerLike;
 }): Promise<PreparedVerificationEnqueue> {
-  const { task, logger } = args;
-  if (task === undefined) return { ok: true, modality: resolveTaskModality(args.type, null) };
+  const { logger } = args;
+  const composedTask = args.task;
+  if (composedTask === undefined) return { ok: true, modality: resolveTaskModality(args.type, null) };
 
   // (1) §7.2 — the composer's own commands.
-  const composed = findForbiddenTaskCommands(task);
+  const composed = findForbiddenTaskCommands(composedTask);
   if (composed.length > 0) {
     return { ok: false, error: forbiddenCommandError(composed, 'task') };
   }
 
-  // The modality the row would be stamped with if nothing is merged in — the
-  // fallback the whole stamp-consistency invariant is written around.
-  const shape = resolveTaskModality(args.type, task);
-
   // (2) A caller-supplied pin is authoritative (setup proof) — stamp it verbatim.
   // Nothing is merged, so the row stamps the SHAPE and that is what this reports.
   if (args.pin !== undefined) {
-    return { ok: true, task, pin: args.pin, modality: shape };
+    return { ok: true, task: composedTask, pin: args.pin, modality: resolveTaskModality(args.type, composedTask) };
   }
 
   // (3) §5.2 seam 3 — the proven-runbook injection.
   const scheduler = VerificationScheduler.tryGetInstance();
-  if (scheduler === null) return { ok: true, task, modality: shape };
-  const resolved =
-    args.modality ??
-    (await resolveEnqueueModality({
-      type: args.type,
-      task,
-      projectId: args.projectId,
-      runId: args.runId,
-      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
-      ...(logger ? { logger } : {}),
-    }));
+  if (scheduler === null) {
+    return { ok: true, task: composedTask, modality: resolveTaskModality(args.type, composedTask) };
+  }
+  // §A2 — resolution may hand back a DIFFERENT task (an inferred `app` block);
+  // everything below reasons about that one, and it is what gets persisted.
+  const resolution =
+    args.modality !== undefined
+      ? { modality: args.modality, task: composedTask }
+      : await resolveEnqueueModality({
+          type: args.type,
+          task: composedTask,
+          projectId: args.projectId,
+          runId: args.runId,
+          ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+          ...(args.surfaceRoot !== undefined ? { surfaceRoot: args.surfaceRoot } : {}),
+          ...(logger ? { logger } : {}),
+        });
+  const resolved = resolution.modality;
+  const task = resolution.task;
+
+  // The modality the row would be stamped with if nothing is merged in — the
+  // fallback the whole stamp-consistency invariant is written around.
+  const shape = resolveTaskModality(args.type, task);
 
   /**
    * Resolve + merge ONE candidate modality, or answer null.
@@ -859,18 +1000,27 @@ export async function enqueueTaskVerification(
   // like every other collaborator call in this never-throws seam.
   const carriesCallerPin = opts.runbookHash !== undefined && opts.runbookLocalVersion !== undefined;
   const isProofRequest = carriesCallerPin || opts.setupProof === true || opts.bootstrapProof === true;
+  //
+  // §A2 — resolution returns the TASK too: a project-surface hit adds an
+  // inferred `app` block, and the bootstrap, the preparation and the row must
+  // all see that task, not the composed one.
   let modality: VerificationModality;
+  let resolvedTask: VerificationTaskV1 = composedTask;
   try {
-    modality = isProofRequest
-      ? resolveTaskModality(type, composedTask)
-      : await resolveEnqueueModality({
-          type,
-          task: composedTask,
-          projectId,
-          runId,
-          probePath: worktreePath,
-          ...(logger ? { logger } : {}),
-        });
+    if (isProofRequest) {
+      modality = resolveTaskModality(type, composedTask);
+    } else {
+      const resolution = await resolveEnqueueModality({
+        type,
+        task: composedTask,
+        projectId,
+        runId,
+        probePath: worktreePath,
+        ...(logger ? { logger } : {}),
+      });
+      modality = resolution.modality;
+      resolvedTask = resolution.task;
+    }
   } catch (err) {
     logger?.warn('[enqueueTaskVerification] modality resolution threw; falling back to the task shape', {
       runId,
@@ -878,6 +1028,7 @@ export async function enqueueTaskVerification(
       error: err instanceof Error ? err.message : String(err),
     });
     modality = resolveTaskModality(type, composedTask);
+    resolvedTask = composedTask;
   }
 
   // (3a) The RUNBOOK BOOTSTRAP (lane-runbook-bootstrap.md §12 steps 1–8).
@@ -912,7 +1063,7 @@ export async function enqueueTaskVerification(
         runId,
         laneTaskRef,
         modality,
-        task: composedTask,
+        task: resolvedTask,
         probePath: worktreePath,
       });
       if (outcome.kind !== 'not-attempted') {
@@ -979,7 +1130,7 @@ export async function enqueueTaskVerification(
       projectId,
       runId,
       type,
-      task: composedTask,
+      task: resolvedTask,
       ...(opts.runbookHash !== undefined && opts.runbookLocalVersion !== undefined
         ? { pin: { hash: opts.runbookHash, localVersion: opts.runbookLocalVersion } }
         : {}),
@@ -994,9 +1145,10 @@ export async function enqueueTaskVerification(
       laneTaskRef,
       error: err instanceof Error ? err.message : String(err),
     });
-    // Unpinned and unmerged ⇒ the row stamps the composed task's own shape, so
-    // that — not the resolved value — is the honest modality to report back.
-    prepared = { ok: true, task: composedTask, modality: resolveTaskModality(type, composedTask) };
+    // Unpinned and unmerged ⇒ the row stamps the resolved task's own shape (the
+    // composed one plus any §A2 inferred `app`), so that — not the resolved
+    // value — is the honest modality to report back.
+    prepared = { ok: true, task: resolvedTask, modality: resolveTaskModality(type, resolvedTask) };
   }
   if (!prepared.ok) {
     logger?.warn('[enqueueTaskVerification] composed task rejected at enqueue; skipping visual verification', {
@@ -1020,7 +1172,7 @@ export async function enqueueTaskVerification(
     });
     modality = prepared.modality;
   }
-  const task: VerificationTaskV1 = prepared.task ?? composedTask;
+  const task: VerificationTaskV1 = prepared.task ?? resolvedTask;
   const input = deriveLegacyInputFromTask(task, laneTaskRef);
   // THE KEY MUST CARRY A GENERATION FOR A BOOTSTRAP PROOF (mig 105).
   //

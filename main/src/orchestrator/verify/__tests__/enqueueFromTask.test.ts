@@ -28,7 +28,7 @@ import {
 } from '../enqueueFromTask';
 import { VerifyRunbookStore } from '../runbookStore';
 import { checkRunbookPin } from '../verificationAgentRunner';
-import { parseVerificationTaskV1, VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
+import { parseVerificationTaskV1, taskJsonHasInferredApp, VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { MobileAppSpec, VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
@@ -891,10 +891,12 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
     expect(readRow(result.requestId).enqueue_key).toBe('run-pf1:TASK-1:1');
   });
 
-  it('the scheduler reports the decision it would act on', async () => {
+  it('the scheduler reports the decision it would act on (kill switch ON: the pre-explore derive)', async () => {
     seedRun(db, { runId: 'run-pf2' });
+    // §A1 kill switch: with it engaged, authoring is reachable again (§A7), so
+    // this pins the pre-explore decision byte for byte.
     initScheduler(db, undefined, {
-      config: { ...baseConfig, autoBootstrapRunbook: true },
+      config: { ...baseConfig, autoBootstrapRunbook: true, requireProvenRunbook: true },
     });
     await expect(
       VerificationScheduler.getInstance().evaluateRunbookBootstrap({
@@ -909,6 +911,23 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
     // 'derive' authors a runbook, 'reprove' re-proves a drifted record and writes
     // nothing.
     ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: false });
+  });
+
+  it('with explore on (the default) a web request with no record declines authoring as explore-mode (§A7)', async () => {
+    seedRun(db, { runId: 'run-pf2e' });
+    initScheduler(db, undefined, {
+      config: { ...baseConfig, autoBootstrapRunbook: true },
+    });
+    await expect(
+      VerificationScheduler.getInstance().evaluateRunbookBootstrap({
+        projectId: 1,
+        runId: 'run-pf2e',
+        laneTaskRef: 'TASK-1',
+        modality: 'web',
+        task: serveTask,
+        probePath: gitRepo,
+      }),
+    ).resolves.toEqual({ proceed: false, reason: 'explore-mode' });
   });
 
   it('declines with the toggle OFF, which is the shipped default', async () => {
@@ -932,8 +951,10 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
     // §3.2 gate is what speaks, exactly as it did before this feature existed.
     const calls: Array<{ runId: string; laneTaskRef: string }> = [];
     seedRun(db, { runId: 'run-pf5' });
+    // Kill switch ON: under explore (the default) authoring is declined before
+    // any runner call (§A7), so the acting derive path is only reachable here.
     initScheduler(db, undefined, {
-      config: { ...baseConfig, autoBootstrapRunbook: true },
+      config: { ...baseConfig, autoBootstrapRunbook: true, requireProvenRunbook: true },
       runbookBootstrap: async ({ runId, laneTaskRef }) => {
         calls.push({ runId, laneTaskRef });
         return { kind: 'declined', reason: 'not-possible', detail: 'no dev server' };
@@ -1211,6 +1232,10 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     return { asked };
   }
 
+  /** The modality half of the resolution — every case here keeps the task as composed. */
+  const modalityOf = async (a: Parameters<typeof resolveEnqueueModality>[0]): Promise<VerificationModality> =>
+    (await resolveEnqueueModality(a)).modality;
+
   beforeEach(() => {
     seedRun(db, { runId: 'run-mod' });
     initScheduler(db);
@@ -1219,7 +1244,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('cdp-app proven only, nothing declared → cdp-app', async () => {
     const { asked } = fakeRecords(['cdp-app']);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('cdp-app');
     // Probed in order, and stopped at the first proven one.
     expect(asked).toEqual(['cdp-app']);
@@ -1228,7 +1253,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('web proven only, nothing declared → web', async () => {
     const { asked } = fakeRecords(['web']);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
     expect(asked).toEqual(['cdp-app', 'web']);
   });
@@ -1236,7 +1261,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('BOTH proven, nothing declared → cdp-app (a project with a proven app entry is an app)', async () => {
     fakeRecords(['cdp-app', 'web']);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('cdp-app');
   });
 
@@ -1253,7 +1278,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('BOTH web and mobile proven, nothing declared → web (mobile is never even asked)', async () => {
     const { asked } = fakeRecords(['web', 'mobile']);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
     expect(asked).toEqual(['cdp-app', 'web']);
     expect(asked).not.toContain('mobile');
@@ -1262,7 +1287,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('mobile proven ALONE, nothing declared → mobile (it is in the order, just last)', async () => {
     const { asked } = fakeRecords(['mobile']);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('mobile');
     expect(asked).toEqual(['cdp-app', 'web', 'mobile']);
   });
@@ -1272,7 +1297,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     // agrees, so step 1 of the precedence returns before any record is read.
     const { asked } = fakeRecords(['web']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'static-render-snapshot',
         task: { ...task, build: ['xcodebuild build -scheme Widgets'], app: MOBILE_APP },
         projectId: 1,
@@ -1288,7 +1313,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     // falls into the ordinary undeclared probe, in the ordinary order.
     const { asked } = fakeRecords(['web']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'interactive-web-behavior',
         task: { ...envTask, modality: 'mobile' },
         projectId: 1,
@@ -1301,7 +1326,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('nothing proven, nothing declared → web (the pre-F5 default)', async () => {
     fakeRecords([]);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
   });
 
@@ -1311,7 +1336,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     // downstream: no merge, and the degrade gate skips naming that modality.
     const { asked } = fakeRecords(['cdp-app']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'interactive-web-behavior',
         task: { ...envTask, modality: 'web' },
         projectId: 1,
@@ -1334,7 +1359,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('a DECLARED cdp-app on a web-shaped task is adopted when the cdp-app record is PROVEN', async () => {
     const { asked } = fakeRecords(['cdp-app']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'interactive-web-behavior',
         task: { ...envTask, modality: 'cdp-app' },
         projectId: 1,
@@ -1348,7 +1373,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
   it('a DECLARED cdp-app on a web-shaped task falls back to the SHAPE when nothing backs it', async () => {
     const { asked } = fakeRecords(['web']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'interactive-web-behavior',
         task: { ...envTask, modality: 'cdp-app' },
         projectId: 1,
@@ -1366,7 +1391,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     // actually proven, while the row still stamped `cdp-app`.
     const { asked } = fakeRecords(['cdp-app']);
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'interactive-web-behavior',
         task: { ...envTask, modality: 'web', serve: { cmd: 'electron .', attach: 'cdp' } },
         projectId: 1,
@@ -1383,7 +1408,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     const { asked } = fakeRecords(['cdp-app']);
     const degenerate: VerificationTaskV1 = { ...task, target: { htmlPath: 'dist/index.html' } };
     await expect(
-      resolveEnqueueModality({
+      modalityOf({
         type: 'static-render-snapshot',
         task: degenerate,
         projectId: 1,
@@ -1401,7 +1426,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
       return a.modality === 'cdp-app';
     });
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('cdp-app');
     expect(asked).toEqual(['cdp-app']);
   });
@@ -1410,7 +1435,7 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockResolvedValue(null);
     vi.spyOn(VerificationScheduler.getInstance(), 'runbookRecordPresent').mockResolvedValue(false);
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
   });
 
@@ -1419,14 +1444,14 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
       throw new Error('store exploded');
     });
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
   });
 
   it('with NO scheduler wired at all → web', async () => {
     VerificationScheduler._resetForTesting();
     await expect(
-      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+      modalityOf({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('web');
   });
 });
@@ -1878,5 +1903,203 @@ describe('laneEnqueueKeyFor (MCP-fired lane requests)', () => {
   it('is undefined for a ref naming no lane, so the request enqueues unkeyed as before', () => {
     expect(laneEnqueueKeyFor('run-1', 'TASK-999', lanes)).toBeUndefined();
     expect(laneEnqueueKeyFor('run-1', 'TASK-001', [])).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §A2 — modality from evidence: the project-surface rung
+// (docs/proposals/runbook-optional-verification.md §A2)
+// ---------------------------------------------------------------------------
+
+describe('§A2 — the project-surface rung inside resolveEnqueueModality', () => {
+  let iosRoot: string;
+  let webRoot: string;
+  const IOS_APP: MobileAppSpec = { platform: 'ios-simulator', bundleId: 'com.example.distractodo', scheme: 'Distractodo' };
+
+  beforeAll(() => {
+    iosRoot = mkdtempSync(join(tmpdir(), 'surface-ios-'));
+    writeFileSync(
+      join(iosRoot, 'project.yml'),
+      [
+        'targets:',
+        '  Distractodo:',
+        '    type: application',
+        '    platform: iOS',
+        '    settings:',
+        '      PRODUCT_BUNDLE_IDENTIFIER: com.example.distractodo',
+        '',
+      ].join('\n'),
+    );
+    webRoot = mkdtempSync(join(tmpdir(), 'surface-web-'));
+    writeFileSync(join(webRoot, 'package.json'), '{"name":"web"}');
+  });
+  afterAll(() => {
+    rmSync(iosRoot, { recursive: true, force: true });
+    rmSync(webRoot, { recursive: true, force: true });
+  });
+
+  /** No proven record anywhere; `present` lists the modalities with a record of some status. */
+  function wirePresence(present: VerificationModality[]): VerificationModality[] {
+    const asked: VerificationModality[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockResolvedValue(null);
+    vi.spyOn(VerificationScheduler.getInstance(), 'runbookRecordPresent').mockImplementation(async (a) => {
+      asked.push(a.modality);
+      return present.includes(a.modality);
+    });
+    return asked;
+  }
+
+  const buildTask: VerificationTaskV1 = { ...task, build: ['xcodebuild build -scheme Distractodo'] };
+  /** `root: null` ⇒ no tree at all. */
+  const resolve = (t: VerificationTaskV1, root: string | null = iosRoot) =>
+    resolveEnqueueModality({
+      type: 'interactive-web-behavior',
+      task: t,
+      projectId: 1,
+      runId: 'run-a2',
+      ...(root !== null ? { probePath: root } : {}),
+    });
+
+  beforeEach(() => {
+    seedRun(db, { runId: 'run-a2' });
+    initScheduler(db);
+  });
+
+  it('an undeclared build-only task on an iOS project with NO record → mobile + an inferred, tagged app', async () => {
+    wirePresence([]);
+    const out = await resolve(buildTask);
+    expect(out.modality).toBe('mobile');
+    expect(out.task.modality).toBe('mobile');
+    expect(out.task.app).toMatchObject(IOS_APP);
+    // The engine-only tag rides the persisted JSON; the rest of the task is the composer's.
+    expect(taskJsonHasInferredApp(JSON.stringify(out.task))).toBe(true);
+    expect(out.task.build).toEqual(buildTask.build);
+    expect(out.task.behaviors).toEqual(buildTask.behaviors);
+  });
+
+  it('a web-axis record of ANY status blocks the rung: the present record wins, task untouched', async () => {
+    wirePresence(['web']);
+    const out = await resolve(buildTask);
+    expect(out.modality).toBe('web');
+    expect(out.task).toBe(buildTask);
+  });
+
+  it('the shiny-eagle row — declared native-screen, no build, no target, web-typed — becomes mobile', async () => {
+    const asked = wirePresence([]);
+    const surfaceless: VerificationTaskV1 = { ...task, modality: 'native-screen' };
+    const out = await resolve(surfaceless);
+    expect(out.modality).toBe('mobile');
+    expect(out.task.modality).toBe('mobile');
+    expect(out.task.app).toMatchObject(IOS_APP);
+    // A surfaceless task still never probes the PROVEN records (nothing to merge),
+    // only the rung's web-axis presence precondition.
+    expect(asked).toEqual(['cdp-app', 'web']);
+  });
+
+  it('a surfaceless task with a web record present keeps its shape', async () => {
+    wirePresence(['cdp-app']);
+    const surfaceless: VerificationTaskV1 = { ...task, modality: 'native-screen' };
+    const out = await resolve(surfaceless);
+    expect(out.modality).toBe('web');
+    expect(out.task).toBe(surfaceless);
+  });
+
+  it('a declared mobile with NO app block gets the inferred app', async () => {
+    wirePresence([]);
+    const out = await resolve({ ...buildTask, modality: 'mobile' });
+    expect(out.modality).toBe('mobile');
+    expect(out.task.app).toMatchObject(IOS_APP);
+  });
+
+  it('an unproven MOBILE record alone: still mobile, and the rung supplies the missing app', async () => {
+    wirePresence(['mobile']);
+    const out = await resolve(buildTask);
+    expect(out.modality).toBe('mobile');
+    expect(out.task.app).toMatchObject(IOS_APP);
+  });
+
+  it.each<[string, VerificationTaskV1]>([
+    ['a usable declaration (web)', { ...buildTask, modality: 'web' }],
+    ['a serve of any form', { ...buildTask, serve: { cmd: 'pnpm dev --port ${PORT}' } }],
+    ['a target.url', { ...task, target: { url: 'http://localhost:3000' } }],
+    ['a target.htmlPath', { ...task, target: { htmlPath: 'dist/index.html' } }],
+  ])('never fires on a task with %s', async (_label, t) => {
+    wirePresence([]);
+    const out = await resolve(t);
+    expect(out.task).toBe(t);
+    expect(out.modality).toBe('web');
+  });
+
+  it('a project with no Xcode evidence changes nothing (probe miss)', async () => {
+    wirePresence([]);
+    const out = await resolve(buildTask, webRoot);
+    expect(out).toEqual({ modality: 'web', task: buildTask });
+  });
+
+  it('with no tree to read (no probePath / surfaceRoot) the rung never runs', async () => {
+    wirePresence([]);
+    const out = await resolve(buildTask, null);
+    expect(out).toEqual({ modality: 'web', task: buildTask });
+  });
+
+  it('surfaceRoot alone is enough (the MCP immediate path leaves probePath to the scheduler)', async () => {
+    wirePresence([]);
+    const out = await resolveEnqueueModality({
+      type: 'interactive-web-behavior',
+      task: buildTask,
+      projectId: 1,
+      runId: 'run-a2',
+      surfaceRoot: iosRoot,
+    });
+    expect(out.modality).toBe('mobile');
+  });
+
+  it('prepareVerificationEnqueue resolving itself returns the inferred task and settles on mobile', async () => {
+    wirePresence([]);
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-a2',
+      type: 'interactive-web-behavior',
+      task: buildTask,
+      surfaceRoot: iosRoot,
+    });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.modality).toBe('mobile');
+    expect(prepared.pin).toBeUndefined();
+    expect(prepared.task?.app).toMatchObject(IOS_APP);
+    expect(taskJsonHasInferredApp(JSON.stringify(prepared.task))).toBe(true);
+  });
+
+  it('enqueueTaskVerification hands the inferred task to the bootstrap AND persists it; the row stamps mobile', async () => {
+    seedRun(db, { runId: 'run-a2-lane' });
+    wirePresence([]);
+    const bootstrapTasks: VerificationTaskV1[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'maybeBootstrapRunbook').mockImplementation(async (a) => {
+      bootstrapTasks.push(a.task);
+      expect(a.modality).toBe('mobile');
+      return { kind: 'not-attempted' } as Awaited<ReturnType<VerificationScheduler['maybeBootstrapRunbook']>>;
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: buildTask,
+      runId: 'run-a2-lane',
+      laneTaskRef: 'TASK-A2',
+      attempt: 1,
+      worktreePath: iosRoot,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(bootstrapTasks).toHaveLength(1);
+    expect(bootstrapTasks[0].app).toMatchObject(IOS_APP);
+    const row = db
+      .prepare('SELECT task_json AS taskJson, modality FROM verification_requests WHERE id = ?')
+      .get(result.requestId) as { taskJson: string; modality: string | null };
+    expect(row.modality).toBe('mobile');
+    expect(taskJsonHasInferredApp(row.taskJson)).toBe(true);
+    const parsed = parseVerificationTaskV1(JSON.parse(row.taskJson));
+    expect(parsed.ok && parsed.task.app).toEqual(IOS_APP);
   });
 });

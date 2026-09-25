@@ -15,6 +15,9 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { Mutex } from '../../../utils/mutex';
 import { AgentEngine } from '../agentEngine';
@@ -31,7 +34,7 @@ import type {
   VerificationAgentRunResult,
 } from '../verificationAgentRunner';
 import { VERIFY_NO_RUNBOOK_REASON, VERIFY_RUNBOOK_DRIFTED_REASON } from '../verificationSkipReasons';
-import { VISUAL_VERIFY_DEFAULTS, parseVerificationTaskV1 } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS, parseVerificationTaskV1, taskJsonHasInferredApp } from '../../../../../shared/types/visualVerification';
 import type {
   MobileAppSpec,
   ResolvedVisualVerifyConfig,
@@ -1285,5 +1288,65 @@ describe('AgentEngine — A11 breaker reset', () => {
     await (await h.engine.processAgentRow(row(), INPUT)).work;
 
     expect(recordHealthyOutcome).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentEngine — a mobile re-dispatch infers its app from the project (§A2/§A3)', () => {
+  let h: Harness;
+  let root: string;
+  afterEach(() => {
+    h.db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function iosProject(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-redispatch-ios-'));
+    writeFileSync(
+      join(dir, 'project.yml'),
+      'targets:\n  Distractodo:\n    type: application\n    platform: iOS\n    settings:\n      PRODUCT_BUNDLE_IDENTIFIER: com.example.distractodo\n',
+    );
+    return dir;
+  }
+
+  it('no app on the report or the task: the surface probe over the run worktree supplies a TAGGED one, and the row requeues', async () => {
+    root = iosProject();
+    h = harness({ ...CAPABLE_HOST, worktreePathForRun: () => root }, { task: SERVE_TASK });
+    h.run.mockResolvedValueOnce(wrongEnvironment('mobile'));
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    const state = rowState(h.db);
+    expect(state).toMatchObject({ status: 'queued', modality: 'mobile' });
+    expect(JSON.parse(state.task_json ?? '{}')).toMatchObject({
+      modality: 'mobile',
+      app: { platform: 'ios-simulator', bundleId: 'com.example.distractodo', scheme: 'Distractodo' },
+      _redispatchedFrom: 'web',
+    });
+    // The engine-only tag rides the requeued task_json, so the re-drain knows the block is a guess.
+    expect(taskJsonHasInferredApp(state.task_json)).toBe(true);
+    expect(h.nudge).toHaveBeenCalledTimes(1);
+  });
+
+  it('a probe miss keeps the terminal unverifiable path', async () => {
+    root = mkdtempSync(join(tmpdir(), 'engine-redispatch-web-'));
+    writeFileSync(join(root, 'package.json'), '{}');
+    h = harness({ ...CAPABLE_HOST, worktreePathForRun: () => root }, { task: SERVE_TASK });
+    h.run.mockResolvedValueOnce(wrongEnvironment('mobile'));
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    const state = rowState(h.db);
+    expect(state.status).toBe('low_confidence');
+    expect(state.error_message).toContain('no iOS app');
+    expect(h.nudge).not.toHaveBeenCalled();
+  });
+
+  it('an app the report names wins over the probe (the probe never overrides one)', async () => {
+    root = iosProject();
+    h = harness({ ...CAPABLE_HOST, worktreePathForRun: () => root }, { task: SERVE_TASK });
+    h.run.mockResolvedValueOnce(wrongEnvironment('mobile', IOS_APP));
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    const state = rowState(h.db);
+    expect(JSON.parse(state.task_json ?? '{}')).toMatchObject({ app: IOS_APP });
+    expect(taskJsonHasInferredApp(state.task_json)).toBe(false);
   });
 });

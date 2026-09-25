@@ -357,6 +357,36 @@ export interface MobileAppSpec {
 export const DEFAULT_MOBILE_PRODUCT_GLOB = 'Build/Products/*-iphonesimulator/*.app';
 
 /**
+ * The ENGINE-ONLY key that tags an `app` block the harness INFERRED from the
+ * project's own Xcode files rather than one a composer or a proven runbook
+ * supplied (docs/proposals/runbook-optional-verification.md §A2). Stored as
+ * `"_inferred": true` INSIDE the persisted `task_json`'s `app` object.
+ *
+ * {@link parseMobileAppSpec} rebuilds the block from its known fields, so the
+ * key never survives a wire parse: a composer cannot claim its own guess was
+ * inferred (and so buy the lenient failure mapping an inferred block gets). The
+ * engine reads it off the RAW `task_json` with {@link taskJsonHasInferredApp}.
+ */
+export const INFERRED_APP_KEY = '_inferred';
+
+/**
+ * Does this RAW (unparsed) `task_json` carry an `app` block tagged
+ * {@link INFERRED_APP_KEY}? Total: `null`, unparseable or non-object content
+ * answers false.
+ */
+export function taskJsonHasInferredApp(taskJson: string | null): boolean {
+  if (taskJson === null) return false;
+  try {
+    const raw: unknown = JSON.parse(taskJson);
+    if (typeof raw !== 'object' || raw === null) return false;
+    const app = (raw as Record<string, unknown>).app;
+    return typeof app === 'object' && app !== null && (app as Record<string, unknown>)[INFERRED_APP_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The composed visual-verification task (§5.1). `behaviors` is the core
  * payload — the acceptance-criteria-derived steps the verification agent
  * independently drives and judges — and MAY be an empty array (a degenerate

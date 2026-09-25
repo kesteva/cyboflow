@@ -716,6 +716,18 @@ export class VerifyToolHandlers {
   ): Promise<{ ok: true; data: RequestVerificationAck } | { ok: false; error: string }> {
     const { runId, projectId, effectiveType, chain, authorizedPin } = args;
     let { task, input } = args;
+    // §A2 — the tree the project-surface rung reads when the preparation
+    // resolves the modality itself (the immediate path). The scheduler's own
+    // probe ladder keeps `probePath` unset there, as before; the deferred path
+    // already resolved the task and passes both.
+    let surfaceRoot: string | undefined;
+    if (args.modality === undefined && task !== undefined) {
+      try {
+        surfaceRoot = this.resolveRunWorktree(runId) ?? undefined;
+      } catch {
+        surfaceRoot = undefined;
+      }
+    }
     const prepared = await prepareVerificationEnqueue({
       projectId,
       runId,
@@ -727,6 +739,7 @@ export class VerifyToolHandlers {
       // threads them. Absent ⇒ the function resolves them itself, as before.
       ...(args.modality !== undefined ? { modality: args.modality } : {}),
       ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+      ...(surfaceRoot !== undefined ? { surfaceRoot } : {}),
       ...(this.logger ? { logger: this.logger } : {}),
     });
     if (!prepared.ok) return { ok: false, error: prepared.error };
@@ -1319,7 +1332,9 @@ export class VerifyToolHandlers {
 
       // F5 — the modality resolved ONCE and shared by the preflight, the
       // bootstrap and the eventual preparation, as the controller seam does.
-      const modality = await resolveEnqueueModality({
+      // §A2 — and the TASK with it: a project-surface hit carries an inferred
+      // `app` block the bootstrap and the deferred preparation must both see.
+      const resolution = await resolveEnqueueModality({
         type: args.effectiveType,
         task,
         projectId,
@@ -1327,7 +1342,9 @@ export class VerifyToolHandlers {
         probePath,
         ...(this.logger ? { logger: this.logger } : {}),
       });
-      const bootstrapArgs = { projectId, runId, laneTaskRef: lane.taskId, modality, task, probePath };
+      const { modality } = resolution;
+      const resolvedTask = resolution.task;
+      const bootstrapArgs = { projectId, runId, laneTaskRef: lane.taskId, modality, task: resolvedTask, probePath };
       const decision = await scheduler.evaluateRunbookBootstrap(bootstrapArgs);
       if (!decision.proceed) return null;
 
@@ -1337,7 +1354,13 @@ export class VerifyToolHandlers {
         laneTaskRef: input.taskRef,
         modality,
       });
-      void this.bootstrapThenEnqueue(scheduler, bootstrapArgs, { ...args, enqueueKey, modality, probePath });
+      void this.bootstrapThenEnqueue(scheduler, bootstrapArgs, {
+        ...args,
+        task: resolvedTask,
+        enqueueKey,
+        modality,
+        probePath,
+      });
       return ack;
     } catch (err) {
       this.logger?.warn('[Cyboflow MCP Query] request-verification: bootstrap deferral failed; enqueuing now', {
