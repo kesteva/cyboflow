@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../utils/cn';
 import { X } from 'lucide-react';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 export interface ModalProps {
   isOpen: boolean;
@@ -40,6 +41,9 @@ export const Modal: React.FC<ModalProps> = ({
   if (instanceIdRef.current === null) {
     instanceIdRef.current = Symbol('modal');
   }
+
+  // A native web view paints above all DOM; hide it while this modal is open.
+  useOcclusion(isOpen, 'modal');
 
   // Register/unregister this instance on the escape stack while open, so
   // nested modals can tell whether they're the top-most one. Re-opening

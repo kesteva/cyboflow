@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import type { ContextMenuPayload } from '../types/session';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface ContextMenuPosition {
   x: number;
@@ -39,6 +40,10 @@ export const ContextMenuProvider: React.FC<ContextMenuProviderProps> = ({ childr
     position: null,
     payload: null,
   });
+
+  // The menu is a `fixed z-50` element at cursor coords — a native web view
+  // would paint over it, so hide the view while any menu is open.
+  useOcclusion(menuState.type !== null, 'context-menu');
 
   const openMenu = useCallback((type: 'session' | 'folder', payload: ContextMenuPayload, position: ContextMenuPosition) => {
     // Close any existing menu before opening a new one

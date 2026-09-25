@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { useOcclusion } from './useOcclusion';
 
 interface UseResizableOptions {
   defaultWidth: number;
@@ -29,6 +30,9 @@ export function useResizable({
 
   const [width, setWidth] = useState(getInitialWidth);
   const [isResizing, setIsResizing] = useState(false);
+  // A native web view swallows mouse events once the cursor crosses it, which
+  // would lose this drag's mouseup — hide it for the duration of the drag.
+  useOcclusion(isResizing, 'resize');
 
   // Save width to localStorage
   useEffect(() => {

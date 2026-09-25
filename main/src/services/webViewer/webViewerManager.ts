@@ -247,6 +247,10 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
           window.contentView.addChildView(view);
           this.applyBounds(record);
         } else {
+          // Hand keyboard focus back to the app before detaching: an overlay
+          // opening over a focused page (the occlusion path) would otherwise
+          // get no keystrokes — Escape included — until the user clicks it.
+          if (view.webContents.isFocused()) window.webContents.focus();
           window.contentView.removeChildView(view);
         }
       }

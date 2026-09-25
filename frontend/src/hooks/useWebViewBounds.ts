@@ -13,10 +13,16 @@
  * window's `getZoomFactor()`. Deriving the factor here from `devicePixelRatio`
  * would be wrong — that is zoomFactor × display scaleFactor.
  *
- * See docs/proposals/native-web-viewer.md §3.6.
+ * OCCLUSION: the view is also hidden while any overlay holds an occlusion lease
+ * (utils/occlusion.ts) — a native view paints above all DOM, so a modal or menu
+ * would otherwise render behind the page. Bounds keep being measured while
+ * occluded, so the view comes back at the right rect after a resize drag.
+ *
+ * See docs/proposals/native-web-viewer.md §3.6 and §3.7.
  */
 import { useEffect, useRef, type RefObject } from 'react';
 import { trpc } from '../trpc/client';
+import { useIsOccluded } from './useOcclusion';
 
 export interface UseWebViewBoundsOptions {
   tabId: string;
@@ -35,9 +41,11 @@ export function useWebViewBounds({ tabId, anchorRef, active }: UseWebViewBoundsO
   // Last pushed rect, so an observer firing with identical numbers (common on
   // scroll) does not round-trip to main.
   const lastRef = useRef<string>('');
+  const occluded = useIsOccluded();
+  const visible = active && !occluded;
 
   useEffect(() => {
-    void trpc.cyboflow.webViewer.setVisible.mutate({ tabId, visible: active }).catch(() => {
+    void trpc.cyboflow.webViewer.setVisible.mutate({ tabId, visible }).catch(() => {
       /* the tab may have closed underneath us */
     });
     return () => {
@@ -49,7 +57,7 @@ export function useWebViewBounds({ tabId, anchorRef, active }: UseWebViewBoundsO
         /* the tab may have closed underneath us */
       });
     };
-  }, [tabId, active]);
+  }, [tabId, visible]);
 
   useEffect(() => {
     if (!active) return;

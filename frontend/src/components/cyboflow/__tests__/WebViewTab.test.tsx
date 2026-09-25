@@ -9,8 +9,9 @@
  * (crashed / auth / TLS) render an explanation rather than an empty rect.
  */
 import '@testing-library/jest-dom';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { acquireOcclusion, resetOcclusionForTests } from '../../../utils/occlusion';
 import type { TabItem } from '../../../../../shared/types/centerPane';
 import type { WebTabSnapshot } from '../../../../../shared/types/webViewer';
 
@@ -74,6 +75,8 @@ beforeEach(() => {
   onTabStateSubscribe.mockReturnValue({ unsubscribe: vi.fn() });
 });
 
+afterEach(() => resetOcclusionForTests());
+
 describe('WebViewTab', () => {
   it('renders the bounds anchor keyed to the tab id', () => {
     render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
@@ -102,6 +105,22 @@ describe('WebViewTab', () => {
     // Only the ACTIVE tab's body is mounted, so an unmount means the user
     // switched tabs — a view left visible would paint over the new one.
     expect(setVisibleMutate).toHaveBeenCalledWith({ tabId: TAB.id, visible: false });
+  });
+
+  it('hides the view while an overlay holds an occlusion lease, and restores it after', async () => {
+    // A native view paints above all DOM: a modal left showing would render
+    // BEHIND the page. §3.7.
+    render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
+    await waitFor(() =>
+      expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: true }),
+    );
+    let release: () => void = () => {};
+    act(() => {
+      release = acquireOcclusion('test-modal');
+    });
+    expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: false });
+    act(() => release());
+    expect(setVisibleMutate).toHaveBeenLastCalledWith({ tabId: TAB.id, visible: true });
   });
 
   it('never makes an inactive tab visible', async () => {
