@@ -52,6 +52,7 @@ import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { useArtifactHtml } from '../../hooks/useArtifactHtml';
 import { useArtifactsList } from '../../hooks/useArtifactsList';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
+import { gateDeclineOutcome } from '../../utils/gateActionPolicy';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -1555,8 +1556,16 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
       // (TASK-222) stamps WHICH control answered the gate into payload_json
       // (`resolvedSurface`) so a post-mortem can tell this artifact-tab pair
       // apart from the queue/session cards.
+      //
+      // The decline path is routed through the shared `gateDeclineOutcome`
+      // (utils/gateActionPolicy.ts), not a bare 'reject' literal — this gate is
+      // discriminated to `approve-plan` only today, so it always resolves to
+      // 'reject', but it keeps this control from silently reintroducing the
+      // swift-bison class of bug if a future gate reusing this artifact ever
+      // declares a loopback.
       setSubmitting(true);
-      resolve(projectId, gateItem.id, { outcome: kind, surface: ARTIFACT_GATE_SURFACE }).then((result) => {
+      const outcome = kind === 'reject' ? gateDeclineOutcome(gateItem) : kind;
+      resolve(projectId, gateItem.id, { outcome, surface: ARTIFACT_GATE_SURFACE }).then((result) => {
         setSubmitting(false);
         if (result === null) setSubmitError('Failed to submit.');
       });
@@ -2763,6 +2772,11 @@ function parseApproveIdeasIdeas(payloadJson: string | null): ApproveIdeasArtifac
 
 const GATE_SOURCE_APPROVE_IDEAS = 'gate:human-step:approve-ideas';
 
+// TASK-222: a stable surface id, mirroring ARTIFACT_GATE_SURFACE — stamped into
+// payload_json (`resolvedSurface`) so a post-mortem can tell this per-idea
+// verdict grid apart from the queue/session cards and the other artifact tabs.
+const ARTIFACT_APPROVE_IDEAS_SURFACE = 'artifact:approve-ideas';
+
 /**
  * The gate's authoritative batch ref list (`DecisionPayload.ideaRefs`), when the
  * review item carries one. Falls back to null so the caller can fall back to the
@@ -3012,7 +3026,7 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
     }
     setSubmitting(true);
     setSubmitError(null);
-    resolve(projectId, gateItem.id, { verdicts }).then((result) => {
+    resolve(projectId, gateItem.id, { verdicts, surface: ARTIFACT_APPROVE_IDEAS_SURFACE }).then((result) => {
       setSubmitting(false);
       // The hook stores the server's real message (e.g. "blocked: resolve the
       // pending size guards first") in its own error state; the alert below
@@ -3204,6 +3218,11 @@ function parseApproveDesignsDesigns(payloadJson: string | null): ApproveDesignsA
 }
 
 const GATE_SOURCE_APPROVE_DESIGNS = 'gate:human-step:approve-designs';
+
+// TASK-222: a stable surface id, mirroring ARTIFACT_GATE_SURFACE above — stamped
+// into payload_json (`resolvedSurface`) so a post-mortem can tell this per-idea
+// verdict grid apart from the queue/session cards and the decomposed-stories tab.
+const ARTIFACT_APPROVE_DESIGNS_SURFACE = 'artifact:approve-designs';
 
 /**
  * The gate's authoritative batch ref list (`DecisionPayload.designRefs`), when
@@ -3458,7 +3477,7 @@ function ApproveDesignsBody({ artifact, projectId }: { artifact: Artifact; proje
     }
     setSubmitting(true);
     setSubmitError(null);
-    resolve(projectId, gateItem.id, { verdicts }).then((result) => {
+    resolve(projectId, gateItem.id, { verdicts, surface: ARTIFACT_APPROVE_DESIGNS_SURFACE }).then((result) => {
       setSubmitting(false);
       // The hook stores the server's real message (e.g. "blocked: resolve the
       // pending size guards first") in its own error state; the alert below

@@ -93,12 +93,14 @@ vi.mock('../../../trpc/client', () => ({
 // Import after mocks so vi.mock hoisting is in effect.
 import { IdeaPickerModal } from '../IdeaPickerModal';
 import { trpc } from '../../../trpc/client';
+import { IDEA_PICKER_MODAL_DRAFT_KEY } from '../../../utils/ideaDraftStorage';
 
 const mockList = vi.mocked(trpc.cyboflow.tasks.list.query);
 const mockCreate = vi.mocked(trpc.cyboflow.tasks.create.mutate);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   mockList.mockResolvedValue(structuredClone(ITEMS));
   mockCreate.mockResolvedValue({ taskId: 'IDEA-NEW' });
 });
@@ -358,5 +360,136 @@ describe('IdeaPickerModal — multi-select planner mode', () => {
     // The mixed-large warning/split affordance never renders in this host.
     expect(screen.queryByTestId('plan-separately-IDEA-B')).not.toBeInTheDocument();
     expect(screen.queryByTestId('plan-separately-warning-IDEA-B')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "New idea" draft persistence (accidental-close survives) — mirrors
+// NewTaskDialog's draft-persistence coverage.
+// ---------------------------------------------------------------------------
+
+async function openAndSwitchToNew(projectId = 1, onClose = vi.fn(), onPicked = vi.fn()) {
+  const utils = render(<IdeaPickerModal isOpen projectId={projectId} onClose={onClose} onPicked={onPicked} />);
+  await screen.findByLabelText('Select idea');
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('idea-picker-mode-new'));
+  });
+  return { ...utils, onClose, onPicked };
+}
+
+describe('IdeaPickerModal — "New idea" draft persistence', () => {
+  it('preserves the draft after Cancel and restores it on a fresh mount against the same project', async () => {
+    const { unmount, onClose } = await openAndSwitchToNew();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'draft title' } });
+      fireEvent.change(screen.getByLabelText('Idea body'), { target: { value: 'draft body' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Unmount (the real close path) and remount fresh, as the host does the
+    // next time it opens this modal.
+    unmount();
+
+    render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} defaultMode="new" />);
+    expect(await screen.findByLabelText('Idea title')).toHaveValue('draft title');
+    expect(screen.getByLabelText('Idea body')).toHaveValue('draft body');
+  });
+
+  it('survives picking an existing idea — handlePickExisting leaves the draft untouched', async () => {
+    const { onPicked } = await openAndSwitchToNew();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'kept title' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-mode-pick'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-1']);
+    expect(mockCreate).not.toHaveBeenCalled();
+
+    const raw = localStorage.getItem(IDEA_PICKER_MODAL_DRAFT_KEY);
+    expect(raw).toBeTruthy();
+    expect((JSON.parse(raw as string) as { title: string }).title).toBe('kept title');
+  });
+
+  it('restores only when projectId matches; a mismatch renders blank and leaves the stored draft untouched', async () => {
+    const first = await openAndSwitchToNew(1);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'project-1 draft' } });
+    });
+    first.unmount();
+
+    // A different project sees no draft — blank fields.
+    mockList.mockResolvedValue(structuredClone(ITEMS));
+    const mismatch = render(
+      <IdeaPickerModal isOpen projectId={2} onClose={vi.fn()} onPicked={vi.fn()} defaultMode="new" />,
+    );
+    expect(await screen.findByLabelText('Idea title')).toHaveValue('');
+    mismatch.unmount();
+
+    // The original project's stored draft was left untouched and is still restorable.
+    mockList.mockResolvedValue(structuredClone(ITEMS));
+    render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} defaultMode="new" />);
+    expect(await screen.findByLabelText('Idea title')).toHaveValue('project-1 draft');
+  });
+
+  it('defaultMode still governs the opening tab even with a restored draft present', async () => {
+    const first = await openAndSwitchToNew(1);
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'x' } });
+    });
+    first.unmount();
+
+    mockList.mockResolvedValue(structuredClone(ITEMS));
+    // defaultMode defaults to 'pick' — a restored draft must not force-switch to 'new'.
+    render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} />);
+    expect(await screen.findByLabelText('Select idea')).toBeInTheDocument();
+    expect(screen.getByTestId('idea-picker-mode-pick')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByLabelText('Idea title')).not.toBeInTheDocument();
+  });
+
+  it('a successful create clears the persisted draft', async () => {
+    const { onPicked } = await openAndSwitchToNew();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'submit me' } });
+    });
+    expect(localStorage.getItem(IDEA_PICKER_MODAL_DRAFT_KEY)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-NEW']);
+    expect(localStorage.getItem(IDEA_PICKER_MODAL_DRAFT_KEY)).toBeNull();
+  });
+
+  it('a malformed or shape-invalid persisted draft does not crash the component', async () => {
+    localStorage.setItem(IDEA_PICKER_MODAL_DRAFT_KEY, '{not valid json');
+    const r1 = render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} />);
+    await screen.findByLabelText('Select idea');
+    r1.unmount();
+
+    // Parseable JSON, but the wrong shape (missing pendingKey/attachments).
+    localStorage.setItem(IDEA_PICKER_MODAL_DRAFT_KEY, JSON.stringify({ projectId: 1, title: 'x' }));
+    mockList.mockResolvedValue(structuredClone(ITEMS));
+    const r2 = render(<IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} />);
+    await screen.findByLabelText('Select idea');
+    r2.unmount();
+  });
+
+  it('the write effect does not call localStorage.setItem on a re-render with unchanged draft content', async () => {
+    const { rerender, onClose, onPicked } = await openAndSwitchToNew();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Idea title'), { target: { value: 'stable' } });
+    });
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    await act(async () => {
+      rerender(<IdeaPickerModal isOpen projectId={1} onClose={onClose} onPicked={onPicked} />);
+    });
+    expect(setItemSpy).not.toHaveBeenCalled();
+    setItemSpy.mockRestore();
   });
 });

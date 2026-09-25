@@ -95,6 +95,13 @@ function createInsightsDb(): Database.Database {
       -- migration 048: non-NULL when this run pinned a specific A/B variant
       -- (excluded from tuning-level attribution — see selectTuningLevelUsage).
       variant_id TEXT,
+      -- migration 037: per-run model pin (Claude alias, or a Codex/OMP model id
+      -- when the launch pinned one); NULL = no pin. migrations 062/063: the
+      -- provider/runtime this run spawned with — TASK-290's result-usage fallback
+      -- in selectDailyModelUsage reads all three to label a Codex/OMP bucket.
+      model TEXT,
+      agent_provider TEXT NOT NULL DEFAULT 'claude',
+      agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
       ended_at DATETIME
@@ -224,13 +231,19 @@ interface SeedRunOpts {
   tuningLevel?: string | null;
   /** workflow_runs.variant_id (migration 048); non-null = a pinned A/B variant run. */
   variantId?: string | null;
+  /** workflow_runs.model (migration 037); null/omitted = no pin. */
+  model?: string | null;
+  /** workflow_runs.agent_provider (migration 062); defaults to 'claude'. */
+  agentProvider?: string;
+  /** workflow_runs.agent_runtime (migration 063); defaults to 'claude-sdk'. */
+  agentRuntime?: string;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, model, agent_provider, agent_runtime, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
@@ -242,6 +255,9 @@ function seedRun(db: Database.Database, opts: SeedRunOpts): void {
     opts.specHash ?? null,
     opts.tuningLevel ?? null,
     opts.variantId ?? null,
+    opts.model ?? null,
+    opts.agentProvider ?? 'claude',
+    opts.agentRuntime ?? 'claude-sdk',
     opts.createdAt ?? null,
     opts.startedAt ?? null,
     opts.endedAt ?? null,
@@ -503,6 +519,7 @@ function resultPayload(
   turns: number | null,
   opts: {
     sessionId?: string;
+    inputTokens?: number;
     outputTokens?: number;
     modelUsage?: Record<string, { outputTokens?: number }>;
   } = {},
@@ -510,8 +527,14 @@ function resultPayload(
   const payload: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false };
   if (cost !== null) payload.total_cost_usd = cost;
   if (turns !== null) payload.num_turns = turns;
-  // A usage block on the result MUST be ignored by the token sums.
-  payload.usage = { input_tokens: 99999, output_tokens: opts.outputTokens ?? 88888 };
+  // A usage block on the result is ignored by selectRunUsageRollups' primary
+  // (assistant-side) token sums UNLESS the run reported no assistant usage at
+  // all, in which case it is the ONLY source (the result-usage fallback) — see
+  // scanRawEventRollups / selectDailyModelUsage's TASK-290 fallback pass.
+  payload.usage = {
+    input_tokens: opts.inputTokens ?? 99999,
+    output_tokens: opts.outputTokens ?? 88888,
+  };
   if (opts.sessionId !== undefined) payload.session_id = opts.sessionId;
   if (opts.modelUsage !== undefined) payload.modelUsage = opts.modelUsage;
   return payload;
@@ -530,6 +553,23 @@ function reportStepPayload(
     { type: 'tool_use', id: 'tu_1', name: toolName, input: { step_id: stepId } },
   ];
   return base;
+}
+
+/**
+ * A datetime N days ago (relative to SQLite's own `now`, not the test host
+ * clock — matches how the helpers under test compute their own windows), at
+ * `hhmmss`. First 10 chars of `ts` are the day. Shared by every describe block
+ * that needs fixtures inside/outside a `datetime('now', '-N days')` window
+ * (selectDailyModelUsage's day-window and selectWorkflowUsageStats' TASK-290
+ * follow-up date window) rather than each hand-rolling its own relative date.
+ */
+function daysAgoAtWindow(
+  db: Database.Database,
+  n: number,
+  hhmmss = '10:00:00',
+): { day: string; ts: string } {
+  const day = (db.prepare(`SELECT date('now', ?) AS d`).get(`-${n} days`) as { d: string }).d;
+  return { day, ts: `${day} ${hhmmss}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1529,11 @@ describe('selectWorkflowUsageStats', () => {
     db = createInsightsDb();
   });
 
+  /** Local wrapper over the module-level `daysAgoAtWindow` closing over this describe's `db`. */
+  function daysAgoAt(n: number, hhmmss = '10:00:00'): { day: string; ts: string } {
+    return daysAgoAtWindow(db, n, hhmmss);
+  }
+
   it('aggregates usage and cost across a workflow runs', () => {
     seedWorkflow(db, { id: 'wf-1', name: 'Sprint' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
@@ -1532,10 +1577,12 @@ describe('selectWorkflowUsageStats', () => {
 
   it('honors the limitRunsPerWorkflow window', () => {
     seedWorkflow(db, { id: 'wf-1' });
-    // 3 runs each with usage; window of 2 → only the 2 most recent counted.
-    seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: '2026-06-01 10:00:00' });
-    seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: '2026-06-02 10:00:00' });
-    seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: '2026-06-03 10:00:00' });
+    // 3 runs each with usage, all inside the 30-day date window; row-cap window
+    // of 2 → only the 2 most recent counted. Relative dates (not fixed literals)
+    // so this stays inside the date window regardless of when the suite runs.
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: daysAgoAt(3).ts });
+    seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: daysAgoAt(2).ts });
+    seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 1, output: 0 }));
     seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 2, output: 0 }));
     seedEvent(db, 'r3', 'assistant', assistantPayload({ input: 3, output: 0 }));
@@ -1544,6 +1591,23 @@ describe('selectWorkflowUsageStats', () => {
     expect(stats.runsWithUsage).toBe(2);
     // most recent 2 = r3(3) + r2(2) → avg 2.5 → rounded 3 (banker-agnostic round).
     expect(stats.avgTotalTokens).toBe(3);
+  });
+
+  it('excludes a run older than the 30-day date window even though it has usage (TASK-290 follow-up)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    // rOld is 31 days old — outside the window the daily-usage chart also
+    // applies — and must NOT be counted even though it carries real usage and
+    // the limitRunsPerWorkflow row cap has plenty of headroom.
+    seedRun(db, { id: 'rOld', workflowId: 'wf-1', createdAt: daysAgoAt(31).ts });
+    seedEvent(db, 'rOld', 'assistant', assistantPayload({ input: 1000, output: 0 }), daysAgoAt(31).ts);
+    // rRecent is inside the window.
+    seedRun(db, { id: 'rRecent', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
+    seedEvent(db, 'rRecent', 'assistant', assistantPayload({ input: 10, output: 0 }), daysAgoAt(1).ts);
+
+    const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
+    expect(stats.runsWithUsage).toBe(1);
+    expect(stats.avgTotalTokens).toBe(10);
+    expect(stats.totalTokens).toBe(10);
   });
 
   it('qualifies a run via its materialized run_usage row even with no raw_events', () => {
@@ -2151,12 +2215,9 @@ describe('selectDailyModelUsage', () => {
     db = createInsightsDb();
   });
 
-  /** A datetime in the window, N days ago, at 10:00 — first 10 chars are the day. */
+  /** Local wrapper over the module-level `daysAgoAtWindow` closing over this describe's `db`. */
   function daysAgoAt(n: number, hhmmss = '10:00:00'): { day: string; ts: string } {
-    const day = (
-      db.prepare(`SELECT date('now', ?) AS d`).get(`-${n} days`) as { d: string }
-    ).d;
-    return { day, ts: `${day} ${hhmmss}` };
+    return daysAgoAtWindow(db, n, hhmmss);
   }
 
   it('returns [] on an empty DB', () => {
@@ -2354,6 +2415,268 @@ describe('selectDailyModelUsage', () => {
     expect(points).toHaveLength(1);
     expect(points[0].totalTokens).toBe(6);
     expect(points[0].assistantMessageCount).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-290: result/agent_result usage fallback for providers that never
+  // report tokens on an assistant message (Codex, OMP).
+  // -------------------------------------------------------------------------
+
+  it("buckets a Codex-only run's terminal result.usage under 'codex:<model>', not 'unknown'", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    // Codex reports usage ONLY on the terminal result — no assistant-type rows at all.
+    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'codex:gpt-5-codex',
+        inputTokens: 400,
+        outputTokens: 100,
+        totalTokens: 500,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it('does not let a subagent_usage snapshot suppress the same run\'s Codex result.usage fallback (TASK-290)', () => {
+    // A runtime-mix-shaped run: one step reported a nested subagent_usage
+    // snapshot (never counted as an "assistant message"), and the run's
+    // Codex step reports its turn usage on the terminal result — exactly the
+    // combination that a too-broad "any assistant-side usage event"
+    // suppression guard would wrongly drop.
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('claude-sonnet-5', { input: 50, output: 10 }), t0.ts);
+    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ day: t0.day, model: 'claude-sonnet-5', inputTokens: 50, outputTokens: 10 }),
+        expect.objectContaining({ day: t0.day, model: 'codex:gpt-5-codex', inputTokens: 400, outputTokens: 100 }),
+      ]),
+    );
+    expect(points).toHaveLength(2);
+  });
+
+  it("falls back to agent_runtime for the codex bucket label when the run pinned no model", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: null,
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 2 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toHaveLength(1);
+    expect(points[0].model).toBe('codex:codex-sdk');
+  });
+
+  it("buckets an OMP-only run's terminal agent_result.usage under 'omp:<model>'", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    // OMP reports its per-turn usage on 'agent_result', not 'result'.
+    seedEvent(
+      db,
+      'r1',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'omp:gpt-5-mini',
+        inputTokens: 60,
+        outputTokens: 15,
+        totalTokens: 75,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it('does NOT double-count a Claude run that carries both assistant usage and a result.usage (regression)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    // The SAME run's terminal result restates a usage block — MUST be ignored
+    // entirely (the run already reported assistant-side usage in this window).
+    seedEvent(db, 'r1', 'result', resultPayload(0.02, 1, { inputTokens: 9999, outputTokens: 8888 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      {
+        day: t0.day,
+        model: 'claude-opus-4-5',
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+        assistantMessageCount: 1,
+      },
+    ]);
+  });
+
+  it('keeps a Codex fallback run scoped to its own project', () => {
+    seedWorkflow(db, { id: 'wf-a', projectId: 1 });
+    seedWorkflow(db, { id: 'wf-b', projectId: 2 });
+    seedRun(db, {
+      id: 'ra',
+      workflowId: 'wf-a',
+      projectId: 1,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'ra', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 5 }), t0.ts);
+
+    expect(selectDailyModelUsage(dbAdapter(db), 2, 30)).toEqual([]);
+    const scoped = selectDailyModelUsage(dbAdapter(db), 1, 30);
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0].model).toBe('codex:gpt-5-codex');
+  });
+
+  it('buckets a mixed 30-day window of Claude, Codex, and OMP runs into three provider-labelled buckets — unknown stays 0', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r-claude', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    seedRun(db, {
+      id: 'r-codex',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    seedRun(db, {
+      id: 'r-omp',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r-claude',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(
+      db,
+      'r-omp',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    const models = points.map((p) => p.model).sort();
+    expect(models).toEqual(['claude-opus-4-5', 'codex:gpt-5-codex', 'omp:gpt-5-mini']);
+    expect(points.find((p) => p.model === 'unknown')).toBeUndefined();
+    expect(points.find((p) => p.model === 'claude-opus-4-5')).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+    });
+    expect(points.find((p) => p.model === 'codex:gpt-5-codex')).toMatchObject({
+      inputTokens: 400,
+      outputTokens: 100,
+      totalTokens: 500,
+    });
+    expect(points.find((p) => p.model === 'omp:gpt-5-mini')).toMatchObject({
+      inputTokens: 60,
+      outputTokens: 15,
+      totalTokens: 75,
+    });
+  });
+
+  it('chart totalTokens sum equals the real per-workflow card total (selectWorkflowUsageStats) for the same window (Codex/OMP included, no drops or double-counts)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r-claude', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    seedRun(db, {
+      id: 'r-codex',
+      workflowId: 'wf-1',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      model: 'gpt-5-codex',
+    });
+    seedRun(db, {
+      id: 'r-omp',
+      workflowId: 'wf-1',
+      agentProvider: 'omp',
+      agentRuntime: 'omp-sdk',
+      model: 'gpt-5-mini',
+    });
+    const t0 = daysAgoAt(0);
+    seedEvent(
+      db,
+      'r-claude',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+      t0.ts,
+    );
+    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(
+      db,
+      'r-omp',
+      'agent_result',
+      { type: 'agent_result', provider: 'omp', usage: { input_tokens: 60, output_tokens: 15 } },
+      t0.ts,
+    );
+
+    const chartTotal = selectDailyModelUsage(dbAdapter(db), null, 30).reduce(
+      (sum, p) => sum + p.totalTokens,
+      0,
+    );
+    // Exercises the ACTUAL per-workflow card query (selectWorkflowUsageStats),
+    // not a hand-picked run-id list fed straight to selectRunUsageRollups — the
+    // card query applies its own recent-runs selection (including, since
+    // TASK-290's follow-up, the SAME 30-day date window the chart above uses),
+    // so this is the only form of the assertion that would catch a drift
+    // between the two (e.g. a run older than 30 days that the card counts but
+    // the chart excludes, or vice versa).
+    const [cardStats] = selectWorkflowUsageStats(dbAdapter(db), null);
+    const cardTotal = cardStats.totalTokens ?? 0;
+    expect(chartTotal).toBe(cardTotal);
+    expect(chartTotal).toBe(120 + 500 + 75);
   });
 });
 

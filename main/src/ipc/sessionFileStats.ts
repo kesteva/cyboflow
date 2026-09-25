@@ -23,10 +23,16 @@
  * same files for the same session, and a card that disagreed with the panel
  * beside it is the bug this whole module exists to fix. Isolating them would
  * need a dirty-tree baseline captured at session start, which nothing records.
+ *
+ * TASK-278: the Diff tab's own base is USER-SELECTABLE (BaseSelector,
+ * persisted client-side), so `base_commit` alone stopped being "the" honest
+ * base — it is only ever the session's branch point, which can drift weeks
+ * stale of what the panel beside the card is actually showing. `baseRef`
+ * (threaded through from the persisted selection) is now tried FIRST, ahead
+ * of `base_commit`, so the two never silently disagree again.
  */
-import type { GitDiffManager } from '../services/gitDiffManager';
+import { resolveGitRefToSha, type GitDiffManager } from '../services/gitDiffManager';
 import type { Logger } from '../utils/logger';
-import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 
 /** The `files` block of the sessions:get-statistics payload, minus executionCount. */
 export interface SessionFileStats {
@@ -50,37 +56,13 @@ export async function resolveSessionDiffBaseRef(
   candidates: Array<string | null | undefined>,
 ): Promise<string | null> {
   for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      assertNotOptionLike(candidate, 'base ref candidate');
-    } catch {
-      // A `-`-prefixed candidate would be parsed by git as an OPTION, not a
-      // value (TASK-208) — reject it locally rather than even attempting to
-      // resolve it, and try the next candidate.
-      continue;
-    }
-    try {
-      // `^{commit}` forces a commit-ish resolution, so a branch name, a tag and
-      // a raw sha all validate the same way; --quiet keeps git silent on miss;
-      // --end-of-options forces the value position (TASK-208). Return the
-      // RESOLVED sha (rev-parse's stdout), not the candidate string, so the
-      // caller diffs against a concrete commit rather than a moving/ambiguous
-      // ref name. If rev-parse succeeds with empty stdout (git-cannot-happen
-      // in practice, but this function must never hand back the raw candidate
-      // string on any path), fall through and try the next candidate instead.
-      const resolved = (
-        await runGitAsync(worktreePath, [
-          'rev-parse',
-          '--verify',
-          '--quiet',
-          END_OF_OPTIONS,
-          `${candidate}^{commit}`,
-        ])
-      ).trim();
-      if (resolved) return resolved;
-    } catch {
-      // Unresolvable in this worktree — try the next candidate.
-    }
+    // THE shared ref-safety resolver (TASK-208): rejects a `-`-prefixed
+    // candidate before git sees it, forces the value position with
+    // --end-of-options and a commit-ish via `^{commit}`, and returns the
+    // RESOLVED sha — never the raw candidate string — or null, in which case
+    // the next candidate is tried.
+    const resolved = await resolveGitRefToSha(worktreePath, candidate ?? undefined);
+    if (resolved) return resolved;
   }
   return null;
 }
@@ -94,33 +76,42 @@ export async function resolveSessionDiffBaseRef(
  */
 export async function computeSessionFileStats(params: {
   worktreePath: string | null | undefined;
+  /**
+   * Explicit override ref (TASK-278) — e.g. the user's BaseSelector selection
+   * for this session, persisted client-side and threaded through
+   * sessions.getStatistics. Tried FIRST, ahead of `baseCommit`, so the card
+   * agrees with whatever the Diff panel beside it is showing. Absent/null
+   * preserves today's fallback chain (`baseCommit`, then
+   * `resolveFallbackRef`) exactly.
+   */
+  baseRef?: string | null;
   baseCommit?: string | null;
   /**
-   * Ref to compare against when `baseCommit` does not resolve (or was never
-   * recorded, as for a main-repo session). Lazy on purpose: resolving it costs
-   * its own git child process, and this whole function runs on the stats poll,
-   * so a session whose `base_commit` still resolves — nearly all of them —
-   * never pays for it.
+   * Ref to compare against when neither `baseRef` nor `baseCommit` resolve (or
+   * were never recorded, as for a main-repo session). Lazy on purpose:
+   * resolving it costs its own git child process, and this whole function
+   * runs on the stats poll, so a session whose `baseRef`/`base_commit` still
+   * resolves — nearly all of them — never pays for it.
    */
   resolveFallbackRef?: () => Promise<string | null | undefined>;
   gitDiffManager: DiffStatsSource;
   logger?: Logger;
 }): Promise<SessionFileStats | null> {
-  const { worktreePath, baseCommit, resolveFallbackRef, gitDiffManager, logger } = params;
+  const { worktreePath, baseRef, baseCommit, resolveFallbackRef, gitDiffManager, logger } = params;
   if (!worktreePath) return null;
 
   try {
-    const baseRef =
-      (await resolveSessionDiffBaseRef(worktreePath, [baseCommit])) ??
+    const resolvedBaseRef =
+      (await resolveSessionDiffBaseRef(worktreePath, [baseRef, baseCommit])) ??
       (resolveFallbackRef
         ? await resolveSessionDiffBaseRef(worktreePath, [await resolveFallbackRef()])
         : null);
-    if (!baseRef) {
+    if (!resolvedBaseRef) {
       logger?.verbose(`[SessionFileStats] No resolvable base ref in ${worktreePath}`);
       return null;
     }
 
-    const { stats, changedFiles } = await gitDiffManager.getDiffStatsAgainstRef(worktreePath, baseRef);
+    const { stats, changedFiles } = await gitDiffManager.getDiffStatsAgainstRef(worktreePath, resolvedBaseRef);
     return {
       totalFilesChanged: stats.filesChanged,
       totalLinesAdded: stats.additions,

@@ -22,10 +22,14 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RunCenterPane } from '../RunCenterPane';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
+import { useRunAgentTargetsStore } from '../../../stores/runAgentTargetsStore';
+import { useReviewItemsSlice } from '../../../stores/reviewItemsSlice';
+import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { Artifact } from '../../../../../shared/types/artifacts';
+import { stepModelKey } from '../../../../../shared/types/agents';
 import type { WorkflowCanvasProps } from '../WorkflowCanvas';
 
 let reportBottomTabKind: ((kind: 'chat' | 'agent' | 'terminal' | 'data-stream') => void) | undefined;
@@ -48,9 +52,9 @@ vi.mock('../WorkflowCanvas', () => ({
 // A sprint/batch run hosts SprintSwimlaneCanvas INSTEAD of WorkflowCanvas, and
 // its PLAN / SPRINT-REVIEW columns are ordinary phases[].steps cards — so they
 // need the same `stepModels` map. Capture its props to pin that threading.
-let capturedSwimlaneProps: { stepModels?: unknown } | undefined;
+let capturedSwimlaneProps: { stepModels?: unknown; pausedStepId?: string | null } | undefined;
 vi.mock('../SprintSwimlaneCanvas', () => ({
-  SprintSwimlaneCanvas: (props: { stepModels?: unknown }) => {
+  SprintSwimlaneCanvas: (props: { stepModels?: unknown; pausedStepId?: string | null }) => {
     capturedSwimlaneProps = props;
     return <div data-testid="mock-swimlane-canvas" />;
   },
@@ -112,6 +116,7 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 const DEFINITION: WorkflowDefinition = { id: 'planner', phases: [] };
+const IMPLEMENT_KEY = stepModelKey('execute', 'implement');
 
 /** Minimal Artifact row for the auto-open / strand tests. */
 function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
@@ -162,6 +167,8 @@ function makePhaseState(definition: WorkflowDefinition | null): UseWorkflowPhase
 describe('RunCenterPane', () => {
   beforeEach(() => {
     useCenterPaneStore.setState({ bySession: {} });
+    useRunAgentTargetsStore.setState({ versionByRun: {} });
+    useReviewItemsSlice.setState({ items: [] });
     mockArtifacts = [];
     mockLoaded = true;
     reportBottomTabKind = undefined;
@@ -208,15 +215,107 @@ describe('RunCenterPane', () => {
     expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-2' });
   });
 
-  it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a stepId-keyed Map', async () => {
+  it('re-fetches runs.getStepModels when the run\'s agent-target override layer is bumped (switch/revert), keeping the old map until the new rows resolve', async () => {
+    getStepModelsQuery.mockResolvedValueOnce([{ stepId: 'implement', phaseId: 'execute', label: 'Sonnet 5', family: 'sonnet' }]);
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() =>
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'Sonnet 5', family: 'sonnet' }),
+    );
+    expect(getStepModelsQuery).toHaveBeenCalledTimes(1);
+
+    // A systemic-pause switch (or its Revert) bumps the run's version — the
+    // pane re-queries WITHOUT first dropping to null (no flicker back to the
+    // model-less row).
+    let resolveSecond: ((rows: unknown[]) => void) | undefined;
+    getStepModelsQuery.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSecond = resolve;
+      }),
+    );
+    act(() => {
+      useRunAgentTargetsStore.getState().bump('run-1');
+    });
+    await waitFor(() => expect(getStepModelsQuery).toHaveBeenCalledTimes(2));
+    expect(getStepModelsQuery).toHaveBeenNthCalledWith(2, { runId: 'run-1' });
+    expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'Sonnet 5', family: 'sonnet' });
+
+    await act(async () => {
+      resolveSecond?.([{ stepId: 'implement', phaseId: 'execute', label: 'gpt-5.5', family: 'other' }]);
+    });
+    await waitFor(() =>
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({ label: 'gpt-5.5', family: 'other' }),
+    );
+
+    // A bump for a DIFFERENT run is not this pane's signal.
+    act(() => {
+      useRunAgentTargetsStore.getState().bump('run-other');
+    });
+    await waitFor(() => expect(capturedWorkflowCanvasProps).toBeDefined());
+    expect(getStepModelsQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('derives pausedStepId from the run\'s PENDING gate:systemic-pause item and threads it to both canvases', async () => {
+    const pause: ReviewItem = {
+      id: 'rvw_pause',
+      project_id: 1,
+      run_id: 'run-1',
+      entity_type: null,
+      entity_id: null,
+      kind: 'decision',
+      status: 'pending',
+      blocking: true,
+      audience: 'human',
+      title: 'Paused: usage limit',
+      body: null,
+      severity: null,
+      priority: null,
+      staged_at: null,
+      selected: false,
+      source: 'gate:systemic-pause:implement',
+      payload: null,
+      created_at: '2026-09-23T00:00:00.000Z',
+      updated_at: '2026-09-23T00:00:00.000Z',
+      resolved_by: null,
+      resolution: null,
+    };
+    useReviewItemsSlice.setState({ items: [pause, { ...pause, id: 'rvw_other', run_id: 'run-2', source: 'gate:systemic-pause:ideas' }] });
+
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    await waitFor(() => expect(capturedWorkflowCanvasProps?.pausedStepId).toBe('implement'));
+
+    // The pause clears (resolved) → the card goes back to the ordering rule.
+    act(() => {
+      useReviewItemsSlice.setState({ items: [{ ...pause, status: 'resolved' }] });
+    });
+    await waitFor(() => expect(capturedWorkflowCanvasProps?.pausedStepId).toBeNull());
+
+    // A sprint (batch) run threads the same value into SprintSwimlaneCanvas.
+    act(() => {
+      useReviewItemsSlice.setState({ items: [pause] });
+    });
+    rerender(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ batch_id: 'batch-1' })}
+      />,
+    );
+    await waitFor(() => expect(capturedSwimlaneProps?.pausedStepId).toBe('implement'));
+  });
+
+  it('threads the resolved runs.getStepModels rows into WorkflowCanvas as a (phaseId, stepId)-keyed Map', async () => {
     getStepModelsQuery.mockResolvedValueOnce([
-      { stepId: 'implement', label: 'Opus 5', family: 'opus' },
+      { stepId: 'implement', phaseId: 'execute', label: 'Opus 5', family: 'opus' },
     ]);
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     await waitFor(() =>
-      expect(capturedWorkflowCanvasProps?.stepModels?.get('implement')).toEqual({
+      expect(capturedWorkflowCanvasProps?.stepModels?.get(IMPLEMENT_KEY)).toEqual({
         label: 'Opus 5',
         family: 'opus',
       }),
@@ -344,7 +443,6 @@ describe('RunCenterPane', () => {
         stepId: 'analyze-dependencies',
         stepName: 'Analyze dependencies',
         phaseId: 'plan',
-        agentKey: 'dependency-analyzer',
         label: 'Opus 5',
         family: 'opus',
       },
@@ -359,7 +457,7 @@ describe('RunCenterPane', () => {
     await waitFor(() => {
       expect(
         (capturedSwimlaneProps?.stepModels as Map<string, { label: string }> | null)?.get(
-          'analyze-dependencies',
+          stepModelKey('plan', 'analyze-dependencies'),
         ),
       ).toEqual({ label: 'Opus 5', family: 'opus' });
     });

@@ -55,6 +55,7 @@ import type {
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import { definitionMergesDecomposition } from './stepPrompt';
 import { composeDesignSurfaces } from './designSurfaces';
 import {
   isSolutionThoroughness,
@@ -249,6 +250,12 @@ export interface DefaultProgrammaticRunnerDeps {
         effort?: ReasoningEffort;
       }
     | undefined;
+  /**
+   * Per-step ROLE resolver for direct dispatch (programmatic/stepDispatch.ts):
+   * `(runId, agentKey)` → the role's effective system prompt. Threaded to the
+   * run's SpawnStepRunner as a run-bound thunk. Absent ⇒ every step delegates.
+   */
+  resolveStepRole?: (runId: string, agentKey: string) => { systemPrompt: string } | undefined;
   /**
    * LANE-TRIAGE task reader (autonomous lane rescue). Resolves a fan-out item's
    * ref / title / CURRENT body so the host can enrich the controller's bare
@@ -849,6 +856,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const resolveStepAgent = this.deps.resolveStepAgent
       ? (agentKey: string) => this.deps.resolveStepAgent!(ctx.runId, agentKey)
       : undefined;
+    const resolveStepRole = this.deps.resolveStepRole
+      ? (agentKey: string) => this.deps.resolveStepRole!(ctx.runId, agentKey)
+      : undefined;
 
     const runner = new SpawnStepRunner(
       this.deps.spawner,
@@ -899,6 +909,8 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
+        ...(resolveStepRole ? { resolveStepRole } : {}),
+        ...(definitionMergesDecomposition(def) ? { mergedDecomposition: true } : {}),
       },
       this.deps.logger,
     );

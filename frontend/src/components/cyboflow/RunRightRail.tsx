@@ -50,6 +50,7 @@ import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { COMPARISON_BASE_KEY, loadComparisonBaseMap } from '../../utils/comparisonBase';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { DiffGroupScope, WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 
@@ -97,31 +98,11 @@ const RAIL_MIN_WIDTH = 240;
 const RAIL_MAX_ABS_WIDTH = 640;
 /** localStorage key for the persisted rail width. Brand-new key — no migration. */
 const RAIL_WIDTH_KEY = 'cyboflow.runRightRail.width';
-/**
- * localStorage key for the persisted comparison-base SELECTION (TASK-218,
- * BaseSelector). Brand-new key — no migration. Holds a JSON-serialized
- * `Record<string, string | null>` map keyed by `selectedSessionId` when
- * present, else the active run id — never a single scalar, since different
- * sessions/runs can each have their own selection. This is the raw
- * SELECTION the user picked, never the RESOLVED base a panel's fetch echoes
- * back via onResolvedBase (see `resolvedBaseBySession` below) — the two
- * must never be conflated.
- */
-const COMPARISON_BASE_KEY = 'cyboflow.runRightRail.comparisonBase';
-
-/** Best-effort read of the persisted comparison-base selection map. Any
- * malformed/absent value degrades to an empty map, never a throw. */
-function loadComparisonBaseMap(): Record<string, string | null> {
-  if (typeof localStorage === 'undefined') return {};
-  const raw = localStorage.getItem(COMPARISON_BASE_KEY);
-  if (!raw) return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, string | null>) : {};
-  } catch {
-    return {};
-  }
-}
+// COMPARISON_BASE_KEY / loadComparisonBaseMap (TASK-218 BaseSelector
+// persistence) now live in ../../utils/comparisonBase — factored out
+// (TASK-278) so useSessionMetrics' quick-session-card poll reads the SAME
+// key the SAME way rather than duplicating the parsing logic. This file
+// stays the sole WRITER (handleComparisonBaseChange below).
 
 /** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
 function maxRailWidth(): number {

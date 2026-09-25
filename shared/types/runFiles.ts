@@ -134,6 +134,20 @@ export interface WorktreeStatusPayload {
   committedUnavailable: boolean;
 }
 
+/**
+ * Success payload of `cyboflow.sessionGit.getComparisonBases` (TASK-216) —
+ * the candidate bases the Diff tab's BaseSelector offers. Declared once here
+ * so the ops contract, the tRPC router and the renderer cannot drift; each
+ * leg's null semantics are documented on the contract method
+ * (main/src/orchestrator/trpc/contracts/sessionGitOps.ts).
+ */
+export interface ComparisonBases {
+  branchPoint: { ref: string; shortSha: string } | null;
+  defaultBranch: string | null;
+  localDefault: { ref: string; behind: number } | null;
+  originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
+}
+
 /** The result of reading a single file from a run's worktree. */
 export interface RunFileContent {
   /** Path relative to the worktree root, POSIX-style ('/' separators). */

@@ -377,12 +377,22 @@ describe('experiments router orchestration (slice B)', () => {
       experimentId: started.experimentId,
     });
 
-    expect(payload?.verdict?.judgeModel).toBe('fake-model');
-    expect(payload?.verdict?.judgeBuildId).toBe('build-1');
-    expect(payload?.verdict?.perSample).toEqual(LEGACY_PER_SAMPLE);
-    expect(payload?.verdict?.aCount).toBe(2);
-    expect(payload?.verdict?.bCount).toBe(0);
-    expect(payload?.verdict?.tieCount).toBe(0);
+    // Exact-shape assertion (TST-6): pins the COMPLETE verdict object the router
+    // hands the renderer, so a future field silently dropped (or an unintended
+    // one added) at the tRPC boundary fails this test instead of surviving
+    // unnoticed behind a partial per-field assertion.
+    expect(payload?.verdict).toEqual({
+      preference: 'A',
+      confidence: 0.85,
+      rationale: 'A wins',
+      aCount: 2,
+      bCount: 0,
+      tieCount: 0,
+      sampleCount: 2,
+      perSample: LEGACY_PER_SAMPLE,
+      judgeModel: 'fake-model',
+      judgeBuildId: 'build-1',
+    });
   });
 
   it('startSideBySide (idea-seeded): pins base sha, clones per arm, launches both tagged', async () => {

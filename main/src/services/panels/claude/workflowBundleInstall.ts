@@ -72,8 +72,12 @@ const CYBOFLOW_SCRIPT_EXCLUDE_PATTERN = '.claude/workflows/cyboflow-*.js';
  * nothing to exclude — the shared writer logs that case at debug and returns
  * `null`; every OTHER git or fs failure still warns, because those are real
  * and worth seeing.
+ *
+ * Exported so PiSdkManager.spawnCliProcess (pi has no sibling bundle writer of
+ * its own, only the role-overlay `installAgentOverlay` call) can exclude the
+ * same generated files before writing them — no behavior change here.
  */
-function ensureBundleExcluded(worktreePath: string, extraPatterns: string[], logger?: LoggerLike): void {
+export function ensureBundleExcluded(worktreePath: string, extraPatterns: string[], logger?: LoggerLike): void {
   const patterns = [...CYBOFLOW_EXCLUDE_PATTERNS, ...extraPatterns];
   const result = ensureGitExcludeEntries(worktreePath, patterns, {
     marker: CYBOFLOW_EXCLUDE_MARKER,

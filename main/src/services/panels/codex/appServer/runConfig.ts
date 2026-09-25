@@ -13,6 +13,7 @@ import type {
   AppServerThreadStartParams,
   AppServerTurnStartParams,
 } from './protocol';
+import type { CodexAgentRoles } from './agentRoles';
 
 export interface CodexAppServerMcpRuntimeConfig {
   orchSocketPath: string;
@@ -38,6 +39,9 @@ export interface CodexIsolationConfig {
 }
 
 type ThreadConfiguration = Omit<AppServerThreadStartParams, 'ephemeral' | 'experimentalRawEvents'>;
+
+/** The standard-speed tier id — the protocol's documented "use 'default' for standard speed". */
+export const CODEX_STANDARD_SERVICE_TIER = 'default';
 
 function buildMcpConfig(
   runId: string,
@@ -141,6 +145,7 @@ export function buildCodexAppServerThreadConfiguration(
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   isolation?: CodexIsolationConfig,
+  agentRoles?: CodexAgentRoles,
 ): ThreadConfiguration {
   const model = resolveAgentModelAlias('codex', options.model);
   const instructions = options.systemPromptAppend
@@ -235,9 +240,26 @@ export function buildCodexAppServerThreadConfiguration(
     sandbox: permissionFlags.sandbox,
     approvalPolicy: permissionFlags.approval,
     approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user',
-    config: buildMcpConfig(runId, runtimeConfig, options.mcpScope),
+    config: {
+      ...buildMcpConfig(runId, runtimeConfig, options.mcpScope),
+      // The run's deployable roles as NATIVE Codex agent roles (agentRoles.ts),
+      // so `spawn_agent({ agent_type: "cyboflow-<key>" })` runs a child under
+      // that role's prompt. Verified live (0.153.3 and 0.156.1):
+      // `agents.<name>.config_file` (absolute) registers the role; Codex silently
+      // DROPS a role whose file it cannot deserialize; and a role child inherits
+      // this thread's MCP servers — cyboflow's included — whatever its file says.
+      // Only here — the isolation branch above never registers roles (the
+      // hermetic assistant deploys none). Omitted when empty, so a role-less
+      // spawn's configuration is byte-identical to before.
+      ...(agentRoles && Object.keys(agentRoles).length > 0 ? { agents: agentRoles } : {}),
+    },
     ...(model ? { model } : {}),
     ...instructions,
+    // Workflow spawns only (see ClaudeSpawnerOptions.standardServiceTier): an
+    // explicit tier overrides config.toml, so a user's `priority` stops riding
+    // onto every lane. Part of the thread configuration, so it is resumed with
+    // the thread and hashed into the warm fingerprint.
+    ...(options.standardServiceTier ? { serviceTier: CODEX_STANDARD_SERVICE_TIER } : {}),
   };
 }
 
@@ -246,9 +268,10 @@ export function buildCodexAppServerThreadStartParams(
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   isolation?: CodexIsolationConfig,
+  agentRoles?: CodexAgentRoles,
 ): AppServerThreadStartParams {
   return {
-    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation),
+    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation, agentRoles),
     ephemeral: false,
     experimentalRawEvents: true,
   };
@@ -260,9 +283,10 @@ export function buildCodexAppServerThreadResumeParams(
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   isolation?: CodexIsolationConfig,
+  agentRoles?: CodexAgentRoles,
 ): AppServerThreadResumeParams {
   return {
-    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation),
+    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation, agentRoles),
     threadId,
     excludeTurns: true,
   };

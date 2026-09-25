@@ -356,6 +356,14 @@ function buildResolveDeps(db: DatabaseLike): ResolveReviewItemDeps {
       TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId),
     maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
     wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
+    // A 'reject' on a systemic-pause item means "stop waiting" (see the handler).
+    applyReviewItemDismiss: (projectId, args) =>
+      ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+        op: 'dismiss',
+        actor: args.actor,
+        reviewItemId: args.reviewItemId,
+        ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+      }),
   };
 }
 

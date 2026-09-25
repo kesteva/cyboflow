@@ -8,7 +8,7 @@
  *   02 STATISTICS  — how each workflow is performing ({@link StatsSection}).
  *   03 CODE QUALITY — flagged / caught / found-after-merge ({@link CodeQualitySection}).
  *
- * Ownership split (matches BacklogPane / ReviewQueueView): this component owns
+ * Ownership split (matches BacklogPane / LandingHome): this component owns
  * the layout shell + the section-index chips (which scroll-to their section) +
  * the one-shot `init()` on mount + the loading/error chrome. Each section reads
  * its own slice of the store directly, so InsightsView passes no data props.

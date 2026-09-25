@@ -19,7 +19,8 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
 import { computeSessionCostUsd } from '../../utils/modelPricing';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
-import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
+import { useRunStepModels, type StepModelRow } from '../../hooks/useRunStepModels';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import type { ExperimentArm, ComparisonStatus } from '../../../../shared/types/experiments';
@@ -36,6 +37,19 @@ import {
 
 /** Mirror of ChatInput's interactive submit cadence: type, settle, then Enter. */
 const SUBMIT_DELAY_MS = 300;
+
+/**
+ * Tolerance for the per-model breakdown SHORTFALL check on a multi-model run.
+ * `usage.perModelUsage` is folded from a live raw_events scan (see
+ * insightsQueries.ts `fetchMaterializedRunModels`), while the run-level token
+ * totals used here come from the durable `run_usage` row (`rollupFromMaterializedRow`)
+ * — so on a PARTIALLY pruned run the per-model sum can fall short of the
+ * authoritative total even when 2+ models still resolve (multiModel stays
+ * true). A per-model token sum more than this fraction below the run-level
+ * total is treated as an incomplete breakdown rather than a genuine per-model
+ * cost — see the `shortfall` note below.
+ */
+const PER_MODEL_SHORTFALL_TOLERANCE = 0.03;
 
 /** How often to re-poll the eval while it is pending/running. */
 const EVAL_POLL_MS = 10_000;
@@ -60,15 +74,9 @@ function formatCost(n: number | null): string {
   return n === null ? '—' : `$${n.toFixed(2)}`;
 }
 
-/**
- * One flattened step's resolved model, as returned by `runs.getStepModels`
- * (TASK-273 — `main/src/orchestrator/runStepModels.ts`). Inferred off the
- * tRPC client rather than imported from `main/src/orchestrator/*` directly —
- * the frontend tsconfig only includes `src` and `../shared`, so the wire
- * shape is read back through `AppRouter` type inference instead of crossing
- * that boundary.
- */
-type StepModelInfo = Awaited<ReturnType<typeof trpc.cyboflow.runs.getStepModels.query>>[number];
+/** One flattened step's resolved model, as returned by `runs.getStepModels`
+ * (via {@link useRunStepModels}). */
+type StepModelInfo = StepModelRow;
 
 /** One distinct-label group of {@link StepModelInfo} for the "Models used" section. */
 interface ModelGroup {
@@ -246,7 +254,8 @@ export function WorkflowSummaryPanel({
   // "Models used" configuration section (TASK-275). `null` is the sentinel for
   // "not available yet, or the query failed" — never rendered as an error, just
   // as "nothing to show" (see the guard on `modelGroups.length > 0` below).
-  const [stepModels, setStepModels] = useState<StepModelInfo[] | null>(null);
+  // Shared with RunCenterPane's canvas rail (one fetch, deduped in flight).
+  const stepModels = useRunStepModels(runId);
   const computeCostFromRates = useConfigStore(
     (state) => state.config?.computeCostFromRates ?? false,
   );
@@ -306,8 +315,16 @@ export function WorkflowSummaryPanel({
   // model in the breakdown could be priced (full fallback to the reported total,
   // same as pre-TASK-092 behavior); 'partial' when at least one model was priced
   // but at least one other was not (the total sums only the priced models, so the
-  // note must say so rather than silently under-reporting). Null otherwise.
-  type CostNote = { kind: 'mixed' } | { kind: 'partial'; unpricedCount: number } | null;
+  // note must say so rather than silently under-reporting); 'shortfall' when the
+  // breakdown's OWN token sum falls short of the authoritative run-level total by
+  // more than PER_MODEL_SHORTFALL_TOLERANCE (partially pruned raw_events — see
+  // that constant's doc comment) — the per-model sum is unreliable regardless of
+  // pricing coverage, so this takes priority over 'mixed'/'partial'. Null otherwise.
+  type CostNote =
+    | { kind: 'mixed' }
+    | { kind: 'partial'; unpricedCount: number }
+    | { kind: 'shortfall' }
+    | null;
   const [displayedCost, costNote] = useMemo<[number | null, CostNote]>(() => {
     if (usage === null) return [null, null];
     if (!computeCostFromRates) return [usage.costUsd, null];
@@ -319,7 +336,9 @@ export function WorkflowSummaryPanel({
       let total = 0;
       let pricedCount = 0;
       let unpricedCount = 0;
+      let perModelTokenSum = 0;
       for (const m of usage.perModelUsage) {
+        perModelTokenSum += m.inputTokens + m.outputTokens;
         const modelCost = computeSessionCostUsd(
           {
             input: m.inputTokens,
@@ -335,6 +354,19 @@ export function WorkflowSummaryPanel({
           total += modelCost;
           pricedCount += 1;
         }
+      }
+      // The breakdown's own token sum vs. the authoritative run-level total
+      // (usage.totalTokens = run_usage's durable inputTokens + outputTokens).
+      // When raw_events were only PARTIALLY pruned, perModelTokenSum can fall
+      // meaningfully short even though 2+ models still resolved — the priced
+      // sum above would then under-report the run's real cost with no warning.
+      // Guarded on a positive run total so a genuinely zero-token run never
+      // trips the check.
+      if (
+        usage.totalTokens > 0 &&
+        perModelTokenSum < usage.totalTokens * (1 - PER_MODEL_SHORTFALL_TOLERANCE)
+      ) {
+        return [usage.costUsd, { kind: 'shortfall' }];
       }
       // Nothing in the breakdown could be priced (including an empty
       // breakdown) — there is nothing sensible to sum, so fall back to the
@@ -374,31 +406,6 @@ export function WorkflowSummaryPanel({
       })
       .catch(() => {
         if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [runId]);
-
-  // One-shot fetch of per-step configured models (TASK-275). On ANY failure —
-  // db not wired, run not found, no resolvable definition, the effective-agents
-  // resolver not wired — the router throws; leave `stepModels` at its `null`
-  // sentinel rather than surfacing the error, so the section just omits itself.
-  useEffect(() => {
-    // Reset FIRST on every runId change (mirrors RunCenterPane's rail effect):
-    // this panel is mounted without a `key={activeRunId}`, so switching runs
-    // re-runs the effect on the SAME component instance. Without the reset,
-    // run A's groups keep rendering, attributed to run B, for the whole of
-    // B's in-flight window.
-    setStepModels(null);
-    let alive = true;
-    trpc.cyboflow.runs.getStepModels
-      .query({ runId })
-      .then((r) => {
-        if (alive) setStepModels(r);
-      })
-      .catch(() => {
-        if (alive) setStepModels(null);
       });
     return () => {
       alive = false;
@@ -742,6 +749,11 @@ export function WorkflowSummaryPanel({
                 {costNote.unpricedCount > 1 ? 's' : ''}
               </p>
             )}
+            {computeCostFromRates && usage?.multiModel === true && costNote?.kind === 'shortfall' && (
+              <p className="text-xs text-text-tertiary" data-testid="run-summary-shortfall-model-cost-note">
+                Per-model breakdown incomplete — some event history was pruned
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -766,7 +778,7 @@ export function WorkflowSummaryPanel({
                 <div className="flex items-center gap-2">
                   <span
                     className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
-                    style={{ backgroundColor: MODEL_FAMILY_COLORS[group.family] }}
+                    style={{ backgroundColor: modelFamilyColor(group.family) }}
                   />
                   <span className="text-sm text-text-secondary" data-testid="run-summary-step-model-group-label">
                     {group.label} — {group.steps.length} {group.steps.length === 1 ? 'step' : 'steps'}
@@ -777,7 +789,7 @@ export function WorkflowSummaryPanel({
                 <div className="ml-3.5 mt-1.5 flex flex-wrap gap-1.5">
                   {group.steps.map((step) => (
                     <span
-                      key={step.stepId}
+                      key={stepModelKey(step.phaseId, step.stepId)}
                       data-testid="run-summary-step-model-chip"
                       className="rounded-button border border-border-primary px-2 py-0.5 text-xs text-text-secondary"
                     >

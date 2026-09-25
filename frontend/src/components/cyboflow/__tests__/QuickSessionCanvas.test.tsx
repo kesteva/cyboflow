@@ -27,6 +27,7 @@ vi.mock('../../../hooks/useSessionMetrics', () => ({
     tokenBreakdown: { input: 10_000, output: 2_400, cacheWrite: 184_000, cacheRead: 418_000 },
     filesSeen: 18,
     diff: { plus: 0, minus: 0 },
+    baseLabel: 'branch point',
     model: 'sonnet 4.5',
     branch: 'quick-20260607',
   }),
@@ -387,28 +388,11 @@ describe('QuickSessionCanvas — session summary + history', () => {
       'Refactoring the auth middleware and adding tests.',
     );
     // The summary well moved OUT of the session node (TASK-144) — it must not
-    // still be reachable inside quick-session-node.
+    // still be reachable inside quick-session-node, and must instead be
+    // reachable inside the summary-history node.
     expect(
       within(screen.getByTestId('quick-session-node')).queryByTestId('quick-session-summary'),
     ).not.toBeInTheDocument();
-  });
-
-  it('keeps the summary well INSIDE the summary-history node, not the session node', () => {
-    mockUseSessionSummary.mockReturnValue({
-      summary: {
-        enabled: true,
-        summary: 'Refactoring the auth middleware and adding tests.',
-        updatedAt: '2026-07-23T10:00:00.000Z',
-        entries: [],
-      },
-      loading: false,
-      error: null,
-    });
-    renderCanvas();
-    expect(screen.getByTestId('quick-session-summary')).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId('quick-session-node')).queryByTestId('quick-session-summary'),
-    ).toBeNull();
     expect(
       within(screen.getByTestId('quick-session-summary-history')).getByTestId('quick-session-summary'),
     ).toBeInTheDocument();
@@ -426,6 +410,13 @@ describe('QuickSessionCanvas — session summary + history', () => {
       error: null,
     });
     renderCanvas();
+    // jsdom does not evaluate var() substitution or validate CSS color-function
+    // grammar, so the `.toContain('rgb(var(...))')` checks below are only a
+    // literal-string regression guard against a hand-edit reverting the form —
+    // they cannot detect whether the declaration is actually valid CSS. The
+    // `.not.toContain('rgba(var(...),')` checks are the real tripwire: they
+    // fail if the invalid legacy comma-alpha form (empirically confirmed over
+    // CDP to compute to fully-transparent, i.e. dropped) is ever reintroduced.
     const style = screen.getByTestId('quick-session-summary').getAttribute('style');
     expect(style).toContain('rgb(var(--color-interactive-rgb) / 0.045)');
     expect(style).not.toContain('rgba(var(--color-interactive-rgb),');
@@ -465,13 +456,13 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(1);
   });
 
-  it('either gate true → the summary/history node renders with two edges (leading + trailing)', () => {
+  it('either gate true → the summary/history node renders with two edges (leading + trailing), in leading-edge position', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: {
         enabled: true,
         summary: 'State.',
         updatedAt: '2026-07-23T10:00:00.000Z',
-        entries: [],
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
       },
       loading: false,
       error: null,
@@ -479,9 +470,98 @@ describe('QuickSessionCanvas — session summary + history', () => {
     renderCanvas();
     expect(screen.getByTestId('quick-session-summary-history')).toBeInTheDocument();
     expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
+    // TASK-144 specifies the summary/history node's edge as LEADING (session
+    // node → edge → summary/history node), not trailing. Each edge is now
+    // grouped with the node it leads into inside its own wrapper flex item
+    // (so flex-wrap never strands an edge alone on a row) — pin the actual
+    // nesting, not a flat body.children walk.
+    const body = screen.getByTestId('quick-session-canvas-body');
+    const topLevel = Array.from(body.children) as HTMLElement[];
+    expect(topLevel).toHaveLength(3);
+    expect(topLevel[0]).toHaveAttribute('data-testid', 'quick-session-node');
+    const summaryGroup = Array.from(topLevel[1].children).map((el) => el.getAttribute('data-testid'));
+    expect(summaryGroup).toEqual(['quick-session-edge', 'quick-session-summary-history']);
+    const addWorkflowGroup = Array.from(topLevel[2].children).map((el) => el.getAttribute('data-testid'));
+    expect(addWorkflowGroup).toEqual(['quick-session-edge', 'quick-session-add-workflow']);
   });
 
-  it('history-only state (no summary text): renders the history list, no summary block, header reads "Summary & History"', () => {
+  it('reserves the summary/history node footprint with a skeleton while the initial summary fetch is in flight', () => {
+    mockUseSessionSummary.mockReturnValue({ summary: null, loading: true, error: null });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary-history-skeleton')).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+    // Skeleton is grouped with its own leading edge, same as the real node.
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
+  });
+
+  it('drops the skeleton once loading settles with nothing to show (no layout reservation left behind)', () => {
+    mockUseSessionSummary.mockReturnValue({ summary: null, loading: false, error: null });
+    renderCanvas();
+    expect(screen.queryByTestId('quick-session-summary-history-skeleton')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(1);
+  });
+
+  it('never shows the skeleton alongside the real summary/history node', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [],
+      },
+      // Even if the hook reported loading:true (shouldn't happen post-resolve,
+      // but the render logic must not double up regardless).
+      loading: true,
+      error: null,
+    });
+    renderCanvas();
+    expect(screen.getByTestId('quick-session-summary-history')).toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-summary-history-skeleton')).not.toBeInTheDocument();
+  });
+
+  it('the canvas body wraps rather than overflowing horizontally on a narrow pane', () => {
+    renderCanvas();
+    const body = screen.getByTestId('quick-session-canvas-body');
+    expect(body).toHaveStyle({ flexWrap: 'wrap' });
+  });
+
+  it('renders a hairline divider above the history section only when both the summary and history sections are present', () => {
+    // Both present → divider (border-top) above the history section.
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-07-23T10:00:00.000Z',
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
+      },
+      loading: false,
+      error: null,
+    });
+    const { unmount } = renderCanvas();
+    expect(screen.getByTestId('quick-session-history-section').getAttribute('style')).toContain(
+      'border-top',
+    );
+    unmount();
+
+    // History-only (no summary) → no divider needed, nothing above it.
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: null,
+        updatedAt: null,
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
+      },
+      loading: false,
+      error: null,
+    });
+    renderCanvas();
+    expect(
+      screen.getByTestId('quick-session-history-section').getAttribute('style') ?? '',
+    ).not.toContain('border-top');
+  });
+
+  it('history-only state (no summary text): renders the history list, no summary block, header reads "History" (not "Summary & History")', () => {
     mockUseSessionSummary.mockReturnValue({
       summary: {
         enabled: true,
@@ -500,11 +580,17 @@ describe('QuickSessionCanvas — session summary + history', () => {
     expect(node).toBeInTheDocument();
     expect(screen.queryByTestId('quick-session-summary')).not.toBeInTheDocument();
     expect(screen.getByTestId('quick-session-history-list')).toBeInTheDocument();
-    expect(node).toHaveTextContent('Summary & History');
+    // Header label is the three-way form: it must not claim a summary section
+    // exists when only history does (that reads as "the summary failed to
+    // render" rather than "there is no summary yet").
+    expect(screen.getByTestId('quick-session-summary-history-label')).toHaveTextContent('History');
+    expect(screen.getByTestId('quick-session-summary-history-label')).not.toHaveTextContent(
+      'Summary & History',
+    );
     expect(node).toHaveTextContent('2 sittings');
-    // History-only is the OTHER "either gate true" permutation (showHistoryCard
-    // true, showSummaryBlock false) — prove it also yields the middle node's
-    // full two-edge wiring, not just the summary-enabled case above.
+    // History-only is the OTHER "either gate true" permutation (hasHistory
+    // true, hasSummary false) — prove it also yields the middle node's full
+    // two-edge wiring, not just the summary-enabled case above.
     expect(screen.getAllByTestId('quick-session-edge')).toHaveLength(2);
   });
 
@@ -626,6 +712,39 @@ describe('QuickSessionCanvas — session summary + history', () => {
 
     expect(toggle).toHaveTextContent('▸ History (2)');
     expect(screen.queryByTestId('quick-session-history-list')).not.toBeInTheDocument();
+  });
+
+  it('resets the history disclosure to expanded when the session changes (state does not leak across sessions)', () => {
+    mockUseSessionSummary.mockReturnValue({
+      summary: {
+        enabled: true,
+        summary: 'State.',
+        updatedAt: '2026-01-06T12:00:00.000Z',
+        entries: [{ id: 1, entry: 'Did A.', createdAt: '2026-01-05T10:00:00.000Z' }],
+      },
+      loading: false,
+      error: null,
+    });
+    const { rerender } = render(
+      <QuickSessionCanvas session={SESSION} projectId={3} projectName="tester-mctest" onBrowseAll={vi.fn()} />,
+    );
+    const getToggle = () => screen.getByTestId('quick-session-history-toggle');
+    // Collapse history in the FIRST session.
+    fireEvent.click(getToggle());
+    expect(getToggle()).toHaveAttribute('aria-expanded', 'false');
+
+    // Same component instance (no key/remount), a DIFFERENT session — the
+    // disclosure must come back expanded, not carry over the collapsed state.
+    const OTHER_SESSION = { ...SESSION, id: 's2' } as Session;
+    rerender(
+      <QuickSessionCanvas
+        session={OTHER_SESSION}
+        projectId={3}
+        projectName="tester-mctest"
+        onBrowseAll={vi.fn()}
+      />,
+    );
+    expect(getToggle()).toHaveAttribute('aria-expanded', 'true');
   });
 });
 

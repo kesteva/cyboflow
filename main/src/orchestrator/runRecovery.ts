@@ -835,6 +835,39 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
 }
 
 /**
+ * Stamp `outcome='merged'` (plus `merge_sha` when known) on a session's runs
+ * whose branch has been PROVEN landed on main by a path we never observed —
+ * `markComplete`'s landed arm (ipc/gitOps.ts). The merged-outcome twin of
+ * {@link stampSessionRunsCompleted}, for the same reason: under
+ * {@link stampSessionRunsOutcome}'s `outcome IS NULL` guard the stamp no-ops
+ * on exactly the runs this action exists for (a sprint run that reads
+ * 'canceled' after teardown, a boot-recovered 'interrupted' one), the op still
+ * reports success, and the archive that follows sweeps the findings.
+ *
+ * Same predicate as stampSessionRunsCompleted: BOTH session link shapes
+ * (direct `workflow_runs.session_id` and the legacy `sessions.run_id`
+ * back-link), guarded by "not already delivered" so a run that recorded
+ * 'merged' / 'integrated' / 'pr_open' / 'completed' keeps its stamp.
+ *
+ * Returns the number of rows stamped. Pure over {@link DatabaseLike}.
+ */
+export function stampSessionRunsLanded(db: DatabaseLike, sessionId: string, mergeSha?: string): number {
+  const sha = typeof mergeSha === 'string' && mergeSha.length > 0 ? mergeSha : null;
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET outcome = 'merged', merge_sha = COALESCE(?, merge_sha), updated_at = CURRENT_TIMESTAMP
+        WHERE (
+                session_id = ?
+                OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = workflow_runs.id)
+              )
+          AND COALESCE(outcome, '') NOT IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}`,
+    )
+    .run(sha, sessionId, sessionId) as { changes: number };
+  return info.changes;
+}
+
+/**
  * Close out a session's runs as a SUCCESSFUL pull request, used by the
  * session-scoped Create-PR flow (the `push` op in ipc/gitOps.ts).
  *

@@ -9,7 +9,7 @@
  * by "only X's segment was re-invoked".
  */
 import '@testing-library/jest-dom';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { RefObject, MutableRefObject } from 'react';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
@@ -149,5 +149,157 @@ describe('ChatTranscript — per-row memoization', () => {
 
     expect(segmentRenders.ids).toContain('a1');
     expect(segmentRenders.ids).not.toContain('a2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-269 — hidden/empty-only messages must render NO row (not the raw-JSON
+// "Unhandled message type" fallback, which leaks exactly the content the
+// user hid via settings.showThinking / settings.showToolCalls).
+// ---------------------------------------------------------------------------
+
+/** Asserts that `messageId` produced no visible row: no MessageSegment call,
+ * no "Unhandled message type" fallback card, and no message-row wrapper
+ * (header/avatar/timestamp) anywhere in the document. The row-wrapper check
+ * is the one that actually proves NOTHING mounted for this message — the
+ * hidden-content branch in ChatTranscript.tsx returns null BEFORE that div,
+ * so a regression that instead rendered an empty header-only row would still
+ * satisfy the segment/fallback probes alone. */
+function expectNoRow(messageId: string): void {
+  expect(screen.queryByTestId(`seg-${messageId}`)).toBeNull();
+  expect(screen.queryByText('Unhandled message type')).toBeNull();
+  expect(screen.queryByTestId(`message-row-${messageId}`)).toBeNull();
+  expect(segmentRenders.ids).not.toContain(messageId);
+}
+
+describe('ChatTranscript — visibility gating (TASK-269)', () => {
+  it('a thinking-only message hidden by showThinking:false renders no row', () => {
+    const hidden: UnifiedMessage = {
+      id: 'think-hidden',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'thinking', content: 'secret reasoning the user opted out of' }],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({ messages: [hidden], settings: { ...settings, showThinking: false } })}
+      />,
+    );
+    expectNoRow('think-hidden');
+  });
+
+  it('a thinking-only message with whitespace-only content renders no row even when showThinking:true', () => {
+    const blank: UnifiedMessage = {
+      id: 'think-blank',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'thinking', content: '   \n\t  ' }],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({ messages: [blank], settings: { ...settings, showThinking: true } })}
+      />,
+    );
+    expectNoRow('think-blank');
+  });
+
+  it('a tool_call-only message hidden by showToolCalls:false renders no row', () => {
+    const toolOnly: UnifiedMessage = {
+      id: 'tool-hidden',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'tool_call', tool: { id: 'tool-x', name: 'Read', status: 'success' } }],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({ messages: [toolOnly], settings: { ...settings, showToolCalls: false } })}
+      />,
+    );
+    expectNoRow('tool-hidden');
+  });
+
+  it('a tool_result-only message hidden by showToolCalls:false renders no row', () => {
+    const resultOnly: UnifiedMessage = {
+      id: 'result-hidden',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'tool_result', result: { content: 'file contents', toolCallId: 'tool-x' } }],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({ messages: [resultOnly], settings: { ...settings, showToolCalls: false } })}
+      />,
+    );
+    expectNoRow('result-hidden');
+  });
+
+  // NOTE: a hidden-TodoWrite regression ("a TodoWrite-only message with
+  // non-empty todos hidden by showToolCalls:false renders no row") was
+  // attempted here per review suggestion and found to FAIL against current
+  // behavior: buildRowDescriptors' "mixed content" arm (ChatTranscript.tsx,
+  // the `else` branch that pushes a 'todo' descriptor whenever a message
+  // contains a TodoWrite tool_call) never checks settings.showToolCalls, so a
+  // TodoWrite's todo list renders even when tool calls are hidden. That code
+  // path is buildRowDescriptors, NOT the TranscriptMessageRowComponent gating
+  // TASK-269 touched (see commit ca5a846e0's diff) — a pre-existing gap this
+  // sprint's diff never reached. Left unfixed and uncovered here deliberately
+  // (fixing/covering it would widen this pass beyond TASK-269's own diff);
+  // flagged for a follow-up task instead.
+
+  it('a message with a genuinely unrecognized segment type still hits the Unhandled-type fallback', () => {
+    // `error` is a real MessageSegment variant, but ChatTranscript's
+    // hasRenderableContent never counted it — this is the PRE-EXISTING raw-JSON
+    // fallback path (untouched by TASK-269), asserted here so the new
+    // visibility-gating branch can't accidentally swallow it.
+    const unknown: UnifiedMessage = {
+      id: 'unknown-type',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'error', error: { message: 'boom' } }],
+    };
+    render(<ChatTranscript {...makeProps({ messages: [unknown], settings })} />);
+    expect(screen.getByText('Unhandled message type')).toBeInTheDocument();
+  });
+
+  it('a message with non-empty text plus hidden thinking/tool segments renders exactly as before', () => {
+    const mixed: UnifiedMessage = {
+      id: 'text-plus-hidden',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [
+        { type: 'thinking', content: 'hidden reasoning' },
+        { type: 'text', content: 'the visible reply' },
+        { type: 'tool_call', tool: { id: 'tool-y', name: 'Read', status: 'success' } },
+      ],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({
+          messages: [mixed],
+          settings: { ...settings, showThinking: false, showToolCalls: false },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('seg-text-plus-hidden')).toBeInTheDocument();
+    expect(screen.queryByText('Unhandled message type')).toBeNull();
+  });
+
+  it('a diff-only message renders ungated regardless of showThinking/showToolCalls', () => {
+    const diffOnly: UnifiedMessage = {
+      id: 'diff-only',
+      role: 'assistant',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'diff', diff: '--- a\n+++ b\n' }],
+    };
+    render(
+      <ChatTranscript
+        {...makeProps({
+          messages: [diffOnly],
+          settings: { ...settings, showThinking: false, showToolCalls: false },
+        })}
+      />,
+    );
+    expect(screen.getByTestId('seg-diff-only')).toBeInTheDocument();
+    expect(screen.queryByText('Unhandled message type')).toBeNull();
   });
 });

@@ -10,9 +10,11 @@
  *
  * Those are genuinely different integration surfaces, and a provider can ship
  * the second without the first. OMP does exactly that today: its lane is
- * per-step programmatic, the orchestrator envelope and question bridge are
- * explicitly deferred, and `task` (the sub-agent tool an orchestrator leans on)
- * is denied by the policy gate. A whole-run OMP request under the orchestrated
+ * per-step programmatic, and the orchestrator envelope and question bridge are
+ * explicitly deferred. (`task`, the sub-agent tool an orchestrator leans on, is
+ * no longer denied by the policy gate — see ompGateConfigBuilder's
+ * `denyTaskTool` — but that alone is not the orchestrated contract.) A
+ * whole-run OMP request under the orchestrated
  * model would therefore start a main orchestrator with none of the machinery it
  * assumes — outside the shipped contract, and silently so.
  *

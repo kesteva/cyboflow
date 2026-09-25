@@ -75,14 +75,24 @@ export interface RunUsageRollup {
   multiModel: boolean;
   /**
    * Per-model token breakdown, resolved the same way as {@link model} (assistant-side
-   * `payload.message.model`, 'unknown' when an event carried none). Populated
-   * whenever assistant-side raw events were scanned for model identity — i.e.
-   * always, on both the materialized and raw-events read tiers (see
-   * insightsQueries.ts `fetchMaterializedRunModels` / `scanRawEventRollups`) — so
-   * it is non-empty even for single-model runs, not gated on `multiModel`. Lets a
-   * multi-model run's rate-card cost be computed as a per-model sum instead of
-   * falling back to the reported total. Field names mirror the run-level token
-   * fields above (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheCreationTokens`).
+   * `payload.message.model`, 'unknown' when an event carried none). ALWAYS
+   * folded from assistant-side `raw_events`, on both read tiers (see
+   * insightsQueries.ts `fetchMaterializedRunModels` / `scanRawEventRollups`) —
+   * even on the materialized tier, where the run-level token totals below come
+   * from the durable `run_usage` row instead. So it is non-empty for
+   * single-model runs (not gated on `multiModel`), but it is only as complete as
+   * the run's surviving raw events: once they are pruned it is empty, and if
+   * they were only PARTIALLY pruned its sums can fall short of the run-level
+   * totals — even while `multiModel` stays true (2+ models still resolve). It
+   * is also empty for a Codex/OMP-only run (their result-usage fallback carries
+   * no model identity). Lets a multi-model run's rate-card cost be computed as
+   * a per-model sum instead of falling back to the reported total — BUT a
+   * caller doing that sum must guard against the partial-pruning case above, or
+   * it silently under-reports: WorkflowSummaryPanel's `PER_MODEL_SHORTFALL_TOLERANCE`
+   * check compares this breakdown's own token sum against the run-level totals
+   * below and falls back to the durable reported cost (with a note) when it
+   * falls short by more than that tolerance. Field names mirror the run-level
+   * token fields above (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheCreationTokens`).
    */
   perModelUsage: {
     model: string;

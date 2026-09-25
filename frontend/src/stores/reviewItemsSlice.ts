@@ -8,7 +8,7 @@
  *
  * ## Re-subscribe on projectId CHANGE (mirrors backlogStore)
  *
- * The active project can change without the ReviewQueueView unmounting. `init()`
+ * The active project can change without the queue host unmounting. `init()`
  * tears down the previous project's subscription and re-syncs whenever the
  * projectId differs from the one currently wired.
  *

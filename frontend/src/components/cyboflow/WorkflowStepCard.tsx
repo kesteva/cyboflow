@@ -14,7 +14,13 @@ import { MODEL_FAMILY_COLORS } from '../../../../shared/types/agents';
 // Types
 // ---------------------------------------------------------------------------
 
-export type StepStatus = 'pending' | 'running' | 'done';
+/**
+ * 'paused' = the run is parked on THIS step by a systemic pause (a
+ * `gate:systemic-pause:<stepId>` item — usage / session limit). The run row
+ * stays 'running' while parked, so without this state the card read RUNNING
+ * for the whole wait. Styled amber (at rest), never the pulsing red outline.
+ */
+export type StepStatus = 'pending' | 'running' | 'paused' | 'done';
 
 export interface WorkflowStepCardProps {
   step: WorkflowStep;
@@ -53,12 +59,13 @@ export function WorkflowStepCard({
 }: WorkflowStepCardProps) {
   const isPending = status === 'pending';
   const isRunning = status === 'running';
+  const isPaused = status === 'paused';
   const isDone = status === 'done';
   const isHuman = step.human === true;
   const isOptional = step.optional === true;
 
   // State text for the foot area
-  const stateLabel = isRunning ? 'RUNNING' : isDone ? 'DONE' : 'PENDING';
+  const stateLabel = isRunning ? 'RUNNING' : isPaused ? 'PAUSED' : isDone ? 'DONE' : 'PENDING';
 
   // ── Root styles ────────────────────────────────────────────────────────────
   // Done cards: position relative + GPU promotion via translateZ(0) + will-change
@@ -95,6 +102,16 @@ export function WorkflowStepCard({
           outlineOffset: '2px',
         }
       : {}),
+    ...(isPaused
+      ? {
+          // Paused: the same outline geometry as running, in the amber
+          // status-warning token — "the run is here, but at rest".
+          outlineStyle: 'solid',
+          outlineWidth: '2px',
+          outlineColor: 'var(--color-status-warning)',
+          outlineOffset: '2px',
+        }
+      : {}),
     ...(isHuman
       ? {
           // Human: inner amber halo
@@ -119,18 +136,22 @@ export function WorkflowStepCard({
     ? 'var(--color-status-success)'
     : isRunning
       ? 'var(--color-status-error)'
-      : '#c8bea3';
+      : isPaused
+        ? 'var(--color-status-warning)'
+        : '#c8bea3';
 
   // ── Agent short name — resolved canonical key (legacy labels mapped) ───────
-  const agentShortName = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
+  const agentKey = resolveStepAgentKey(step.id, step.agent);
+  const agentShortName = agentKey ?? step.agent;
 
   // ── Model segment gate ─────────────────────────────────────────────────────
   // A human/gate step NEVER renders a model segment — the approved design
   // calls that a hard rule, not a data accident. `runs.getStepModels` already
-  // omits gate steps (resolveStepAgentKey -> null), so this is the card-local
+  // omits gate steps by the SAME two-part predicate (`human: true` OR an agent
+  // that resolves to no key, i.e. `agent: 'human'`), so this is the card-local
   // enforcement of the same rule: even if a caller hands a human step a label,
   // neither the segment nor the "· model" title appears.
-  const showModel = !isHuman && Boolean(modelLabel);
+  const showModel = !isHuman && agentKey !== null && Boolean(modelLabel);
 
   return (
     <div style={rootStyle} data-testid={`step-card-${step.id}`}>
@@ -207,7 +228,7 @@ export function WorkflowStepCard({
           title={
             showModel
               ? isPending
-                ? `${agentShortName} · will run ${modelLabel}`
+                ? `${agentShortName} · configured to run ${modelLabel}`
                 : `${agentShortName} · ${modelLabel}`
               : undefined
           }
@@ -229,7 +250,7 @@ export function WorkflowStepCard({
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: 4,
+                gap: 3,
                 whiteSpace: 'nowrap',
                 flexShrink: 0,
                 // Hard cap from the approved design: the card is a fixed 138px
@@ -242,9 +263,6 @@ export function WorkflowStepCard({
               }}
               data-testid={`step-card-model-${step.id}`}
             >
-              <span aria-hidden style={{ letterSpacing: '0.02em' }}>
-                ·
-              </span>
               <span
                 aria-hidden
                 style={{
@@ -258,7 +276,19 @@ export function WorkflowStepCard({
                 }}
                 data-testid={`step-card-model-dot-${step.id}`}
               />
-              <span style={{ fontStyle: isPending ? 'italic' : 'normal' }}>{modelLabel}</span>
+              {/* The ellipsis must live on the TEXT span: the capped
+                  inline-flex parent can only clip its child, not ellipsise it. */}
+              <span
+                style={{
+                  fontStyle: isPending ? 'italic' : 'normal',
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+                data-testid={`step-card-model-label-${step.id}`}
+              >
+                {modelLabel}
+              </span>
             </span>
           )}
           <span style={{ flexShrink: 0 }}>×{step.retries}</span>

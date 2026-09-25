@@ -5,7 +5,7 @@ import {
   listQuickSessions,
   type QuickSessionCandidateRow,
 } from '../quickSessionListing';
-import { hashAskText } from '../sessionAskHash';
+import { hashAskText } from '../../database/sessionAskHash';
 import type { DatabaseLike, PreparedStatement } from '../types';
 
 function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCandidateRow {

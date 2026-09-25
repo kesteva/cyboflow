@@ -27,7 +27,11 @@
  * ITEM CONTRACT: the production `SystemicPauseItemOps` adapter creates a review
  * item that is kind 'decision', BLOCKING, status 'pending' — so it participates
  * in the same aggregate-unblock park/resume machinery as a human gate. Resolving
- * it ⇒ 'retry'; dismissing it ⇒ 'giveup'. The item is keyed by a per-step source
+ * it ⇒ 'retry' (the card's "Retry now", and "Switch runtime & retry" after the
+ * switch handler writes the run's agent-target overrides); dismissing it ⇒
+ * 'giveup' (the card's "Stop waiting"; a `reject` outcome on this source is
+ * mapped to a dismiss server-side). The item carries a `DecisionPayload` with
+ * gate 'systemic-pause' naming what was blocked. The item is keyed by a per-step source
  * (`systemicPauseSourceForStep`) so a crash-resume / a repeated systemic failure
  * on the SAME step re-attaches to the already-pending item instead of minting a
  * duplicate.
@@ -54,9 +58,10 @@
  */
 import type { EventEmitter } from 'events';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { DecisionPayload } from '../../../../shared/types/reviews';
 import type { LoggerLike } from '../types';
-import type { SystemicPauseVerdict } from './types';
-import { parseLimitResetDelayMs } from './systemicError';
+import type { SystemicPauseInfo, SystemicPauseVerdict } from './types';
+import { classifyErrorPattern, parseLimitResetDelayMs } from './systemicError';
 
 /** Provenance prefix stamped on a systemic-pause decision review_item. */
 export const SYSTEMIC_PAUSE_SOURCE = 'gate:systemic-pause';
@@ -81,6 +86,13 @@ export interface SystemicPauseRequest {
   step: WorkflowStep;
   /** The failing step's error text — used for the item body + reset parsing. */
   error: string | undefined;
+  /**
+   * What the failure blocked (agents, provider, origin, fan-out) — composed into
+   * the pause item's `DecisionPayload` (gate 'systemic-pause') and body so the
+   * operator can "Switch runtime & retry" exactly those agents. Absent (a caller
+   * that predates it) ⇒ the payload carries only gate/stepId/errorClass.
+   */
+  info?: SystemicPauseInfo;
   /**
    * Fires when the run is canceled while parked at this checkpoint. On abort the
    * resolver dismisses the pause item (fail-soft) and settles to 'canceled',
@@ -112,13 +124,18 @@ export interface SystemicPauseResolver {
 export interface SystemicPauseItemOps {
   /** An ALREADY-pending pause item id for (runId, source), or null (crash-resume). */
   findPending(runId: string, source: string): Promise<string | null>;
-  /** Mint the blocking 'decision' pause item; returns its reviewItemId. */
+  /**
+   * Mint the blocking 'decision' pause item; returns its reviewItemId. `payload`
+   * is the gate-composed `DecisionPayload` (gate 'systemic-pause'); the
+   * production adapter forwards it onto the router create.
+   */
   create(args: {
     runId: string;
     projectId: number;
     title: string;
     body: string;
     source: string;
+    payload?: DecisionPayload;
   }): Promise<string>;
   /** Orchestrator-actor resolve (auto-resume timer path). */
   resolve(args: { projectId: number; reviewItemId: string; resolution: string }): Promise<void>;
@@ -169,13 +186,57 @@ function describeSystemicReason(error: string | undefined): string {
   return 'systemic failure';
 }
 
-/** Build the pause item's markdown body (error block + optional auto-resume line). */
+/**
+ * The pause item's `DecisionPayload`: what was blocked, for the pause card's
+ * "Switch runtime & retry" (switchRunAgentsHandler reads `agentKeys` /
+ * `blockedProvider` / `fanOut` to scope the re-target). Fields the caller could
+ * not determine are omitted, never guessed.
+ */
+function buildPausePayload(
+  step: WorkflowStep,
+  error: string | undefined,
+  info: SystemicPauseInfo | undefined,
+): DecisionPayload {
+  return {
+    kind: 'decision',
+    gate: 'systemic-pause',
+    stepId: step.id,
+    ...(info && info.blockedAgentKeys.length > 0 ? { agentKeys: [...info.blockedAgentKeys] } : {}),
+    ...(info?.blockedProvider ? { blockedProvider: info.blockedProvider } : {}),
+    ...(info?.blockedRuntime ? { blockedRuntime: info.blockedRuntime } : {}),
+    ...(info ? { origin: info.origin, fanOut: info.fanOut } : {}),
+    errorClass: classifyErrorPattern(error),
+  };
+}
+
+/** The "what was blocked" line of the body, or null when the caller supplied no info. */
+function describeBlocked(info: SystemicPauseInfo | undefined): string | null {
+  if (!info) return null;
+  if (info.origin === 'triage') {
+    return (
+      "The run's supervisor (lane triage, always Claude) hit the limit — switching the step agents " +
+      'does not move the supervisor; retrying after the reset or stopping the wait are the options.'
+    );
+  }
+  if (info.blockedAgentKeys.length === 0) return null;
+  const agents = info.blockedAgentKeys.map((k) => `\`${k}\``).join(', ');
+  const on = info.blockedProvider
+    ? `${info.blockedProvider}${info.blockedRuntime ? ` (\`${info.blockedRuntime}\`)` : ''}`
+    : "the run's provider";
+  return `Blocked: ${agents} on ${on}.`;
+}
+
+/**
+ * Build the pause item's markdown body (error block + optional auto-resume line +
+ * what was blocked + the three actions the pause card offers).
+ */
 function buildPauseBody(
   step: WorkflowStep,
   error: string | undefined,
   reason: string,
   nowMs: number,
   delayMs: number | null,
+  info?: SystemicPauseInfo,
 ): string {
   const lines = [
     `Step **${step.name}** (\`${step.id}\`) paused after a ${reason}.`,
@@ -191,8 +252,10 @@ function buildPauseBody(
     const resetAt = new Date(nowMs + delayMs);
     lines.push(`Auto-resumes at ~${resetAt.toLocaleString()}.`, '');
   }
+  const blocked = describeBlocked(info);
+  if (blocked) lines.push(blocked, '');
   lines.push(
-    '**Resolve** to retry the step now. **Dismiss** to stop waiting — the step then fails normally (its own retry/skip/escalate budgets apply).',
+    "**Retry now** re-runs the step as configured. **Switch runtime & retry** (in the run's pending-input strip) re-targets the blocked agents and retries at once. **Stop waiting** lets the step fail normally.",
   );
   return lines.join('\n');
 }
@@ -237,7 +300,7 @@ export class ReviewQueueSystemicPauseGate implements SystemicPauseResolver {
   }
 
   awaitClear(req: SystemicPauseRequest): Promise<SystemicPauseVerdict> {
-    const { runId, projectId, step, error, signal } = req;
+    const { runId, projectId, step, error, signal, info } = req;
 
     // (1) Already canceled on entry — settle immediately, open nothing.
     if (signal?.aborted) return Promise.resolve<SystemicPauseVerdict>('canceled');
@@ -317,6 +380,13 @@ export class ReviewQueueSystemicPauseGate implements SystemicPauseResolver {
       const openAndPark = async (): Promise<void> => {
         // (3) Reattach to an already-pending pause item (crash-resume / a repeated
         // systemic failure on the SAME step) instead of minting a duplicate.
+        //
+        // The re-attached item keeps the body + payload it was minted with: the
+        // ReviewItemRouter has no op that rewrites a decision item's body/payload
+        // (`annotate` upserts only a closed set of machine sections; `mutate` is
+        // finding-scoped), and this seam deliberately adds none. A stale payload
+        // is acceptable — a fan-out's `agentKeys` are chain-derived (identical
+        // across re-attaches), and a single step's agent key never changes.
         let id = await this.items.findPending(runId, source);
         if (settled) return;
         if (id) {
@@ -333,8 +403,9 @@ export class ReviewQueueSystemicPauseGate implements SystemicPauseResolver {
             runId,
             projectId,
             title: `Run paused — ${reason} at step '${step.name}'`,
-            body: buildPauseBody(step, error, reason, nowMs, delayMs),
+            body: buildPauseBody(step, error, reason, nowMs, delayMs, info),
             source,
+            payload: buildPausePayload(step, error, info),
           });
           if (settled) return;
         }

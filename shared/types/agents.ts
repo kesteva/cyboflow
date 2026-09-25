@@ -171,6 +171,9 @@ export function modelFamilyColor(family: ModelFamily): string {
  * agent's pin) with no alias validation performed upstream, so this accepts
  * ANY string:
  *   - a Claude alias (a key of {@link AGENT_MODEL_LABELS}) -> that label.
+ *   - a concrete `claude-*` snapshot id (a launch-picker "Other models" pick)
+ *     -> its parsed "Family Version[ · 1M]" label ({@link claudeModelIdLabel});
+ *     a raw Claude wire id is never shown.
  *   - any other non-empty, non-`'auto'` string (a non-Claude provider's
  *     verbatim model id, e.g. `'gpt-5.6-sol'`) -> returned verbatim.
  *   - `null` / `''` / `'auto'` -> `'Auto'` for the Claude provider (mirrors
@@ -180,8 +183,56 @@ export function modelFamilyColor(family: ModelFamily): string {
  */
 export function runModelLabel(model: string | null, provider: string | null): string {
   if (model !== null && isAgentModelAlias(model)) return AGENT_MODEL_LABELS[model];
-  if (model !== null && model !== '' && model !== 'auto') return model;
+  if (model !== null && model !== '' && model !== 'auto') return claudeModelIdLabel(model) ?? model;
   return provider === 'claude' ? 'Auto' : 'Auto/default';
+}
+
+/**
+ * The Claude family a model string belongs to — an alias (`'opus'`) OR a
+ * concrete snapshot id with any date/window suffix (`'claude-opus-4-8[1m]'`) —
+ * by case-insensitive substring match, or `null` for anything else (a
+ * non-Claude provider id, `'auto'`, empty). The ONE family derivation shared by
+ * the per-step model rail ({@link ModelFamily} buckets) and the renderer's cost
+ * estimator (`frontend/src/utils/modelPricing.ts`), so a concrete id picked
+ * from the launch picker's "Other models" list colors and prices the same.
+ */
+export function claudeModelFamily(model: string | null | undefined): AgentModelAlias | null {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  for (const alias of AGENT_MODEL_ALIASES) {
+    if (m.includes(alias)) return alias;
+  }
+  return null;
+}
+
+/**
+ * Friendly "Family Version[ · 1M]" label for a CONCRETE Claude snapshot id
+ * (`'claude-opus-4-8[1m]'` → `'Opus 4.8 · 1M'`, `'claude-haiku-4-5-20251001'` →
+ * `'Haiku 4.5'`), or `null` when the id is not a `claude-*` id or no version can
+ * be recovered from it. Same parse the launch picker's "Other models" rows use
+ * (`formatDynamicClaudeLabel` in ModelPill.tsx), hoisted here so a main-process
+ * resolver never has to print a raw Claude wire id.
+ */
+export function claudeModelIdLabel(id: string): string | null {
+  if (!/^claude-/i.test(id)) return null;
+  const has1m = /\[1m\]$/i.test(id);
+  const tokens = id.replace(/\[1m\]$/i, '').replace(/^claude-/i, '').split('-').filter(Boolean);
+  const family = tokens.shift();
+  // Keep short numeric version segments (4, 8); drop date-like tokens (20251001).
+  const version = tokens.filter((t) => /^\d{1,2}$/.test(t)).join('.');
+  if (!family || !version) return null;
+  const name = `${family.charAt(0).toUpperCase()}${family.slice(1)} ${version}`;
+  return has1m ? `${name} · 1M` : name;
+}
+
+/**
+ * Composite key the per-step model rail / summary index `runs.getStepModels`
+ * rows by. `WorkflowStep.id` is unique only WITHIN its phase
+ * (`shared/types/workflows.ts`), so a bare `stepId` key would let a cross-phase
+ * duplicate paint one step's model on another step's card.
+ */
+export function stepModelKey(phaseId: string, stepId: string): string {
+  return `${phaseId}\u0000${stepId}`;
 }
 
 export interface AgentUsageStep {

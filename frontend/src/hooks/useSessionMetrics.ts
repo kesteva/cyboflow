@@ -15,12 +15,24 @@
  *     from the worktree vs the session's branch point). Polled on a short
  *     cadence so the node tracks the running chat without a stream wire.
  *
+ * TASK-278: filesSeen/diff follow the SAME comparison base as the Diff tab's
+ * BaseSelector, not always the session's branch point — each poll re-reads
+ * the persisted selection (`readComparisonBaseRef`, the shared reader
+ * `RunRightRail.tsx`'s BaseSelector writes to) and threads it through as
+ * `getStatistics`'s `baseRef`, so a card can never again disagree with the
+ * panel beside it. `baseLabel` names which base is in effect ("branch point",
+ * or the raw ref string — "main", "origin/main", … — matching what the
+ * persisted selection literally holds, which is exactly the vocabulary
+ * BaseSelector's own labels use) so the UI never shows a silent, unlabeled
+ * base.
+ *
  * Returns formatted display strings (elapsed "4m 12s", tokens "12.4k") plus the
  * raw diff/files numbers so the canvas can colour the diff (+ green / − rust)
  * only once it is non-zero.
  */
 import { useEffect, useRef, useState } from 'react';
 import { API } from '../utils/api';
+import { readComparisonBaseRef } from '../utils/comparisonBase';
 import type { Session } from '../types/session';
 
 // ---------------------------------------------------------------------------
@@ -76,6 +88,14 @@ export interface SessionMetrics {
   filesSeen: number;
   /** Working diff line counts; both 0 until the agent edits something. */
   diff: { plus: number; minus: number };
+  /**
+   * Which comparison base `filesSeen`/`diff` were computed against — "branch
+   * point" (the default, no persisted BaseSelector selection) or the raw ref
+   * string of the persisted selection (e.g. "main", "origin/main", a named
+   * branch). Never absent: the UI always has something to label the meter
+   * with (TASK-278).
+   */
+  baseLabel: string;
   /** Resolved model name (e.g. "sonnet 4.5"), or null when unknown. */
   model: string | null;
   /** Worktree branch (e.g. "quick-20260607-…"), or null when unknown. */
@@ -182,6 +202,13 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
 
   // Snapshot metrics — polled from getStatistics.
   const [stats, setStats] = useState<StatisticsShape | null>(null);
+  // The comparison-base ref (TASK-278) the MOST RECENT successful `stats`
+  // snapshot was actually fetched with — null means "branch point" (no
+  // persisted selection at fetch time). Tracked alongside `stats` (rather
+  // than re-reading localStorage at render time) so `baseLabel` always
+  // describes what `filesSeen`/`diff` actually reflect, even if the user
+  // flips BaseSelector again before the next poll tick lands.
+  const [baseRefUsed, setBaseRefUsed] = useState<string | null>(null);
   // Guard against a late response from a previous session overwriting the new one.
   const sessionIdRef = useRef<string | null>(sessionId);
   sessionIdRef.current = sessionId;
@@ -189,6 +216,7 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
   useEffect(() => {
     if (sessionId === null) {
       setStats(null);
+      setBaseRefUsed(null);
       return;
     }
     let cancelled = false;
@@ -202,10 +230,19 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
       if (inFlight) return;
       inFlight = true;
       try {
-        const res = await API.sessions.getStatistics(sessionId);
+        // Re-read the persisted BaseSelector selection on EVERY tick (not just
+        // once per session) — switching bases must be reflected within one
+        // poll cycle without a full reload. `null` (no persisted selection)
+        // preserves the pre-TASK-278 call shape exactly.
+        const persistedBaseRef = readComparisonBaseRef(sessionId);
+        const res =
+          persistedBaseRef !== null
+            ? await API.sessions.getStatistics(sessionId, persistedBaseRef)
+            : await API.sessions.getStatistics(sessionId);
         if (cancelled || sessionIdRef.current !== sessionId) return;
         if (res.success && isStatisticsShape(res.data)) {
           setStats(res.data);
+          setBaseRefUsed(persistedBaseRef);
         }
       } catch {
         // Best-effort: keep the last known snapshot on a transient failure.
@@ -278,6 +315,7 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
       plus: stats?.files?.totalLinesAdded ?? 0,
       minus: stats?.files?.totalLinesDeleted ?? 0,
     },
+    baseLabel: baseRefUsed ?? 'branch point',
     model,
     branch,
   };

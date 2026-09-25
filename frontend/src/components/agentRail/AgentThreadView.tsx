@@ -24,6 +24,8 @@ import { AgentComposer } from './AgentComposer';
 import { AgentSuggestionChips } from './AgentSuggestionChips';
 import { clearAssistantGreeting, peekAssistantGreeting } from './onboardingGreeting';
 import { ProposalCardList } from './ProposalCardList';
+import { LiveTail } from '../chat/LiveTail';
+import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
 
 export interface AgentThreadViewProps {
   /** 'rail' (default) — the AgentRail host: onboarding greeting + suggestion
@@ -44,8 +46,25 @@ export function AgentThreadView({
   const proposals = useAgentThreadStore((s) => s.proposals);
   const composerDraft = useAgentThreadStore((s) => s.composerDraft);
   const setComposerDraft = useAgentThreadStore((s) => s.setComposerDraft);
+  const liveEvents = useAgentThreadStore((s) => s.liveEvents);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
+
+  // Progressive-render live tail (Option A — see render-map.md), mirroring
+  // RunChatView / ClaudePanel: reconstruct the in-flight assistant message's
+  // text/thinking blocks from the store's `liveEvents` buffer. Claude-SDK-only
+  // (the `stream_event` producer only exists under
+  // main/src/services/panels/claude/) — on codex-sdk runtime `liveEvents` stays
+  // empty, `reduceLiveTail` returns no active blocks, and the gate below
+  // suppresses the node so ChatTranscript keeps its animated fallback.
+  const liveTailState = useMemo(() => reduceLiveTail(liveEvents ?? []), [liveEvents]);
+  // Gate on VISIBLE content, not block existence: a block opens empty at
+  // content_block_start and an all-empty tail would render a bare "Claude"
+  // header while suppressing the animated fallback (blank-bubble bug fixed
+  // once already on RunChatView/ClaudePanel — commit b3609f07a).
+  const liveTail = hasVisibleTailContent(liveTailState.activeBlocks) ? (
+    <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+  ) : undefined;
 
   // The model actually answering: every projected assistant turn carries the
   // SDK's resolved model id (messageProjection stamps metadata.model), so the
@@ -102,6 +121,7 @@ export function AgentThreadView({
       messages={messagesWithGreeting}
       loadError={loadError}
       isWaitingForResponse={sending}
+      liveTail={liveTail}
       folderLabel={null}
       branchName={null}
       contextUsage={null}

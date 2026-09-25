@@ -74,7 +74,7 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
+import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
@@ -128,7 +128,8 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
+import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
 import {
   DefaultMonitorSession,
@@ -154,10 +155,10 @@ import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
-import { createGitOps } from './ipc/gitOps';
+import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -165,8 +166,8 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
-import { providerForRuntime } from '../../shared/types/agentRuntime';
-import { setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
+import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
+import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
@@ -1068,6 +1069,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // CustomWidgetServerLike's shape, so no adapter is needed.
         customWidgetServer: customWidgetServerManager ?? undefined,
         resolveRunEffectiveAgents: createRunEffectiveAgentsResolver(() => databaseService.getDb()),
+        stepModelGates: { isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p), isModelUsable },
       }),
   });
 }
@@ -1916,6 +1918,7 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
+    additionalOptions: { db: databaseService.getDb() },
     skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {
@@ -1935,7 +1938,6 @@ async function initializeServices(): Promise<boolean> {
     executionTracker,
     getMainWindow: () => mainWindow
   });
-
 
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
@@ -2737,18 +2739,16 @@ async function initializeServices(): Promise<boolean> {
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
       // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
       // written by the MCP workflow-config tools as well as the editor, so a pin
       // naming a provider the user switched off in Settings → Integrations can
       // reach here even though the editor hides it. Drop just the runtime pin
       // (keeping model/effort) so the step falls back to the run-level provider,
       // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
-      const pinnedRuntime =
-        a.runtime && !configManager.isAgentProviderEnabled(providerForRuntime(a.runtime))
-          ? undefined
-          : a.runtime;
+      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
+      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
+      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
       if (a.runtime && pinnedRuntime === undefined) {
         cyboflowLogger.warn(
           `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
@@ -2772,6 +2772,11 @@ async function initializeServices(): Promise<boolean> {
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
+    // Direct step dispatch: the role's effective prompt (same layering as above).
+    resolveStepRole: (runId, agentKey) => {
+      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
+      return systemPrompt ? { systemPrompt } : undefined;
+    },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
@@ -2783,52 +2788,8 @@ async function initializeServices(): Promise<boolean> {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
-    // Systemic-pause gate (the 2026-07-06 planner incident): a step failing with
-    // a usage/session/rate-limit-class error PARKS the run behind a blocking
-    // 'decision' item ("resolve to retry now, dismiss to give up") and
-    // auto-resumes at the parsed limit-reset time, instead of burning the step's
-    // retry / optional-skip / triage budgets on a condition no retry can fix.
-    // Item writes ride the ReviewItemRouter chokepoint (orchestrator actor);
-    // park/resume rides the SAME HumanStepManager primitives as the blocking
-    // gate, so a systemic pause participates in aggregate-unblock.
-    systemicGate: new ReviewQueueSystemicPauseGate({
-      items: {
-        findPending: (runId, source) =>
-          HumanStepManager.getInstance().findPendingItemBySource(runId, source),
-        create: async ({ runId, projectId, title, body, source }) => {
-          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(
-            projectId,
-            {
-              op: 'create',
-              actor: 'orchestrator',
-              kind: 'decision',
-              title,
-              body,
-              blocking: true,
-              source,
-              runId,
-            },
-          );
-          return reviewItemId;
-        },
-        resolve: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'resolve',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-        dismiss: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'dismiss',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-      },
-      parker: HumanStepManager.getInstance(),
+    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
+    systemicGate: buildSystemicPauseGate({
       events: reviewItemChangeEvents,
       channelFor: reviewItemProjectChannel,
       logger: cyboflowLogger,
@@ -3676,6 +3637,17 @@ async function initializeServices(): Promise<boolean> {
   // mutations are ops closures over this very services object now, not
   // ipcMain.handle registrations.
   sessionOps = createSessionOps(services);
+  // "Switch runtime & retry" on a limit-paused programmatic run (switchRunAgentsHandler.ts).
+  // Wired HERE, not beside setPauseRunDeps: its readiness probe needs this services object.
+  setSwitchRunAgentsDeps({
+    db: cyboflowDb,
+    isProviderEnabled: isAgentProviderAllowed,
+    isProviderReady: async (p) => (await detectProvider(p, services)).state === 'detected',
+    listRunAgentTargets: (runId) => listRunAgentTargets(rawDb, runId, cyboflowLogger),
+    findPendingPause: findPendingSystemicPause,
+    resolveItem: resolveSystemicPauseItem,
+    logger: cyboflowLogger,
+  });
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
@@ -4218,6 +4190,7 @@ app.whenReady().then(async () => {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
     }
 
+    await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
     // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
     // a previous process (state intent/snapshotted/folded) forward through the SAME
     // step functions the first-run approve uses — a crash after the body fold cannot

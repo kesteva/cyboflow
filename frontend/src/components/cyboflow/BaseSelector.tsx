@@ -28,14 +28,7 @@ import type { ReactElement } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { API } from '../../utils/api';
-
-/** Mirrors the `getComparisonBases` success payload (sessionGitOps.ts). */
-interface ComparisonBases {
-  branchPoint: { ref: string; shortSha: string } | null;
-  defaultBranch: string | null;
-  localDefault: { ref: string; behind: number } | null;
-  originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
-}
+import type { ComparisonBases } from '../../../../shared/types/runFiles';
 
 const EMPTY_BASES: ComparisonBases = {
   branchPoint: null,

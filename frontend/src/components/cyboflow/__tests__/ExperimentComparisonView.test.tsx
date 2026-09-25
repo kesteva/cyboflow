@@ -191,6 +191,11 @@ const NULL_IDENTITY_SAMPLES: PairwiseSample[] = [
   { ...LEGACY_SAMPLES[0], judgeModel: null },
 ];
 
+/** A whitespace-only judge name — must degrade to 'unknown', not a blank chip/tooltip. */
+const WHITESPACE_IDENTITY_SAMPLES: PairwiseSample[] = [
+  { ...LEGACY_SAMPLES[0], judgeName: '   ', judgeModel: null },
+];
+
 const DIFF_A = [
   'diff --git a/src/a.ts b/src/a.ts',
   'index 111..222 100644',
@@ -378,6 +383,32 @@ describe('ExperimentComparisonView', () => {
       'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by unknown',
     );
     expect(screen.getAllByTestId('experiment-verdict-judge-provenance')).toHaveLength(1);
+  });
+
+  it('renders explicit unknown for a whitespace-only judge name (never a blank chip/tooltip)', async () => {
+    getQuery.mockResolvedValue(makeExp());
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        verdict: {
+          ...makePayload().verdict!,
+          judgeModel: null,
+          perSample: [...WHITESPACE_IDENTITY_SAMPLES],
+          sampleCount: 1,
+        },
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    expect(await screen.findByTestId('experiment-verdict-judge-provenance')).toHaveTextContent('graded by unknown');
+    const chips = screen.getAllByTestId('experiment-sample-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent(/^#1 Arm A · unknown$/);
+    expect(chips[0]).toHaveAttribute(
+      'title',
+      'Solution 1 = Arm A · Solution 2 = Arm B · confidence 90% · graded by unknown',
+    );
   });
 
   it('suppresses the provenance footer for an empty legacy verdict', async () => {

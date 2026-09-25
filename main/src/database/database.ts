@@ -170,7 +170,7 @@ interface ExecutionDiffStatsDbRow {
  * callers can dedup cumulative working-directory-diff rows: when a turn never
  * commits, before_commit_hash === HEAD from the prior turn and each row's
  * stats are a cumulative superset of the run, not a per-turn delta (see
- * aggregateExecutionDiffTotals in ipc/session.ts).
+ * aggregateExecutionDiffTotals in ipc/executionDiffAggregation.ts).
  */
 export interface ExecutionDiffStats {
   execution_sequence: number;

@@ -26,7 +26,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from '../WorkflowCanvas';
 import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
-import type { ModelFamily } from '../../../../../shared/types/agents';
+import { stepModelKey, type ModelFamily } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Mock fixture: 2 phases × 2 steps each
@@ -151,6 +151,40 @@ describe('WorkflowCanvas', () => {
 
     // The running pill must NOT be present while paused.
     expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
+  });
+
+  it('pausedStepId (systemic pause): that card reads PAUSED, the rest derive from currentStepId, and the paused pill replaces the running pill', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        workflowTitle="SPRINT-014"
+        runLabel="run-001"
+        isRunning={true}
+        currentStepId="step-b"
+        pausedStepId="step-b"
+      />,
+    );
+
+    expect(screen.getByTestId('step-card-step-b')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-step-a')).toHaveTextContent('DONE');
+    expect(screen.getByTestId('step-card-step-c')).toHaveTextContent('PENDING');
+    // The run row is still 'running' while parked — the pill must not say so.
+    expect(screen.getByTestId('workflow-canvas-paused-pill')).toHaveTextContent('paused');
+    expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
+  });
+
+  it('pausedStepId wins over a lagging currentStepId for the parked card only', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        isRunning={true}
+        currentStepId="step-a"
+        pausedStepId="step-c"
+      />,
+    );
+    expect(screen.getByTestId('step-card-step-c')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-step-a')).toHaveTextContent('RUNNING');
+    expect(screen.getByTestId('step-card-step-b')).toHaveTextContent('PENDING');
   });
 
   it('shows the running pill (not paused) when isRunning=true and paused is absent', () => {
@@ -457,8 +491,8 @@ describe('WorkflowCanvas', () => {
 
   it('threads a stepModels entry into the matching step card as modelLabel/modelFamilyColor', () => {
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Opus 5', family: 'opus' }],
-      ['step-b', { label: 'Auto', family: 'auto' }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Opus 5', family: 'opus' }],
+      [stepModelKey('phase-1', 'step-b'), { label: 'Auto', family: 'auto' }],
     ]);
     render(
       <WorkflowCanvas
@@ -484,6 +518,18 @@ describe('WorkflowCanvas', () => {
     expect(screen.queryByTestId('step-card-model-step-c')).not.toBeInTheDocument();
   });
 
+  it('keys stepModels by (phaseId, stepId): an entry for the same step id in ANOTHER phase does not paint this card', () => {
+    const stepModels = new Map<string, { label: string; family: ModelFamily }>([
+      // Same step id, different phase — must not leak onto phase-1's step-a.
+      [stepModelKey('phase-2', 'step-a'), { label: 'Haiku 4.5', family: 'haiku' }],
+    ]);
+    render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" stepModels={stepModels} />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-step-a')).not.toBeInTheDocument();
+  });
+
   it('omitting stepModels (undefined/null) renders every card without a model segment, unbroken', () => {
     const { rerender } = render(
       <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" />,
@@ -502,7 +548,7 @@ describe('WorkflowCanvas', () => {
     // Cast: simulates a main/renderer version skew handing the rail a family
     // bucket this bundle's ModelFamily union does not list.
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Mystery Model', family: 'not-a-real-family' as ModelFamily }],
     ]);
     render(
       <WorkflowCanvas
@@ -521,8 +567,8 @@ describe('WorkflowCanvas', () => {
 
   it('threading a stepModels entry does not change the step card/wrapper height or column width (138x120 unchanged)', () => {
     const stepModels = new Map<string, { label: string; family: ModelFamily }>([
-      ['step-a', { label: 'Opus 5', family: 'opus' }],
-      ['step-b', { label: 'Auto', family: 'auto' }],
+      [stepModelKey('phase-1', 'step-a'), { label: 'Opus 5', family: 'opus' }],
+      [stepModelKey('phase-1', 'step-b'), { label: 'Auto', family: 'auto' }],
     ]);
     render(
       <WorkflowCanvas

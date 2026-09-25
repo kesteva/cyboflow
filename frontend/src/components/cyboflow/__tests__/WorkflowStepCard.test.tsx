@@ -96,6 +96,24 @@ describe('WorkflowStepCard', () => {
     });
   });
 
+  it('paused variant (systemic pause parked on this step): PAUSED label, amber outline + dot, no running outline', () => {
+    render(<WorkflowStepCard step={MOCK_STEP} phase={MOCK_PHASE} stepIndex={3} status="paused" />);
+
+    const card = screen.getByTestId('step-card-implement');
+    expect(card).toHaveTextContent('PAUSED');
+    expect(card).not.toHaveTextContent('RUNNING');
+    expect(card).toHaveStyle({
+      outlineStyle: 'solid',
+      outlineWidth: '2px',
+      outlineColor: 'var(--color-status-warning)',
+    });
+    expect(screen.getByTestId('step-card-dot-implement')).toHaveStyle({
+      background: 'var(--color-status-warning)',
+    });
+    // Never the done overlay — the step has not finished.
+    expect(screen.queryByTestId('step-card-frosted-overlay-implement')).not.toBeInTheDocument();
+  });
+
   it('done variant: frosted-glass overlay present + green check circle present', () => {
     render(
       <WorkflowStepCard
@@ -236,7 +254,7 @@ describe('WorkflowStepCard', () => {
     expect(agentSegment).toHaveStyle({ flex: '1 1 auto' });
   });
 
-  it('pending status: model label is italic, dot is 45% opacity, and title reads "will run"', () => {
+  it('pending status: model label is italic, dot is 45% opacity, and title reads "configured to run"', () => {
     render(
       <WorkflowStepCard
         step={MOCK_STEP}
@@ -256,7 +274,7 @@ describe('WorkflowStepCard', () => {
     expect(label).toHaveStyle({ fontStyle: 'italic' });
 
     const row = screen.getByTestId('step-card-agent-row-implement');
-    expect(row).toHaveAttribute('title', 'executor-agent · will run Sonnet 5');
+    expect(row).toHaveAttribute('title', 'executor-agent · configured to run Sonnet 5');
     // Uses the existing pending row text color.
     expect(row).toHaveStyle({ color: '#b3a685' });
 
@@ -285,6 +303,27 @@ describe('WorkflowStepCard', () => {
       overflow: 'hidden',
       textOverflow: 'ellipsis',
     });
+    // The ellipsis must be on the TEXT span itself (the capped inline-flex
+    // parent can only clip it), with minWidth 0 so it can shrink below its
+    // intrinsic width.
+    const label = screen.getByTestId('step-card-model-label-implement');
+    expect(label).toHaveTextContent('gpt-5.6-sol-preview-2026-09-01-long');
+    expect(label).toHaveStyle({ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: '0' });
+  });
+
+  it("a step whose agent is 'human' (without the human flag) is treated as a gate: no model segment", () => {
+    render(
+      <WorkflowStepCard
+        step={{ ...MOCK_STEP_HUMAN, id: 'agent-only-gate', human: undefined }}
+        phase={MOCK_PHASE}
+        stepIndex={5}
+        status="running"
+        modelLabel="Opus 5"
+      />,
+    );
+
+    expect(screen.queryByTestId('step-card-model-agent-only-gate')).not.toBeInTheDocument();
+    expect(screen.getByTestId('step-card-agent-row-agent-only-gate')).not.toHaveAttribute('title');
   });
 
   it('modelLabel without an explicit modelFamilyColor still paints a visible dot', () => {

@@ -21,6 +21,9 @@ import type { AgentModelAlias } from './agents';
 import type { ReasoningEffort } from './reasoningEffort';
 import type { CliTool } from './cliTools';
 import { SPRINT_BATCH_CAP } from './sprintBatch';
+import { isWorkflowLaunchableRuntime } from './agentRuntime';
+import { isAgentModelAlias } from './agents';
+import { isAnyEffortLevel } from './reasoningEffort';
 // Type-only, so the shared/tuning -> shared/types edge stays one-directional at
 // runtime (workflowTuning imports the definitions from here; this import is
 // erased at compile time and creates no cycle).
@@ -313,6 +316,15 @@ export interface WorkflowRunRow {
    * it is never rewritten on the row.
    */
   verify_chain?: string | null;
+  /**
+   * Operator-written per-run agent-target overrides (migration 144), JSON of
+   * {@link RunAgentTargetOverrides}. Unlike the launch stamps above this is
+   * deliberately MUTABLE: the "Switch runtime & retry" action on a limit-paused
+   * programmatic run (switchRunAgentsHandler, its sole writer) re-targets the
+   * blocked agents mid-run. NULL = no overrides. Parse with
+   * {@link parseRunAgentTargetOverrides}; never `JSON.parse` it directly.
+   */
+  agent_target_overrides_json?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;
@@ -791,6 +803,83 @@ export interface WorkflowAgentConfig {
    * lives at the end of `resolveRunEffectiveAgents`.
    */
   promptAddendum?: string;
+}
+
+/**
+ * One agent's operator-written runtime/model target for a single run — the
+ * value side of {@link RunAgentTargetOverrides} (workflow_runs
+ * .agent_target_overrides_json, migration 144). The HIGHEST-precedence layer of
+ * `resolveRunEffectiveAgents` (after the workflow's `agentConfigs` and variant
+ * deltas, before prompt addenda), so it binds on the very next spawn.
+ *
+ * Field semantics mirror {@link WorkflowAgentConfig} with one addition: `null`
+ * CLEARS the lower layers' value for that field (e.g. a switch onto Codex writes
+ * `model: null` so a Claude alias pinned by the workflow cannot ride along).
+ * `undefined` (absent) leaves the lower layers' value in place.
+ */
+export interface RunAgentTarget {
+  runtime?: WorkflowLaunchableRuntime;
+  model?: AgentModelAlias | null;
+  providerModel?: string | null;
+  effort?: ReasoningEffort | null;
+}
+
+/**
+ * agentKey -> {@link RunAgentTarget}. NO wildcard key: the writer always names
+ * the agents it covers, so what a switch touched is legible on the row.
+ */
+export type RunAgentTargetOverrides = Record<string, RunAgentTarget>;
+
+/**
+ * Narrow one untrusted entry to a {@link RunAgentTarget}, dropping every field
+ * that fails validation. Null when no field survives.
+ */
+function parseRunAgentTarget(raw: unknown): RunAgentTarget | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const rec = raw as Record<string, unknown>;
+  const out: RunAgentTarget = {};
+  if (isWorkflowLaunchableRuntime(rec.runtime)) out.runtime = rec.runtime;
+  if (rec.model === null) out.model = null;
+  else if (isAgentModelAlias(rec.model)) out.model = rec.model;
+  if (rec.providerModel === null) out.providerModel = null;
+  else if (typeof rec.providerModel === 'string' && rec.providerModel.length > 0) {
+    out.providerModel = rec.providerModel;
+  }
+  if (rec.effort === null) out.effort = null;
+  else if (isAnyEffortLevel(rec.effort)) out.effort = rec.effort;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Parse workflow_runs.agent_target_overrides_json. Pure and total: malformed
+ * JSON, a non-object root, malformed entries and malformed fields are dropped;
+ * null when nothing valid survives (the "no overrides" state).
+ */
+export function parseRunAgentTargetOverrides(
+  json: string | null | undefined,
+): RunAgentTargetOverrides | null {
+  if (!json) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const out: RunAgentTargetOverrides = {};
+  for (const [agentKey, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (agentKey.length === 0) continue;
+    const target = parseRunAgentTarget(entry);
+    if (target) out[agentKey] = target;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Serialize for the column; null when there is nothing to store (clears the column). */
+export function serializeRunAgentTargetOverrides(o: RunAgentTargetOverrides): string | null {
+  const entries = Object.entries(o).filter(([k, v]) => k.length > 0 && Object.keys(v).length > 0);
+  if (entries.length === 0) return null;
+  return JSON.stringify(Object.fromEntries(entries));
 }
 
 /**

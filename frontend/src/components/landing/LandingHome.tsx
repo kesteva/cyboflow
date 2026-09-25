@@ -263,11 +263,21 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // INCLUDING a finished one (the rail store retains the newest terminal run
   // per session). Once the flow run is terminal its session's own quick row
   // returns to Ready — but "Open →" there must open THAT run, and the label
-  // must describe it, not the `__quick__` chat the flow interrupted (TASK-226).
+  // must describe it, not the `__quick__` chat the flow interrupted (TASK-226)
+  // — UNLESS the session has since been reused as a plain chat with fresher
+  // activity of its own ("most recent activity wins", product decision
+  // 2026-09-25): `chatActivityBySession` feeds each session's own last-rest
+  // boundary so `significantFlowRunBySession` can leave a stale terminal run
+  // out of the map entirely, handing the row back to its own signals.
   // Bucket precedence above deliberately keeps using the non-terminal map.
+  const chatActivityBySession = React.useMemo(() => {
+    const map = new Map<string, string | null>();
+    for (const row of quickRows) map.set(row.sessionId, row.restedAtIso);
+    return map;
+  }, [quickRows]);
   const readyFlowRunBySession = React.useMemo(
-    () => significantFlowRunBySession(retainedRuns),
-    [retainedRuns],
+    () => significantFlowRunBySession(retainedRuns, chatActivityBySession),
+    [retainedRuns, chatActivityBySession],
   );
   const triage = React.useMemo(
     () =>
@@ -774,6 +784,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         flashing={flashing}
         onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
         onOpenReviewItem={openReviewItem}
+        onReviewItemActed={afterLifecycleAction}
         onApprovalDecided={afterLifecycleAction}
         onQuickSessionAskDismissed={afterLifecycleAction}
       />

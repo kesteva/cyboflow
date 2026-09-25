@@ -44,6 +44,7 @@ import type {
   SessionLastCommitRow,
 } from '../contracts/sessionGitOps';
 import type { GitStatus } from '../../../types/session';
+import type { ComparisonBases } from '../../../../../shared/types/runFiles';
 
 function requireOps<T>(ops: T | undefined): T {
   if (!ops) {
@@ -164,7 +165,13 @@ export const sessionGitRouter = router({
     }): Promise<
       | {
           success: true;
-          data: { delivered: boolean; landed: boolean; ownCommits: number; completedNoCode: boolean };
+          data: {
+            delivered: boolean;
+            landed: boolean;
+            ownCommits: number;
+            completedNoCode: boolean;
+            integratedLaneCount?: number;
+          };
         }
       | SessionGitError
     > => {
@@ -173,7 +180,13 @@ export const sessionGitRouter = router({
 
   markComplete: protectedProcedure
     .input(sessionInput)
-    .mutation(async ({ ctx, input }): Promise<{ success: true; data: { stamped: number } } | SessionGitError> => {
+    .mutation(async ({
+      ctx,
+      input,
+    }): Promise<
+      | { success: true; data: { stamped: number; laneTasksLeftOpen?: number; tasksMovedToDone?: number } }
+      | SessionGitError
+    > => {
       return requireOps(ctx.sessionGitOps).markComplete(input);
     }),
 
@@ -232,15 +245,7 @@ export const sessionGitRouter = router({
       ctx,
       input,
     }): Promise<
-      | {
-          success: true;
-          data: {
-            branchPoint: { ref: string; shortSha: string } | null;
-            defaultBranch: string | null;
-            localDefault: { ref: string; behind: number } | null;
-            originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
-          };
-        }
+      | { success: true; data: ComparisonBases }
       | SessionGitError
     > => {
       return requireOps(ctx.sessionGitOps).getComparisonBases(input);

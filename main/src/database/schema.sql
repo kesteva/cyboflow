@@ -44,6 +44,10 @@ CREATE INDEX IF NOT EXISTS idx_conversation_messages_timestamp ON conversation_m
 -- project_id is NULLABLE: NULL ⇒ global (shown across all projects), an integer
 -- ⇒ project-scoped (migration 030). FK to projects(id) ON DELETE CASCADE, with
 -- NULL allowed by the FK.
+-- NOTE: numbered migrations 079/124/128 add archived_at/tuning_level/runtime_mix
+-- on top of a fresh seed too, so a schema.sql lacking them was functionally
+-- fine (this file only seeds a DB before migrations run). Reconciled here to
+-- keep the seed shape matching the current numbered-migration truth.
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,
   project_id INTEGER,
@@ -52,6 +56,11 @@ CREATE TABLE IF NOT EXISTS workflows (
   workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  tuning_level TEXT NOT NULL DEFAULT 'standard'
+    CHECK (tuning_level IN ('efficient','standard','thorough','custom')),
+  runtime_mix TEXT NOT NULL DEFAULT 'claude'
+    CHECK (runtime_mix IN ('claude','claude-primary','codex-primary','codex')),
+  archived_at TEXT,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);

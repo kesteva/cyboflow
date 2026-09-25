@@ -133,6 +133,7 @@ describe('projectTurnSessionEvent', () => {
         { type: 'localImage', path: '/tmp/context.png', detail: 'high' },
         { type: 'audio', url: 'https://example.com/clip.mp3' },
         { type: 'localAudio', path: '/tmp/clip.wav' },
+        { type: 'image', fileId: 'file-abc' },
       ],
     }))).toEqual([{
       type: 'agent_message',
@@ -142,7 +143,8 @@ describe('projectTurnSessionEvent', () => {
       content: [{
         type: 'text',
         text: 'Continue the workflow.\n[local image: /tmp/context.png]'
-          + '\n[audio: https://example.com/clip.mp3]\n[local audio: /tmp/clip.wav]',
+          + '\n[audio: https://example.com/clip.mp3]\n[local audio: /tmp/clip.wav]'
+          + '\n[image file: file-abc]',
       }],
       external_session_id: 'thread-1',
     }]);

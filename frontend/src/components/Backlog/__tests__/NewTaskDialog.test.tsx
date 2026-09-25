@@ -11,8 +11,13 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { BacklogProjectRef } from '../../../stores/backlogStore';
+import type { IdeaAttachment } from '../../../../../shared/types/tasks';
+import { NEW_TASK_DIALOG_DRAFT_KEY } from '../../../utils/ideaDraftStorage';
 
-const { mockCreate } = vi.hoisted(() => ({ mockCreate: vi.fn() }));
+const { mockCreate, mockUseIdeaAttachments } = vi.hoisted(() => ({
+  mockCreate: vi.fn(),
+  mockUseIdeaAttachments: vi.fn(),
+}));
 
 vi.mock('../../../trpc/client', () => ({
   trpc: { cyboflow: { tasks: { create: { mutate: mockCreate } } } },
@@ -26,19 +31,12 @@ vi.mock('../../../stores/backlogStore', () => ({
     selector({ projects: mockProjects, filterProjectId: mockFilterProjectId }),
 }));
 
-// The attachment hook + strip pull in IPC we don't exercise here.
+// The attachment hook + strip pull in IPC we don't exercise here. Mocked as a
+// spy (not a plain arrow fn) so tests can assert the (pendingKey, initial)
+// args NewTaskDialog calls it with, and control what `attachments` it reports
+// back (which the write-draft effect persists).
 vi.mock('../../../hooks/useIdeaAttachments', () => ({
-  useIdeaAttachments: () => ({
-    attachments: [],
-    previews: [],
-    busy: false,
-    error: null,
-    handlePaste: vi.fn(),
-    handleDrop: vi.fn(),
-    addFiles: vi.fn(),
-    remove: vi.fn(),
-    reset: vi.fn(),
-  }),
+  useIdeaAttachments: mockUseIdeaAttachments,
 }));
 vi.mock('../../cyboflow/IdeaAttachmentStrip', () => ({ IdeaAttachmentStrip: () => null }));
 
@@ -48,8 +46,25 @@ function project(id: number, name: string): BacklogProjectRef {
   return { id, name } as BacklogProjectRef;
 }
 
+/** Default mock behavior: reports back whatever `initial` it was seeded with. */
+function defaultAttachmentsMock(_ownerKey: string, initial: IdeaAttachment[]) {
+  return {
+    attachments: initial,
+    previews: initial,
+    busy: false,
+    error: null,
+    handlePaste: vi.fn(),
+    handleDrop: vi.fn(),
+    addFiles: vi.fn(),
+    remove: vi.fn(),
+    reset: vi.fn(),
+  };
+}
+
 beforeEach(() => {
+  localStorage.clear();
   mockCreate.mockReset().mockResolvedValue({ taskId: 'tsk_new' });
+  mockUseIdeaAttachments.mockReset().mockImplementation(defaultAttachmentsMock);
   mockProjects = [project(1, 'Alpha'), project(2, 'Beta'), project(3, 'Gamma')];
   mockFilterProjectId = null;
 });
@@ -154,19 +169,97 @@ describe('NewTaskDialog — idea size hint (IDEA-009)', () => {
   });
 });
 
-describe('NewTaskDialog — close resets fields', () => {
-  it('clears the title and project override after Cancel + reopen', () => {
+describe('NewTaskDialog — draft persistence across an accidental close', () => {
+  it('preserves the typed title after Cancel and restores it on a fresh mount', () => {
     const onClose = vi.fn();
-    const { rerender } = render(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
-    fireEvent.change(projectSelect(), { target: { value: '2' } });
+    const { unmount } = render(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
     fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'draft title' } });
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
-    // Simulate the parent closing then reopening the dialog.
-    rerender(<NewTaskDialog isOpen={false} projectId={1} onClose={onClose} />);
-    rerender(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
+    // Unmount (the real close path — the dialog stops being rendered) and
+    // remount a fresh instance, as the parent does on the next "+ New" click.
+    unmount();
+    render(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
+    expect((screen.getByLabelText('Task title') as HTMLInputElement).value).toBe('draft title');
+  });
+
+  it('preserves the summary too, and every close path (overlay/Escape/X) funnels through the same handler as Cancel', () => {
+    // Modal's overlay/Escape/X all call the same onClose prop NewTaskDialog
+    // wires to handleClose — Cancel exercises that shared code path.
+    const onClose = vi.fn();
+    const { unmount } = render(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
+    fireEvent.change(screen.getByLabelText('Task summary'), { target: { value: 'more context' } });
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    unmount();
+    render(<NewTaskDialog isOpen projectId={1} onClose={onClose} />);
+    expect((screen.getByLabelText('Task summary') as HTMLTextAreaElement).value).toBe('more context');
+  });
+
+  it('degrades silently to blank defaults on a corrupt or shape-invalid persisted draft', () => {
+    localStorage.setItem(NEW_TASK_DIALOG_DRAFT_KEY, '{not valid json');
+    expect(() => render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />)).not.toThrow();
     expect((screen.getByLabelText('Task title') as HTMLInputElement).value).toBe('');
-    // Override cleared → back to tracking the default (prop = 1).
-    expect(projectSelect().value).toBe('1');
+
+    localStorage.setItem(NEW_TASK_DIALOG_DRAFT_KEY, JSON.stringify({ title: 'ok', body: 42 }));
+    expect(() => render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />)).not.toThrow();
+  });
+
+  it('persists attachments under the pending key and restores them as `initial` on reopen', () => {
+    const meta: IdeaAttachment = { id: 'att1', name: 'file.png', path: '/tmp/file.png', type: 'image/png', size: 123 };
+    // Simulate a session where the user has attached a file: report `meta`
+    // back regardless of the (empty, no-draft) `initial` seed it was called with.
+    mockUseIdeaAttachments.mockImplementation((_ownerKey: string, initial: IdeaAttachment[]) => ({
+      ...defaultAttachmentsMock(_ownerKey, initial),
+      attachments: initial.length > 0 ? initial : [meta],
+      previews: initial.length > 0 ? initial : [meta],
+    }));
+
+    const { unmount } = render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    // Any field edit re-runs the write effect, which now includes the attachment.
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'with attachment' } });
+
+    const raw = localStorage.getItem(NEW_TASK_DIALOG_DRAFT_KEY);
+    expect(raw).toBeTruthy();
+    const persisted = JSON.parse(raw as string) as { pendingKey: string; attachments: IdeaAttachment[] };
+    expect(persisted.attachments).toEqual([meta]);
+    const persistedPendingKey = persisted.pendingKey;
+
+    unmount();
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+
+    const lastCall = mockUseIdeaAttachments.mock.calls[mockUseIdeaAttachments.mock.calls.length - 1];
+    expect(lastCall[0]).toBe(persistedPendingKey);
+    expect(lastCall[1]).toEqual([meta]);
+  });
+
+  it('clears the persisted draft and mints a fresh pendingKey after a successful submit', async () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'submit me' } });
+
+    const draftBefore = localStorage.getItem(NEW_TASK_DIALOG_DRAFT_KEY);
+    expect(draftBefore).toBeTruthy();
+    const pendingKeyBefore = (JSON.parse(draftBefore as string) as { pendingKey: string }).pendingKey;
+
+    fireEvent.click(screen.getByTestId('new-task-submit'));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+
+    expect(localStorage.getItem(NEW_TASK_DIALOG_DRAFT_KEY)).toBeNull();
+
+    const lastCall = mockUseIdeaAttachments.mock.calls[mockUseIdeaAttachments.mock.calls.length - 1];
+    expect(lastCall[0]).not.toBe(pendingKeyBefore);
+  });
+
+  it('does not call localStorage.setItem on a re-render where the draft content is unchanged', () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    const { rerender } = render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'stable title' } });
+    const callsAfterType = setItemSpy.mock.calls.length;
+    expect(callsAfterType).toBeGreaterThan(0);
+
+    // Re-render with the same props/state (a fresh onClose ref doesn't touch
+    // any draft field) — the write effect must not fire another setItem.
+    rerender(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    expect(setItemSpy.mock.calls.length).toBe(callsAfterType);
+    setItemSpy.mockRestore();
   });
 });

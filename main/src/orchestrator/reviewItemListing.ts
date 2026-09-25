@@ -758,6 +758,83 @@ export interface RunFindingRow extends FindingSeedRow {
   blocking: boolean;
 }
 
+/** The raw SELECT shape both run-scoped and project-scoped finding reads share. */
+interface RawRunFindingRow {
+  id: string;
+  runId: string | null;
+  title: string;
+  body: string | null;
+  severity: 'info' | 'warning' | 'error' | null;
+  priority: FindingPriority | null;
+  source: string | null;
+  blocking: number | boolean | null;
+  payloadJson: string | null;
+}
+
+function shapeRunFindingRow(row: RawRunFindingRow): RunFindingRow {
+  let payload: unknown = null;
+  if (row.payloadJson) {
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      payload = null;
+    }
+  }
+  return {
+    id: row.id,
+    runId: row.runId,
+    title: row.title,
+    body: row.body,
+    severity: row.severity,
+    priority: row.priority,
+    source: row.source,
+    category: liftCategory(payload),
+    // SQLite BOOLEAN reads back as 0/1 — normalize like ReviewItemRouter.shapeRow.
+    blocking: row.blocking === 1 || row.blocking === true,
+    proposedTarget: liftProposedTarget(payload),
+    suggestedFix: liftSuggestedFix(payload),
+    locations: liftLocations(payload),
+  };
+}
+
+/** A project-scoped finding row: the run-scoped shape plus its triage state. */
+export interface ProjectFindingRow extends RunFindingRow {
+  /** True once a human approved it into READY (`staged_at` set); false = untriaged. */
+  staged: boolean;
+  createdAt: string | null;
+}
+
+/**
+ * Every still-open HUMAN-audience finding in `projectId`, oldest first — the
+ * project-wide triage read a user-driven chat gets via
+ * `cyboflow_list_run_findings({ scope: 'project' })`.
+ *
+ * Deliberately WIDER than {@link selectRunFindingsForRuns} on source: no
+ * `agent:%` allow-list, so system-minted findings (visual-verify skip/timeout
+ * notices, monitor rescues) are listed too. That allow-list protects a FLOW
+ * step from refuting rendered-output judgments it cannot see; this read only
+ * ever serves a chat a human is steering, and those notices are exactly the
+ * stale backlog a human asks a chat to clear. The machine mailbox stays out.
+ */
+export function selectProjectFindings(db: DatabaseLike, projectId: number): ProjectFindingRow[] {
+  if (!hasReviewItemsTable(db)) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, run_id AS runId, title, body, severity, priority, source, blocking,
+              payload_json AS payloadJson, staged_at AS stagedAt, created_at AS createdAt
+         FROM review_items
+        WHERE project_id = ? AND kind = 'finding' AND status = 'pending'
+          AND ${HUMAN_AUDIENCE_CLAUSE}
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(projectId) as Array<RawRunFindingRow & { stagedAt: string | null; createdAt: string | null }>;
+  return rows.map((row) => ({
+    ...shapeRunFindingRow(row),
+    staged: row.stagedAt !== null,
+    createdAt: row.createdAt,
+  }));
+}
+
 /**
  * Read every still-open (`status = 'pending'`) HUMAN-audience `kind = 'finding'`
  * review item filed by any run in `runIds`, oldest first. Returns `[]` when the table is
@@ -820,43 +897,9 @@ export function selectRunFindingsForRuns(
           AND source LIKE 'agent:%'
         ORDER BY created_at ASC, id ASC`,
     )
-    .all(...runIds) as Array<{
-    id: string;
-    runId: string | null;
-    title: string;
-    body: string | null;
-    severity: 'info' | 'warning' | 'error' | null;
-    priority: FindingPriority | null;
-    source: string | null;
-    blocking: number | boolean | null;
-    payloadJson: string | null;
-  }>;
+    .all(...runIds) as RawRunFindingRow[];
 
-  return rows.map((row) => {
-    let payload: unknown = null;
-    if (row.payloadJson) {
-      try {
-        payload = JSON.parse(row.payloadJson);
-      } catch {
-        payload = null;
-      }
-    }
-    return {
-      id: row.id,
-      runId: row.runId,
-      title: row.title,
-      body: row.body,
-      severity: row.severity,
-      priority: row.priority,
-      source: row.source,
-      category: liftCategory(payload),
-      // SQLite BOOLEAN reads back as 0/1 — normalize like ReviewItemRouter.shapeRow.
-      blocking: row.blocking === 1 || row.blocking === true,
-      proposedTarget: liftProposedTarget(payload),
-      suggestedFix: liftSuggestedFix(payload),
-      locations: liftLocations(payload),
-    };
-  });
+  return rows.map(shapeRunFindingRow);
 }
 
 /**

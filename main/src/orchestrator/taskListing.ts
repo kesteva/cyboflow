@@ -262,6 +262,12 @@ interface RunOverlayRow {
   session_id: string | null;
   /** `sessions.name` via LEFT JOIN; null when the sessions table/join is unavailable or the row is gone. */
   session_name: string | null;
+  /**
+   * `workflows.name` via LEFT JOIN on `workflow_runs.workflow_id` (TASK-224). Undefined on
+   * the task/epic arm (not selected there — no restriction needed), present on the idea arm
+   * where it also drives the Planner/Ship filter.
+   */
+  workflow_name?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +365,60 @@ function resolveAgentLabel(run: RunOverlayRow): string {
 }
 
 /**
+ * Idea sibling of {@link gatherTaskRunOverlayRows}'s task/epic arm (TASK-224):
+ * an idea is never linked via `workflow_runs.task_id`/`batch_id` — a live
+ * Planner/Ship run instead records the idea it was SEEDED with via
+ * `seed_idea_id` (migration 017, single-idea) or `seed_idea_ids` (migration
+ * 061, JSON array — multi-idea planner batches). Both are soft links (no FK,
+ * no cascading delete), so a run seeded from a since-deleted idea simply
+ * matches nothing here.
+ *
+ * Guarded per-column via columnExists so a pre-017 schema (neither column)
+ * returns [] and a pre-061 schema (seed_idea_id only) falls back to the
+ * single-idea arm alone. `json_valid()` guards the `json_each` arm against a
+ * malformed/non-array stored value throwing 'malformed JSON' and taking the
+ * whole board query down with it.
+ */
+function gatherIdeaRunOverlayRows(
+  db: DatabaseLike,
+  ideaId: string,
+  sessionSelect: string,
+  sessionJoin: string,
+): RunOverlayRow[] {
+  const hasSeedIdeaId = columnExists(db, 'workflow_runs', 'seed_idea_id');
+  const hasSeedIdeaIds = columnExists(db, 'workflow_runs', 'seed_idea_ids');
+  if (!hasSeedIdeaId && !hasSeedIdeaIds) return [];
+
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (hasSeedIdeaId) {
+    clauses.push('wr.seed_idea_id = ?');
+    params.push(ideaId);
+  }
+  if (hasSeedIdeaIds) {
+    clauses.push(
+      'wr.seed_idea_ids IS NOT NULL AND json_valid(wr.seed_idea_ids) AND EXISTS (SELECT 1 FROM json_each(wr.seed_idea_ids) je WHERE je.value = ?)',
+    );
+    params.push(ideaId);
+  }
+  const whereClause = clauses.map((c) => `(${c})`).join(' OR ');
+
+  // Restrict to Planner/Ship (TASK-224): seed_idea_id/seed_idea_ids is a soft
+  // link written by more than those two workflows (e.g. a launch seeded with
+  // an idea as lineage), so without this join+filter an idea would pulse and
+  // action-gate for an out-of-scope workflow run that merely happens to name it.
+  return db
+    .prepare(
+      `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, w.name AS workflow_name, ${sessionSelect}
+         FROM workflow_runs wr
+         JOIN workflows w ON w.id = wr.workflow_id
+         ${sessionJoin}
+        WHERE (${whereClause}) AND w.name IN ('planner', 'ship')`,
+    )
+    .all(...params) as RunOverlayRow[];
+}
+
+/**
  * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
  * runs whose lane names it (migration 066's derived 'In development' stage
  * tracks the SAME association — see TaskChangeRouter.gatherTaskRuns). LEFT
@@ -370,9 +430,15 @@ function resolveAgentLabel(run: RunOverlayRow): string {
  * pre-022 (no sprint_batch_tasks/batch_id) or pre-019 (no session_id) schema
  * degrades gracefully — batch runs are simply excluded / session fields read
  * back null — instead of throwing 'no such column/table'.
+ *
+ * `entityType === 'idea'` delegates to {@link gatherIdeaRunOverlayRows} instead
+ * (TASK-224) — an idea has no task_id/batch_id association at all.
  */
-function gatherTaskRunOverlayRows(db: DatabaseLike, taskId: string): RunOverlayRow[] {
-  const hasBatch = columnExists(db, 'workflow_runs', 'batch_id');
+function gatherTaskRunOverlayRows(
+  db: DatabaseLike,
+  taskId: string,
+  entityType?: TaskDbRow['type'],
+): RunOverlayRow[] {
   // The `sessions` table is legacy (schema.sql, not a numbered migration) —
   // some partial-migration test DBs add workflow_runs.session_id (migration
   // 019) WITHOUT ever creating it, so the column check alone is not enough;
@@ -380,16 +446,20 @@ function gatherTaskRunOverlayRows(db: DatabaseLike, taskId: string): RunOverlayR
   // doubles as a table-existence probe.
   const hasSession =
     columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
-
-  const whereClause = hasBatch
-    ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
-    : 'wr.task_id = ?';
-  const params = hasBatch ? [taskId, taskId] : [taskId];
-
   const sessionSelect = hasSession
     ? 'wr.session_id AS session_id, s.name AS session_name'
     : 'NULL AS session_id, NULL AS session_name';
   const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+
+  if (entityType === 'idea') {
+    return gatherIdeaRunOverlayRows(db, taskId, sessionSelect, sessionJoin);
+  }
+
+  const hasBatch = columnExists(db, 'workflow_runs', 'batch_id');
+  const whereClause = hasBatch
+    ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
+    : 'wr.task_id = ?';
+  const params = hasBatch ? [taskId, taskId] : [taskId];
 
   return db
     .prepare(
@@ -415,18 +485,21 @@ function gatherTaskRunOverlayRows(db: DatabaseLike, taskId: string): RunOverlayR
  *                    are NOT "done".
  *
  * @param db   - Narrow DatabaseLike interface.
- * @param task - The base task row (needs id + stage_id).
+ * @param task - The base task row (needs id + stage_id; `type` is optional and
+ *               defaults to the task/epic association arm — pass `'idea'` so a
+ *               live Planner/Ship run seeded with this idea (`seed_idea_id` /
+ *               `seed_idea_ids`, TASK-224) is picked up instead).
  */
 export function computeTaskOverlay(
   db: DatabaseLike,
-  task: Pick<TaskDbRow, 'id' | 'stage_id'>,
+  task: Pick<TaskDbRow, 'id' | 'stage_id'> & Partial<Pick<TaskDbRow, 'type'>>,
 ): { inFlow: FlowOverlay[]; awaitingReview: boolean; isDone: boolean; experimentSeed: boolean } {
   const stage = db
     .prepare('SELECT is_terminal, position FROM board_stages WHERE id = ?')
     .get(task.stage_id) as StageOverlayRow | undefined;
   const isDone = stage ? stage.is_terminal === 1 && stage.position === 9 : false;
 
-  const runs = gatherTaskRunOverlayRows(db, task.id);
+  const runs = gatherTaskRunOverlayRows(db, task.id, task.type);
 
   const inFlow: FlowOverlay[] = runs
     .filter((r) => !TERMINAL_RUN_STATUS_SET.has(r.status))
@@ -437,6 +510,10 @@ export function computeTaskOverlay(
       runStatus: r.status,
       sessionId: r.session_id,
       sessionName: r.session_name,
+      // Only the idea arm selects workflow_name (undefined on the task/epic
+      // arm) — omit the key entirely rather than projecting an always-null
+      // field onto every task's FlowMarker overlay too.
+      ...(r.workflow_name !== undefined ? { workflowName: r.workflow_name } : {}),
     }));
 
   const runIds = runs.map((r) => r.id);

@@ -751,7 +751,13 @@ export function parseMobileAppSpec(
  *     windows --app <app>`: scoping the question to one application is what
  *     separates "the app we launched is showing this window" from "something
  *     on this machine has a window with a matching title", and the second is
- *     not an identity check at all.
+ *     not an identity check at all. `app` MUST be a bundle id (e.g.
+ *     `com.example.MyApp`) or `PID:<n>`, never a bare display name — peekaboo
+ *     fuzzy-matches `--app` over both the name and the bundle id, which can
+ *     silently resolve to an unrelated app or fail with `Ambiguous
+ *     application identifier`; {@link isAttestationSpec}'s caller
+ *     ({@link parseModalityEntry} in `verifyRunbook.ts`) rejects a bare name
+ *     at runbook-authoring time.
  *   - `'bundle-identity'` — `mobile`: the executable INSIDE the app the
  *     simulator actually installed is read back out of its container and
  *     compared byte-for-byte against the exactly-one `.app` staged in this

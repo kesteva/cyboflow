@@ -256,6 +256,8 @@ export type McpQueryMessage =
       type: 'mcp-list-run-findings';
       requestId: string;
       runId: string;
+      /** 'project' = every open finding in the caller's project (chats only). Default 'session'. */
+      scope?: 'session' | 'project';
     }
   | {
       type: 'mcp-resolve-finding';
@@ -264,7 +266,7 @@ export type McpQueryMessage =
       /** The review_items.id of the finding the run consumed. */
       reviewItemId: string;
       /** How the finding was resolved — maps to the matching resolution prefix. */
-      resolutionKind: 'fixed' | 'triaged' | 'promoted';
+      resolutionKind: 'fixed' | 'triaged' | 'promoted' | 'dismissed';
       /** Optional free-text note appended to the resolution (e.g. 'compound'). */
       note?: string;
       /** Optional minted task id; recorded when resolutionKind='promoted'. */
@@ -848,7 +850,7 @@ export type McpQueryMessage =
       /**
        * Which substrate is asking. The interactive-Claude hook omits it; the OMP
        * gate extension stamps 'omp'. Read ONLY by the socket-died disposition —
-       * see {@link McpQueryHandler.registerInFlightShellApproval}.
+       * see {@link InteractiveHookHandlers.registerInFlightShellApproval}
        */
       substrate?: 'omp';
     }

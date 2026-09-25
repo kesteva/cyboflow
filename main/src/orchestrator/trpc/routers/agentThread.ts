@@ -11,7 +11,7 @@
  *   - confirmProposal  : mutation → ConfirmProposalResult (the user's Confirm click)
  *   - dismissProposal  : mutation → { ok: true; dismissed }
  * Subscriptions:
- *   - onThreadEvent    : per-thread live-tail envelopes, throttled ~60ms (like onStreamEvent)
+ *   - onThreadEvent    : per-thread live-tail envelopes, batched ~60Hz (lossless — see its own doc)
  *   - onProposalUpdate : proposal-transition notifications (unthrottled — infrequent)
  *
  * The agent PROPOSES (an `agent_proposals` row, minted by the MCP
@@ -35,7 +35,7 @@ import { router, protectedProcedure } from '../trpc';
 import type { Context } from '../context';
 import type { AgentThreadServiceLike, AgentThreadStoreLike } from '../context';
 import { eventToAsyncIterable } from './events';
-import { throttleAsyncIterator } from '../throttle';
+import { batchAsyncIterator } from '../throttle';
 import { selectAgentThreadUnifiedMessages } from '../../agentThreadUnifiedMessagesListing';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type {
@@ -157,7 +157,7 @@ function emitProposalUpdate(store: AgentThreadStoreLike, proposalId: string): vo
   agentThreadProposalEvents.emit('update', event);
 }
 
-/** Filter a live-tail stream to one thread BEFORE throttling (so a busy sibling can't evict this thread's latest). */
+/** Filter a live-tail stream to one thread BEFORE batching (so a busy sibling's events never land in this thread's batch). */
 async function* filterThread(
   source: AsyncIterable<AgentThreadLiveTailEvent>,
   threadId: string,
@@ -305,27 +305,34 @@ export const agentThreadRouter = router({
 
   /**
    * Per-thread live-tail. Bridges the AgentThreadService's publishes (via
-   * `agentThreadEvents`), filtered to the requested thread, throttled to 60Hz
-   * before crossing the IPC boundary — same coalescing posture as onStreamEvent
-   * (the renderer debounce-refetches the full projection on each signal).
+   * `agentThreadEvents`), filtered to the requested thread, batched to 60Hz
+   * before crossing the IPC boundary — capped emission RATE like onStreamEvent,
+   * but LOSSLESS (batchAsyncIterator, not throttleAsyncIterator): the client
+   * reconstructs in-flight text by concatenating `content_block_delta`
+   * fragments, so coalescing-to-latest would silently drop the in-between
+   * deltas and corrupt the reconstructed text. Stage 1 has exactly one global
+   * thread (at most one live subscriber), so the IPC-queue-saturation concern
+   * `throttleAsyncIterator` exists for doesn't apply the same way multi-panel
+   * subscriptions do — batching per tick keeps the message RATE capped without
+   * dropping data.
    */
   onThreadEvent: protectedProcedure
     .input(z.object({ threadId: z.string() }))
-    .subscription(async function* ({ input, signal }): AsyncGenerator<unknown> {
+    .subscription(async function* ({ input, signal }): AsyncGenerator<unknown[]> {
       const abortSignal = signal ?? new AbortController().signal;
       const all = eventToAsyncIterable<AgentThreadLiveTailEvent>(
         agentThreadEvents,
         'message',
         abortSignal,
       );
-      // Signal threaded through: between emissions the throttle parks at an
+      // Signal threaded through: between emissions the batcher parks at an
       // internal await, where `.return()` alone cannot run its teardown.
-      for await (const ev of throttleAsyncIterator(
+      for await (const batch of batchAsyncIterator(
         filterThread(all, input.threadId),
         60,
         abortSignal,
       )) {
-        yield ev.envelope;
+        yield batch.map((ev) => ev.envelope);
       }
     }),
 

@@ -834,11 +834,18 @@ export class CliManagerFactory {
       sessionManager: unknown,
       logger?: Logger,
       configManager?: ConfigManager,
+      additionalOptions?: unknown,
     ) => {
+      // Optional, unlike codex-sdk/omp-sdk: pi uses the db only to write a
+      // workflow run's role files (PiSdkManager.spawnCliProcess), so a call
+      // site without one still gets a working manager.
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const db = isSqliteDatabase(options?.db) ? options.db : undefined;
       return new PiSdkManager(
         sessionManager as SessionManager,
         logger,
         configManager,
+        db,
       );
     };
 

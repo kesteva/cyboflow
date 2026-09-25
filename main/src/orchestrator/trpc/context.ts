@@ -41,7 +41,7 @@ import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
 import type { CustomViewsServiceLike } from '../customViews/customViewsService';
-import type { EffectiveAgentsResolver } from '../runStepModels';
+import type { EffectiveAgentsResolver, StepModelGates } from './contracts/effectiveAgents';
 
 /**
  * Narrow structural interface for `CustomWidgetServerManager`
@@ -657,6 +657,14 @@ export interface ContextDeps {
    * PRECONDITION_FAILED.
    */
   resolveRunEffectiveAgents?: EffectiveAgentsResolver;
+
+  /**
+   * The spawn-seam gates (provider enabled, guarded model usable) the per-step
+   * model rail applies so it reports what actually spawns — see
+   * {@link StepModelGates}. `undefined` (the unit-test default) ⇒ every
+   * provider is treated as enabled and every model as usable.
+   */
+  stepModelGates?: StepModelGates;
 }
 
 /**
@@ -720,6 +728,7 @@ export function createContext(deps: ContextDeps = {}): {
   customViews?: CustomViewsServiceLike;
   customWidgetServer?: CustomWidgetServerLike;
   resolveRunEffectiveAgents?: EffectiveAgentsResolver;
+  stepModelGates?: StepModelGates;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -749,6 +758,7 @@ export function createContext(deps: ContextDeps = {}): {
     customViews,
     customWidgetServer,
     resolveRunEffectiveAgents,
+    stepModelGates,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -785,6 +795,7 @@ export function createContext(deps: ContextDeps = {}): {
     customViews,
     customWidgetServer,
     resolveRunEffectiveAgents,
+    stepModelGates,
   };
 }
 

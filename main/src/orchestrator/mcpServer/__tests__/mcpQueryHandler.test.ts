@@ -5134,6 +5134,116 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       });
     });
 
+    describe('chat project-scope triage (findingTriageScope project arm)', () => {
+      /** A `__quick__` chat sentinel run in project 1, in its own session. */
+      function seedChatSentinel(runId: string): void {
+        fdb
+          .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-q', 1, '__quick__', '{}')`)
+          .run();
+        fdb
+          .prepare(`INSERT INTO workflow_runs (id, workflow_id, project_id, status) VALUES (?, 'wf-q', 1, 'running')`)
+          .run(runId);
+      }
+
+      it("lets a chat resolve another session's finding in its own project", async () => {
+        seedChatSentinel('run-chat');
+        seedCompoundRun(fdb, { runId: 'run-far', status: 'completed' });
+        seedFinding(fdb, { id: 'ri_far', title: 'Filed elsewhere', runId: 'run-far' });
+
+        const { socket, writes } = makeSocketDouble();
+        await fHandler.handleMessage(
+          { type: 'mcp-resolve-finding', requestId: 'rs-chat', runId: 'run-chat', reviewItemId: 'ri_far', resolutionKind: 'triaged', note: 'stale' },
+          socket,
+        );
+
+        expect(parseLastWrite(writes)).toMatchObject({ ok: true });
+        await drain();
+        const row = fdb.prepare(`SELECT status, resolution FROM review_items WHERE id = 'ri_far'`).get() as {
+          status: string;
+          resolution: string;
+        };
+        expect(row).toEqual({ status: 'resolved', resolution: 'triaged:stale' });
+      });
+
+      it("still refuses a chat reaching into ANOTHER project's finding", async () => {
+        seedChatSentinel('run-chat');
+        fdb.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Other', '/tmp/p2');
+        fdb
+          .prepare(
+            `INSERT INTO review_items (id, project_id, kind, status, blocking, title, source)
+             VALUES ('ri_p2', 2, 'finding', 'pending', 0, 'Other project', 'agent:reviewer')`,
+          )
+          .run();
+
+        const { socket, writes } = makeSocketDouble();
+        await fHandler.handleMessage(
+          { type: 'mcp-resolve-finding', requestId: 'rs-p2', runId: 'run-chat', reviewItemId: 'ri_p2', resolutionKind: 'fixed' },
+          socket,
+        );
+
+        expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'finding_not_in_run_scope' });
+      });
+
+      it("dismissed routes the router's dismiss op with the note as the reason", async () => {
+        seedChatSentinel('run-chat');
+        seedCompoundRun(fdb, { runId: 'run-far' });
+        seedFinding(fdb, { id: 'ri_nit', title: 'A nit', runId: 'run-far' });
+
+        const { socket, writes } = makeSocketDouble();
+        await fHandler.handleMessage(
+          { type: 'mcp-resolve-finding', requestId: 'rs-dis', runId: 'run-chat', reviewItemId: 'ri_nit', resolutionKind: 'dismissed', note: 'low value' },
+          socket,
+        );
+
+        expect(parseLastWrite(writes)).toMatchObject({ ok: true, data: { status: 'dismissed' } });
+        await drain();
+        const row = fdb.prepare(`SELECT status, resolution FROM review_items WHERE id = 'ri_nit'`).get() as {
+          status: string;
+          resolution: string;
+        };
+        expect(row).toEqual({ status: 'dismissed', resolution: 'low value' });
+      });
+
+      it("lists every open human-audience finding in the project for a chat, with triage state", async () => {
+        seedChatSentinel('run-chat');
+        seedCompoundRun(fdb, { runId: 'run-far' });
+        seedFinding(fdb, { id: 'ri_agent', title: 'Agent-reported', runId: 'run-far' });
+        seedFinding(fdb, { id: 'ri_visual', title: 'Visual verification did not run', runId: 'run-far' });
+        fdb.prepare(`UPDATE review_items SET source = 'visual-verify', staged_at = CURRENT_TIMESTAMP WHERE id = 'ri_visual'`).run();
+        seedFinding(fdb, { id: 'ri_mail', title: 'mailbox', runId: 'run-far' });
+        fdb.prepare(`UPDATE review_items SET audience = 'machine' WHERE id = 'ri_mail'`).run();
+        seedFinding(fdb, { id: 'ri_closed', title: 'closed', runId: 'run-far' });
+        fdb.prepare(`UPDATE review_items SET status = 'dismissed' WHERE id = 'ri_closed'`).run();
+
+        const { socket, writes } = makeSocketDouble();
+        await fHandler.handleMessage(
+          { type: 'mcp-list-run-findings', requestId: 'lf-proj', runId: 'run-chat', scope: 'project' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { scope: string; findings: Array<{ id: string; staged: boolean }> };
+        expect(data.scope).toBe('project');
+        expect(data.findings.map((f) => [f.id, f.staged])).toEqual([
+          ['ri_agent', false],
+          ['ri_visual', true],
+        ]);
+      });
+
+      it('refuses project scope to a flow run', async () => {
+        seedCompoundRun(fdb, { runId: 'run-a' });
+
+        const { socket, writes } = makeSocketDouble();
+        await fHandler.handleMessage(
+          { type: 'mcp-list-run-findings', requestId: 'lf-flow', runId: 'run-a', scope: 'project' },
+          socket,
+        );
+
+        expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'project_scope_requires_chat' });
+      });
+    });
+
     it('refuses a non-finding review item (a gate or human task is not triage fodder)', async () => {
       seedCompoundRun(fdb, { runId: 'run-a' });
       fdb
@@ -5207,7 +5317,7 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
-      expect(response.data).toEqual({ resolved: true, review_item_id: 'ri_p' });
+      expect(response.data).toEqual({ resolved: true, status: 'resolved', review_item_id: 'ri_p' });
 
       await drain();
       const row = fdb

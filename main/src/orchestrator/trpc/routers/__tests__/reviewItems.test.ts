@@ -845,6 +845,28 @@ describe('cyboflow.reviewItems.resolve — programmatic human-gate outcome', () 
     expect(run.status).toBe('awaiting_review'); // NOT resumed
   });
 
+  it("reject on a SYSTEMIC-PAUSE item dismisses it (stop waiting) instead of resolving (which would retry)", async () => {
+    const { caller, db } = buildCaller();
+    // seedGate supplies the parked run; the pause item on it is the subject.
+    seedGate(db, { runId: 'run-sp', stepId: 'approve-idea' });
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES ('rvw_pause', 1, 'run-sp', NULL, NULL, 'decision', 'pending', 1, 'Run paused', NULL, NULL,
+               'gate:systemic-pause:implement', NULL, ?, ?, NULL, NULL)`,
+    ).run(now, now);
+
+    const res = await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_pause', outcome: 'reject' });
+
+    expect(res.resumed).toBe(false);
+    const row = db
+      .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+      .get('rvw_pause') as { status: string; resolution: string };
+    expect(row).toEqual({ status: 'dismissed', resolution: 'stop waiting' });
+  });
+
   it('approve on a NON-approve-plan gate (approve-idea) resumes but does NOT reveal', async () => {
     const { caller, db } = buildCaller();
     const reveal = vi
