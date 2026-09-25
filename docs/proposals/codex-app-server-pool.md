@@ -15,8 +15,10 @@ Status: **DEFERRED** (2026-09-24). This design was split out of revision 1 of
 - **Pooling does not save MCP startup.** MCP servers start per thread, not per process.
 - **Revision 1's pool key was wrong.** It included the sandbox/permission family and the
   capability policy, but both of those are thread parameters (`ThreadStartParams` and thread
-  `config`), not process parameters. The process environment depends only on the run id
-  (`buildCodexAppServerEnvironment`), and the lanes of a run share one worktree. The real key is
+  `config`), not process parameters. The process environment
+  (`buildCodexAppServerEnvironment`) is the inherited environment with `PATH` rewritten, plus the
+  run id, socket, token and test-concurrency values. Nothing in it is specific to a lane, and the
+  lanes of a run share one worktree. The real key is
   therefore the same for every lane in a run, and a `pool_key_distinct_per_run` metric would
   always read 1.
 - **Cancellation gets harder.** Today, cancelling a lane stops that lane's process group,
@@ -71,7 +73,6 @@ environment carries run-specific values:
 - the run id;
 - the orchestration bearer token;
 - the socket path;
-- the sandbox environment;
 - test-concurrency settings.
 
 Key the process on run id, executable path and version, client version, a digest of the

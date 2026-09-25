@@ -1,8 +1,22 @@
 # SDK workflow efficiency — complete usage accounting, scoped Codex tools, direct programmatic steps
 
-Status: PROPOSED, revision 2 (2026-09-24). This revision replaces revision 1, which was drafted
-on `solar-juniper` the same day. Revision 1 was checked against three sources: the production
-database (read-only), the local Codex rollout files under `~/.codex/sessions`, and the code.
+Status: PROPOSED, revision 3 (2026-09-25).
+
+Revision 3 folds in a Codex review of revision 2 (4 blocking, 7 should-fix, 4 nits):
+- descendant usage is now disjoint from the root `agent_result`;
+- the backfill is a real backfill with a coverage record, not a delete;
+- child threads get inherited configuration plus an audit, not a pre-start gate;
+- there is one Claude token formula;
+- the `total` fallback is baselined on the warm process and pairs updates with responses;
+- steps are addressed by full path, and the resolved dispatch is frozen and stored per
+  invocation;
+- `config/read` is part of a two-phase cold start;
+- the controller corrections that replace the dispatcher are specified;
+- the kill switch no longer fails fully open.
+
+Revision 2 (2026-09-24) replaced revision 1, which was drafted on `solar-juniper` the same
+day. Revision 1 was checked against three sources: the production database (read-only), the
+local Codex rollout files under `~/.codex/sessions`, and the code.
 That check disproved its Codex accounting premise and blocked its app-server pool.
 
 Nothing from this proposal has landed except the service-tier pin in §4.3.
@@ -17,7 +31,7 @@ Nothing from this proposal has landed except the service-tier pin in §4.3.
 | — | Service tier pinned to standard for workflow threads (landed) | Every audited workflow thread ran on `priority` |
 | — | New Increment 2: fixes to the delegated path | Removes baseline confounds, and each fix saves usage on its own |
 | Tools restricted by disabling MCP servers by name | Each tool source closed with its own setting, a `mcpServerStatus/list` gate, and router-side limits per step | Disabling a plugin server by name makes the whole thread fail |
-| Direct steps enabled by an env allowlist keyed `provider:role` | Frozen-spec `stepDispatch` keyed by step id; host eligibility keyed `provider:workflow:stepId` | Role keys collide, and env toggles contaminate A/B comparisons |
+| Direct steps enabled by an env allowlist keyed `provider:role` | Frozen-spec resolved `stepDispatch` keyed by full step address; host eligibility keyed `provider:workflow:<step address>` | Role keys collide, step ids repeat across phases, and env toggles contaminate A/B comparisons |
 | Increment 4: per-run app-server pool | Deferred to `codex-app-server-pool.md` | `thread/unsubscribe` leaks MCP children, and the possible gain is under 1% of lane time |
 | Session MCP/plugin parity inside the tools increment | Split out as its own small fix (§7.6) | The session columns hold Claude-namespace ids |
 
@@ -82,13 +96,16 @@ Three consequences:
 | Threads with usage | 282 root + 282 child. Roots: 281 workflow, 1 quick chat |
 | Turns | 593 |
 | Model requests | 13,542 |
-| Input, including cache reads | 816.9M |
+| Input, including cache reads | 816.9M (816,946,512) |
 | Cached input | 780.7M |
 | Uncached input | 36.3M |
 | Cache-write input | 0 |
 | Output | 3.39M |
 | Cache-hit rate | 95.56% |
 | Service tier | `priority` on 130/130 recorded thread-settings rows |
+
+Figures in §1 are rounded independently from exact counts, so components can differ from a
+rounded total by 0.1M (here, cached plus uncached shows 817.0M).
 
 | Layer | Input | Output | Share of input | Share of output |
 | --- | ---: | ---: | ---: | ---: |
@@ -126,7 +143,8 @@ How Claude reports usage:
 | Cache-creation input | 15.75M | 11.5M | |
 | Output | 2.61M | 3.15M | 5.76M |
 
-The outer share is 51.1% of input and 45.3% of output.
+The outer share is 51.1% of input and 45.3% of output. (Rounded independently: the two input
+components show 359.3M against the exact combined 359.2M.)
 
 The set covers 9 runs, 297 outer result records and 251 Task/Agent delegations. The audit also
 found 143 Task/Agent calls across 13 orchestrated Claude runs. Those parents do real
@@ -256,7 +274,11 @@ comparison, for five reasons.
    outside the host-composed programmatic step. This proposal removes only delegation that the
    host itself requests.
 7. **Tool reduction fails closed, but never silently.** A capability explicitly granted to an
-   effective agent is available. Otherwise the launch fails with a named reason.
+   effective agent is available. Otherwise the launch fails with a named reason. There are two
+   deliberate exceptions, both in §7.5, and every run they affect carries a loud diagnostic:
+   - the `warn` rollout mode, which applies nothing;
+   - the emergency kill switch, which bypasses only the blocking gate and keeps the source-level
+     disabling.
 8. **A restriction enforced only by the prompt is never described as structural.**
 
 ## 4. Increment 0 — settled questions and remaining groundwork
@@ -280,7 +302,7 @@ The 29 extra child turns were a mix of:
 - reverts of edits that went outside the task's scope;
 - branch re-syncs.
 
-Direct mode must reproduce the timebox and scope interventions through controller loopbacks.
+Direct mode must reproduce these interventions in the controller (§8.6).
 
 ### 4.2 Remaining before the increments that depend on it
 
@@ -293,10 +315,19 @@ Direct mode must reproduce the timebox and scope interventions through controlle
   - the `tools` option with a role's tool list plus `mcp__cyboflow__*`;
   - `Options.agent = 'cyboflow-<key>'`, checking system-prompt layering, model precedence over
     `Options.model`, and whether the agent can reach the Cyboflow MCP server.
-- **Codex role-prompt probe.** This blocks Increment 2c. It checks whether a forked
-  `spawn_agent` child inherits the parent thread's `developerInstructions`.
+- **Codex child-inheritance probe.** This blocks Increments 2c and 3. It checks two things about a
+  forked `spawn_agent` child:
+  - whether it inherits the parent thread's `developerInstructions` (for 2c);
+  - whether it inherits the parent's thread `config` overrides, such as `features.plugins =
+    false` and a disabled config.toml server (for 3). The host cannot stop a child before its
+    first request (§7.3), so inherited configuration is the only structural protection a child
+    gets. If children do not inherit it, Increment 3's child coverage shrinks to an audit, and
+    the proposal must say so.
+- **Codex version.** Every protocol claim here was verified on 0.153.3. An upgrade to 0.156.1 is
+  in progress on another branch. Whichever version lands first, re-run the model-free probes and
+  the protocol-shape test (§5.2) against it before building on them.
 - **Outcome baseline for the delegated path.** This blocks evaluation of Increment 4. Run the
-  Increment 2 arm to completion on the programmatic plane (§8.6). It costs real Sprints, so
+  Increment 2 arm to completion on the programmatic plane (§8.7). It costs real Sprints, so
   budget for them.
 - **Shared fake app-server.** Build `main/src/test/fakes/fakeCodexAppServer.ts`, following the
   existing `fakeSdk.ts` pattern. It must cover:
@@ -367,81 +398,162 @@ own `assistant` row, and each row repeats `message.usage`.
 
 **1a — Count Codex usage per response.**
 
-Add `observeResponse(threadId, responseId, usage)` to `CodexTurnUsageAccumulator`:
+Add `observeResponse(threadId, responseId, usage)` to `CodexTurnUsageAccumulator`.
 
 - Calling it twice with the same `responseId` changes nothing.
-- It keeps a breakdown per thread.
+- It keeps a separate total per thread.
 - `CodexSdkManager`'s notification handler calls it *before* `TurnSession` filters the
-  notification, so the root thread's descendants are counted.
+  notification, so the root thread's descendants reach it.
 
-A thread belongs to the lane that spawned it, as shown by `spawnAgent.receiverThreadIds` or
-`subAgentActivity(kind=started).agentThreadId`. A descendant's usage is attributed to the
-lane's current turn.
+The accumulator gets two read methods in place of today's single `snapshot()`:
 
-`thread/tokenUsage/updated` stays as a fallback. It is used for a thread only when no
-`rawResponse/completed` arrives for that thread:
+| Method | Returns | Where it goes |
+| --- | --- | --- |
+| `rootSnapshot()` | the lane's root thread only | the root `agent_result`, as today (`codexSdkManager.ts:1191`) |
+| `descendantSnapshots()` | one cumulative total per descendant thread | one `subagent_usage` row per descendant |
 
-- Add up changes in `total`, not `last`.
-- Skip repeats whose `total` has not changed.
-- If `total` goes down, treat it as a process restart: take the new value as the starting point
-  instead of subtracting.
+The two outputs are disjoint by construction. `agent_result` stays root-only, as it is today
+because `TurnSession` filters child events, so no descendant token is ever counted in both.
 
-Two guards protect the primary source:
+**Descendant rows.**
+- Each descendant gets one cumulative row, upserted under a stable Codex-namespaced dedup key
+  `codex-subagent:<invocationId>:<threadId>`. This uses the existing `subagent_usage` upsert
+  (`persistSubagentUsage`, `shared/streamParser/rawEventsSink.ts:110`). The namespace keeps these
+  rows apart from the dynamic-workflow producer's `subagent:<wfRunId>:<agentId>` rows, which 1b
+  treats differently.
+- The payload uses the nested `message.usage` shape that Insights already reads.
 
+**Descendant ownership.** Ownership cannot hang off `entry.currentContext`. That context is
+valid only during the logical turn, and terminal cleanup clears it (`codexSdkManager.ts:1109`).
+Instead, the warm entry keeps a **descendant registry**:
+- It maps a child `threadId` to the owning invocation and lane.
+- A thread is registered from `spawnAgent.receiverThreadIds` or
+  `subAgentActivity(kind=started).agentThreadId`.
+- Registration is transitive, so a grandchild belongs to the same lane.
+
+**Late responses.**
+- On root terminal, the manager writes each descendant's row.
+- The registry then stays open for a bounded drain, which ends at whichever comes first: the
+  client stopping (single-shot lanes) or 30 seconds. A response arriving during the drain
+  re-upserts that descendant's row.
+- A response arriving after the drain, or from an unregistered thread, is recorded as a
+  `descendant_usage_unattributed` diagnostic that carries its token counts. It is never
+  silently dropped.
+
+**Fallback from `thread/tokenUsage/updated`.** The primary source is `rawResponse/completed`.
+The fallback fills gaps in it request by request, not thread by thread:
+
+1. **Keep a baseline per thread.** The warm entry stores the last `total` it saw for each
+   (process, thread). A thread first seen in this process starts at 0; `total` restarts per
+   process, so that is also right for a resumed thread. The baseline lives on the warm entry,
+   not in the per-turn accumulator (`codexSdkManager.ts:898`). That way a second turn on a warm
+   process is compared against the first turn's last reading, not against zero.
+2. **Count only updates that moved `total`.** An update whose `total` equals the baseline is a
+   duplicate emission and is skipped. This is defect A2.
+3. **Pair updates with responses.** Each counted update's `last` is one request's usage, so it
+   has a matching `rawResponse/completed.usage`. At turn end (and again at drain end), pair them
+   with a multiset match on all token fields. This doesn't depend on which arrived first.
+4. **Top up only for missing responses.** A counted update with no matching response means that
+   response was never delivered, or arrived with `usage: null`. Add its `last` to the thread's
+   total and log `response_usage_missing`.
+
+If no responses arrive at all, this reduces to today's behavior without the duplicates.
+`total(end) − total(start)` is only a cross-check. When it differs from the stored figure for
+reasons other than the known ones (compaction, spill across a turn boundary), log
+`oracle_mismatch`; never use it as the stored value.
+
+**Protocol guards.**
 - **Drift diagnostic.** Log loudly when a turn has `tokenUsage` snapshots but no
-  `rawResponse/completed`; that means the protocol has changed.
+  `rawResponse/completed`. That means the protocol has changed.
 - **Protocol-shape test.** `rawResponse/completed` is typed as internal-only, and its `usage` is
   `TokenUsageBreakdown | null`. Pin the method name, field names and nullability against the
-  generated types, so a Codex upgrade that changes them fails CI instead of silently zeroing
-  usage.
+  generated types. A Codex upgrade that changes them then fails CI instead of silently falling
+  back.
+- **Delivery.** Confirm whether delivery depends on `experimentalApi: true`. The fallback
+  covers either answer.
 
-Also confirm whether delivery depends on `experimentalApi: true`. The fallback covers either
-answer.
+**1b — One rollup, with one formula per provider.**
 
-Output shape:
+Replace the per-run `assistantMessageCount === 0` condition with a single shared function.
+`scanRawEventRollups`, `selectDailyModelUsage` and the daily model buckets all call it, so they
+cannot drift apart again. It lives in a new file next to `insightsQueries.ts`, which is 3,122
+lines.
 
-- The root thread's usage stays on `agent_result`, as today.
-- Descendant usage is emitted as the existing `subagent_usage` event type. Both Insights paths
-  already add it unconditionally (`insightsQueries.ts:141`, `:686`).
+Each token comes from exactly one source:
 
-No new event type and no new rollup are needed.
+| Provider | Tokens counted from | Also read, for attribution and checks only |
+| --- | --- | --- |
+| Claude, outer agent | `result.usage`, per query | deduplicated assistant messages (§1c) |
+| Claude, children | Δ`modelUsage` − `result.usage`, per query, within one process segment | Task/Agent `tool_use`; dynamic-workflow `subagent:` rows |
+| Codex, root thread | `agent_result` | — |
+| Codex, descendants | `codex-subagent:` `subagent_usage` rows | — |
+| OMP, pi, other | their existing `agent_result` / `subagent_usage` sources, unchanged | — |
 
-**1b — Roll up per provider.**
+Rules for the Claude child formula:
 
-Replace the per-run `assistantMessageCount === 0` condition with a rollup per provider:
+- **Segments.** A process segment is one SDK process within one (run, session). A new segment
+  starts on the first reading, and whenever any `modelUsage` counter goes down. Reuse the
+  reset detection the cost fold already does (`insightsQueries.ts:723`).
+- **First reading.** The first reading in a segment counts from zero.
+- **Negative result.** If Δ`modelUsage` − `result.usage` comes out negative, clamp that token
+  type to 0 and log `claude_child_delta_negative`.
+- **Missing `modelUsage`.** A result with no `modelUsage` contributes zero child tokens and logs
+  `claude_model_usage_missing`.
+- **Per-model split.** Take it from Δ`modelUsage` for each model. The outer's own per-model
+  figures come from deduplicated assistant messages.
+- **Dynamic-workflow rows.** Rows from `dynamicWorkflowTracker` run inside the same Claude
+  process, so `modelUsage` already contains them. In Claude runs they become attribution-only.
+  Today's fold adds them unconditionally. Check whether it also counts the same work through
+  forwarded child assistant rows; if so, that is a further double count, and 1b removes it.
 
-| Usage | Source |
-| --- | --- |
-| Claude | deduplicated assistant messages |
-| Codex root | `agent_result` |
-| Descendants | `subagent_usage` |
+**1c — Deduplicate Claude assistant messages.**
 
-Put this in one shared function that both `scanRawEventRollups` and `selectDailyModelUsage`
-call, so they cannot drift apart again. `insightsQueries.ts` is 3,122 lines and has no size cap
-yet, but the shared function still belongs in a separate file next to it.
+- Count each (session, `message.id`) once.
+- These messages are no longer a token source (1b). They supply message counts and the outer
+  agent's per-model split.
+- They also give a check: summing the deduplicated outer messages should come close to
+  `result.usage`. A large gap logs `claude_outer_mismatch`.
 
-**1c — Deduplicate Claude usage.**
+**1d — Backfill past runs, and record how complete each run's accounting is.**
 
-Count assistant usage once per (session, `message.id`).
-- **Outer usage:** from `result.usage` where present.
-- **Child usage:** from the differences between successive `modelUsage` readings. These are
-  already tracked per (run, session) for cost.
+Deleting `run_usage` rows, as migration 132 did, is not enough. The boot rebuild runs the fold
+over `raw_events`, and past runs have no `codex-subagent:` rows for the fold to find. The
+backfill has four parts.
 
-Apply this to both Insights paths.
+1. **Schema migration.** Take the next free number (145 when this was written). Add
+   `accounting_version INTEGER` and `coverage TEXT` to `run_usage`, update `schema.sql`, and
+   extend the writer in `runUsageRollup.ts:129`, which today inserts only nine fields.
 
-**1d — Recompute past runs.**
+   | `coverage` | Meaning |
+   | --- | --- |
+   | `complete` | every token source for the run was available |
+   | `codex-root-only` | Codex descendants could not be reconstructed |
+   | `legacy` | written before this change and not recomputed |
 
-A data-only migration recomputes `run_usage` for runs with Codex or Claude rows. It takes the
-next free number (145 when this was written) and follows migration 132
-(`132_run_usage_recompute.sql`).
+2. **One-shot boot backfill.** This runs in TypeScript next to `backfillRunUsageRollups`
+   (`runRecovery.ts:924`), guarded by a completion marker. For each run with
+   `codex_app_server_notification` rows, it:
+   - replays the stored `rawResponse/completed` and spawn notifications through the same
+     registry and pairing code as 1a;
+   - writes the `codex-subagent:` rows using the same upsert keys that live code uses, so
+     re-running it is harmless;
+   - deletes the run's `run_usage` row so the existing boot rollup rebuilds it with the new
+     fold.
 
-| Run | What the migration does |
-| --- | --- |
-| Codex run whose raw events predate 2026-09-14T19:51Z (no `rawResponse/completed`) | Recompute from the root-thread fallback and mark it root-only |
-| Run whose raw events have been archived out of `raw_events` (see `docs/BACKUP-RESTORE.md`) | Keep the stored value and mark it not recomputed |
+   Claude runs need no new rows, only the delete, because 1b recomputes them from stored
+   `result` and `modelUsage` payloads.
 
-Stamp new usage with a `usage_accounting_version` so Insights can tell the old accounting from
-the new. Do not rely on timestamps for this.
+3. **Runs before 2026-09-14T19:51Z.** These have no `rawResponse/completed`. Their descendant
+   `tokenUsage/updated` notifications were kept only last-write-wins per (run, turn), so they
+   cannot be summed. They are rebuilt root-only and marked `codex-root-only`.
+
+4. **Daily buckets** read `raw_events` through the shared fold, so they pick up the backfilled
+   rows without a separate step.
+
+Two things are deliberately not changed:
+- Historical root `agent_result` payloads are not rewritten. Their roughly 0.4% duplicate-update
+  overcount stays, and it is documented.
+- Runs with no `raw_events` keep their stored value, following migration 132's rule.
 
 **1e — Fix the comment.**
 
@@ -453,43 +565,54 @@ a revert.
 
 ### 5.3 Tests
 
-**Accumulator:**
+**Accumulator and fallback:**
 - one response;
 - several responses add up;
 - a repeated `responseId` adds 0;
-- null `usage` falls back to the change in `total`;
+- `rootSnapshot()` excludes descendants, and `descendantSnapshots()` excludes the root;
 - a duplicate `tokenUsage/updated` with unchanged `total` and non-zero `last` adds 0;
-- a change in `total` that spans two requests;
-- a `total` reset (process resume) takes the new starting point;
+- partial delivery: 3 counted updates and 2 responses tops up exactly the unmatched `last`;
+- null `usage` on a response is topped up from its update;
+- a second turn on the same warm process is baselined against the first turn's last `total`;
+- a new process starts each thread's baseline at 0;
 - compaction requests are counted;
 - uncached input is never negative.
 
 **Manager, using the fake app-server:**
-- A lane whose root thread spawns two children emits one root `agent_result` and one
-  `subagent_usage` per child.
-- Their sum equals the lane's total from `rawResponse/completed.usage`.
+- A lane whose root spawns a child and a grandchild emits one root `agent_result` and two
+  `codex-subagent:` rows.
+- Each row is correct on its own, and the three add up to the lane's
+  `rawResponse/completed.usage` total with no overlap.
+- A child response that arrives after root terminal but within the drain updates its row.
+- A response after the drain produces `descendant_usage_unattributed`.
 
 **Protocol shape:**
-- `rawResponse/completed` is pinned against the generated 0.153.3 types.
+- `rawResponse/completed` is pinned against the generated types.
 
 **Rollups:**
-- In a mixed claude-primary fixture, `run_usage` equals deduplicated Claude plus Codex root plus
-  Codex children, and also equals the sum of the daily buckets.
-- In a Claude run with multi-block assistant messages, each message is counted once.
+- In a mixed claude-primary fixture, `run_usage` equals Claude (outer plus child) plus Codex
+  root plus Codex descendants, and equals the sum of the daily buckets.
+- Multi-block assistant messages are counted once, and never as tokens.
+- Claude cases: a `modelUsage` reset within one (run, session) starts a new segment; a negative
+  child delta clamps and logs; a result with no `modelUsage` logs.
+- A Claude run with dynamic-workflow `subagent:` rows is not double-counted.
 
-**Migration:**
-- Running it twice gives the same result.
-- Runs before the boundary are marked root-only.
-- Archived runs are untouched.
+**Backfill:**
+- Running it twice gives the same rows.
+- A run before the boundary is marked `codex-root-only`.
+- Runs with no `raw_events` are untouched.
+- The daily buckets for a backfilled run match its `run_usage`.
 
 ### 5.4 Acceptance
 
 - For new Codex runs, stored input and output per lane (root plus descendants) equals the sum of
   `rawResponse/completed.usage` exactly.
-- For the audit window, the recompute reproduces two figures within 0.5%:
-  - Codex: §1.2's 816.9M input and 3.39M output, minus the one quick-chat root;
-  - Claude: §1.3's deduplicated totals.
+- For the audit window, the backfill reproduces two figures within 0.5%. The historical 0.4%
+  root overcount fits inside that tolerance.
+  - Codex: §1.2's 816.9M input and 3.39M output, minus the one quick-chat root.
+  - Claude: §1.3's outer and child totals.
 - Mixed runs show both providers in `run_usage` and in the daily model buckets.
+- Every `run_usage` row carries `accounting_version` and `coverage`.
 
 ## 6. Increment 2 — fixes to the delegated path
 
@@ -519,7 +642,7 @@ turn has nothing to steer.
 
 **2c — Deliver the role prompt on Codex.**
 
-- **If** the Increment 0 probe shows forked children inherit the parent's
+- **If** the Increment 0 child-inheritance probe shows forked children inherit the parent's
   `developerInstructions`: send the effective role body as thread `developerInstructions` on
   programmatic Codex steps.
 - **Otherwise:** put it in the spawn message the host composes.
@@ -586,7 +709,7 @@ is documented in the `userMcpServers.ts` header.
 
 | Source | Setting |
 | --- | --- |
-| config.toml servers | Disable by name, but only ids the *effective* configuration defines. List them with `config/read { cwd, includeLayers: true }` so project config and profiles are included; the current header scan reads only `$CODEX_HOME/config.toml` |
+| config.toml servers | Disable by name, but only ids the *effective* configuration defines. List them with `config/read { cwd, includeLayers: true }` so project config and profiles are included; the current header scan reads only `$CODEX_HOME/config.toml`. This changes the cold start (below) |
 | Plugins | `features.plugins = false` |
 | Apps | `features.apps = false` plus `apps._default.enabled = false` |
 | Remote plugin discovery | `features.remote_plugin = false` |
@@ -594,19 +717,52 @@ is documented in the `userMcpServers.ts` header.
 
 A probe on 0.153.3 that ran no model verified these settings.
 
-**Gate that blocks on failure.** Between `thread/start` and `turn/start`, call
+**Cold start becomes two-phase.** Today `CodexSdkManager` builds the isolation inputs and the
+warm fingerprint (`codexSdkManager.ts:629`, `:636`) before it constructs and starts the client
+(`:973`). `config/read` needs a running app-server, so the cold start becomes:
+
+1. Start and initialize the app-server process.
+2. Call `config/read { cwd, includeLayers: true }`.
+3. Resolve the capability policy against that effective configuration.
+4. Build the final thread configuration and its fingerprint.
+5. Call `thread/start`.
+6. Run the gate (below).
+7. Call `turn/start`.
+
+The warm fingerprint splits in two:
+- a **process fingerprint** (executable, environment, cwd) that decides whether a warm process
+  can be reused;
+- a **thread-configuration fingerprint** that includes a digest of the `config/read` result and
+  the resolved policy.
+
+On every warm reuse, re-run `config/read`. It is one local call. If the digest has changed
+because the user edited config.toml or a profile, restart the thread cold rather than reuse a
+configuration built from stale input.
+
+**Gate that blocks on failure (root thread).** Between `thread/start` and `turn/start`, call
 `mcpServerStatus/list({ threadId, detail: 'toolsAndAuthOnly' })`.
 
 - It lists config, plugin and app servers, with `pluginId`, and reports disabled ones as
   `disabled`.
 - If any enabled server is outside the resolved policy, the step stops before role work with a
   named error.
-- Collaboration children have their own threads, so each child must pass the same check with its
-  own `threadId`.
 - Fill `agent_init.mcp_servers` from this call.
 
 Startup notifications cannot serve as the gate: nothing marks when startup is complete, and
 `cloudflare-api` arrives late.
+
+**Children: inherited configuration plus an audit, not a gate.**
+- The host controls the gap between `thread/start` and `turn/start` only for the root thread
+  (`codexSdkManager.ts:995`, `:1062`). Codex creates collaboration children internally, and the
+  host first hears of one after it has started work. So no child can be gated before its first
+  request.
+- A child's structural protection is the configuration it inherits from the parent thread. The
+  Increment 0 child-inheritance probe must confirm it inherits the overrides above.
+- On top of that, when a child is registered (§5.2), the host runs `mcpServerStatus/list` for
+  the child's `threadId` as an audit. An unexpected server interrupts the lane's turn and fails
+  the step with a named error. Any work the child already did is discarded along with the step.
+- If the probe shows children do *not* inherit the overrides, the audit is the only child
+  control. §7.8 and §13 then state child coverage as "detected and failed", not "prevented".
 
 `collaboration.spawn_agent` cannot be removed from the tool list on 0.153.3. Setting the
 collaboration feature flags to false did not remove it in the global-assistant probe. So
@@ -630,15 +786,21 @@ methods its contract needs. For example, review and verification steps get the r
   does not rely on per-spawn `disallowedTools`.
 - **Step identity.** It reaches the router from the spawn's MCP server configuration. If pooling
   is ever revived, it must move to a token sent with each call.
-- **Where the code goes.** New handler code goes in `orchestrator/mcpServer/handlers/`, not
-  `mcpQueryHandler.ts`, which is at its size cap.
+- **Where the code goes.** New handler code goes in `orchestrator/mcpServer/handlers/`, which is
+  where the tool families now live. `mcpQueryHandler.ts` is only the dispatcher (1,151 lines on
+  local main, at its size cap).
 
 This must be in place before Increment 4 is enabled on any review or verification step.
 
 ### 7.5 Rollout
 
 - The mode (`warn` or `enforce`) is a ConfigManager setting, not an env flag.
-  `CYBOFLOW_DISABLE_CODEX_CAPABILITY_POLICY=1` turns the policy off entirely.
+- The emergency switch is `CYBOFLOW_CODEX_CAPABILITY_GATE=audit`, not a full disable. In
+  `enforce` mode it keeps every source-level setting from §7.3 and turns only the blocking gate
+  into a logged audit.
+- Every run under `warn` or under the switch logs a startup diagnostic and writes a raw event
+  that names the mode. Rolling back to `warn` is the full fail-open path, and it is visibly
+  marked on every affected run.
 - **Warn phase:**
   - Change nothing.
   - Search `raw_events` for the MCP tools *and built-in tools* (web search, computer use) that
@@ -669,7 +831,11 @@ only *remove* Codex servers whose ids match; it never grants one.
   apps, remote discovery) produces exactly the expected override set. Ids that are absent from
   the effective config are never named.
 - **Fake `mcpServerStatus/list`.** An unexpected enabled server from config, a profile or a
-  plugin stops the step before `turn/start`. A child thread is checked separately.
+  plugin stops the root step before `turn/start`. An unexpected server on a registered child
+  interrupts the lane's turn and fails the step.
+- **Cold start and warm reuse.** `config/read` runs before the thread configuration is built. A
+  changed `config/read` digest on warm reuse forces a cold thread. The audit-only switch keeps
+  the source-level settings, and it writes its diagnostic.
 - **Explicit grant.** A validated role MCP server is present while the other servers are
   disabled.
 - **Router.** A review step that calls a write method outside its scope is rejected, for both
@@ -678,8 +844,10 @@ only *remove* Codex servers whose ids match; it never grants one.
 
 ### 7.8 Acceptance
 
-- By default, programmatic Codex threads (root and child) start only `cyboflow` plus explicit
-  grants, and no `cloudflare-api`, `codex_apps` or `cua_repl`.
+- By default, programmatic Codex root threads start only `cyboflow` plus explicit grants, with
+  no `cloudflare-api`, `codex_apps` or `cua_repl`.
+- Child threads get the same surface through inherited configuration. If the probe shows they
+  don't inherit it, an unexpected child server is detected and the step fails (§7.3).
 - `agent_init` reports the servers that actually started.
 - Context size decreases, and neither startup latency nor MCP startup failures get worse.
 
@@ -733,37 +901,58 @@ Claude follows once the Increment 0 SDK probe is done and its baseline is rebuil
 
 ### 8.3 Selection and keying
 
-**Recorded in the frozen spec, not an env var.**
-- Add a definition-level `stepDispatch?: Record<stepId, 'delegated' | 'direct'>` to
+**Steps are addressed by their full path.** Step ids are unique only within a phase
+(`workflowDefinitionSchema.ts:210`), and fan-out inner steps have a namespace of their own
+(`:222`). So a bare step id is ambiguous in a valid definition. Every key in this section is a
+**step address**:
+- `<phaseId>/<stepId>` for an ordinary step;
+- `<phaseId>/<stepId>/<innerStepId>` for a fan-out lane step, such as
+  `<executePhase>/execute-tasks/implement`.
+
+A shared helper builds and parses addresses, and validation rejects an address that does not
+resolve to exactly one step.
+
+**What the definition requests.**
+- Add a definition-level `stepDispatch?: Record<StepAddress, 'delegated' | 'direct'>` to
   `workflowDefinitionSchema`. The schema's `z.object` strips unknown keys, so the field must be
   declared.
-- It is copied into the run's frozen spec, so the two arms get different `spec_hash` values, a
-  restart replays the same choice, and no migration is needed.
-- It is *not* an `agentConfigs` field. `agentConfigs` is keyed by agent/role
+- It is *not* an `agentConfigs` field. `agentConfigs` is keyed by agent or role
   (`workflowDefinitionSchema.ts:194`), and role keys collide (next point).
 
-**Host eligibility is keyed `provider:workflow:stepId`.** It is a code constant, not a setting.
-Role keys would be wrong because one role backs several steps:
-- Ship's `materialize-batch` uses the `implement` role for work that only touches the database.
+**Host eligibility is keyed `provider:workflow:<step address>`.** It is a code constant, not a
+setting. Role keys would be wrong because one role backs several steps:
+- Ship's `materialize-batch` uses the `implement` role for database-only work.
 - `expand-spec` uses `context`.
 - Launch's `interview` role backs three steps.
 - `execute-tasks` is `implement`.
 
-Exclude verify-setup `prove` and fan-out parent steps.
+Exclude verify-setup `prove` and fan-out parent steps. The first entries are Sprint's
+implement and write-tests lane steps on Codex. Ship's lane equivalents follow once Sprint
+passes.
 
-The first entries are `codex:sprint:implement` and `codex:sprint:write-tests`. Ship's lane
-equivalents follow once Sprint passes.
-
-**How a `direct` entry resolves.** At launch, after the runtime mix is applied, a `direct` entry
-falls back to `delegated` if:
+**What gets frozen is the resolved choice, not the request.** At launch, after the runtime mix is
+applied, each requested `direct` entry is resolved. It falls back to `delegated` if either:
 - the step's resolved runtime is not `claude-sdk` or `codex-sdk`; or
-- the step is not eligible.
+- the step address is not on the eligibility list at launch time.
 
-The fallback is recorded in the run stamp, never applied silently. Each invocation row also
-records its dispatch mode, so attribution survives handover.
+The frozen spec records both the request and the resolved map. Restart and replay read only the
+resolved map. That way a later change to the eligibility list, or a version upgrade, can never
+change how a run that is already in flight executes. The resolved map is part of the frozen
+spec, so the two arms of a comparison get different `spec_hash` values.
 
-**Handover.** After a run is handed over, the orchestrated plane ignores `stepDispatch` and
-goes back to the Task arrangement. Invocations that already ran keep their recorded mode.
+**Per-invocation record.** `agent_invocations` today stores only step, provider, runtime, model
+and panel identity (`agentInvocationStore.ts:15`, `:60`). Add three nullable columns, and have
+the store write them and read them back:
+- `dispatch_mode`;
+- `service_tier`;
+- `effort`.
+
+This needs a schema migration (next free number after Increment 1's) and a `schema.sql`
+update. §10 depends on these columns.
+
+**Handover.** After a run is handed over, the orchestrated plane ignores the resolved
+`stepDispatch` map and goes back to the Task arrangement. Invocations that already ran keep their
+recorded `dispatch_mode`.
 Evaluation excludes handed-over runs.
 
 **Kill switch.** `CYBOFLOW_DISABLE_DIRECT_STEPS=1` forces `delegated` everywhere.
@@ -815,8 +1004,13 @@ agent.
 ### 8.5 Tools, sandbox and state ownership
 
 **Claude.**
-- Pass the role's tool list as the SDK `tools` option. The option is
-  `ClaudeSpawnerOptions.tools`, wired at `claudeCodeManager.ts:3203`.
+- Pass the role's tool list as the SDK `tools` option.
+  - The manager's own `ClaudeSpawnOptions` already has `tools` (`claudeCodeManager.ts:849`) and
+    forwards it at `:3203`.
+  - The orchestrator-facing `ClaudeSpawnerOptions` (`runExecutor.ts`), which `SpawnStepRunner`
+    uses, does not. Add `tools` there, and carry it through every facade and adapter between
+    the two.
+  - Non-Claude runtimes ignore it deliberately, and a test pins that.
 - Add the step's `mcp__cyboflow__*` tools, because role `tools:` lists omit them.
 - Exclude `Task` and `Agent`.
 - Never use `allowedTools`, which only pre-approves tools and does not restrict them. Without
@@ -836,7 +1030,52 @@ is not structural, and should not be described that way.
 **State writes.** These are limited by Increment 3's per-step router limits. Direct mode is not
 turned on for any review or verification step until those limits are enforced.
 
-### 8.6 Evaluation design
+### 8.6 Replacing the dispatcher's corrections
+
+In the window, dispatchers sent 29 corrective follow-up turns to their children (§4.1). A
+direct worker has no dispatcher, so the controller must do this job. "Charge the loopback to the
+step" covers only the accounting. It does not make the corrections happen.
+
+`SpawnStepRunner` today makes one spawn and waits for one terminal outcome
+(`spawnStepRunner.ts:495`, `:521`). Direct mode is not enabled for a step until each
+intervention below has a controller-side trigger, action, limit and test.
+
+**Timebox.**
+- **Trigger:** the step's wall-clock time exceeds its budget. The budget is set per step
+  address, defaulting to 1.5x arm A's p95 for that step.
+- **Action:** interrupt the turn, then resume the same thread with one "stop, finish, and emit
+  your result contract now" turn. A single-shot lane has already stopped its client, so this
+  resumes the thread on a new client.
+- **Limit:** one follow-up. After that the step fails with a timeout class.
+
+**Incomplete output.**
+- **Trigger:** the result contract is missing or cannot be parsed.
+- **Action:** the existing output-contract retry. Today it exists for task-verify ("fails this
+  lane after one retry"); extend it to every direct-eligible step.
+- **Limit:** one retry.
+
+**Edits outside the task's scope.**
+- **Trigger:** after the step, the lane's diff touches a path owned by a sibling lane in the same
+  batch, or a protected path such as the runbook.
+- **Action:** a loopback that lists the offending paths and asks for them to be reverted.
+- **Limit:** one loopback, then the step fails.
+- **Why not the task's file hints:** tasks carry file hints, not a strict list, so the check
+  cannot use them.
+
+**Branch drift.**
+- **Trigger:** after the step, the lane is not on its expected branch or base, or the worktree
+  is still dirty after the step's required commit.
+- **Action:** a loopback that asks the worker to re-sync or commit.
+- **Limit:** one loopback, then the step fails.
+
+Beyond the task-verify retry, none of these is confirmed to exist in the controller today. Treat
+each as new work unless the implementation finds it already there.
+
+Arm A's data sizes the need. Classify how often each intervention would have fired on arm A's
+delegated runs, and require direct mode to fire no more often than that within the predeclared
+tolerance.
+
+### 8.7 Evaluation design
 
 **Compare variants side by side, not with a toggle.**
 - **Arm A:** a delegated-fixed variant (Increment 2 in place) with explicit per-agent runtime
@@ -875,7 +1114,7 @@ findings metric, or split it by dispatch mode.
 production Sprint. Decide the tolerances in advance for completion, verification, loopbacks,
 retries and result parsing.
 
-### 8.7 Tests
+### 8.8 Tests
 
 - **Prompts.**
   - Direct prompts contain the effective role body, the addendum, the task scope and exactly one
@@ -885,7 +1124,11 @@ retries and result parsing.
 - **Overrides.** Project prompt replacement, workflow addendum, variant delta, provider model
   and effort all reach the direct turn.
 - **Keying.**
-  - `codex:sprint:implement` never makes Ship's `materialize-batch` direct.
+  - Eligibility for Sprint's implement lane step never makes Ship's `materialize-batch`
+    direct.
+  - A bare or ambiguous step id is rejected; only full step addresses resolve.
+  - Restart after an eligibility-list change replays the frozen resolved map.
+  - `agent_invocations` rows carry `dispatch_mode`, `service_tier` and `effort`.
   - Ineligible or wrong-runtime entries fall back to delegated and are recorded in the stamp.
 - **No leakage.**
   - Direct mode never reaches OMP, pi or orchestrated turns; check every place `stepDispatch` is
@@ -899,6 +1142,10 @@ retries and result parsing.
   - Code-review findings and blocking verdicts still trigger the loopback.
   - Canceling interrupts the turn, and no MCP write arrives afterwards.
 - **Handover.** A run handed over after a direct step keeps an accurate per-invocation stamp.
+- **Corrections (§8.6).** Test each intervention: timebox expiry with its one follow-up;
+  incomplete output with its one retry; an edit to a sibling lane's path causing a revert
+  loopback; branch drift causing a re-sync loopback. Each fails the step when its limit is
+  exhausted.
 - **Compaction.**
   - The persistence and result contracts survive Claude auto-compaction, or are re-injected.
   - Measure how often direct Claude workers compact: they now carry the full step prompt plus
@@ -907,10 +1154,10 @@ retries and result parsing.
   reusing a warm session between sequential programmatic steps. If they do, count the extra
   cold starts in evaluation.
 
-### 8.8 Acceptance
+### 8.9 Acceptance
 
 - Each eligible step runs one top-level thread or query, with zero host-requested children by
-  the §8.6 count.
+  the §8.7 count.
 - Acceptance criteria, commits, artifacts, findings (after deduplication) and controller
   verdicts match arm A within the tolerances set in advance.
 - Before arm B runs, set a minimum saving per provider. Base it on how much the validated
@@ -924,7 +1171,7 @@ retries and result parsing.
 | Order | Increment | Why at this point | How to roll back |
 | --- | --- | --- | --- |
 | — | Service-tier pin (§4.3) | Already landed. The cheapest saving, and it removes a skew | Revert |
-| 0 | Reproductions, fake app-server, SDK and role-prompt probes | Every later increment needs the fake; 2c and Claude direct mode need the probes | Nothing to roll back; no behavior changes |
+| 0 | Reproductions, fake app-server, Claude SDK and Codex child-inheritance probes, re-probe on the next Codex version | Every later increment needs the fake; 2c, Increment 3's child coverage and Claude direct mode need the probes | Nothing to roll back; no behavior changes |
 | 1 | Complete usage accounting | Nothing can be measured without it | Revert. The migration only touches data and can be re-run |
 | 2 | Fixes to the delegated path | Each saves usage on its own, and together they define arm A | Revert each sub-item separately |
 | 3 | Codex capability surface and per-step router limits | Least privilege must exist before parent and child are merged into one agent | Switch ConfigManager to `warn`, or use the kill switch |
@@ -945,8 +1192,13 @@ invocation stamps, not from in-process counters. `perfBump` does nothing unless
 - `descendant_input` and `descendant_output`;
 - `response_usage_missing`;
 - `oracle_mismatch`;
-- capability-gate aborts;
-- per invocation: `stepDispatch`, `serviceTier`, model and effort.
+- `descendant_usage_unattributed`;
+- `claude_child_delta_negative`, `claude_model_usage_missing` and `claude_outer_mismatch`;
+- capability-gate aborts and child-audit failures;
+- the capability mode (`warn` / `enforce` / audit switch) on every affected run.
+
+Per-invocation `dispatch_mode`, `service_tier`, model and effort come from the new
+`agent_invocations` columns (§8.3), not from diagnostics.
 
 **Compare**, per provider, per model and per step:
 - task outcomes;
@@ -977,7 +1229,8 @@ Indicative, not exhaustive:
   - `codex/appServer/turnSession.ts`
   - `codex/appServer/rawNotificationSink.ts`
   - `orchestrator/insightsQueries.ts`, plus a new shared-rollup file next to it
-  - a data-only migration
+  - `orchestrator/runRecovery.ts` (the one-shot backfill) and `orchestrator/runUsageRollup.ts`
+  - a schema migration adding `run_usage.accounting_version` and `coverage`, plus `schema.sql`
   - `test/fakes/fakeCodexAppServer.ts`
 - **Increment 2**
   - the PreToolUse Agent-dispatch merge and background pin in `claude/`, extracted (see below)
@@ -991,20 +1244,23 @@ Indicative, not exhaustive:
   - a new module for per-step router limits under `orchestrator/mcpServer/handlers/`
   - ConfigManager
 - **Increment 4**
-  - `orchestrator/workflowDefinitionSchema.ts`
+  - `orchestrator/workflowDefinitionSchema.ts` and a step-address helper
+  - `orchestrator/agentInvocationStore.ts`, plus a migration adding `dispatch_mode`,
+    `service_tier` and `effort`
+  - the controller's step-correction interventions (§8.6)
   - `programmatic/stepPrompt.ts`
   - `programmatic/spawnStepRunner.ts`
   - the Codex runtime envelope
   - a new `resolveStepRole` module
   - `orchestrator/runExecutor.ts` (`ClaudeSpawnerOptions.tools`)
 
-**Where new code lives.** Three files are at or near their size caps:
+**Where new code lives.** Three files are at or near their size caps. Re-check them on rebase:
 
 | File | Lines / cap |
 | --- | --- |
 | `claudeCodeManager.ts` | 4,818 / 4,818 (at cap) |
-| `mcpQueryHandler.ts` | 4,495 / 4,495 (at cap) |
-| `index.ts` | 6,180 / 6,220 (40 lines free) |
+| `mcpQueryHandler.ts` | 4,495 / 4,495 here; 1,151 / 1,151 on local main after the #19 split (at cap either way) |
+| `index.ts` | 6,180 / 6,220 (40 lines free); #19's next target |
 
 So:
 - Claude option wiring and the dispatch-pin changes go in a new file extracted next to
@@ -1025,7 +1281,9 @@ Read `main/src/services/panels/AGENTS.md` before editing under `panels/`.
 | The recompute migration mislabels old runs | Explicit root-only and not-recomputed markers, plus an accounting version |
 | A direct worker writes state before its file work is valid | The addendum keeps the step's order; controller gates and result contracts stay authoritative |
 | The role's "subagent / no state writes" wording conflicts with direct ownership | The addendum overrides only the listed persistence duties |
-| A direct worker loses the dispatcher's corrective follow-ups (timeboxes, scope reverts) | Reproduce them as controller loopbacks, and charge their usage to the step |
+| A direct worker loses the dispatcher's corrective follow-ups (timeboxes, scope reverts) | Controller interventions with defined triggers and limits (§8.6), gated on arm A's rates; their usage is charged to the step |
+| A late or unregistered Codex descendant escapes accounting | Descendant registry with a bounded drain; `descendant_usage_unattributed` records anything that escapes (§5.2) |
+| The fail-open paths (`warn` mode, the audit switch) are left on | Every affected run carries a startup diagnostic and a raw event naming the mode (§7.5) |
 | Direct Claude review turns at the pinned model cost more than today's downgraded children | Arm A also runs at the pins (2a), so the comparison is fair. Accept the cost, or change the pin deliberately |
 | A workflow relied on inherited plugins, apps or web search | Warn phase that also mines built-in tool use; named failures in enforce mode |
 | `spawn_agent` cannot be removed from the tool list | The child-agent count; a loopback when one is spawned |
@@ -1072,9 +1330,10 @@ Open decisions:
   and the audit window has been recomputed.
 - **Tiers, models and effort.** Workflow Codex threads run on the standard tier. Claude children
   run on their pinned model and effort.
-- **Capabilities.** By default, programmatic Codex threads start only `cyboflow` plus explicit
-  grants, as checked by the gate. Review and verification steps are held to their per-step
-  router limits.
+- **Capabilities.** By default, programmatic Codex root threads start only `cyboflow` plus
+  explicit grants, as checked by the gate. Children are covered by inherited configuration and
+  the audit, as far as the probe shows they can be (§7.3). Review and verification steps are
+  held to their per-step router limits.
 - **Direct steps.** Eligible direct steps run one agent per step, with zero host-requested
   children. Outcomes do not regress beyond the tolerances set in advance. Savings beat each
   provider's minimum on trials that are model-matched, completed and not handed over.
