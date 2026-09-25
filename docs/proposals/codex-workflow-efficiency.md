@@ -39,7 +39,16 @@ day. Revision 1 was checked against three sources: the production database (read
 local Codex rollout files under `~/.codex/sessions`, and the code.
 That check disproved its Codex accounting premise and blocked its app-server pool.
 
-Nothing from this proposal has landed except the service-tier pin in §4.3.
+Landed so far: the service-tier pin (§4.3) and a first cut of Increment 4, direct steps
+(2026-09-25, ahead of Increment 1 at the user's direction). The first cut differs from §8 in
+scope: direct is the DEFAULT for every eligible programmatic step on Claude and Codex, behind the
+`CYBOFLOW_DISABLE_DIRECT_STEPS=1` kill switch, with no `stepDispatch` definition field, no frozen
+resolved map, no step addresses, no per-invocation `dispatch_mode` column and no §8.6 controller
+corrections. Exclusions: OMP, pi, `verify-setup/prove` and `address-review`. See
+`docs/ARCHITECTURE.md` → "Programmatic plane: direct step dispatch". Since revision 4, the Codex
+delegated path also changed underneath §8.1: roles are now registered natively, and the
+dispatcher is told to spawn `cyboflow-<role>` without forking its context (the live smoke showed
+`fork_turns: "none"`), so a Codex child no longer sees the full step prompt.
 
 ### What changed from revision 1
 

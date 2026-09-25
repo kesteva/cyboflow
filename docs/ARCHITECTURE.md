@@ -144,6 +144,26 @@ chokepoint" — this section frames only what each one owns:
 - **`ideaComponentRouter.ts` (`IdeaComponentRouter.applyChange`)** — the `idea_components` ledger
   (migration 101) tracking each idea's idea-spec/prototype/architecture/epics/stories progress.
 
+#### Programmatic plane: direct step dispatch
+
+A programmatic step turn runs its role DIRECTLY by default: the turn is the `cyboflow-<key>` role,
+not a dispatcher that delegates to it (`programmatic/stepDispatch.ts`). `SpawnStepRunner` resolves
+the role's effective system prompt (the same `resolveRunEffectiveAgents` layering as the agent
+overlay) and sends it, followed by a host addendum, as the spawn's `systemPromptAppend` — Claude's
+`systemPrompt.append`, Codex's thread `developerInstructions`. `composeStepPrompt` then says "do the
+work yourself" instead of "delegate", and the Codex runtime adapter switches to a direct-step
+envelope that forbids `spawn_agent` for the step's work. A direct Claude turn is also denied the
+`Task` and `Agent` tools; Codex cannot remove `spawn_agent`, so there the rule is prompt-only.
+
+A step stays delegated when it spawns on OMP or pi, when its role has no resolvable prompt, for
+`verify-setup/prove` (its contract already runs in-turn and the read-only role would contradict it),
+and for any `address-review` step (its fix → full suite → re-delegate loop is written for two
+agents). `CYBOFLOW_DISABLE_DIRECT_STEPS=1` reverts every step to delegated. Each step logs its
+dispatch (and, when delegated, why). The orchestrated plane is unaffected. Known gaps: dispatch mode
+is not yet stored per invocation, and Insights still undercounts delegated Codex steps (child-thread
+usage is dropped — `docs/proposals/codex-workflow-efficiency.md` Increment 1), so a step that moves
+to direct can appear to use MORE Codex tokens than it did delegated.
+
 #### Programmatic plane: systemic pauses and run-scoped agent-target overrides
 
 A programmatic step that dies on a usage/session/rate limit parks the run behind a blocking
