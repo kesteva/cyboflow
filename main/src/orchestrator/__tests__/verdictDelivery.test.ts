@@ -1264,6 +1264,33 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     expect(f[0].body).toMatch(/Cannot find module "\.\/missing"/);
   });
 
+  it('a low_confidence WITH a report still carries the reason (the unverifiable diagnosis reaches the human)', async () => {
+    seedRun(db, 'run-b4');
+    seedRequestFull(db, {
+      id: 'vr_lc',
+      runId: 'run-b4',
+      status: 'low_confidence',
+      enqueueKey: 'run-b4:TASK-1:1',
+      errorMessage: 'unverifiable: no simulator runtime matches the deployment target',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'unverifiable',
+        diagnosis: 'no simulator runtime matches the deployment target',
+        confidence: 0,
+        feedback: '',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
+    await deliver({ requestId: 'vr_lc', runId: 'run-b4', projectId: 1, type: 'static-render-snapshot', status: 'low_confidence', verdict: undefined, fileNames: [] });
+
+    const f = visualFindings(db, 'run-b4');
+    expect(f).toHaveLength(1);
+    expect(f[0].body).toMatch(/Reason: unverifiable: no simulator runtime matches the deployment target/);
+  });
+
   it('timeout / skipped bodies carry the concrete error_message reason', async () => {
     seedRun(db, 'run-b3');
     seedRequestFull(db, { id: 'vr_to', runId: 'run-b3', status: 'timeout', errorMessage: 'request timed out' });

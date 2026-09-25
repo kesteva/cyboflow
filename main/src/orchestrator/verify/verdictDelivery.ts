@@ -444,7 +444,11 @@ function buildFindingText(args: {
       if (untested.length > 0) parts.push(['Behaviors that could not be tested:', ...untested].join('\n'));
     }
     if (verdict?.feedback) parts.push(verdict.feedback);
-    if (!report && !verdict && errorMessage) parts.push(`Reason: ${errorMessage}`);
+    // The reason is what separates the low-confidence shapes from one another —
+    // an `unverifiable` diagnosis, a declined `wrong_environment` re-dispatch, a
+    // missing attestation floor — so it is rendered whenever the row has one,
+    // report or not.
+    if (errorMessage) parts.push(`Reason: ${errorMessage}`);
     return { title: 'Visual verification needs human review (low confidence)', body: parts.join('\n\n') };
   }
 
