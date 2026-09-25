@@ -5,9 +5,14 @@
  * Pure projections over `BacklogTaskItem` (the shared taskListing.ts read
  * model): no database, no side effects. Extracted from mcpQueryHandler.ts under
  * the issue-#19 file-size ratchet; the handler still owns scoping, the
- * attachment/approved-design enrichment and the response envelope.
+ * approved-design enrichment and the response envelope. `toMcpAttachments`
+ * (the attachment path projection, filesystem read-only) lives here too so the
+ * run-bound get-task read and the global agent's entity read share it.
  */
-import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import * as path from 'path';
+import { existsSync } from 'fs';
+import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
+import type { BacklogTaskItem, IdeaAttachment } from '../../../../shared/types/tasks';
 
 /**
  * The compact projection cyboflow_list_tasks returns per item — deliberately
@@ -104,4 +109,39 @@ export function toFullTask(item: BacklogTaskItem): Record<string, unknown> {
     created_at: item.created_at,
     updated_at: item.updated_at,
   };
+}
+
+/**
+ * Project an idea's image attachments (migration 028) into the MCP read shape
+ * for cyboflow_get_task: [{ id, label, mimeType, path }], `path` RESOLVED to
+ * an absolute on-disk path — never base64/dataURLs (flow agents fetch bytes
+ * themselves via Read). Reuses the EXACT resolution + containment guard the
+ * ideas:load-attachments IPC handler applies (main/src/ipc/ideaAttachments.ts)
+ * so this read-only surface can never be used to escape the artifacts root:
+ * an attachment whose stored path resolves outside CYBOFLOW_DIR/artifacts, or
+ * that no longer exists on disk, is silently dropped rather than surfaced.
+ */
+export function toMcpAttachments(attachments: IdeaAttachment[]): Array<{
+  id: string;
+  label: string;
+  mimeType: string;
+  path: string;
+}> {
+  // Common case (an idea with no attachments — and every epic/task, though those
+  // never reach here): nothing to resolve or containment-check, so return early
+  // WITHOUT touching getCyboflowSubdirectory. Behaviour-preserving (the loop below
+  // would yield [] anyway) and it keeps the read path off the CYBOFLOW_DIR
+  // resolver for the zero-attachment majority.
+  if (attachments.length === 0) return [];
+  const artifactsRoot = path.resolve(getCyboflowSubdirectory('artifacts'));
+  const result: Array<{ id: string; label: string; mimeType: string; path: string }> = [];
+  for (const att of attachments) {
+    const resolved = path.resolve(att.path);
+    if (resolved !== artifactsRoot && !resolved.startsWith(artifactsRoot + path.sep)) {
+      continue;
+    }
+    if (!existsSync(resolved)) continue;
+    result.push({ id: att.id, label: att.name, mimeType: att.type, path: resolved });
+  }
+  return result;
 }

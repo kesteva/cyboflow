@@ -850,7 +850,7 @@ export type McpQueryMessage =
       /**
        * Which substrate is asking. The interactive-Claude hook omits it; the OMP
        * gate extension stamps 'omp'. Read ONLY by the socket-died disposition —
-       * see {@link McpQueryHandler.registerInFlightShellApproval}.
+       * see {@link InteractiveHookHandlers.registerInFlightShellApproval}
        */
       substrate?: 'omp';
     }
