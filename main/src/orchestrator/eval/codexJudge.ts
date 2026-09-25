@@ -8,7 +8,8 @@ import {
   type JudgeGradeInput,
 } from './evalJury';
 import type { JudgeSample } from './scoring';
-import { AgentProviderDisabledError } from '../../../../shared/agents/agentProviderGuard';
+import { isAgentProviderDisabled } from '../../../../shared/agents/agentProviderGuard';
+import { hasResolvedModel } from './judgeSlots';
 
 export type CodexJurorUnavailableCode = 'runtime-missing' | 'logged-out' | 'provider-disabled';
 
@@ -21,28 +22,6 @@ export class CodexJurorUnavailableError extends Error {
   ) {
     super(message);
   }
-}
-
-/**
- * True when `err` is a CODEX provider-disabled refusal. Scoped to `codex` on the
- * typed branch so a refusal for a DIFFERENT provider is never rewrapped as a
- * Codex-juror outage. Mirrors codexPairwiseJudge.ts's predicate of the same name
- * — the two adapters map this refusal identically, see codexPairwiseJudge.ts's
- * header comment for why the mapping belongs to the adapter, not the app-server
- * client.
- */
-function isAgentProviderDisabledError(err: unknown): boolean {
-  if (err instanceof AgentProviderDisabledError) return err.provider === 'codex';
-  return err instanceof Error && err.name === 'AgentProviderDisabledError';
-}
-
-interface QueryWithResolvedModel {
-  getResolvedModel(): string | null;
-}
-
-function hasResolvedModel(query: EvalStructuredQueryFn): query is EvalStructuredQueryFn & QueryWithResolvedModel {
-  return 'getResolvedModel' in query
-    && typeof (query as { getResolvedModel?: unknown }).getResolvedModel === 'function';
 }
 
 export interface CodexJudgeDeps {
@@ -80,7 +59,7 @@ export class CodexJudge implements JudgeClient {
       if (err instanceof CodexJurorUnavailableError) {
         throw err; // pass through by identity — do not rewrap an already-typed refusal
       }
-      if (isAgentProviderDisabledError(err)) {
+      if (isAgentProviderDisabled(err, 'codex')) {
         const message = err instanceof Error ? err.message : String(err);
         this.deps.logger?.warn('[codexJudge] Codex provider disabled', { error: message });
         throw new CodexJurorUnavailableError(message, 'provider-disabled');
