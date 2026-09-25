@@ -121,7 +121,9 @@ export type AppServerImageDetail = 'auto' | 'low' | 'high' | 'original';
 
 export type AppServerUserInput =
   | { type: 'text'; text: string; text_elements: AppServerJsonValue[] }
+  // 0.156.1: an image is identified by EITHER a `url` or an uploaded `fileId`.
   | { type: 'image'; url: string; detail?: AppServerImageDetail }
+  | { type: 'image'; fileId: string; detail?: AppServerImageDetail }
   | { type: 'localImage'; path: string; detail?: AppServerImageDetail }
   | { type: 'audio'; url: string }
   | { type: 'localAudio'; path: string }
