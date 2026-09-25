@@ -135,7 +135,11 @@ Shared helpers live in `main/src/orchestrator/__test_fixtures__/orchestratorTest
 
 - `createTestDb()` — in-memory `better-sqlite3` with the full cyboflow schema
   applied via `GATE_SCHEMA` (column-parity-pinned to `006_cyboflow_schema.sql`
-  by `__tests__/orchestratorTestDb.test.ts`).
+  plus every later migration that adds a column/index to one of GATE_SCHEMA's
+  tables, by `__tests__/orchestratorTestDb.test.ts` — see that test's own
+  header comment for the current migration list; a migration touching those
+  tables must be added there and to GATE_SCHEMA together, or parity drifts
+  silently).
 - `seedRun(db, overrides?)` — inserts a `workflows` + `workflow_runs` pair;
   `overrides` accepts any column subset (e.g. `{ id, status, workflowName }`).
 - `seedApproval(db, overrides)` — inserts one `approvals` row; `overrides.runId`

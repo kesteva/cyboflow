@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
+import { DEFAULT_WORKFLOW_MODEL } from '../../../../../shared/types/sessionDefaults';
 import type { RunTypeDefaults } from '../../../../../shared/types/sessionDefaults';
 import type { AgentRuntime } from '../../../../../shared/types/agentRuntime';
 
@@ -87,7 +88,7 @@ describe('useTaskRunLauncher.launch — flow resolution by name', () => {
         workflowId: 'wf-sprint',
         projectId: 7,
         sessionId: 'sess-1',
-        model: 'opus',
+        model: DEFAULT_WORKFLOW_MODEL,
         permissionMode: 'default',
       }),
     );
@@ -214,7 +215,7 @@ describe('useTaskRunLauncher.launchSprintBatch', () => {
     expect(mockStartMutate.mock.calls[0][0]).toMatchObject({
       workflowId: 'wf-sprint',
       taskIds: ['t1', 't2'],
-      model: 'opus',
+      model: DEFAULT_WORKFLOW_MODEL,
       permissionMode: 'default',
     });
     expect(result.current.launchingTaskId).toBeNull();
@@ -227,7 +228,7 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
     await act(async () => {
       await result.current.launch('tsk_1', 7, 'task');
     });
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'opus', permissionMode: 'default' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: DEFAULT_WORKFLOW_MODEL, permissionMode: 'default' });
   });
 
   it('launch: resolves the model from runTypeDefaults["workflow:<resolved id>"], read AFTER the async workflow lookup', async () => {
@@ -253,7 +254,7 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
     await act(async () => {
       await result.current.launchSprintBatch('epic_9', ['t1'], 7);
     });
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'opus', permissionMode: 'default' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: DEFAULT_WORKFLOW_MODEL, permissionMode: 'default' });
   });
 
   it('launchSprintBatch: resolves the model from runTypeDefaults["workflow:<resolved id>"]', async () => {
@@ -286,7 +287,7 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
       await result.current.launch('tsk_1', 7, 'task');
     });
     // task → wf-sprint, no matching entry → opus floor.
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: 'opus' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: DEFAULT_WORKFLOW_MODEL });
 
     await act(async () => {
       await result.current.launch('idea_1', 7, 'idea');
@@ -306,7 +307,7 @@ describe('useTaskRunLauncher — per-workflow model default + permissionMode', (
       await result.current.launchSprintBatch('epic_1', ['t1'], 7);
     });
     // Resolves against the default SPRINT (id wf-sprint) — no matching entry.
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: 'opus' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ workflowId: 'wf-sprint', model: DEFAULT_WORKFLOW_MODEL });
 
     // A different project whose "sprint"-named workflow id matches the entry.
     mockListQuery.mockResolvedValue([{ id: 'wf-sprint-b', name: 'sprint' }]);
@@ -332,7 +333,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
       workflowId: 'wf-sprint',
       projectId: 7,
       sessionId: 'sess-1',
-      model: 'opus',
+      model: DEFAULT_WORKFLOW_MODEL,
       permissionMode: 'default',
       substrate: 'sdk',
       taskIds: ['tsk_1'],
@@ -350,7 +351,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
       projectId: 7,
       sessionId: 'sess-1',
       taskIds: ['t1', 't2'],
-      model: 'opus',
+      model: DEFAULT_WORKFLOW_MODEL,
       permissionMode: 'default',
       substrate: 'sdk',
     });
@@ -485,7 +486,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
     await act(async () => {
       await result.current.launch('tsk_1', 7, 'task');
     });
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: 'opus' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ model: DEFAULT_WORKFLOW_MODEL });
   });
 
   // The rung-ordering guard: the resolved runtime OWNS its substrate, so the
@@ -523,7 +524,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
     expect(mockStartMutate.mock.calls[0][0]).not.toHaveProperty('agentRuntime');
     expect(mockStartMutate.mock.calls[1][0]).not.toHaveProperty('agentRuntime');
     // …and the launch lands on the workflow floor, not on a half-applied global.
-    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ substrate: 'sdk', model: 'opus' });
+    expect(mockStartMutate.mock.calls[0][0]).toMatchObject({ substrate: 'sdk', model: DEFAULT_WORKFLOW_MODEL });
   });
 
   it('a stored per-workflow agentRuntime still BEATS the global default', async () => {
@@ -552,7 +553,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
       workflowId: 'wf-sprint',
       projectId: 7,
       sessionId: 'sess-1',
-      model: 'opus',
+      model: DEFAULT_WORKFLOW_MODEL,
       permissionMode: 'default',
       substrate: 'sdk',
       taskIds: ['tsk_1'],
@@ -562,7 +563,7 @@ describe('useTaskRunLauncher — full stored launch defaults on BOTH call sites'
       projectId: 7,
       sessionId: 'sess-1',
       taskIds: ['t1', 't2'],
-      model: 'opus',
+      model: DEFAULT_WORKFLOW_MODEL,
       permissionMode: 'default',
       substrate: 'sdk',
     });

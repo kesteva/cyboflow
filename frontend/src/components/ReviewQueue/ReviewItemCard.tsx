@@ -131,6 +131,7 @@ import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { SystemicPauseSwitchForm } from './SystemicPauseSwitchForm';
+import { isApproveDesignGateItem, gateDeclineOutcome } from '../../utils/gateActionPolicy';
 
 // ---------------------------------------------------------------------------
 // Accept-routing target chip — keyed on the discriminant so a new target breaks
@@ -369,41 +370,11 @@ function isApproveIdeasGateItem(item: ReviewItem): boolean {
   return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-ideas');
 }
 
-/**
- * Tier 2, item 12b: true for the two-way approve-design gate — Approve logs
- * every remaining adversarial-review entry as a non-blocking accepted-risk
- * finding and continues; Revise reruns the design steps with those findings
- * as feedback (a loopback, not a rejection). The generic "Approve & resume" /
- * "Reject" labels below read as a plain accept/deny, which is wrong for a
- * revision loop — this keys the button copy on the gate the same way
- * {@link isApproveIdeasGateItem} does.
- */
-function isApproveDesignGateItem(item: ReviewItem): boolean {
-  if (item.kind !== 'decision') return false;
-  if (item.source === 'gate:human-step:approve-design') return true;
-  const payload = item.payload;
-  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-design');
-}
-
-/**
- * TASK-222 — centralized gate -> verdict mapping. A gate that declares an
- * intra-phase `loopback` (today, the ONLY one among human gates: `approve-design`
- * — shared/types/workflows.ts) must never have its non-approve action recorded as
- * a plain terminal 'reject': that ENDS the run instead of looping back to
- * `expand-spec`/`ui-prototype` with the human's note + the adversarial review
- * threaded in (the 2026-09-17 swift-bison incident — `defaultEscalationActions`'s
- * discard button used to hardcode 'reject' for every decision kind, silently
- * downgrading this gate's Dismiss into a run-ending reject on the queue surface).
- *
- * ONE function, used by BOTH the explicit verdict pair below AND
- * `defaultEscalationActions`'s discard, so a future surface/collapse cannot
- * regress back to a bare 'reject' literal for this gate. Extend the underlying
- * discriminant (currently just {@link isApproveDesignGateItem}) — never add a new
- * per-surface conditional — when a future gate adds a loopback.
- */
-function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
-  return isApproveDesignGateItem(item) ? 'revise' : 'reject';
-}
+// Tier 2, item 12b / TASK-222: `isApproveDesignGateItem` and `gateDeclineOutcome`
+// moved to `utils/gateActionPolicy.ts` (imported above) so `ArtifactTabRenderer`'s
+// own gate controls can share the same decline-outcome mapping instead of
+// re-deriving it — see that module's header for the swift-bison incident this
+// guards against. Extend the discriminant there, never re-add a local copy here.
 
 // ---------------------------------------------------------------------------
 // Plan v2 — switch runtime/model on a systemic pause (subscription/session
@@ -1281,6 +1252,13 @@ export function ReviewItemCard({
         );
       case 'finding':
       default:
+        // MAINTENANCE DEBT: this card has grown past ~740 lines of switch body
+        // (file total >1100) largely from TASK-277's eval-finding triage below
+        // (an eligibility effect + two handlers + two copy tables + this
+        // branch). Consider extracting an `EvalFindingActions` sibling
+        // (item/busy/onResolved props) so eval triage can be tested in
+        // isolation and this switch stays readable — not done here to avoid
+        // widening this change into a refactor.
         // TASK-277: an eval-sourced finding (source LIKE 'agent:eval%' — every
         // confirmed jury finding, the synthesized catastrophic-cap item, and
         // the ad-hoc summary) is a POST-HOC jury flag on a run parked at its
