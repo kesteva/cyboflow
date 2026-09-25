@@ -27,6 +27,31 @@ import { publishReservedChord } from './useReservedChord';
 export function useWebViewerBridge(sessionKey: string | null): void {
   useEffect(() => {
     if (sessionKey === null || sessionKey.length === 0) return;
+    let cancelled = false;
+
+    // Rebuild the strip from the persisted rows. Main re-creates each tab
+    // UNLOADED under its persisted id (grants, cursors and position survive);
+    // it loads on first focus. Idempotent, so a remount is harmless.
+    void trpc.cyboflow.webViewer.restore
+      .mutate({ sessionId: sessionKey })
+      .then((tabs) => {
+        if (cancelled) return;
+        const store = useCenterPaneStore.getState();
+        for (const tab of tabs) {
+          store.openWebTab(sessionKey, {
+            id: tab.tabId,
+            url: tab.initialUrl,
+            ...(tab.currentUrl !== null ? { currentUrl: tab.currentUrl } : {}),
+            ...(tab.title !== null && tab.title.length > 0 ? { label: tab.title } : {}),
+            openedBy: tab.openedBy,
+            ...(tab.openedByRunId !== null ? { openedByRunId: tab.openedByRunId } : {}),
+            humanTouched: tab.humanTouched,
+            focus: false,
+            quiet: true,
+          });
+        }
+      })
+      .catch((err: unknown) => console.warn('[useWebViewerBridge] restore failed:', err));
 
     const chords = trpc.cyboflow.webViewer.onReservedChord.subscribe(
       { sessionId: sessionKey },
@@ -84,6 +109,7 @@ export function useWebViewerBridge(sessionKey: string | null): void {
     );
 
     return () => {
+      cancelled = true;
       chords.unsubscribe();
       popups.unsubscribe();
       closed.unsubscribe();

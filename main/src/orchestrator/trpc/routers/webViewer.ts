@@ -15,6 +15,7 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
 import { eventToAsyncIterable } from './events';
 import type {
+  RestoredWebTab,
   WebTabClosedEvent,
   WebTabSnapshot,
   WebTabStateEvent,
@@ -125,6 +126,17 @@ export const webViewerRouter = router({
     .input(tabIdInput)
     .query(async ({ ctx, input }): Promise<WebTabSnapshot | null> => {
       return requireViewer(ctx.webViewer).get(input.tabId);
+    }),
+
+  /**
+   * Re-create a session's persisted tabs, UNLOADED and under their persisted
+   * ids, and return them in strip order for the renderer to rebuild its entries.
+   * A mutation, not a query: it registers rows with the manager. Idempotent.
+   */
+  restore: protectedProcedure
+    .input(z.object({ sessionId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<RestoredWebTab[]> => {
+      return requireViewer(ctx.webViewer).restore(input.sessionId);
     }),
 
   /** Per-session tab-state stream (navigation, title, loading, blocked, crashed). */

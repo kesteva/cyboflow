@@ -130,6 +130,22 @@ export interface WebTabSnapshot {
 }
 
 /** Push payload for the `onTabState` subscription. */
+/**
+ * A persisted tab re-created (unloaded) by `webViewer.restore`, in strip order.
+ * Carries what the renderer's `openWebTab` needs to rebuild the entry under the
+ * SAME id — re-minting would orphan grants, cursors and the persisted row.
+ */
+export interface RestoredWebTab {
+  tabId: string;
+  initialUrl: string;
+  currentUrl: string | null;
+  title: string | null;
+  openedBy: WebTabOpener;
+  openedByRunId: string | null;
+  humanTouched: boolean;
+  position: number;
+}
+
 export interface WebTabStateEvent {
   sessionId: string;
   snapshot: WebTabSnapshot;

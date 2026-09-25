@@ -10,6 +10,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 type PopupHandler = (ev: { sessionId: string; openerTabId: string; url: string }) => void;
 let popupHandler: PopupHandler | null = null;
 const openMutate = vi.fn();
+const restoreMutate = vi.fn();
 const sub = () => ({ unsubscribe: vi.fn() });
 
 vi.mock('../../trpc/client', () => ({
@@ -25,6 +26,7 @@ vi.mock('../../trpc/client', () => ({
           }),
         },
         open: { mutate: (...a: unknown[]) => openMutate(...a) },
+        restore: { mutate: (...a: unknown[]) => restoreMutate(...a) },
       },
     },
   },
@@ -41,6 +43,8 @@ const webTabs = () =>
 beforeEach(() => {
   popupHandler = null;
   openMutate.mockReset();
+  restoreMutate.mockReset();
+  restoreMutate.mockResolvedValue([]);
   useCenterPaneStore.setState({ bySession: {} });
   useErrorStore.setState({ currentError: null } as never);
 });
@@ -62,5 +66,55 @@ describe('useWebViewerBridge popups', () => {
     popupHandler!({ sessionId: KEY, openerTabId: 'web:x', url: 'https://example.com/' });
     await waitFor(() => expect(webTabs()).toHaveLength(0));
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ title: 'Too many web tabs' }));
+  });
+});
+
+describe('useWebViewerBridge restore', () => {
+  it('rebuilds persisted tabs under their PERSISTED ids, unfocused and unpulsed', async () => {
+    restoreMutate.mockResolvedValue([
+      {
+        tabId: 'web:persisted-1',
+        initialUrl: 'https://example.com/',
+        currentUrl: 'https://example.com/deep',
+        title: 'Deep page',
+        openedBy: 'agent',
+        openedByRunId: 'run-9',
+        humanTouched: true,
+        position: 0,
+      },
+    ]);
+    renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(webTabs()).toHaveLength(1));
+
+    const [tab] = webTabs();
+    // Re-minting would orphan the tab's grants, cursor and row.
+    expect(tab.id).toBe('web:persisted-1');
+    expect(tab.label).toBe('Deep page');
+    expect(tab.currentUrl).toBe('https://example.com/deep');
+    // The tripwire survives the restart.
+    expect(tab.humanTouched).toBe(true);
+    expect(tab.isNew).toBeFalsy();
+    expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).not.toBe('web:persisted-1');
+    expect(restoreMutate).toHaveBeenCalledWith({ sessionId: KEY });
+  });
+
+  it('is idempotent across remounts — no duplicate strip entries', async () => {
+    const row = {
+      tabId: 'web:p',
+      initialUrl: 'https://example.com/',
+      currentUrl: null,
+      title: null,
+      openedBy: 'user' as const,
+      openedByRunId: null,
+      humanTouched: false,
+      position: 0,
+    };
+    restoreMutate.mockResolvedValue([row]);
+    const first = renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(webTabs()).toHaveLength(1));
+    first.unmount();
+    renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(restoreMutate).toHaveBeenCalledTimes(2));
+    expect(webTabs()).toHaveLength(1);
   });
 });

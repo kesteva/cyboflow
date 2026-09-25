@@ -14,6 +14,9 @@
 import { app, clipboard, Menu, shell, type BrowserWindow } from 'electron';
 import type { ConfigManager } from './services/configManager';
 import type { SessionManager } from './services/sessionManager';
+import type { DatabaseService } from './database/database';
+import { WebTabsRepository } from './database/webTabsRepository';
+import { PersistingWebViewer } from './services/webViewer/webViewerPersistence';
 import {
   WebViewerManager,
   WEB_VIEWER_CHORD,
@@ -27,6 +30,8 @@ import type { WebViewerEventsLike, WebViewerLike } from './orchestrator/trpc/con
 export interface WebViewerCompositionDeps {
   configManager: ConfigManager;
   sessionManager: SessionManager;
+  /** Tab rows + the web audit trail (migration 146). */
+  databaseService: DatabaseService;
   /**
    * ACCESSOR, never a captured window: macOS re-creates the main window on dock
    * activate, so a captured reference would leave the manager parenting views to
@@ -44,7 +49,7 @@ export interface WebViewerComposition {
 }
 
 export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerComposition {
-  const { configManager, sessionManager, getMainWindow, devMode } = deps;
+  const { configManager, sessionManager, databaseService, getMainWindow, devMode } = deps;
 
   const manager = new WebViewerManager({
     getMainWindow,
@@ -56,6 +61,9 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
     devMode,
     platform: process.platform === 'darwin' ? 'mac' : 'other',
   });
+  // The router sees the PERSISTING wrapper, so every open/close is recorded and
+  // audited by construction. The bare manager stays the event source.
+  const viewer = new PersistingWebViewer(manager, new WebTabsRepository(databaseService.getDb()));
 
   // ---------------------------------------------------------------------
   // Per-tab context menu.
@@ -115,14 +123,16 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
   // whole window closes.
   // ---------------------------------------------------------------------
   sessionManager.on('session-deleted', (session: { id: string }) => {
-    manager.disposeSession(session.id);
+    // Views AND tab rows (archive never cascades); the audit trail is kept.
+    viewer.disposeSession(session.id);
   });
   app.on('before-quit', () => {
+    // Views only — the rows are what bring the tabs back on the next launch.
     manager.disposeAll();
   });
 
   return {
-    webViewer: manager,
+    webViewer: viewer,
     webViewerEvents: {
       emitter: manager,
       tabStateChannel: WEB_VIEWER_TAB_STATE,
@@ -130,6 +140,6 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
       chordChannel: WEB_VIEWER_CHORD,
       popupChannel: WEB_VIEWER_POPUP,
     },
-    disposeSession: (sessionId: string) => manager.disposeSession(sessionId),
+    disposeSession: (sessionId: string) => viewer.disposeSession(sessionId),
   };
 }

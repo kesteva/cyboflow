@@ -2310,6 +2310,7 @@ async function initializeServices(): Promise<boolean> {
   webViewerComposition = composeWebViewer({
     configManager,
     sessionManager,
+    databaseService,
     getMainWindow: () => mainWindow,
     devMode: !app.isPackaged,
   });

@@ -126,6 +126,11 @@ export interface OpenWebTabArgs {
   currentUrl?: string;
   /** Restored human-interaction tripwire (restore path only). */
   humanTouched?: boolean;
+  /**
+   * Suppress the new-tab pulse on an unfocused open. A restore rebuilds tabs the
+   * user already had; pulsing all of them would read as "something happened".
+   */
+  quiet?: boolean;
 }
 
 /** Params to open (or focus) an approved-design tab. */
@@ -407,7 +412,7 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           ...(args.humanTouched === true ? { humanTouched: true } : {}),
           // An agent-opened tab arrives as a pulsing inactive tab, the same
           // affordance a mid-run artifact uses — it is new and unfocused.
-          ...(focus ? {} : { isNew: true }),
+          ...(focus || args.quiet === true ? {} : { isNew: true }),
         };
         return {
           ...cur,

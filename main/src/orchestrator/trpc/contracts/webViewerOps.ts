@@ -17,6 +17,7 @@
  * token string.
  */
 import type {
+  RestoredWebTab,
   WebTabBounds,
   WebTabSnapshot,
 } from '../../../../../shared/types/webViewer';
@@ -31,6 +32,12 @@ export interface WebViewerOpenArgs {
   openedByRunId?: string;
   /** Restore path: the tab exists as a row but is not loaded yet. */
   deferLoad?: boolean;
+  /**
+   * Restore path: the persisted row's fields. A restore is not a new open — it
+   * skips the agent-open rate limit and carries `humanTouched` back, so a tab a
+   * human typed into before a restart stays consent-gated after it.
+   */
+  restore?: { initialUrl: string; title: string | null; humanTouched: boolean };
 }
 
 export type WebViewerOpenResult =
@@ -43,7 +50,7 @@ export type WebViewerAck = { ok: true } | { ok: false; error: string };
  * View lifecycle + chrome. The renderer drives every member; agents reach the
  * same surface through the MCP handlers, under the consent rules.
  */
-export interface WebViewerLike {
+export interface WebViewerCoreLike {
   open(args: WebViewerOpenArgs): Promise<WebViewerOpenResult>;
   navigate(tabId: string, url: string): Promise<WebViewerAck>;
   back(tabId: string): Promise<WebViewerAck>;
@@ -63,6 +70,15 @@ export interface WebViewerLike {
   list(sessionId: string): Promise<WebTabSnapshot[]>;
   /** One tab's current snapshot, or null when it is not a known tab. */
   get(tabId: string): Promise<WebTabSnapshot | null>;
+}
+
+/**
+ * The full surface the router sees: the manager's lifecycle plus persistence.
+ * `restore` re-creates a session's persisted tabs UNLOADED, reusing their ids,
+ * and returns what the renderer needs to rebuild its strip.
+ */
+export interface WebViewerLike extends WebViewerCoreLike {
+  restore(sessionId: string): Promise<RestoredWebTab[]>;
 }
 
 /** Whether the viewer is available at all, and what agents may do (config §7). */

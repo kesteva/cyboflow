@@ -33,7 +33,7 @@ import {
 } from '../../../../shared/types/reservedChords';
 import type {
   WebViewerAck,
-  WebViewerLike,
+  WebViewerCoreLike,
   WebViewerOpenArgs,
   WebViewerOpenResult,
 } from '../../orchestrator/trpc/contracts/webViewerOps';
@@ -102,7 +102,7 @@ interface TabRecord {
   lastAgentReadAt: number | null;
 }
 
-export class WebViewerManager extends EventEmitter implements WebViewerLike {
+export class WebViewerManager extends EventEmitter implements WebViewerCoreLike {
   private readonly tabs = new Map<string, TabRecord>();
   private readonly deps: WebViewerManagerDeps;
   /** The window these views are currently parented to, for reap-on-close. */
@@ -116,7 +116,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
   }
 
   // -------------------------------------------------------------------------
-  // WebViewerLike
+  // WebViewerCoreLike
   // -------------------------------------------------------------------------
 
   async open(args: WebViewerOpenArgs): Promise<WebViewerOpenResult> {
@@ -129,14 +129,16 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
     if (url === null) return { ok: false, error: 'invalid_arguments: url must be http(s)' };
 
     const now = this.now();
+    const restore = args.restore;
     const verdict = checkOpen(
       this.tabIdsForSession(args.sessionId).length,
       args.openedBy,
-      this.agentOpens.get(args.sessionId) ?? [],
+      // A restore re-creates a row that already existed; it is not agent churn.
+      restore ? [] : (this.agentOpens.get(args.sessionId) ?? []),
       now,
     );
     if (!verdict.ok) return { ok: false, error: verdict.error };
-    if (args.openedBy === 'agent') this.recordAgentOpen(args.sessionId, now);
+    if (args.openedBy === 'agent' && !restore) this.recordAgentOpen(args.sessionId, now);
 
     const partition = partitionFor(args.openedBy, args.sessionId, this.deps.persistLogin());
     const record: TabRecord = {
@@ -144,12 +146,12 @@ export class WebViewerManager extends EventEmitter implements WebViewerLike {
       sessionId: args.sessionId,
       view: null,
       partition,
-      initialUrl: url,
+      initialUrl: (restore && resolveViewableUrl(restore.initialUrl)) || url,
       currentUrl: url,
-      title: null,
+      title: restore?.title ?? null,
       openedBy: args.openedBy,
       openedByRunId: args.openedByRunId ?? null,
-      humanTouched: false,
+      humanTouched: restore?.humanTouched === true,
       // A deferred tab is a URL row with no renderer — exactly what an evicted
       // tab is, so it reports the same state and a read re-navigates it.
       state: args.deferLoad === true ? 'evicted' : 'hidden',
