@@ -109,12 +109,12 @@ export function isMixedRuntimeMix(mix: RuntimeMix): boolean {
  * like the tuning presets hardcode Claude aliases.
  *
  * Slugs verified against the live Codex CLI catalog (codex-cli 0.156.1:
- * `gpt-5.6-luna` "fast and affordable", `gpt-6-sol` completes a turn). A
+ * `gpt-6-luna` and `gpt-6-sol` both listed and turn-probed). A
  * Codex model bump is therefore a ONE-CONSTANT edit — which forks spec_hash
  * revisions for every mixed run, exactly like any preset recalibration.
  */
 export const CODEX_TIER_MODELS = {
-  luna: 'gpt-5.6-luna',
+  luna: 'gpt-6-luna',
   sol: 'gpt-6-sol',
 } as const;
 
