@@ -2366,10 +2366,16 @@ export interface VerificationRunbookState {
    * not earn the same amount of trust, and someone deciding whether to keep a
    * machine-authored runbook has no other way to find out which happened.
    *
+   * `'learned'` (docs/proposals/runbook-optional-verification.md §A5) means
+   * the harness LEARNED it from a passing explore request's own recipe and the
+   * lane's next ordinary request proved it by executing it verbatim — the
+   * least-reviewed of the three: no human and no drafting agent ever saw it as
+   * a runbook, and that proof is the only validation it ever got.
+   *
    * `null` for every record registered before the distinction existed. Honestly
    * unknown, and a reader must not guess `'setup-flow'` for it.
    */
-  origin: 'setup-flow' | 'lane-bootstrap' | null;
+  origin: 'setup-flow' | 'lane-bootstrap' | 'learned' | null;
 }
 
 /** Per-modality health: outcome stats plus the capability ledger and runbook record for that modality. */
@@ -2440,8 +2446,9 @@ export interface VerifyProjectSetupRow {
   /** Modalities whose runbook is proven here, in {@link VERIFICATION_MODALITIES} order. */
   provenModalities: VerificationModality[];
   /**
-   * True when at least one PROVEN runbook here was derived by a lane bootstrap
-   * rather than by the Verify Setup flow (migration 105 `origin`).
+   * True when at least one PROVEN runbook here was derived by a lane bootstrap,
+   * or learned from a passing explore request (§A5), rather than by the Verify
+   * Setup flow (migration 105 `origin`).
    *
    * A single boolean rather than a per-modality map because it drives one
    * sentence in the setup list, and the question it answers is binary: is any

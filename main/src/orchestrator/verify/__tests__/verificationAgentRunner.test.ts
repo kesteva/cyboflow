@@ -1743,6 +1743,28 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
+  it('§A5: a LEARNED PIN (unproven draft, origin learned) takes the proof half — accepted at its exact version, refused at any other', async () => {
+    const learned: PinnedRunbookRecord = { ...resolved, status: 'unproven-draft', origin: 'learned' };
+    const ok = makeRunner({ resolveRunbookByHash: () => learned, ...servedBy(entry.serve.cmd) });
+    const accepted = await ok.runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
+    expect(accepted.runbookMismatch).toBeUndefined();
+    expect(ok.query).toHaveBeenCalledTimes(1);
+
+    const moved = makeRunner({ resolveRunbookByHash: () => learned });
+    const refused = await moved.runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 1 }));
+    expect(refused).toMatchObject({ status: 'skipped', runbookMismatch: true, deployed: false });
+    expect(moved.query).not.toHaveBeenCalled();
+  });
+
+  it('§A5: an unproven draft of any OTHER origin is still refused on an ordinary request', async () => {
+    const draft: PinnedRunbookRecord = { ...resolved, status: 'unproven-draft', origin: 'setup-flow' };
+    const { runner, query } = makeRunner({ resolveRunbookByHash: () => draft });
+    const result = await runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
+    expect(result).toMatchObject({ status: 'skipped', runbookMismatch: true });
+    expect(result.errorMessage).toContain('not proven');
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('a MISS → env-class skip: no deploy, no budget charge, no provisioning', async () => {
     const { runner, query } = makeRunner({ resolveRunbookByHash: () => null });
     const provision = vi.fn();

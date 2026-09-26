@@ -1537,3 +1537,80 @@ describe('VerificationAgentRunner.run — explore web with NO declared channel (
     expect(result.status).toBe('low_confidence');
   });
 });
+
+// ---------------------------------------------------------------------------
+// §A5 — the runner validates a passing explore request's recipe
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner — §A5 recipe validation on a passing explore run', () => {
+  const servedTask = makeTask({ serve: { cmd: SERVE_CMD } });
+  const RECIPE = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD }, attestation: HTTP_SPEC });
+  const PKG = JSON.stringify({ scripts: { build: 'vite build', preview: 'vite preview' } });
+
+  function recipeRunner(report: VerificationReportV1, extra: Partial<VerificationAgentRunnerDeps> = {}) {
+    const readTextFile = vi.fn(async (path: string) => (path === join('/snap', 'package.json') ? PKG : null));
+    const made = makeRunner({ ...servedBy(SERVE_CMD), readTextFile, ...extra });
+    made.query.mockImplementation(async () => outcome(report));
+    return { ...made, readTextFile };
+  }
+
+  it('a passed explore run with a valid recipe carries the learnable entry, read against the SNAPSHOT package.json', async () => {
+    const { runner, readTextFile } = recipeRunner(validReport({ recipeJson: RECIPE }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: true, entry: { serve: { cmd: SERVE_CMD } } });
+    expect(readTextFile).toHaveBeenCalledWith(join('/snap', 'package.json'));
+  });
+
+  it('an invalid recipe is carried as a rejection and the verdict is unaffected', async () => {
+    const bad = JSON.stringify({ build: ['pnpm install'], serve: { cmd: SERVE_CMD }, attestation: HTTP_SPEC });
+    const { runner } = recipeRunner(validReport({ recipeJson: bad }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: false });
+  });
+
+  it('a literal of THIS request\'s leased port is refused', async () => {
+    const leaky = JSON.stringify({ serve: { cmd: SERVE_CMD }, build: ['pnpm run build --port 29260'], attestation: HTTP_SPEC });
+    const { runner } = recipeRunner(validReport({ recipeJson: leaky }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.learnedRecipe).toMatchObject({ ok: false, reason: expect.stringContaining('leased port 29260') });
+  });
+
+  it('nothing is validated for a pinned or legacy pass, a non-passing explore run, or a mutated snapshot', async () => {
+    const pinned = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'pinned', task: servedTask }),
+    );
+    expect(pinned.status).toBe('passed');
+    expect(pinned.learnedRecipe).toBeUndefined();
+
+    const legacy = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'legacy', task: servedTask }),
+    );
+    expect(legacy.learnedRecipe).toBeUndefined();
+
+    const failing = await recipeRunner(validReport({ recipeJson: RECIPE, outcome: 'fail', behaviors: [failedB1] })).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask }),
+    );
+    expect(failing.status).not.toBe('passed');
+    expect(failing.learnedRecipe).toBeUndefined();
+
+    const mutated = await recipeRunner(validReport({ recipeJson: RECIPE }), { checkSnapshotMutated: async () => true }).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask }),
+    );
+    expect(mutated.status).toBe('low_confidence');
+    expect(mutated.learnedRecipe).toBeUndefined();
+
+    const fallback = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask, snapshotSha: null }),
+    );
+    expect(fallback.learnedRecipe).toBeUndefined();
+  });
+
+  it('a passed explore run with no recipe carries nothing', async () => {
+    const { runner } = recipeRunner(validReport());
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toBeUndefined();
+  });
+});

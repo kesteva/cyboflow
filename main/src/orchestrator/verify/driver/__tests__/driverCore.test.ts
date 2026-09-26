@@ -1759,7 +1759,8 @@ describe.skipIf(process.platform === 'win32')('attest bundle', () => {
 describe('headlessShellSibling — the driver prefers chrome-headless-shell', () => {
   const full =
     '/Users/me/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
-  const shell = '/Users/me/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell';
+  // Built with path.join, as the resolver does, so the separators match on win32.
+  const shell = join('/Users/me/Library/Caches/ms-playwright/chromium_headless_shell-1234', 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell');
 
   it('resolves the same-revision headless shell when it is installed', () => {
     expect(headlessShellSibling(full, (p) => p === shell)).toBe(shell);

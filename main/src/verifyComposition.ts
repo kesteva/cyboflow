@@ -39,6 +39,7 @@ import {
   createVerdictDelivery,
   createCapabilityBreakerFinding,
   createExploreStaleProofFinding,
+  createRunbookLearningFinding,
 } from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
@@ -873,6 +874,8 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // §A7 — the "runbook needs re-proving, lanes explore meanwhile" notice.
     staleProofFinding: createExploreStaleProofFinding({ db: cyboflowDb, logger: cyboflowLogger }),
+    // §A5 — "recipe learned" / "learned recipe promoted" / "suggested entry".
+    runbookLearningFinding: createRunbookLearningFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // Phase 1 modality roster (§4): the live grant probe that decides whether a
     // `native-screen` request may deploy at all. Reuses the capture backend's
     // healthCheck verbatim, exactly as the proposal prescribes ("the retired

@@ -101,7 +101,8 @@ describe('computeVerifyInputHash', () => {
     expect(await computeVerifyInputHash(dir)).toBeNull();
   });
 
-  it('returns null on a non-ENOENT/ENOTDIR fs fault reading package.json (EACCES)', async () => {
+  // chmod 0o000 does not deny reads on win32.
+  it.skipIf(process.platform === 'win32')('returns null on a non-ENOENT/ENOTDIR fs fault reading package.json (EACCES)', async () => {
     writePkg({ dev: 'vite' });
     const pkgPath = path.join(dir, 'package.json');
     fs.chmodSync(pkgPath, 0o000);
@@ -234,7 +235,8 @@ describe('computeVerifyInputHash — A0 fallback manifests (no package.json)', (
     expect(await computeVerifyInputHash(dir)).not.toBe(none);
   });
 
-  it('returns null when a fallback manifest EXISTS but cannot be read (EACCES) — never a skipped fold', async () => {
+  // chmod 0o000 does not deny reads on win32.
+  it.skipIf(process.platform === 'win32')('returns null when a fallback manifest EXISTS but cannot be read (EACCES) — never a skipped fold', async () => {
     if (process.getuid && process.getuid() === 0) return; // root reads 0-perm files
     const manifest = path.join(dir, 'project.yml');
     fs.writeFileSync(manifest, 'name: App\n');
@@ -258,7 +260,8 @@ describe('probeHasPackageJson', () => {
     await expect(probeHasPackageJson(path.join(dir, 'does', 'not', 'exist'))).resolves.toBe(false);
   });
 
-  it('answers TRUE (the conservative direction) when it cannot look — EACCES on the directory', async () => {
+  // chmod 0o000 does not deny reads on win32.
+  it.skipIf(process.platform === 'win32')('answers TRUE (the conservative direction) when it cannot look — EACCES on the directory', async () => {
     if (process.getuid && process.getuid() === 0) return; // root traverses 0-perm dirs
     const locked = path.join(dir, 'locked');
     fs.mkdirSync(locked);

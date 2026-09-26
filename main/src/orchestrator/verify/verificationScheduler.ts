@@ -54,7 +54,7 @@ import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookSto
 import { type BootstrapDecision, type BootstrapDeclineReason } from './bootstrapEligibility';
 import { runbookBootstrapPreflight } from './runbookBootstrapPreflight';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
-import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
+import { resolveRunbookRevision } from './learnedRunbook';
 import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
@@ -67,6 +67,7 @@ import type {
   DevServerContextResolver,
   OnVerdict,
   ProvenRunbookRevision,
+  RunbookRevisionArgs,
   VerificationSchedulerDeps,
 } from './verificationSchedulerContracts';
 import {
@@ -285,7 +286,6 @@ export class VerificationScheduler {
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
     this.runbookStatus =
       deps.runbookStatus ??
-      // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
       (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
     this.staleProofFinding = deps.staleProofFinding;
@@ -329,6 +329,7 @@ export class VerificationScheduler {
       mobileToolchainProbe: deps.mobileToolchainProbe,
       runbookStatus: this.runbookStatus,
       runbookStore: this.runbookStore,
+      learningFinding: deps.runbookLearningFinding,
       delivery: this.delivery,
       inFlight: this.inFlight,
       agentGateColumnsForRow: (id) => this.agentGateColumnsForRow(id),
@@ -1442,29 +1443,6 @@ export class VerificationScheduler {
   }
 
   /**
-   * §5.2 seam 3, ENQUEUE half — resolve the PROVEN runbook revision a request
-   * for this (project, modality) must be pinned to, or `null` when there is
-   * none. Public because BOTH enqueue entry points (the MCP handler and the
-   * programmatic `enqueueTaskVerification` seam) need the identical answer and
-   * the store is injected HERE, not into either of them; the shared merge +
-   * validation logic that consumes this lives in one place too
-   * (`enqueueFromTask.prepareVerificationEnqueue`).
-   *
-   * WHY THE PROBE PATH IS THE RUN'S WORKTREE FIRST. `status()` re-validates the
-   * proof against the portable file at a specific tree, and the tree that
-   * matters is the one the requesting run is actually changing — a run whose
-   * branch edited (or has not yet merged) the runbook must be judged by ITS
-   * copy, not by the project's main checkout. That is the same worktree-first
-   * ladder `verifyConfigLoader` walks, for the same reason. The project path is
-   * the fallback for a run with no worktree; with neither, there is nothing to
-   * probe and the answer is `null` (no pin ⇒ the §3.2 degrade gate decides).
-   *
-   * A null answer is NEVER an error path — it is "this request executes
-   * unpinned", which for a build/serve task means the degrade gate skips it with
-   * a setup CTA, and for a degenerate pre-live task means nothing changes at
-   * all.
-   */
-  /**
    * F5 ∘ F4 composition — does ANY runbook record (proven, drifted, or a
    * registered/file-only draft) exist for this (project, modality) on the probed
    * tree? `resolveProvenRunbook` answers only for a PROVEN one, and since F4 made
@@ -1499,41 +1477,51 @@ export class VerificationScheduler {
     }
   }
 
-  async resolveProvenRunbook(args: {
-    projectId: number;
-    runId: string;
-    modality: VerificationModality;
-    /** The caller's own worktree, when it has one (skips the run-row lookup). */
-    probePath?: string;
-  }): Promise<ProvenRunbookRevision | null> {
-    const store = this.runbookStore;
-    if (!store) return null;
-    const probePath =
-      args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
-    if (probePath === null || probePath === undefined) return null;
-    try {
-      const status = await store.status(args.projectId, probePath, args.modality);
-      if (status !== 'proven') return null;
-      const current = store.getCurrent(args.projectId, args.modality);
-      if (current === null) return null;
-      // The cast is safe by construction: `parseVerifyRunbookV1` only ever
-      // populates keys from VERIFY_RUNBOOK_MODALITIES, so a VerificationModality
-      // outside that subset ('mobile') simply misses — the same narrowing the
-      // store's own `declaresModality` does.
-      const entry = current.runbook.modalities[args.modality as VerifyRunbookModality];
-      if (entry === undefined) return null;
-      return { hash: current.hash, version: current.version, entry };
-    } catch (err) {
-      // A resolution hiccup must never fail an enqueue: answer "unpinned" and
-      // let the gate speak.
-      this.logger?.warn('[VerificationScheduler] proven-runbook resolution failed (fail-soft)', {
-        projectId: args.projectId,
-        runId: args.runId,
-        modality: args.modality,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
+  /**
+   * §5.2 seam 3, ENQUEUE half — resolve the PROVEN runbook revision a request
+   * for this (project, modality) must be pinned to, or `null` when there is
+   * none. Public because BOTH enqueue entry points (the MCP handler and the
+   * programmatic `enqueueTaskVerification` seam) need the identical answer and
+   * the store is injected HERE, not into either of them; the shared merge +
+   * validation logic that consumes this lives in one place too
+   * (`enqueueFromTask.prepareVerificationEnqueue`).
+   *
+   * WHY THE PROBE PATH IS THE RUN'S WORKTREE FIRST. `status()` re-validates the
+   * proof against the portable file at a specific tree, and the tree that
+   * matters is the one the requesting run is actually changing — a run whose
+   * branch edited (or has not yet merged) the runbook must be judged by ITS
+   * copy, not by the project's main checkout. That is the same worktree-first
+   * ladder `verifyConfigLoader` walks, for the same reason. The project path is
+   * the fallback for a run with no worktree; with neither, there is nothing to
+   * probe and the answer is `null` (no pin ⇒ the §3.2 degrade gate decides).
+   *
+   * A null answer is NEVER an error path — it is "this request executes
+   * unpinned", which for a build/serve task means the degrade gate skips it with
+   * a setup CTA, and for a degenerate pre-live task means nothing changes at
+   * all.
+   */
+  async resolveProvenRunbook(args: RunbookRevisionArgs): Promise<ProvenRunbookRevision | null> {
+    return this.resolveRevision(args, 'proven');
+  }
+
+  /**
+   * §A5 — the LEARNED-draft twin of {@link resolveProvenRunbook}: the record
+   * when it is an unproven LEARNED draft and the tree carries no committed
+   * entry for the modality (`resolveRunbookRevision`), so the lane's own
+   * ordinary request pins it and its verdict is the promotion proof. Always
+   * `null` with the kill switch on (§A1: no learned pins), read LIVE.
+   */
+  async resolveLearnedDraft(args: RunbookRevisionArgs): Promise<ProvenRunbookRevision | null> {
+    if (requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)) return null;
+    return this.resolveRevision(args, 'learned');
+  }
+
+  /** Both resolvers' worktree → project-root probe ladder; `null` with no store or no tree. */
+  private async resolveRevision(args: RunbookRevisionArgs, which: 'proven' | 'learned'): Promise<ProvenRunbookRevision | null> {
+    const probePath = args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
+    if (!this.runbookStore || probePath === null || probePath === undefined) return null;
+    const { projectId, modality } = args;
+    return resolveRunbookRevision({ store: this.runbookStore, projectId, modality, probePath, which, logger: this.logger });
   }
 
   /**

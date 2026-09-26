@@ -768,13 +768,24 @@ export async function prepareVerificationEnqueue(args: {
    */
   const tryInject = async (
     candidate: VerificationModality,
-  ): Promise<{ revision: ProvenRunbookRevision; merged: VerificationTaskV1 } | null> => {
-    const revision = await scheduler.resolveProvenRunbook({
+  ): Promise<{ revision: ProvenRunbookRevision; merged: VerificationTaskV1; learned: boolean } | null> => {
+    const revisionArgs = {
       projectId: args.projectId,
       runId: args.runId,
       modality: candidate,
       ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
-    });
+    };
+    // §A5 PROMOTION VIA A LEARNED PIN. With no proven record, an unproven
+    // LEARNED draft (a recipe a passing explore request reported) is merged and
+    // pinned exactly like a proven revision: the lane's OWN ordinary request
+    // executes it verbatim, and its verdict is the promotion proof — passed ⇒
+    // the engine flips the draft proven; a recipe that cannot stand the
+    // deliverable up ⇒ the draft is discarded and the row explores. The pin is
+    // an ordinary one (no proof flag), so both seams persist it unchanged and
+    // the row keeps the lane key, the budget and full delivery. The scheduler
+    // answers null with the kill switch on.
+    const proven = await scheduler.resolveProvenRunbook(revisionArgs);
+    const revision = proven ?? (await scheduler.resolveLearnedDraft(revisionArgs));
     if (revision === null) return null;
     const merged = mergeRunbookIntoTask(task, revision.entry, candidate);
     if (resolveTaskModality(args.type, merged) !== candidate) {
@@ -787,7 +798,7 @@ export async function prepareVerificationEnqueue(args: {
       });
       return null;
     }
-    return { revision, merged };
+    return { revision, merged, learned: proven === null };
   };
 
   let modality = resolved;
@@ -821,7 +832,7 @@ export async function prepareVerificationEnqueue(args: {
     return { ok: false, error: forbiddenCommandError(fromRunbook, 'runbook') };
   }
 
-  logger?.debug('[prepareVerificationEnqueue] injected a proven runbook revision', {
+  logger?.debug(`[prepareVerificationEnqueue] injected a ${injected.learned ? 'LEARNED (promotion)' : 'proven'} runbook revision`, {
     projectId: args.projectId,
     runId: args.runId,
     modality,

@@ -482,7 +482,8 @@ async function readRunbooks(
       version: row.version,
       portableHash: row.portable_hash,
       // An unrecognized value is reported as `null` — "unknown", not a guess.
-      origin: row.origin === 'setup-flow' || row.origin === 'lane-bootstrap' ? row.origin : null,
+      origin:
+        row.origin === 'setup-flow' || row.origin === 'lane-bootstrap' || row.origin === 'learned' ? row.origin : null,
     });
   }
   return out;
@@ -1005,7 +1006,9 @@ export const verificationRequestsRouter = router({
       // lane-derived draft is not something a human has to weigh, and flagging
       // it would put a trust question in front of someone whose real state is
       // "verification is not running here at all".
-      if (row.origin === 'lane-bootstrap') laneDerived.add(row.project_id);
+      // A LEARNED record (§A5) counts too: no human reviewed it either — its
+      // only validation was the lane request that proved it.
+      if (row.origin === 'lane-bootstrap' || row.origin === 'learned') laneDerived.add(row.project_id);
     }
 
     return [...seen]

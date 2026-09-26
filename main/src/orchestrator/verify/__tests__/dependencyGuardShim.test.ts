@@ -306,7 +306,8 @@ function reapStrays(...roots: string[]): void {
   }
 }
 
-describe('materializeDependencyGuardShim — end-to-end (real shell, real node)', () => {
+// POSIX-only: on win32 materialize returns { binDir: null } by design (covered above).
+describe.skipIf(process.platform === 'win32')('materializeDependencyGuardShim — end-to-end (real shell, real node)', () => {
   it('a benign command reaches the real tool and its exit code passes through', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dep-guard-shim-'));
     const fakeDir = mkdtempSync(join(tmpdir(), 'dep-guard-shim-fake-'));

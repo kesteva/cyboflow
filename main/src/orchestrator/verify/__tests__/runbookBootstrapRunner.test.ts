@@ -246,6 +246,16 @@ describe('runRunbookBootstrap — the happy path', () => {
     h.db.close();
   });
 
+  it("does NOT re-stamp the origin on A8's unchanged no-op — the proven record keeps its provenance", async () => {
+    // registerDraft wrote nothing (identical content + bindings over a proven
+    // record), so relabelling it 'lane-bootstrap' would claim a derivation that
+    // never happened over a record someone else proved.
+    const h = harness({ registerDraft: async () => ({ hash: 'hash-1', version: 3, unchanged: true }) });
+    await runRunbookBootstrap(ARGS, h.deps);
+    expect(h.deps.setOrigin).not.toHaveBeenCalled();
+    h.db.close();
+  });
+
   it('leaves the stamp PROVEN with the pin, so a sibling lane takes the ordinary path', async () => {
     const h = harness();
     await runRunbookBootstrap(ARGS, h.deps);
