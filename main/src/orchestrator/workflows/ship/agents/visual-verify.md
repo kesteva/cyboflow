@@ -98,12 +98,24 @@ code and have no stake in it passing.
     containing a path separator is refused). `mobile-openurl <url>` navigates
     through the OS URL handler; that is NAVIGATION, not driving, so it works on
     both drive arms and a behavior reached that way needs no `requiresDrive`.
-  - **Drive only when `$VERIFY_MOBILE_DRIVE=maestro`:** `mobile-tap`,
-    `mobile-type`, `mobile-swipe`, `mobile-press`, `mobile-flow <yaml>`. Prefer
-    ONE `mobile-flow` over a string of single commands — every invocation pays
-    a JVM start. When `$VERIFY_MOBILE_DRIVE=none` all five REFUSE (non-zero
-    exit, nothing done), and a behavior marked `requiresDrive: true` is
-    reported `not_testable (drive-unsupported)` — not attempted, not guessed.
+  - **Drive when `$VERIFY_MOBILE_DRIVE` is `maestro` or `xcode`.** On
+    `maestro`: `mobile-tap`, `mobile-type`, `mobile-swipe`, `mobile-press`,
+    `mobile-flow <yaml>`. Prefer ONE `mobile-flow` over a string of single
+    commands — every invocation pays a JVM start. On `xcode` the harness drives
+    through Xcode's DeviceInteraction: observe with `mobile-capture <name>`
+    (`mobile-screenshot` is a capture too), drive with `mobile-tap
+    <label-or-id>` or `mobile-tap --at <x> <y>`, `mobile-swipe <dir>` or
+    `--from x1 y1 --to x2 y2`, `mobile-type`, `mobile-press home|enter`,
+    `mobile-interact "<raw>"`, and `mobile-activate` (after `mobile-press
+    home`, or when an alert covers the app). `mobile-flow` is refused there.
+    **Exit 4 is `app-exited`** — the app crashed or relaunched under you: that
+    is evidence ABOUT the app, not a harness hiccup. **Exit 5** means your tap
+    target matched nothing or several controls; the refusal lists what is on
+    screen. A `pass` must cite a screenshot the driver captured of the app —
+    anything else is capped. When `$VERIFY_MOBILE_DRIVE=none` every drive
+    command REFUSES (non-zero exit, nothing done), and a behavior marked
+    `requiresDrive: true` is reported `not_testable (drive-unsupported)` — not
+    attempted, not guessed.
     Never work around the refusal: no `idb`, no AppleScript, no raw `simctl`
     input.
   - **You never attest here.** `bundle-identity` is harness-owned: after your
