@@ -11,10 +11,11 @@
  * timestamps are ISO-8601 strings, durations are milliseconds.
  *
  * Substrate caveat (see docs/ARCHITECTURE.md "Dual-substrate"): token usage is
- * aggregated from persisted SDK `assistant` payloads in `raw_events`. SDK runs
- * always carry usage; interactive runs carry it only when the transcript
- * normalizer preserved a `usage` object. `costUsd` comes from the terminal
- * `result` payload's `total_cost_usd` and is SDK-only (null elsewhere).
+ * folded from persisted `raw_events` by main/src/orchestrator/usageFold.ts —
+ * Claude `result` payloads, provider `agent_result` payloads and Codex
+ * descendant `subagent_usage` rows; assistant messages supply the message count
+ * and model attribution only. `costUsd` comes from the terminal `result`
+ * payload's `total_cost_usd` and is SDK-only (null elsewhere).
  */
 
 import type { AgentProvider } from './agentRuntime';
@@ -63,6 +64,34 @@ export interface WorkflowRunStats {
   lastRunAt: string | null;
 }
 
+/**
+ * How complete one run's usage accounting is (`run_usage.coverage`, migration 146),
+ * listed from least to most severe limitation. A run with several limitations
+ * records the most severe one.
+ *   - complete                 : every token has an exact source.
+ *   - codex-run-level          : Codex descendant usage was recovered per run
+ *                                (historical backfill rows), not per invocation.
+ *   - codex-model-inferred     : a Codex child row carried its parent's model.
+ *   - claude-segments-inferred : Claude process segments were inferred from the
+ *                                counters (events predating process identity).
+ *   - codex-root-only          : only Codex root-thread usage could be recovered.
+ *   - legacy                   : produced by the pre-v1 fold.
+ */
+export const USAGE_COVERAGE_LEVELS = [
+  'complete',
+  'codex-run-level',
+  'codex-model-inferred',
+  'claude-segments-inferred',
+  'codex-root-only',
+  'legacy',
+] as const;
+
+export type UsageCoverage = (typeof USAGE_COVERAGE_LEVELS)[number];
+
+export function isUsageCoverage(value: unknown): value is UsageCoverage {
+  return USAGE_COVERAGE_LEVELS.some((level) => level === value);
+}
+
 /** Token/cost rollup for one run, aggregated from persisted `raw_events`. */
 export interface RunUsageRollup {
   runId: string;
@@ -74,18 +103,21 @@ export interface RunUsageRollup {
   /** True when assistant-side raw events reported more than one distinct model id. */
   multiModel: boolean;
   /**
-   * Per-model token breakdown, resolved the same way as {@link model} (assistant-side
-   * `payload.message.model`, 'unknown' when an event carried none). ALWAYS
-   * folded from assistant-side `raw_events`, on both read tiers (see
-   * insightsQueries.ts `fetchMaterializedRunModels` / `scanRawEventRollups`) —
+   * Per-model token breakdown from the same usage fold as the totals (Claude
+   * outer tokens split by the query's assistant-message models, Task children
+   * by `modelUsage`, provider rows by their model or a `<provider>:<model>`
+   * label; 'unknown' when nothing names one). A run materialized by the legacy
+   * fold keeps the legacy split (assistant-side rows only). ALWAYS
+   * folded from `raw_events`, on both read tiers (see
+   * insightsQueries.ts `applyMaterializedRunModels` / `scanRawEventRollups`) —
    * even on the materialized tier, where the run-level token totals below come
    * from the durable `run_usage` row instead. So it is non-empty for
    * single-model runs (not gated on `multiModel`), but it is only as complete as
    * the run's surviving raw events: once they are pruned it is empty, and if
    * they were only PARTIALLY pruned its sums can fall short of the run-level
-   * totals — even while `multiModel` stays true (2+ models still resolve). It
-   * is also empty for a Codex/OMP-only run (their result-usage fallback carries
-   * no model identity). Lets a multi-model run's rate-card cost be computed as
+   * totals — even while `multiModel` stays true (2+ models still resolve). Under
+   * the legacy fold it is also empty for a Codex/OMP-only run (that fold's
+   * result-usage fallback carries no model identity). Lets a multi-model run's rate-card cost be computed as
    * a per-model sum instead of falling back to the reported total — BUT a
    * caller doing that sum must guard against the partial-pruning case above, or
    * it silently under-reports: WorkflowSummaryPanel's `PER_MODEL_SHORTFALL_TOLERANCE`
@@ -101,7 +133,12 @@ export interface RunUsageRollup {
     cacheReadTokens: number;
     cacheCreationTokens: number;
   }[];
-  /** Sums over `assistant` payloads' message.usage (NOT result.usage — result events double-count turn totals). */
+  /**
+   * Token totals from the usage fold (main/src/orchestrator/usageFold.ts): under
+   * the current accounting version, Claude `result.usage` plus the Task-child
+   * `modelUsage` delta, provider `agent_result` usage, and Codex descendant
+   * rows. Assistant messages are never a token source.
+   */
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -112,8 +149,15 @@ export interface RunUsageRollup {
   costUsd: number | null;
   /** SUM of `result` payloads' num_turns; null when no result carried it. */
   numTurns: number | null;
-  /** Count of `assistant` payloads that carried a usage object. */
+  /**
+   * Outer-agent message count: deduplicated parentless Claude assistant messages
+   * plus provider `agent_result` turns that carried usage.
+   */
   assistantMessageCount: number;
+  /** The usage fold version that produced these numbers (0 = the legacy fold). */
+  accountingVersion: number;
+  /** How complete the accounting is — see {@link UsageCoverage}. */
+  coverage: UsageCoverage;
   /**
    * `workflow_runs.started_at` as an ISO-8601 string; null when the run has not
    * started yet (or the run row is absent). Carried alongside the token rollup so
@@ -150,9 +194,10 @@ export interface WorkflowUsageStats {
 
 /**
  * One day x model token bucket for the 30-day usage chart at the top of the
- * Statistics section. Buckets come from the raw_events assistant-message scan:
- * `day` is the UTC date slice of raw_events.created_at, `model` is the SDK
- * assistant message's `message.model` ('unknown' when absent). Token fields
+ * Statistics section. Buckets come from the same usage fold as the run rollups:
+ * `day` is the UTC date slice of the contributing raw_events row's created_at,
+ * `model` the model the fold attributed the tokens to ('unknown' when nothing
+ * named one). Token fields
  * follow the RunUsageRollup convention — totalTokens = input + output, cache
  * counted separately and excluded from the total. Days with no usage emit no
  * bucket (the chart component fills the axis).

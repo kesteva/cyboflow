@@ -65,6 +65,8 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '071_raw_events_dedup.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
+  // 146: run_usage.accounting_version / coverage, which the rollup writer stamps.
+  db.exec(readFileSync(join(migDir, '146_usage_accounting_v1.sql'), 'utf-8'));
 
   // Seed the run hosting the session (review_items.run_id FK) + the session.
   db.prepare(

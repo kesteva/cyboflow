@@ -56,7 +56,7 @@ function buildDb(): Database.Database {
     '006_cyboflow_schema.sql', '011_workflow_step_tracking.sql', '014_native_tasks.sql',
     '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '026_run_usage_spec_hash_revisions.sql',
     '028_idea_attachments.sql', '043_run_evals.sql', '069_run_eval_jury.sql',
-    '085_review_item_audience.sql',
+    '071_raw_events_dedup.sql', '085_review_item_audience.sql', '146_usage_accounting_v1.sql',
   ]) db.exec(readFileSync(join(migDir, f), 'utf-8'));
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');

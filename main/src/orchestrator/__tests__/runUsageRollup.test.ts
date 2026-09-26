@@ -54,7 +54,9 @@ const RUN_USAGE_DDL = `
     cost_usd                REAL,
     num_turns               INTEGER,
     assistant_message_count INTEGER NOT NULL DEFAULT 0,
-    computed_at             DATETIME DEFAULT CURRENT_TIMESTAMP
+    computed_at             DATETIME DEFAULT CURRENT_TIMESTAMP,
+    accounting_version      INTEGER NOT NULL DEFAULT 0,
+    coverage                TEXT NOT NULL DEFAULT 'legacy'
   )
 `;
 
@@ -133,6 +135,8 @@ interface RunUsageRow {
   cost_usd: number | null;
   num_turns: number | null;
   assistant_message_count: number;
+  accounting_version: number;
+  coverage: string;
 }
 
 /** Read back the single run_usage row for a run (or null when absent). */
@@ -152,10 +156,19 @@ describe('rollupRunUsage', () => {
     const db = makeRollupDb();
     const runId = 'run-1';
 
-    // Two assistant turns with usage + one terminal result carrying cost/turns.
+    // Two assistant messages + the terminal result carrying cost/turns and the
+    // query's usage (the token source under accounting v1 — assistant usage is
+    // never summed). modelUsage reads the same as usage: no Task children.
     seedEvent(db, runId, 'assistant', assistantPayload({ input: 100, output: 40, cacheRead: 10, cacheCreation: 5 }));
     seedEvent(db, runId, 'assistant', assistantPayload({ input: 200, output: 60, cacheRead: 20, cacheCreation: 0 }));
-    seedEvent(db, runId, 'result', resultPayload(0.42, 3));
+    seedEvent(db, runId, 'result', {
+      ...resultPayload(0.42, 3, { input: 300, output: 100, cacheRead: 30, cacheCreation: 5 }),
+      session_id: 's1',
+      cyboflow_process_instance_id: 'proc-1',
+      modelUsage: {
+        'claude-sonnet-5': { inputTokens: 300, outputTokens: 100, cacheReadInputTokens: 30, cacheCreationInputTokens: 5 },
+      },
+    });
 
     const logger = makeSpyLogger();
     rollupRunUsage(dbAdapter(db), runId, logger);
@@ -172,12 +185,14 @@ describe('rollupRunUsage', () => {
       cost_usd: 0.42,
       num_turns: 3,
       assistant_message_count: 2,
+      accounting_version: 1,
+      coverage: 'complete',
     });
     // Success path logs nothing at warn.
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('uses result-level usage when no assistant event reports tokens', () => {
+  it('takes tokens from result.usage even when no assistant event reports usage', () => {
     const db = makeRollupDb();
     const runId = 'run-result-usage';
     seedEvent(db, runId, 'assistant', {
@@ -198,7 +213,9 @@ describe('rollupRunUsage', () => {
       cache_read_tokens: 25,
       total_tokens: 140,
       num_turns: 1,
-      assistant_message_count: 1,
+      // The assistant row carried no usage, so it is not a counted message (a
+      // result is never one); the legacy fold's fallback counted the result.
+      assistant_message_count: 0,
     });
   });
 
@@ -252,7 +269,7 @@ describe('rollupRunUsage', () => {
 
     // First terminal seam: one assistant turn + a result.
     seedEvent(db, runId, 'assistant', assistantPayload({ input: 100, output: 50 }));
-    seedEvent(db, runId, 'result', resultPayload(0.1, 1));
+    seedEvent(db, runId, 'result', resultPayload(0.1, 1, { input: 100, output: 50 }));
     rollupRunUsage(dbAdapter(db), runId);
 
     const first = readRunUsage(db, runId);
@@ -267,7 +284,7 @@ describe('rollupRunUsage', () => {
 
     // A later turn lands MORE events; the run re-terminates and re-rolls up.
     seedEvent(db, runId, 'assistant', assistantPayload({ input: 300, output: 150 }));
-    seedEvent(db, runId, 'result', resultPayload(0.4, 2));
+    seedEvent(db, runId, 'result', resultPayload(0.4, 2, { input: 300, output: 150 }));
     rollupRunUsage(dbAdapter(db), runId);
 
     // Exactly one row (PK upsert, no duplicate), carrying the FULL re-scan.

@@ -41,7 +41,7 @@ const SUBMIT_DELAY_MS = 300;
 /**
  * Tolerance for the per-model breakdown SHORTFALL check on a multi-model run.
  * `usage.perModelUsage` is folded from a live raw_events scan (see
- * insightsQueries.ts `fetchMaterializedRunModels`), while the run-level token
+ * insightsQueries.ts `applyMaterializedRunModels`), while the run-level token
  * totals used here come from the durable `run_usage` row (`rollupFromMaterializedRow`)
  * — so on a PARTIALLY pruned run the per-model sum can fall short of the
  * authoritative total even when 2+ models still resolve (multiModel stays

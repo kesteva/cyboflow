@@ -60,6 +60,7 @@ import {
   getRunEval,
 } from '../insightsQueries';
 import { computeSpecHash } from '../specHash';
+import { rollupRunUsage } from '../runUsageRollup';
 
 // ---------------------------------------------------------------------------
 // Schema + seed helpers
@@ -111,7 +112,8 @@ function createInsightsDb(): Database.Database {
       run_id TEXT NOT NULL,
       event_type TEXT NOT NULL,
       payload_json TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      dedup_key TEXT
     );
     CREATE TABLE run_usage (
       run_id TEXT PRIMARY KEY,
@@ -123,7 +125,10 @@ function createInsightsDb(): Database.Database {
       cost_usd REAL,
       num_turns INTEGER,
       assistant_message_count INTEGER NOT NULL DEFAULT 0,
-      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      -- migration 146
+      accounting_version INTEGER NOT NULL DEFAULT 0,
+      coverage TEXT NOT NULL DEFAULT 'legacy'
     );
     CREATE TABLE review_items (
       id TEXT PRIMARY KEY,
@@ -446,15 +451,23 @@ function seedReview(db: Database.Database, opts: SeedReviewOpts): void {
   );
 }
 
-/** Construct an assistant payload with the given usage tokens. */
+/** Distinct message ids — the fold deduplicates assistant rows by (session, message.id). */
+let assistantMessageSeq = 0;
+
+/**
+ * Construct an assistant payload with the given usage tokens (a distinct
+ * message). Under the current usage fold assistant rows are never a token
+ * source — pair with {@link claudeResultPayload} for tokens.
+ */
 function assistantPayload(usage: {
   input?: number;
   output?: number;
   cacheRead?: number;
   cacheCreation?: number;
 } | null): Record<string, unknown> {
+  assistantMessageSeq += 1;
   const message: Record<string, unknown> = {
-    id: 'msg_x',
+    id: `msg_${assistantMessageSeq}`,
     model: 'claude-opus-4-5',
     role: 'assistant',
     content: [{ type: 'text', text: 'hello' }],
@@ -538,6 +551,78 @@ function resultPayload(
   if (opts.sessionId !== undefined) payload.session_id = opts.sessionId;
   if (opts.modelUsage !== undefined) payload.modelUsage = opts.modelUsage;
   return payload;
+}
+
+/**
+ * A Claude `result` whose `result.usage` carries the query's outer tokens and
+ * whose `modelUsage` reads exactly the same (no Task children), so the usage
+ * fold counts `usage` once. `childUsage` adds Task-child tokens on top of the
+ * process-cumulative `modelUsage` reading (one query per process here).
+ */
+function claudeResultPayload(
+  usage: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number },
+  opts: {
+    model?: string;
+    cost?: number;
+    turns?: number;
+    childUsage?: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number };
+  } = {},
+): Record<string, unknown> {
+  const child = opts.childUsage ?? {};
+  const payload: Record<string, unknown> = {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    usage: {
+      input_tokens: usage.input ?? 0,
+      output_tokens: usage.output ?? 0,
+      cache_read_input_tokens: usage.cacheRead ?? 0,
+      cache_creation_input_tokens: usage.cacheCreation ?? 0,
+    },
+    modelUsage: {
+      [opts.model ?? 'claude-opus-4-5']: {
+        inputTokens: (usage.input ?? 0) + (child.input ?? 0),
+        outputTokens: (usage.output ?? 0) + (child.output ?? 0),
+        cacheReadInputTokens: (usage.cacheRead ?? 0) + (child.cacheRead ?? 0),
+        cacheCreationInputTokens: (usage.cacheCreation ?? 0) + (child.cacheCreation ?? 0),
+      },
+    },
+    // A fresh process per result: each reading counts from zero.
+    cyboflow_process_instance_id: `proc-${(assistantMessageSeq += 1)}`,
+  };
+  if (opts.cost !== undefined) payload.total_cost_usd = opts.cost;
+  if (opts.turns !== undefined) payload.num_turns = opts.turns;
+  return payload;
+}
+
+/**
+ * Seed one complete Claude query: an assistant message plus its `result`, both
+ * carrying `usage` (the fold counts the result's once). The pre-v1 fixtures
+ * seeded the assistant row alone, which the legacy fold treated as the token
+ * source; this keeps their totals and message counts under accounting v1.
+ */
+function seedClaudeTurn(
+  db: Database.Database,
+  runId: string,
+  usage: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number },
+  createdAt?: string,
+  model: string | null = 'claude-opus-4-5',
+): void {
+  seedEvent(db, runId, 'assistant', assistantPayloadWithModel(model, usage), createdAt);
+  seedEvent(db, runId, 'result', claudeResultPayload(usage, { model: model ?? undefined }), createdAt);
+}
+
+/** A Codex root-thread `agent_result` (the provider-neutral terminal row; it names no model). */
+function codexAgentResultPayload(inputTokens: number, outputTokens: number): Record<string, unknown> {
+  return {
+    type: 'agent_result',
+    provider: 'codex',
+    runtime: 'codex-sdk',
+    subtype: 'success',
+    is_error: false,
+    num_turns: 1,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+  };
 }
 
 /** Assistant payload whose content reports a step via a suffix-matched MCP tool. */
@@ -744,13 +829,16 @@ describe('selectRunUsageRollups', () => {
     });
   });
 
-  it('sums assistant usage and counts only payloads that carry a usage object', () => {
+  it('takes Claude tokens from result.usage and counts each assistant message once (accounting v1)', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50, cacheRead: 10, cacheCreation: 5 }));
+    const first = assistantPayload({ input: 100, output: 50, cacheRead: 10, cacheCreation: 5 });
+    seedEvent(db, 'r1', 'assistant', first);
+    // A second content-block row of the SAME message repeats its usage — the
+    // legacy fold counted it twice.
+    seedEvent(db, 'r1', 'assistant', first);
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 200, output: 25 }));
-    // assistant WITHOUT a usage object — not counted.
-    seedEvent(db, 'r1', 'assistant', assistantPayload(null));
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 300, output: 75, cacheRead: 10, cacheCreation: 5 }));
 
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
     expect(rollup.inputTokens).toBe(300);
@@ -759,6 +847,8 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.cacheCreationTokens).toBe(5);
     expect(rollup.totalTokens).toBe(375);
     expect(rollup.assistantMessageCount).toBe(2);
+    expect(rollup.accountingVersion).toBe(1);
+    expect(rollup.coverage).toBe('complete');
   });
 
   it('resolves one model from raw_events at read time for a materialized run', () => {
@@ -875,12 +965,20 @@ describe('selectRunUsageRollups', () => {
       'assistant',
       assistantPayloadWithModel('claude-opus-4-5', { input: 50, output: 10 }),
     );
-    seedEvent(
-      db,
-      'r1',
-      'subagent_usage',
-      subagentUsagePayload('claude-haiku-4-5', { input: 30, output: 5, cacheRead: 1 }),
-    );
+    // Accounting v1: the outer tokens come from result.usage (split across the
+    // query's parentless messages' models), and a Task child on another model
+    // from the modelUsage delta beyond result.usage.
+    seedEvent(db, 'r1', 'result', {
+      type: 'result',
+      subtype: 'success',
+      session_id: 's1',
+      cyboflow_process_instance_id: 'proc-1',
+      usage: { input_tokens: 150, output_tokens: 30, cache_read_input_tokens: 5, cache_creation_input_tokens: 2 },
+      modelUsage: {
+        'claude-opus-4-5': { inputTokens: 150, outputTokens: 30, cacheReadInputTokens: 5, cacheCreationInputTokens: 2 },
+        'claude-haiku-4-5': { inputTokens: 30, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 0 },
+      },
+    });
 
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
     expect(rollup.multiModel).toBe(true);
@@ -892,7 +990,7 @@ describe('selectRunUsageRollups', () => {
       ]),
     );
     // Conservation: the per-model buckets sum to the same totals as the
-    // run-level fields (no fallback path was involved here).
+    // run-level fields.
     const summed = rollup.perModelUsage.reduce(
       (acc, m) => ({ input: acc.input + m.inputTokens, output: acc.output + m.outputTokens }),
       { input: 0, output: 0 },
@@ -976,6 +1074,7 @@ describe('selectRunUsageRollups', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 20 }));
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 100, output: 20 }));
     seedEvent(
       db,
       'r1',
@@ -1204,17 +1303,19 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.numTurns).toBeNull();
   });
 
-  it('does NOT add result.usage tokens into the assistant sums (no double-count)', () => {
+  it('counts result.usage once and the assistant message usage never (no double-count)', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50 }));
-    // resultPayload() embeds a usage block of 99999/88888 that MUST be ignored.
-    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1));
+    // The assistant row's own usage (999/999) is NOT a token source under
+    // accounting v1 — the result's usage (100/50) is.
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 999, output: 999 }));
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 100, output: 50 }, { cost: 0.01, turns: 1 }));
 
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
     expect(rollup.inputTokens).toBe(100);
     expect(rollup.outputTokens).toBe(50);
     expect(rollup.totalTokens).toBe(150);
+    expect(rollup.assistantMessageCount).toBe(1);
   });
 
   it('reads Codex usage from provider-neutral agent_result rows', () => {
@@ -1249,6 +1350,7 @@ describe('selectRunUsageRollups', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50 }));
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 100, output: 50 }));
     seedEvent(db, 'r1', 'assistant', '{ this is not valid json'); // malformed
     seedEvent(db, 'r1', 'result', '}{ also broken'); // malformed
 
@@ -1262,8 +1364,8 @@ describe('selectRunUsageRollups', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'rA', workflowId: 'wf-1' });
     seedRun(db, { id: 'rB', workflowId: 'wf-1' });
-    seedEvent(db, 'rA', 'assistant', assistantPayload({ input: 10, output: 1 }));
-    seedEvent(db, 'rB', 'assistant', assistantPayload({ input: 20, output: 2 }));
+    seedEvent(db, 'rA', 'result', claudeResultPayload({ input: 10, output: 1 }));
+    seedEvent(db, 'rB', 'result', claudeResultPayload({ input: 20, output: 2 }));
 
     const rollups = selectRunUsageRollups(dbAdapter(db), ['rB', 'rA']);
     expect(rollups.map((r) => r.runId)).toEqual(['rB', 'rA']);
@@ -1322,7 +1424,7 @@ describe('selectRunUsageRollups', () => {
     seedRunUsage(db, { runId: 'rMat', inputTokens: 80, outputTokens: 20, costUsd: 0.05, assistantMessageCount: 2 });
     // rRaw: no run_usage row → falls back to the live scan.
     seedEvent(db, 'rRaw', 'assistant', assistantPayload({ input: 40, output: 10 }));
-    seedEvent(db, 'rRaw', 'result', resultPayload(0.01, 1));
+    seedEvent(db, 'rRaw', 'result', claudeResultPayload({ input: 40, output: 10 }, { cost: 0.01, turns: 1 }));
 
     const rollups = selectRunUsageRollups(dbAdapter(db), ['rMat', 'rRaw']);
     const byId = new Map(rollups.map((r) => [r.runId, r]));
@@ -1369,7 +1471,7 @@ describe('selectSessionRunTokenTotals', () => {
       totalTokens: 140,
     });
     seedRun(db, { id: 'r2', workflowId: 'wf1', sessionId: 'sess-1' });
-    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 200, output: 60, cacheRead: 2000, cacheCreation: 800 }));
+    seedClaudeTurn(db, 'r2', { input: 200, output: 60, cacheRead: 2000, cacheCreation: 800 });
     seedRun(db, { id: 'r3', workflowId: 'wf1', sessionId: 'sess-2' });
     seedRunUsage(db, { runId: 'r3', inputTokens: 999, outputTokens: 999, cacheReadTokens: 999, cacheCreationTokens: 999, totalTokens: 1998 });
 
@@ -1476,12 +1578,17 @@ describe('selectRunUsageRollupsFromRawEvents', () => {
     // raw_events tell the TRUE, now-larger story (the later turns the stale row missed).
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50, cacheRead: 3, cacheCreation: 2 }));
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 200, output: 100 }));
-    seedEvent(db, 'r1', 'result', resultPayload(0.05, 2));
+    seedEvent(
+      db,
+      'r1',
+      'result',
+      claudeResultPayload({ input: 300, output: 150, cacheRead: 3, cacheCreation: 2 }, { cost: 0.05, turns: 2 }),
+    );
 
     const [rollup] = selectRunUsageRollupsFromRawEvents(dbAdapter(db), ['r1']);
     // Raw-events values win — the materialized 300/200/0.99/9/4 are ignored.
-    expect(rollup.inputTokens).toBe(300); // 100 + 200 from the events
-    expect(rollup.outputTokens).toBe(150); // 50 + 100
+    expect(rollup.inputTokens).toBe(300); // the result's usage
+    expect(rollup.outputTokens).toBe(150);
     expect(rollup.cacheReadTokens).toBe(3);
     expect(rollup.cacheCreationTokens).toBe(2);
     expect(rollup.totalTokens).toBe(450);
@@ -1509,8 +1616,8 @@ describe('selectRunUsageRollupsFromRawEvents', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'rA', workflowId: 'wf-1' });
     seedRun(db, { id: 'rB', workflowId: 'wf-1' });
-    seedEvent(db, 'rA', 'assistant', assistantPayload({ input: 10, output: 1 }));
-    seedEvent(db, 'rB', 'assistant', assistantPayload({ input: 20, output: 2 }));
+    seedEvent(db, 'rA', 'result', claudeResultPayload({ input: 10, output: 1 }));
+    seedEvent(db, 'rB', 'result', claudeResultPayload({ input: 20, output: 2 }));
 
     const rollups = selectRunUsageRollupsFromRawEvents(dbAdapter(db), ['rB', 'rA']);
     expect(rollups.map((r) => r.runId)).toEqual(['rB', 'rA']);
@@ -1539,9 +1646,10 @@ describe('selectWorkflowUsageStats', () => {
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     seedRun(db, { id: 'r2', workflowId: 'wf-1' });
     // r1: 150 in/out tokens (+1200 cache), cost 0.02 ; r2: 250 in/out (+3500 cache), no cost.
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50, cacheRead: 1000, cacheCreation: 200 }));
-    seedEvent(db, 'r1', 'result', resultPayload(0.02, 1));
-    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 200, output: 50, cacheRead: 3000, cacheCreation: 500 }));
+    seedClaudeTurn(db, 'r1', { input: 100, output: 50, cacheRead: 1000, cacheCreation: 200 });
+    // A cost-only result (no usage block, so it adds no tokens).
+    seedEvent(db, 'r1', 'result', { type: 'result', subtype: 'success', total_cost_usd: 0.02, num_turns: 1 });
+    seedClaudeTurn(db, 'r2', { input: 200, output: 50, cacheRead: 3000, cacheCreation: 500 });
 
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
     expect(stats.workflowName).toBe('Sprint');
@@ -1583,9 +1691,9 @@ describe('selectWorkflowUsageStats', () => {
     seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: daysAgoAt(3).ts });
     seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: daysAgoAt(2).ts });
     seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 1, output: 0 }));
-    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 2, output: 0 }));
-    seedEvent(db, 'r3', 'assistant', assistantPayload({ input: 3, output: 0 }));
+    seedClaudeTurn(db, 'r1', { input: 1, output: 0 });
+    seedClaudeTurn(db, 'r2', { input: 2, output: 0 });
+    seedClaudeTurn(db, 'r3', { input: 3, output: 0 });
 
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null, 2);
     expect(stats.runsWithUsage).toBe(2);
@@ -1599,10 +1707,10 @@ describe('selectWorkflowUsageStats', () => {
     // applies — and must NOT be counted even though it carries real usage and
     // the limitRunsPerWorkflow row cap has plenty of headroom.
     seedRun(db, { id: 'rOld', workflowId: 'wf-1', createdAt: daysAgoAt(31).ts });
-    seedEvent(db, 'rOld', 'assistant', assistantPayload({ input: 1000, output: 0 }), daysAgoAt(31).ts);
+    seedClaudeTurn(db, 'rOld', { input: 1000, output: 0 }, daysAgoAt(31).ts);
     // rRecent is inside the window.
     seedRun(db, { id: 'rRecent', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
-    seedEvent(db, 'rRecent', 'assistant', assistantPayload({ input: 10, output: 0 }), daysAgoAt(1).ts);
+    seedClaudeTurn(db, 'rRecent', { input: 10, output: 0 }, daysAgoAt(1).ts);
 
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
     expect(stats.runsWithUsage).toBe(1);
@@ -1623,7 +1731,7 @@ describe('selectWorkflowUsageStats', () => {
     });
     // rRaw uses the fallback scan path.
     seedRun(db, { id: 'rRaw', workflowId: 'wf-1' });
-    seedEvent(db, 'rRaw', 'assistant', assistantPayload({ input: 100, output: 0 }));
+    seedClaudeTurn(db, 'rRaw', { input: 100, output: 0 });
 
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
     // both runs carried usage (rMat materialized, rRaw scanned).
@@ -1987,9 +2095,9 @@ describe('selectUsageTrend', () => {
     seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: `${yesterday.d} 10:00:00` });
     seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: `${today.d} 10:00:00` });
     seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: `${today.d} 11:00:00` });
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 10, output: 0 }));
-    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 20, output: 0 }));
-    seedEvent(db, 'r3', 'assistant', assistantPayload({ input: 5, output: 0 }));
+    seedClaudeTurn(db, 'r1', { input: 10, output: 0 });
+    seedClaudeTurn(db, 'r2', { input: 20, output: 0 });
+    seedClaudeTurn(db, 'r3', { input: 5, output: 0 });
 
     const trend = selectUsageTrend(dbAdapter(db), { workflowId: null, projectId: null });
     expect(trend).toHaveLength(2);
@@ -2005,7 +2113,7 @@ describe('selectUsageTrend', () => {
   it('excludes runs older than the window', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'old', workflowId: 'wf-1', createdAt: '2000-01-01 10:00:00' });
-    seedEvent(db, 'old', 'assistant', assistantPayload({ input: 100, output: 0 }));
+    seedClaudeTurn(db, 'old', { input: 100, output: 0 });
     const trend = selectUsageTrend(dbAdapter(db), { workflowId: null, projectId: null, days: 7 });
     expect(trend).toEqual([]);
   });
@@ -2016,8 +2124,8 @@ describe('selectUsageTrend', () => {
     const today = db.prepare(`SELECT date('now') AS d`).get() as { d: string };
     seedRun(db, { id: 'ra', workflowId: 'wf-a', projectId: 1, createdAt: `${today.d} 10:00:00` });
     seedRun(db, { id: 'rb', workflowId: 'wf-b', projectId: 2, createdAt: `${today.d} 10:00:00` });
-    seedEvent(db, 'ra', 'assistant', assistantPayload({ input: 10, output: 0 }));
-    seedEvent(db, 'rb', 'assistant', assistantPayload({ input: 20, output: 0 }));
+    seedClaudeTurn(db, 'ra', { input: 10, output: 0 });
+    seedClaudeTurn(db, 'rb', { input: 20, output: 0 });
 
     const onlyA = selectUsageTrend(dbAdapter(db), { workflowId: 'wf-a', projectId: null });
     expect(onlyA).toHaveLength(1);
@@ -2033,7 +2141,7 @@ describe('selectUsageTrend', () => {
     // A run ~60 days ago: visible with days=90 (clamped from 999) but not days=7.
     const sixtyAgo = db.prepare(`SELECT datetime('now','-60 days') AS d`).get() as { d: string };
     seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: sixtyAgo.d });
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 10, output: 0 }));
+    seedClaudeTurn(db, 'r1', { input: 10, output: 0 });
 
     const wide = selectUsageTrend(dbAdapter(db), { workflowId: null, projectId: null, days: 999 });
     expect(wide).toHaveLength(1);
@@ -2230,36 +2338,12 @@ describe('selectDailyModelUsage', () => {
     const t0 = daysAgoAt(0);
     const t1 = daysAgoAt(1);
     // Same day + same model → one bucket summing two messages (cache excluded).
-    seedEvent(
-      db,
-      'r1',
-      'assistant',
-      assistantPayloadWithModel('claude-opus', { input: 100, output: 50, cacheRead: 10, cacheCreation: 5 }),
-      t0.ts,
-    );
-    seedEvent(
-      db,
-      'r1',
-      'assistant',
-      assistantPayloadWithModel('claude-opus', { input: 20, output: 5 }),
-      t0.ts,
-    );
+    seedClaudeTurn(db, 'r1', { input: 100, output: 50, cacheRead: 10, cacheCreation: 5 }, t0.ts, 'claude-opus');
+    seedClaudeTurn(db, 'r1', { input: 20, output: 5 }, t0.ts, 'claude-opus');
     // Same day, DIFFERENT model → its own bucket.
-    seedEvent(
-      db,
-      'r1',
-      'assistant',
-      assistantPayloadWithModel('claude-sonnet', { input: 7, output: 3 }),
-      t0.ts,
-    );
+    seedClaudeTurn(db, 'r1', { input: 7, output: 3 }, t0.ts, 'claude-sonnet');
     // Different (earlier) day, same model as the first → separate day bucket.
-    seedEvent(
-      db,
-      'r1',
-      'assistant',
-      assistantPayloadWithModel('claude-opus', { input: 1, output: 1 }),
-      t1.ts,
-    );
+    seedClaudeTurn(db, 'r1', { input: 1, output: 1 }, t1.ts, 'claude-opus');
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     const byKey = new Map(points.map((p) => [`${p.day}|${p.model}`, p]));
@@ -2323,9 +2407,9 @@ describe('selectDailyModelUsage', () => {
     const t0 = daysAgoAt(0);
     const t1 = daysAgoAt(1);
     // Seed out of order; expect day-then-model ascending in the output.
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('zebra', { input: 1, output: 0 }), t0.ts);
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('alpha', { input: 1, output: 0 }), t0.ts);
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('mid', { input: 1, output: 0 }), t1.ts);
+    seedClaudeTurn(db, 'r1', { input: 1, output: 0 }, t0.ts, 'zebra');
+    seedClaudeTurn(db, 'r1', { input: 1, output: 0 }, t0.ts, 'alpha');
+    seedClaudeTurn(db, 'r1', { input: 1, output: 0 }, t1.ts, 'mid');
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points.map((p) => `${p.day}|${p.model}`)).toEqual([
@@ -2339,7 +2423,7 @@ describe('selectDailyModelUsage', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     const t0 = daysAgoAt(0);
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel(null, { input: 9, output: 1 }), t0.ts);
+    seedClaudeTurn(db, 'r1', { input: 9, output: 1 }, t0.ts, null);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toHaveLength(1);
@@ -2353,8 +2437,8 @@ describe('selectDailyModelUsage', () => {
     seedRun(db, { id: 'ra', workflowId: 'wf-a', projectId: 1 });
     seedRun(db, { id: 'rb', workflowId: 'wf-b', projectId: 2 });
     const t0 = daysAgoAt(0);
-    seedEvent(db, 'ra', 'assistant', assistantPayloadWithModel('m', { input: 10, output: 0 }), t0.ts);
-    seedEvent(db, 'rb', 'assistant', assistantPayloadWithModel('m', { input: 20, output: 0 }), t0.ts);
+    seedClaudeTurn(db, 'ra', { input: 10, output: 0 }, t0.ts, 'm');
+    seedClaudeTurn(db, 'rb', { input: 20, output: 0 }, t0.ts, 'm');
 
     // Cross-project sees both runs (same day+model → one bucket of 30).
     const all = selectDailyModelUsage(dbAdapter(db), null, 30);
@@ -2375,8 +2459,8 @@ describe('selectDailyModelUsage', () => {
     const old = (
       db.prepare(`SELECT datetime('now','-200 days') AS d`).get() as { d: string }
     ).d;
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 5, output: 0 }), recent.ts);
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 50, output: 0 }), old);
+    seedClaudeTurn(db, 'r1', { input: 5, output: 0 }, recent.ts, 'm');
+    seedClaudeTurn(db, 'r1', { input: 50, output: 0 }, old, 'm');
 
     // days=7 → only the recent event.
     const narrow = selectDailyModelUsage(dbAdapter(db), null, 7);
@@ -2389,18 +2473,16 @@ describe('selectDailyModelUsage', () => {
     expect(total).toBe(55);
   });
 
-  it('ignores non-assistant events (result rows never count)', () => {
+  it('takes Claude tokens from the result row, never from the assistant rows (accounting v1)', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     const t0 = daysAgoAt(0);
-    // A result event whose embedded usage block (99999/88888) MUST be ignored —
-    // the WHERE clause only scans assistant rows.
-    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1), t0.ts);
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 4, output: 1 }), t0.ts);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 999, output: 999 }), t0.ts);
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 4, output: 1 }, { model: 'm' }), t0.ts);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toHaveLength(1);
-    expect(points[0].totalTokens).toBe(5); // not the result's 99999/88888
+    expect(points[0]).toMatchObject({ model: 'm', totalTokens: 5, assistantMessageCount: 1 });
   });
 
   it('skips malformed payload_json and assistant rows with no usage object', () => {
@@ -2409,7 +2491,7 @@ describe('selectDailyModelUsage', () => {
     const t0 = daysAgoAt(0);
     seedEvent(db, 'r1', 'assistant', '{ not valid json', t0.ts); // malformed → skip
     seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', null), t0.ts); // no usage → skip
-    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 6, output: 0 }), t0.ts);
+    seedClaudeTurn(db, 'r1', { input: 6, output: 0 }, t0.ts, 'm');
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toHaveLength(1);
@@ -2433,7 +2515,7 @@ describe('selectDailyModelUsage', () => {
     });
     const t0 = daysAgoAt(0);
     // Codex reports usage ONLY on the terminal result — no assistant-type rows at all.
-    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(db, 'r1', 'agent_result', codexAgentResultPayload(400, 100), t0.ts);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toEqual([
@@ -2464,7 +2546,7 @@ describe('selectDailyModelUsage', () => {
     });
     const t0 = daysAgoAt(0);
     seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('claude-sonnet-5', { input: 50, output: 10 }), t0.ts);
-    seedEvent(db, 'r1', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedEvent(db, 'r1', 'agent_result', codexAgentResultPayload(400, 100), t0.ts);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toEqual(
@@ -2486,7 +2568,7 @@ describe('selectDailyModelUsage', () => {
       model: null,
     });
     const t0 = daysAgoAt(0);
-    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 2 }), t0.ts);
+    seedEvent(db, 'r1', 'agent_result', codexAgentResultPayload(10, 2), t0.ts);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toHaveLength(1);
@@ -2529,16 +2611,13 @@ describe('selectDailyModelUsage', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
     const t0 = daysAgoAt(0);
-    seedEvent(
-      db,
-      'r1',
-      'assistant',
-      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
-      t0.ts,
-    );
-    // The SAME run's terminal result restates a usage block — MUST be ignored
-    // entirely (the run already reported assistant-side usage in this window).
-    seedEvent(db, 'r1', 'result', resultPayload(0.02, 1, { inputTokens: 9999, outputTokens: 8888 }), t0.ts);
+    // Two content-block rows of ONE message, each restating the message usage —
+    // accounting v1 never counts assistant usage as tokens.
+    const message = assistantPayloadWithModel('claude-opus-4-5', { input: 9999, output: 8888 });
+    seedEvent(db, 'r1', 'assistant', message, t0.ts);
+    seedEvent(db, 'r1', 'assistant', message, t0.ts);
+    // The result's usage is the outer agent's tokens, counted once.
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 100, output: 20 }), t0.ts);
 
     const points = selectDailyModelUsage(dbAdapter(db), null, 30);
     expect(points).toEqual([
@@ -2565,7 +2644,7 @@ describe('selectDailyModelUsage', () => {
       model: 'gpt-5-codex',
     });
     const t0 = daysAgoAt(0);
-    seedEvent(db, 'ra', 'result', resultPayload(0.01, 1, { inputTokens: 10, outputTokens: 5 }), t0.ts);
+    seedEvent(db, 'ra', 'agent_result', codexAgentResultPayload(10, 5), t0.ts);
 
     expect(selectDailyModelUsage(dbAdapter(db), 2, 30)).toEqual([]);
     const scoped = selectDailyModelUsage(dbAdapter(db), 1, 30);
@@ -2591,14 +2670,8 @@ describe('selectDailyModelUsage', () => {
       model: 'gpt-5-mini',
     });
     const t0 = daysAgoAt(0);
-    seedEvent(
-      db,
-      'r-claude',
-      'assistant',
-      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
-      t0.ts,
-    );
-    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedClaudeTurn(db, 'r-claude', { input: 100, output: 20 }, t0.ts, 'claude-opus-4-5');
+    seedEvent(db, 'r-codex', 'agent_result', codexAgentResultPayload(400, 100), t0.ts);
     seedEvent(
       db,
       'r-omp',
@@ -2646,14 +2719,8 @@ describe('selectDailyModelUsage', () => {
       model: 'gpt-5-mini',
     });
     const t0 = daysAgoAt(0);
-    seedEvent(
-      db,
-      'r-claude',
-      'assistant',
-      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
-      t0.ts,
-    );
-    seedEvent(db, 'r-codex', 'result', resultPayload(0.05, 1, { inputTokens: 400, outputTokens: 100 }), t0.ts);
+    seedClaudeTurn(db, 'r-claude', { input: 100, output: 20 }, t0.ts, 'claude-opus-4-5');
+    seedEvent(db, 'r-codex', 'agent_result', codexAgentResultPayload(400, 100), t0.ts);
     seedEvent(
       db,
       'r-omp',
@@ -2681,6 +2748,174 @@ describe('selectDailyModelUsage', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Usage accounting v1 (usageFold.ts) — one fold behind run_usage, the tier-2
+// scan, the materialized per-model read and the daily chart
+// ---------------------------------------------------------------------------
+
+describe('usage accounting v1 across the rollup surfaces', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  function seedKeyed(runId: string, payload: Record<string, unknown>, dedupKey: string, createdAt: string): void {
+    db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at, dedup_key)
+       VALUES (?, 'subagent_usage', ?, ?, ?)`,
+    ).run(runId, JSON.stringify(payload), createdAt, dedupKey);
+  }
+
+  function codexChild(model: string, input: number, output: number, cacheRead = 0): Record<string, unknown> {
+    return {
+      type: 'subagent_usage',
+      provider: 'codex',
+      thread_id: 't',
+      parent_thread_id: 't0',
+      invocation_id: 'inv-1',
+      model_inferred: false,
+      message: {
+        model,
+        usage: {
+          input_tokens: input,
+          output_tokens: output,
+          cache_read_input_tokens: cacheRead,
+          cache_creation_input_tokens: 0,
+          reasoning_output_tokens: 0,
+        },
+      },
+    };
+  }
+
+  it('a mixed claude-primary run: run_usage = Claude outer + child + Codex root/descendant/unattributed/top-up = Σ daily buckets', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
+    const d0 = daysAgoAtWindow(db, 1);
+    const d1 = daysAgoAtWindow(db, 0);
+
+    // Claude step: one outer message (split over two content-block rows), a
+    // forwarded Task-child message, and the query's result.
+    const outer = { ...assistantPayloadWithModel('claude-opus-4-5', { input: 7, output: 7 }), session_id: 's1' };
+    seedEvent(db, 'r1', 'assistant', outer, d0.ts);
+    seedEvent(db, 'r1', 'assistant', outer, d0.ts);
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      { ...assistantPayloadWithModel('claude-haiku-4-5', { input: 99, output: 99 }), session_id: 's1', parent_tool_use_id: 'toolu_1' },
+      d0.ts,
+    );
+    seedEvent(
+      db,
+      'r1',
+      'result',
+      {
+        type: 'result',
+        subtype: 'success',
+        session_id: 's1',
+        cyboflow_process_instance_id: 'proc-a',
+        total_cost_usd: 0.5,
+        num_turns: 2,
+        usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 },
+        modelUsage: {
+          'claude-opus-4-5': { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 1000, cacheCreationInputTokens: 50 },
+          'claude-haiku-4-5': { inputTokens: 40, outputTokens: 10, cacheReadInputTokens: 200, cacheCreationInputTokens: 0 },
+        },
+      },
+      d0.ts,
+    );
+
+    // Codex step: root thread on agent_result, plus the descendant /
+    // unattributed / top-up rows (the latter two land a day later).
+    seedEvent(db, 'r1', 'agent_assistant', { type: 'agent_message', provider: 'codex', role: 'assistant', model: 'gpt-6-sol', content: [] }, d0.ts);
+    seedEvent(
+      db,
+      'r1',
+      'agent_result',
+      { type: 'agent_result', provider: 'codex', num_turns: 1, usage: { input_tokens: 300, output_tokens: 30, cache_read_input_tokens: 3000 } },
+      d0.ts,
+    );
+    seedKeyed('r1', codexChild('gpt-6-luna', 200, 20, 2000), 'codex-subagent:inv-1:t2', d0.ts);
+    seedKeyed('r1', codexChild('gpt-6-luna', 10, 1), 'codex-unattributed:r1:t3', d1.ts);
+    seedKeyed('r1', codexChild('gpt-6-sol', 5, 1), 'codex-usage-topup:r1:t0', d1.ts);
+
+    rollupRunUsage(dbAdapter(db), 'r1');
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    // Claude outer 100/20 + child 40/10; Codex 300/30 + 200/20 + 10/1 + 5/1.
+    expect(rollup).toMatchObject({
+      inputTokens: 655,
+      outputTokens: 82,
+      cacheReadTokens: 6200,
+      cacheCreationTokens: 50,
+      totalTokens: 737,
+      // one deduplicated parentless message + one Codex turn
+      assistantMessageCount: 2,
+      numTurns: 3,
+      accountingVersion: 1,
+      coverage: 'complete',
+    });
+    expect(rollup.costUsd).toBeCloseTo(0.5, 10);
+    expect(rollup.multiModel).toBe(true);
+
+    // The materialized per-model split re-folds the same rows and sums to the row.
+    const byModel = new Map(rollup.perModelUsage.map((m) => [m.model, m]));
+    expect(byModel.get('claude-opus-4-5')).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+    expect(byModel.get('claude-haiku-4-5')).toMatchObject({ inputTokens: 40, outputTokens: 10 });
+    expect(byModel.get('gpt-6-sol')).toMatchObject({ inputTokens: 305, outputTokens: 31 });
+    expect(byModel.get('gpt-6-luna')).toMatchObject({ inputTokens: 210, outputTokens: 21 });
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    const dailyInput = points.reduce((sum, p) => sum + p.inputTokens, 0);
+    const dailyOutput = points.reduce((sum, p) => sum + p.outputTokens, 0);
+    expect(dailyInput).toBe(rollup.inputTokens);
+    expect(dailyOutput).toBe(rollup.outputTokens);
+    expect(points.find((p) => p.day === d1.day && p.model === 'gpt-6-luna')).toMatchObject({ inputTokens: 10 });
+  });
+
+  it('records the fold version and the most severe coverage on run_usage', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // No process id → inferred Claude segments; an inferred Codex child model.
+    seedEvent(db, 'r1', 'result', resultPayload(0.1, 1, { sessionId: 's1', inputTokens: 5, outputTokens: 5 }));
+    seedKeyed('r1', { ...codexChild('gpt-6-sol', 1, 1), model_inferred: true }, 'codex-subagent:inv-1:t9', daysAgoAtWindow(db, 0).ts);
+
+    rollupRunUsage(dbAdapter(db), 'r1');
+    const row = db.prepare(`SELECT accounting_version, coverage FROM run_usage WHERE run_id = 'r1'`).get();
+    expect(row).toEqual({ accounting_version: 1, coverage: 'claude-segments-inferred' });
+  });
+
+  it('re-folds a run materialized at an older accounting_version with the legacy rules', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'rOld', workflowId: 'wf-1' });
+    seedRun(db, { id: 'rNew', workflowId: 'wf-1' });
+    const t0 = daysAgoAtWindow(db, 0);
+    for (const runId of ['rOld', 'rNew']) {
+      // One message over two content-block rows (legacy double-counts it) + its result.
+      const message = assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 });
+      seedEvent(db, runId, 'assistant', message, t0.ts);
+      seedEvent(db, runId, 'assistant', message, t0.ts);
+      seedEvent(db, runId, 'result', claudeResultPayload({ input: 100, output: 20 }), t0.ts);
+    }
+    // rOld: a pre-v1 row (version 0, as every row written before migration 146).
+    seedRunUsage(db, { runId: 'rOld', inputTokens: 200, outputTokens: 40, assistantMessageCount: 2 });
+    rollupRunUsage(dbAdapter(db), 'rNew');
+
+    const [oldRollup, newRollup] = selectRunUsageRollups(dbAdapter(db), ['rOld', 'rNew']);
+    expect(oldRollup).toMatchObject({ inputTokens: 200, accountingVersion: 0, coverage: 'legacy' });
+    // Legacy per-model split: the assistant rows, consistent with the v0 row.
+    expect(oldRollup.perModelUsage).toEqual([
+      { model: 'claude-opus-4-5', inputTokens: 200, outputTokens: 40, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    ]);
+    expect(newRollup).toMatchObject({ inputTokens: 100, outputTokens: 20, accountingVersion: 1, coverage: 'complete' });
+
+    // The daily chart folds each run under its own version: 200/40 + 100/20.
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toEqual([
+      expect.objectContaining({ day: t0.day, model: 'claude-opus-4-5', inputTokens: 300, outputTokens: 60, assistantMessageCount: 3 }),
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // selectRunUsageRollups — runtime timestamps (migration-020 started_at/ended_at)
 // ---------------------------------------------------------------------------
 
@@ -2698,7 +2933,7 @@ describe('selectRunUsageRollups runtime timestamps', () => {
       startedAt: '2026-07-01 10:00:00',
       endedAt: '2026-07-01 10:05:00',
     });
-    seedEvent(db, 'r1', 'assistant', { message: { usage: { input_tokens: 3, output_tokens: 1 } } });
+    seedEvent(db, 'r1', 'result', claudeResultPayload({ input: 3, output: 1 }));
 
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
     expect(rollup.startedAt).toBe('2026-07-01T10:00:00.000Z');

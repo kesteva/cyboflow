@@ -47,14 +47,15 @@ beforeEach(() => {
     );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, event_type TEXT NOT NULL,
-      payload_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      payload_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, dedup_key TEXT
     );
     CREATE TABLE run_usage (
       run_id TEXT PRIMARY KEY, input_tokens INTEGER NOT NULL DEFAULT 0,
       output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
       cache_creation_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
       cost_usd REAL, num_turns INTEGER, assistant_message_count INTEGER NOT NULL DEFAULT 0,
-      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      accounting_version INTEGER NOT NULL DEFAULT 0, coverage TEXT NOT NULL DEFAULT 'legacy'
     );
   `);
   const insert = rawDb.prepare('INSERT INTO items (id, project_id, label, amount) VALUES (?, ?, ?, ?)');
@@ -233,6 +234,19 @@ describe('runWidgetSources — query adapters', () => {
             content: [],
             usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
           },
+        }),
+      );
+    // The query's result carries its tokens (the usage fold's Claude source).
+    rawDb
+      .prepare("INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES (?, 'result', ?, datetime('now'))")
+      .run(
+        'run-1',
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          usage: { input_tokens: 100, output_tokens: 50 },
+          modelUsage: { 'claude-opus-4-5': { inputTokens: 100, outputTokens: 50 } },
+          cyboflow_process_instance_id: 'proc-1',
         }),
       );
   });

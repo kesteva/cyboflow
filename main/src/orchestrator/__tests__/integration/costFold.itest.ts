@@ -74,10 +74,13 @@ describe('Tier-3: run_usage.cost_usd is the SDK total_cost_usd verbatim (never r
         usage: { ...assistant.message.usage, input_tokens: INPUT_TOKENS, output_tokens: OUTPUT_TOKENS },
       },
     };
-    const result: SDKMessage = sdkResultSuccess({
-      totalCostUsd: SDK_TOTAL_COST_USD,
-      numTurns: NUM_TURNS,
-    });
+    // The result's usage restates the query's outer tokens — the usage fold's
+    // Claude token source (assistant usage is attribution only).
+    const bare = sdkResultSuccess({ totalCostUsd: SDK_TOTAL_COST_USD, numTurns: NUM_TURNS });
+    const result: SDKMessage = {
+      ...bare,
+      usage: { ...bare.usage, input_tokens: INPUT_TOKENS, output_tokens: OUTPUT_TOKENS },
+    };
 
     const insert = db.prepare(
       'INSERT INTO raw_events (run_id, event_type, payload_json) VALUES (?, ?, ?)',
@@ -112,8 +115,8 @@ describe('Tier-3: run_usage.cost_usd is the SDK total_cost_usd verbatim (never r
     // dollars, not 0.4237 — so exact equality proves it was NOT recomputed.
     expect(row!.costUsd).not.toBe(row!.totalTokens);
 
-    // 3. Token totals are derived INDEPENDENTLY from the assistant usage (result
-    //    usage is intentionally never summed into the token totals).
+    // 3. Token totals come from the result's usage, counted once (never also
+    //    from the assistant message's copy of it).
     expect(row!.inputTokens).toBe(INPUT_TOKENS);
     expect(row!.outputTokens).toBe(OUTPUT_TOKENS);
     expect(row!.totalTokens).toBe(INPUT_TOKENS + OUTPUT_TOKENS);
@@ -161,9 +164,27 @@ describe('Tier-3: run_usage.cost_usd is the SDK total_cost_usd verbatim (never r
     const insert = db.prepare(
       'INSERT INTO raw_events (run_id, event_type, payload_json) VALUES (?, ?, ?)',
     );
+    // The query's result: outer usage, and a process-cumulative modelUsage that
+    // already holds the workflow agent's tokens (it ran inside the same process).
+    const bare = sdkResultSuccess();
+    const primaryResult = {
+      ...bare,
+      usage: { ...bare.usage, input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 11, cache_creation_input_tokens: 3 },
+      modelUsage: {
+        'claude-primary': { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 11, cacheCreationInputTokens: 3 },
+        'claude-subagent': { inputTokens: 40, outputTokens: 6, cacheReadInputTokens: 7, cacheCreationInputTokens: 2 },
+      },
+      cyboflow_process_instance_id: 'proc-1',
+    };
+    // dynamicWorkflowTracker's snapshots carry the `subagent:` dedup key, which
+    // makes them attribution-only (never a second count of the same tokens).
+    const insertKeyed = db.prepare(
+      'INSERT INTO raw_events (run_id, event_type, payload_json, dedup_key) VALUES (?, ?, ?, ?)',
+    );
     insert.run(RUN_ID, primaryWithUsage.type, JSON.stringify(primaryWithUsage));
-    insert.run(RUN_ID, 'subagent_usage', JSON.stringify(nestedSubagentUsage));
-    insert.run(RUN_ID, 'subagent_usage', JSON.stringify(flatSubagentUsage));
+    insert.run(RUN_ID, 'result', JSON.stringify(primaryResult));
+    insertKeyed.run(RUN_ID, 'subagent_usage', JSON.stringify(nestedSubagentUsage), 'subagent:wf-run-1:agent-1');
+    insertKeyed.run(RUN_ID, 'subagent_usage', JSON.stringify(flatSubagentUsage), 'subagent:wf-run-1:agent-flat');
 
     // The primary Workflow-dispatch assistant is a normal SDK message and must
     // still narrow cleanly; synthetic usage is intentionally router-less.

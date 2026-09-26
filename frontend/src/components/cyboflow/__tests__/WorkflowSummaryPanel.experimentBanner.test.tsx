@@ -62,6 +62,8 @@ const ROLLUP: RunUsageRollup = {
   costUsd: 0.1,
   numTurns: 1,
   assistantMessageCount: 1,
+  accountingVersion: 1,
+  coverage: 'complete',
   startedAt: null,
   endedAt: null,
 };

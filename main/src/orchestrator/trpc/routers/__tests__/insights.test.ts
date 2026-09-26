@@ -229,6 +229,8 @@ describe('cyboflow.insights.runUsage', () => {
     costUsd: 0.01,
     numTurns: 3,
     assistantMessageCount: 4,
+    accountingVersion: 1,
+    coverage: 'complete',
     startedAt: '2026-07-01T10:00:00.000Z',
     endedAt: '2026-07-01T10:05:00.000Z',
   };
@@ -264,6 +266,8 @@ describe('cyboflow.insights.runUsage', () => {
       costUsd: null,
       numTurns: null,
       assistantMessageCount: 0,
+      accountingVersion: 1,
+      coverage: 'complete',
       startedAt: null,
       endedAt: null,
     });
