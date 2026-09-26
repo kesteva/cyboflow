@@ -35,6 +35,7 @@ export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
   'screen-recording': 'Screen recording',
   accessibility: 'Computer control (accessibility)',
   'mobile-simulator': 'iOS simulator control',
+  'xcode-mcp': 'Xcode device control',
 };
 
 /**
@@ -115,6 +116,8 @@ export function probeFixLabel(row: VerifyProbeRow): string | null {
       return 'Grant access';
     case 'open-screen-recording-settings':
       return 'Open settings';
+    case 'approve-xcode-access':
+      return 'Approve Xcode access';
     case null:
       return null;
   }
@@ -122,7 +125,10 @@ export function probeFixLabel(row: VerifyProbeRow): string | null {
 
 /** The in-flight label while a fix runs, or null for one that completes instantly. */
 export function probeFixPendingLabel(fix: VerifyProbeRow['fix']): string | null {
-  return fix === 'provision-chromium' ? 'Installing…' : null;
+  if (fix === 'provision-chromium') return 'Installing…';
+  // Xcode's approval prompt blocks the call until the user answers it.
+  if (fix === 'approve-xcode-access') return 'Waiting for Xcode…';
+  return null;
 }
 
 /** The pill class for a row, via its status. */

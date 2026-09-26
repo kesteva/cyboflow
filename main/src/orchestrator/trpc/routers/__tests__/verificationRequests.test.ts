@@ -56,6 +56,7 @@ import type {
   VerifyHostProbeReport,
   VerifyProbeId,
   VerifyProbeRow,
+  XcodeAccessApproval,
 } from '../../../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
@@ -1013,6 +1014,8 @@ type ProbeOverrides = Partial<{
   requestAccessibility: (() => Promise<void>) | undefined;
   openScreenRecordingSettings: (() => Promise<void>) | undefined;
   mobileSimulator: (() => Promise<VerifyProbeRow>) | undefined;
+  xcodeMcp: (() => Promise<VerifyProbeRow>) | undefined;
+  approveXcodeAccess: (() => Promise<XcodeAccessApproval>) | undefined;
 }>;
 
 type ProbeStub = {
@@ -1024,6 +1027,8 @@ type ProbeStub = {
   requestAccessibility?: () => Promise<void>;
   openScreenRecordingSettings?: () => Promise<void>;
   mobileSimulator?: () => Promise<VerifyProbeRow>;
+  xcodeMcp?: () => Promise<VerifyProbeRow>;
+  approveXcodeAccess?: () => Promise<XcodeAccessApproval>;
 };
 
 /** Keys whose explicit `undefined` must leave the key ABSENT, not present-and-undefined. */
@@ -1032,6 +1037,8 @@ const OPTIONAL_PROBE_KEYS = [
   'requestAccessibility',
   'openScreenRecordingSettings',
   'mobileSimulator',
+  'xcodeMcp',
+  'approveXcodeAccess',
 ] as const;
 
 function probeStub(overrides: ProbeOverrides = {}): ProbeStub {
@@ -1047,6 +1054,12 @@ function probeStub(overrides: ProbeOverrides = {}): ProbeStub {
       id: 'mobile-simulator',
       state: 'ok',
       detail: 'Xcode 26.2 · iOS 26.2 · maestro /opt/homebrew/bin/maestro',
+      fix: null,
+    }),
+    xcodeMcp: async (): Promise<VerifyProbeRow> => ({
+      id: 'xcode-mcp',
+      state: 'ok',
+      detail: 'Xcode 27.0 with iOS 27.0, headless mode on; approved',
       fix: null,
     }),
     ...overrides,
@@ -1092,7 +1105,7 @@ describe('verificationRequests.hostProbes', () => {
     return { caller, db };
   }
 
-  it('reports exactly the four actionable rows on a healthy host', async () => {
+  it('reports exactly the five actionable rows on a healthy host', async () => {
     const { caller } = setup();
     const report = await caller.cyboflow.verificationRequests.hostProbes();
 
@@ -1101,6 +1114,7 @@ describe('verificationRequests.hostProbes', () => {
       'screen-recording',
       'accessibility',
       'mobile-simulator',
+      'xcode-mcp',
     ]);
     expect(report.probes.every((p) => p.state === 'ok')).toBe(true);
   });
@@ -1357,7 +1371,7 @@ describe('verificationRequests.hostProbes', () => {
     expect(row.fix).toBeNull();
   });
 
-  it('does not let a thrown mobile probe take down the other three rows', async () => {
+  it('does not let a thrown mobile probe take down the other rows', async () => {
     const { caller } = setup({
       probes: { mobileSimulator: async () => { throw new Error('boom'); } },
     });
@@ -1368,8 +1382,72 @@ describe('verificationRequests.hostProbes', () => {
       'screen-recording',
       'accessibility',
       'mobile-simulator',
+      'xcode-mcp',
     ]);
     expect(probeRow(report, 'browser-driving').state).toBe('ok');
+  });
+
+  // -------------------------------------------------------------------------
+  // §B2 / §B8 — the 'xcode-mcp' row and "Approve Xcode access"
+  // -------------------------------------------------------------------------
+
+  const approvalRequired = async (): Promise<VerifyProbeRow> => ({
+    id: 'xcode-mcp',
+    state: 'missing',
+    detail: 'Xcode has no MCP grant for /Applications/Cyboflow.app/Contents/MacOS/Cyboflow',
+    fix: 'approve-xcode-access',
+  });
+  const approval: XcodeAccessApproval = {
+    outcome: 'prompted',
+    detail: 'Xcode opened the scaffold project',
+    approveCommand: 'sudo xcrun mcp-server approve FCC0C7CB-C446-46B8-93A3-D9CB349F4416 --for-24-hours',
+    durableApproveCommand: null,
+    disclosure: 'Approving Cyboflow approves every agent it hosts',
+    scaffoldPath: '/data/xcode-approval/CyboflowApproval.xcodeproj',
+  };
+
+  it('xcode-mcp keeps its approve action only when the action is wired', async () => {
+    const wired = setup({ probes: { xcodeMcp: approvalRequired, approveXcodeAccess: async () => approval } });
+    expect(probeRow(await wired.caller.cyboflow.verificationRequests.hostProbes(), 'xcode-mcp').fix).toBe(
+      'approve-xcode-access',
+    );
+    const unwired = setup({ probes: { xcodeMcp: approvalRequired, approveXcodeAccess: undefined } });
+    expect(probeRow(await unwired.caller.cyboflow.verificationRequests.hostProbes(), 'xcode-mcp').fix).toBeNull();
+  });
+
+  it('an unwired or throwing xcode probe is inconclusive, never missing', async () => {
+    const unwired = setup({ probes: { xcodeMcp: undefined } });
+    expect(probeRow(await unwired.caller.cyboflow.verificationRequests.hostProbes(), 'xcode-mcp').state).toBe(
+      'inconclusive',
+    );
+    const thrown = setup({ probes: { xcodeMcp: async () => { throw new Error('status unreadable'); } } });
+    const row = probeRow(await thrown.caller.cyboflow.verificationRequests.hostProbes(), 'xcode-mcp');
+    expect(row).toMatchObject({ state: 'inconclusive', fix: null });
+    expect(row.detail).toMatch(/status unreadable/);
+  });
+
+  it('approveXcodeAccess returns the approval to SHOW plus the re-probed rows', async () => {
+    let calls = 0;
+    const { caller } = setup({
+      probes: {
+        xcodeMcp: approvalRequired,
+        approveXcodeAccess: async () => {
+          calls += 1;
+          return approval;
+        },
+      },
+    });
+    const result = await caller.cyboflow.verificationRequests.approveXcodeAccess();
+    expect(calls).toBe(1);
+    expect(result.approval).toEqual(approval);
+    expect(result.report.probes.map((p) => p.id)).toContain('xcode-mcp');
+  });
+
+  it('approveXcodeAccess PRECONDITION_FAILEDs where the action does not exist', async () => {
+    const { caller } = setup({ probes: { approveXcodeAccess: undefined } });
+    await expect(caller.cyboflow.verificationRequests.approveXcodeAccess()).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
   });
 
   it('PRECONDITION_FAILEDs when probes are unwired instead of reporting a bare host', async () => {

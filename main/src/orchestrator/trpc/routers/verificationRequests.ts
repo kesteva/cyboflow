@@ -88,6 +88,7 @@ import {
   type VerifyProbeRow,
   type VerifyProjectSetupRow,
   type VisualBackendId,
+  type XcodeAccessApproval,
 } from '../../../../../shared/types/visualVerification';
 
 function requireDb(db: DatabaseLike | undefined, where: string): DatabaseLike {
@@ -718,6 +719,35 @@ async function mobileRow(probes: VerifyHostProbesLike): Promise<VerifyProbeRow> 
   }
 }
 
+/**
+ * The `'xcode-mcp'` row (runbook-optional-verification.md §B2) — the Xcode 27
+ * DeviceInteraction drive rung, pre-folded by `mobileComposition` like the
+ * mobile row. The same fail-open discipline: unwired or thrown ⇒
+ * `'inconclusive'`, never `'missing'`.
+ *
+ * Unlike the mobile row, this one CAN carry an action — `'approve-xcode-access'`
+ * (§B8) — but only when the action is actually wired on this host; a button
+ * with nothing behind it would be a fix in name only, so the fix is dropped
+ * otherwise.
+ */
+async function xcodeRow(probes: VerifyHostProbesLike): Promise<VerifyProbeRow> {
+  if (probes.xcodeMcp === undefined) {
+    return {
+      id: 'xcode-mcp',
+      state: 'inconclusive',
+      detail: detail('no Xcode DeviceInteraction probe wired on this host'),
+      fix: null,
+    };
+  }
+  try {
+    const row = await probes.xcodeMcp();
+    const fix = row.fix === 'approve-xcode-access' && probes.approveXcodeAccess !== undefined ? row.fix : null;
+    return { ...row, id: 'xcode-mcp', detail: detail(row.detail), fix };
+  } catch (err) {
+    return { id: 'xcode-mcp', state: 'inconclusive', detail: detail(errorText(err)), fix: null };
+  }
+}
+
 /** Read the grants, mapping an unwired backend and a thrown probe alike to a reason string. */
 async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProbe> {
   if (probes.nativeGrants === undefined) {
@@ -733,7 +763,7 @@ async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProb
 }
 
 /**
- * Run the host probes and shape them into the four panel rows.
+ * Run the host probes and shape them into the panel rows.
  *
  * The fail-open rule from `preflight.ts` is reproduced EXACTLY here: a probe
  * that rejects is `'inconclusive'`, never `'missing'`. The single exception is
@@ -752,14 +782,15 @@ async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProb
  * when you first try to use it.
  */
 async function runHostProbes(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]> {
-  const [node, chromium, cli, grants, mobile] = await Promise.all([
+  const [node, chromium, cli, grants, mobile, xcode] = await Promise.all([
     probeNodePart(probes),
     probeChromiumPart(probes),
     probeDriverCliPart(probes),
     grantRows(probes),
     mobileRow(probes),
+    xcodeRow(probes),
   ]);
-  return [foldDrivingParts([node, chromium, cli]), ...grants, mobile];
+  return [foldDrivingParts([node, chromium, cli]), ...grants, mobile, xcode];
 }
 
 export const verificationRequestsRouter = router({
@@ -1097,6 +1128,31 @@ export const verificationRequestsRouter = router({
       const probes = requireProbes(ctx.verifyHostProbes, 'openScreenRecordingSettings');
       await runGrantAction(probes.openScreenRecordingSettings);
       return await reportFor(probes);
+    },
+  ),
+
+  /**
+   * §B8 "Approve Xcode access": raise Xcode's own approval prompt (the main
+   * process opens cyboflow's scaffold project through the bridge) and return
+   * the REPROBED rows plus what to show the user — the exact
+   * `sudo xcrun mcp-server approve …` command(s), never run, and the
+   * disclosure. Not an entity write.
+   *
+   * PRECONDITION_FAILED when the action is not wired (off macOS): unlike the
+   * grant actions there is no honest no-op here — the caller asked for a
+   * command to show, and there is none.
+   */
+  approveXcodeAccess: protectedProcedure.mutation(
+    async ({ ctx }): Promise<{ report: VerifyHostProbeReport; approval: XcodeAccessApproval }> => {
+      const probes = requireProbes(ctx.verifyHostProbes, 'approveXcodeAccess');
+      if (probes.approveXcodeAccess === undefined) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: '[verificationRequests.approveXcodeAccess] Xcode access approval is not available on this host',
+        });
+      }
+      const approval = await probes.approveXcodeAccess();
+      return { report: await reportFor(probes), approval };
     },
   ),
 });

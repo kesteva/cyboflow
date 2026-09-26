@@ -37,6 +37,7 @@ import type {
   VerifyHostProbeReport,
   VerifyProbeRow,
   VerifyProjectSetupRow,
+  XcodeAccessApproval,
 } from '../../../../shared/types/visualVerification';
 import {
   PROBE_LABEL,
@@ -170,17 +171,72 @@ export function VerifyProjectSetupList({
  * A `switch` rather than a lookup table so adding a `VerifyProbeFix` variant is
  * a compile error here instead of a button that silently does nothing.
  */
-function fixMutation(fix: VerifyProbeRow['fix']): (() => Promise<VerifyHostProbeReport>) | null {
+function fixMutation(
+  fix: VerifyProbeRow['fix'],
+): (() => Promise<{ report: VerifyHostProbeReport; approval?: XcodeAccessApproval }>) | null {
+  const reportOnly = (run: () => Promise<VerifyHostProbeReport>) => async () => ({ report: await run() });
   switch (fix) {
     case 'provision-chromium':
-      return () => trpc.cyboflow.verificationRequests.provisionChromium.mutate();
+      return reportOnly(() => trpc.cyboflow.verificationRequests.provisionChromium.mutate());
     case 'request-accessibility':
-      return () => trpc.cyboflow.verificationRequests.requestAccessibility.mutate();
+      return reportOnly(() => trpc.cyboflow.verificationRequests.requestAccessibility.mutate());
     case 'open-screen-recording-settings':
-      return () => trpc.cyboflow.verificationRequests.openScreenRecordingSettings.mutate();
+      return reportOnly(() => trpc.cyboflow.verificationRequests.openScreenRecordingSettings.mutate());
+    case 'approve-xcode-access':
+      // §B8: the main process raises Xcode's own prompt; what comes back is
+      // the command to SHOW (never run) plus the re-probed rows.
+      return () => trpc.cyboflow.verificationRequests.approveXcodeAccess.mutate();
     case null:
       return null;
   }
+}
+
+/**
+ * The §B8 result: what happened, the exact `sudo xcrun mcp-server approve …`
+ * command to run in Terminal (shown, never run by the app), and the disclosure
+ * that must accompany it. The durable `--always` form is an explicit opt-in:
+ * hidden until the user asks for it, and only ever offered on a signed build.
+ */
+function XcodeApprovalNotice({ approval }: { approval: XcodeAccessApproval }): ReactElement {
+  const [showDurable, setShowDurable] = useState(false);
+  return (
+    <div
+      data-testid="verify-xcode-approval"
+      className="flex flex-col gap-1.5 rounded-card border border-border-primary bg-bg-primary px-3 py-2 text-[11px] text-text-secondary"
+    >
+      <span className="text-text-primary">{approval.detail}</span>
+      <span data-testid="verify-xcode-approval-disclosure">{approval.disclosure}</span>
+      {approval.approveCommand !== null && (
+        <>
+          <span>To approve for 24 hours, run this in Terminal (Cyboflow never runs it for you):</span>
+          <code
+            data-testid="verify-xcode-approve-command"
+            className="select-all break-all rounded bg-bg-tertiary px-1.5 py-1 font-mono text-text-primary"
+          >
+            {approval.approveCommand}
+          </code>
+        </>
+      )}
+      {approval.durableApproveCommand !== null && !showDurable && (
+        <button
+          type="button"
+          data-testid="verify-xcode-show-durable"
+          onClick={() => setShowDurable(true)}
+          className="self-start text-[11px] text-text-tertiary underline hover:text-text-primary focus:outline-none"
+        >
+          Show the durable (no-expiry) command instead…
+        </button>
+      )}
+      {approval.durableApproveCommand !== null && showDurable && (
+        <code
+          data-testid="verify-xcode-durable-command"
+          className="select-all break-all rounded bg-bg-tertiary px-1.5 py-1 font-mono text-text-primary"
+        >
+          {approval.durableApproveCommand}
+        </code>
+      )}
+    </div>
+  );
 }
 
 function ProbeTableRow({
@@ -245,6 +301,7 @@ export function VerifyHealthPanel({
   const [probes, setProbes] = useState<VerifyHostProbeReport | null>(null);
   const [setupRows, setSetupRows] = useState<VerifyProjectSetupRow[] | null>(null);
   const [fixInFlight, setFixInFlight] = useState(false);
+  const [xcodeApproval, setXcodeApproval] = useState<XcodeAccessApproval | null>(null);
 
   // PROBES run ONCE per panel open, never on a poll. Each pass shells out — resolving a Playwright browser path and asking the
   // OS about the screen-recording grant — and none of it is project-scoped or
@@ -304,7 +361,10 @@ export function VerifyHealthPanel({
     if (run === null) return;
     setFixInFlight(true);
     void run()
-      .then(setProbes)
+      .then((result) => {
+        setProbes(result.report);
+        if (result.approval !== undefined) setXcodeApproval(result.approval);
+      })
       .catch(() => {
         // Soft-fail: none of these throw for an ordinary "could not do it" —
         // the re-probed row carries that outcome. An actual transport error
@@ -340,6 +400,7 @@ export function VerifyHealthPanel({
           ))}
         </div>
       )}
+      {xcodeApproval !== null && <XcodeApprovalNotice approval={xcodeApproval} />}
 
     </section>
   );
