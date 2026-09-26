@@ -2,11 +2,16 @@ import type Database from 'better-sqlite3';
 import type { AgentUsage } from '../../../../../shared/types/agentStream';
 import type { Logger } from '../../../utils/logger';
 import type { AppServerNotification } from './appServer/client';
-import type { RawResponseCompletedNotification } from './appServer/protocol';
+import type {
+  RawResponseCompletedNotification,
+  ThreadTokenUsageUpdatedNotification,
+  TokenUsageBreakdown,
+} from './appServer/protocol';
 import { CodexTurnUsageAccumulator, CodexUsageTotals } from './appServer/usageAccumulator';
 import {
   CodexDescendantRegistry,
   CodexResponsePairingLedger,
+  sameUsage,
   type CodexDescendantRecord,
 } from './appServer/usageLedger';
 import { parseCodexUsageSignals, type CodexUsageSignal } from './appServer/usageNotifications';
@@ -209,6 +214,25 @@ export interface CodexProcessUsageTrackerOptions {
  *     `codex-usage-topup:<runId>:<threadId>`.
  *
  * A thread's usage never moves between keys once written.
+ *
+ * RAW-EVENTS SOURCE. Only `thread/start` accepts `experimentalRawEvents`
+ * (0.156.1's ThreadResumeParams has no such field), so a thread RESUMED in this
+ * process emits no `rawResponse/completed`. Such a thread is UPDATE-SOURCED:
+ * each counted (total-moved) `tokenUsage/updated` `last` is its request's usage,
+ * routed exactly as a response would be — never paired, never topped up, never
+ * drift. Threads the process started are response-sourced. Threads with no
+ * origin of their own (collab descendants) inherit the root's source.
+ *
+ * Switch rule (an update-sourced thread whose responses DO arrive): on its first
+ * response it becomes response-sourced for good. Every request before that was
+ * counted from its update. The first response can only answer the request in
+ * flight, whose update may already have been counted — so if it equals the
+ * thread's LAST update-counted `last`, it is recorded (id only) and skipped.
+ * Anything else takes the normal pairing path from then on; an update that
+ * later finds no response is topped up. So each request is counted exactly once
+ * whichever of its update or response arrives first. (A mis-skip of a previous
+ * identical request is still safe: its own update then goes unmatched and is
+ * topped up.)
  */
 export class CodexProcessUsageTracker {
   private readonly ledger = new CodexResponsePairingLedger();
@@ -224,6 +248,12 @@ export class CodexProcessUsageTracker {
   private settled = false;
   private anyRootSealed = false;
   private wroteAfterSeal = false;
+  /** Source of threads with no origin of their own: the root's. */
+  private defaultSource: 'responses' | 'updates' = 'responses';
+  private readonly threadSources = new Map<string, 'responses' | 'updates'>();
+  /** Per update-sourced thread, the last request counted from an update. */
+  private readonly lastUpdateCounted = new Map<string, TokenUsageBreakdown>();
+  private updateSequence = 0;
 
   constructor(private readonly options: CodexProcessUsageTrackerOptions) {
     this.registry = new CodexDescendantRegistry<CodexUsageOwner>((threadId) => {
@@ -235,6 +265,17 @@ export class CodexProcessUsageTracker {
   setRootThread(threadId: string): void {
     this.rootThreadId = threadId;
     this.activeOwner?.accumulator.setRootThread(threadId);
+  }
+
+  /**
+   * How this process opened `threadId`: `started` threads emit
+   * `rawResponse/completed`; `resumed` ones do not, so they (and their
+   * descendants) count from `tokenUsage/updated` instead.
+   */
+  markThreadOrigin(threadId: string, origin: 'started' | 'resumed'): void {
+    const source = origin === 'resumed' ? 'updates' : 'responses';
+    this.threadSources.set(threadId, source);
+    if (threadId === this.rootThreadId || this.rootThreadId === null) this.defaultSource = source;
   }
 
   /** Binds the invocation a new root turn belongs to. */
@@ -358,7 +399,7 @@ export class CodexProcessUsageTracker {
         this.observeResponse(signal.notification);
         return;
       case 'tokenUsage':
-        this.ledger.observeTokenUsage(signal.notification);
+        this.observeTokenUsage(signal.notification);
         return;
       case 'spawn':
         this.registerChildren(
@@ -403,9 +444,50 @@ export class CodexProcessUsageTracker {
     }
   }
 
+  private sourceOf(threadId: string): 'responses' | 'updates' {
+    return this.threadSources.get(threadId) ?? this.defaultSource;
+  }
+
+  private observeTokenUsage(notification: ThreadTokenUsageUpdatedNotification): void {
+    const { threadId, turnId } = notification;
+    if (this.sourceOf(threadId) === 'responses') {
+      this.ledger.observeTokenUsage(notification);
+      return;
+    }
+    if (!this.ledger.observeTokenUsage(notification, false)) return; // duplicate emission
+    const { last } = notification.tokenUsage;
+    if (last.totalTokens === 0 && last.inputTokens === 0 && last.outputTokens === 0) return;
+    this.lastUpdateCounted.set(threadId, last);
+    this.updateSequence += 1;
+    // A synthetic, never-colliding id: the request routes exactly as a response.
+    this.routeUsage({
+      threadId,
+      turnId,
+      responseId: `token-usage:${threadId}:${this.updateSequence}`,
+      usage: last,
+      usageMetadata: null,
+    });
+  }
+
   private observeResponse(notification: RawResponseCompletedNotification): void {
+    const { threadId } = notification;
+    if (this.sourceOf(threadId) === 'updates') {
+      // The switch rule (class doc): response-sourced from here on.
+      this.threadSources.set(threadId, 'responses');
+      const inFlight = this.lastUpdateCounted.get(threadId);
+      this.lastUpdateCounted.delete(threadId);
+      if (inFlight && notification.usage !== null && sameUsage(inFlight, notification.usage)) {
+        this.ledger.observeResponse(notification, false);
+        return;
+      }
+    }
     if (!this.ledger.observeResponse(notification)) return; // replayed response id
     if (notification.usage === null) return; // topped up from its update at settlement
+    this.routeUsage(notification);
+  }
+
+  /** Routes one counted request's usage to its owner, a buffer, or the unattributed row. */
+  private routeUsage(notification: RawResponseCompletedNotification): void {
     const { threadId } = notification;
     if (threadId === this.rootThreadId) {
       const owner = this.activeOwner;

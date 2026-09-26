@@ -152,7 +152,7 @@ function usageKey(usage: TokenUsageBreakdown): string {
   ].join(':');
 }
 
-function sameUsage(a: TokenUsageBreakdown, b: TokenUsageBreakdown): boolean {
+export function sameUsage(a: TokenUsageBreakdown, b: TokenUsageBreakdown): boolean {
   return usageKey(a) === usageKey(b);
 }
 
@@ -210,7 +210,10 @@ interface ThreadPairingState {
   unmatchedUpdates: UsageMultiset;
   unmatchedResponses: UsageMultiset;
   nullResponses: number;
-  /** Raw Codex input/output of every counted response — the oracle's comparand. */
+  /**
+   * Raw Codex input/output of every counted response, plus every update counted
+   * as the primary source (a resumed thread) — the oracle's comparand.
+   */
   responseInput: number;
   responseOutput: number;
   compacted: boolean;
@@ -263,11 +266,16 @@ export class CodexResponsePairingLedger {
     this.turnSources.set(key, entry);
   }
 
-  /** Returns false for a response id already seen in this process (a replay). */
-  observeResponse(notification: RawResponseCompletedNotification): boolean {
+  /**
+   * Returns false for a response id already seen in this process (a replay).
+   * `pair: false` only records the id — for a response whose request was
+   * already counted from its update (see CodexProcessUsageTracker's source switch).
+   */
+  observeResponse(notification: RawResponseCompletedNotification, pair = true): boolean {
     if (this.settled || this.seenResponseIds.has(notification.responseId)) return false;
     this.seenResponseIds.add(notification.responseId);
     this.markTurn(notification.threadId, notification.turnId, 'responses');
+    if (!pair) return true;
     const state = this.thread(notification.threadId);
     if (notification.usage === null) {
       state.nullResponses += 1;
@@ -284,13 +292,21 @@ export class CodexResponsePairingLedger {
   /**
    * Returns false for a duplicate emission — an update whose `total` did not
    * move from the thread's baseline, whatever its `last` says (defect A2).
+   * `pair: false` is an UPDATE-SOURCED thread (resumed in this process, so it
+   * emits no responses): the caller counts `last` itself, so it is neither
+   * paired, nor topped up, nor evidence of protocol drift.
    */
-  observeTokenUsage(notification: ThreadTokenUsageUpdatedNotification): boolean {
+  observeTokenUsage(notification: ThreadTokenUsageUpdatedNotification, pair = true): boolean {
     if (this.settled) return false;
     const state = this.thread(notification.threadId);
     const { total, last } = notification.tokenUsage;
     if (state.baseline !== null ? sameUsage(state.baseline, total) : isZeroUsage(total)) return false;
     state.baseline = total;
+    if (!pair) {
+      state.responseInput += last.inputTokens;
+      state.responseOutput += last.outputTokens;
+      return true;
+    }
     this.markTurn(notification.threadId, notification.turnId, 'updates');
     if (isZeroUsage(last)) return true;
     if (!state.unmatchedResponses.take(last)) {

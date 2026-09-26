@@ -183,3 +183,63 @@ describe('CodexProcessUsageTracker', () => {
     expect(owner.accumulator.rootSnapshot()).toEqual(expected(A));
   });
 });
+
+describe('CodexProcessUsageTracker raw-events source switch (update-sourced thread gets responses)', () => {
+  function resumedTracker(db: Database.Database): { tracker: CodexProcessUsageTracker; owner: ReturnType<typeof createCodexUsageOwner> } {
+    const tracker = new CodexProcessUsageTracker({ runId: 'run-1', writer: new CodexUsageRowWriter(db) });
+    tracker.markThreadOrigin('root', 'resumed');
+    tracker.setRootThread('root');
+    const owner = createCodexUsageOwner({ invocationId: 'inv-1', runId: 'run-1', model: 'm', rootThreadId: 'root' });
+    tracker.bindOwner(owner);
+    return { tracker, owner };
+  }
+
+  it('counts the in-flight request once when its update arrives before its response', () => {
+    const db = createDb();
+    try {
+      const { tracker, owner } = resumedTracker(db);
+      tracker.observe(n.tokenUsage('root', 't', A, A));
+      tracker.observe(n.tokenUsage('root', 't', codexUsage(30, 3, 9, 3), B));
+      tracker.observe(n.rawResponse('root', 't', 'rb', B)); // answers B, already counted
+      tracker.observe(n.rawResponse('root', 't', 'rc', C)); // response-first from here on
+      tracker.observe(n.tokenUsage('root', 't', codexUsage(60, 6, 9, 3), C));
+      tracker.settle();
+      expect(owner.accumulator.rootSnapshot()).toEqual(expected(A, B, C));
+      expect(rowUsage(db, 'codex-usage-topup:run-1:root')).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('counts the in-flight request once when its response arrives before its update', () => {
+    const db = createDb();
+    try {
+      const { tracker, owner } = resumedTracker(db);
+      tracker.observe(n.tokenUsage('root', 't', A, A));
+      tracker.observe(n.rawResponse('root', 't', 'rb', B)); // switch; B's update is still to come
+      tracker.observe(n.tokenUsage('root', 't', codexUsage(30, 3, 9, 3), B));
+      tracker.settle();
+      expect(owner.accumulator.rootSnapshot()).toEqual(expected(A, B));
+      expect(rowUsage(db, 'codex-usage-topup:run-1:root')).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('stays exact when the first response is mis-skipped as an identical earlier request', () => {
+    const db = createDb();
+    try {
+      const { tracker, owner } = resumedTracker(db);
+      tracker.observe(n.tokenUsage('root', 't', A, A));
+      // A second request identical to A: its response lands first and is skipped...
+      tracker.observe(n.rawResponse('root', 't', 'ra2', A));
+      // ...so its update, now paired, finds no response and is topped up once.
+      tracker.observe(n.tokenUsage('root', 't', codexUsage(20, 2, 8, 0), A));
+      tracker.settle();
+      expect(owner.accumulator.rootSnapshot()).toEqual(expected(A));
+      expect(rowUsage(db, 'codex-usage-topup:run-1:root')).toEqual(expected(A));
+    } finally {
+      db.close();
+    }
+  });
+});

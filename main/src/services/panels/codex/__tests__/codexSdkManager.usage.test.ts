@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 import type { SessionManager } from '../../../sessionManager';
+import type { Logger } from '../../../../utils/logger';
 import type { AgentUsage } from '../../../../../../shared/types/agentStream';
 import { CodexSdkManager } from '../codexSdkManager';
 import { CodexUsageTotals } from '../appServer/usageAccumulator';
@@ -58,11 +59,11 @@ function createDb(): Database.Database {
   return db;
 }
 
-function makeManager(db: Database.Database, options: FakeCodexAppServerOptions) {
+function makeManager(db: Database.Database, options: FakeCodexAppServerOptions, logger?: Logger) {
   const fake = createFakeCodexAppServer({ threadId: ROOT, ...options });
   const manager = new CodexSdkManager(
     {} as SessionManager,
-    undefined,
+    logger,
     undefined,
     db,
     fake.factory,
@@ -458,6 +459,78 @@ describe('CodexSdkManager per-response usage accounting', () => {
       client().notify(n.turnCompleted('child-1', 'child-turn'));
       await vi.waitFor(() => expect(client().stopCalls).toBe(1));
       expect(rollupRunUsage).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('CodexSdkManager usage on a RESUMED thread (no rawResponse/completed)', () => {
+  function recordingLogger(): { logger: Logger; lines: string[] } {
+    const lines: string[] = [];
+    const record = (line: string): void => { lines.push(line); };
+    return {
+      logger: { warn: record, error: record, info: vi.fn(), debug: vi.fn(), verbose: vi.fn() } as unknown as Logger,
+      lines,
+    };
+  }
+
+  /** Updates only, as a resumed thread emits them: A, a duplicate of A, then B. */
+  function updatesOnly({ client, turnId }: { client: FakeCodexAppServerClient; turnId: string }): void {
+    client.notify(n.tokenUsage(ROOT, turnId, ROOT_A, ROOT_A));
+    client.notify(n.tokenUsage(ROOT, turnId, ROOT_A, ROOT_A)); // unchanged total: a re-emission
+    client.notify(n.tokenUsage(ROOT, turnId, codexUsage(300, 15, 190, 20, 4), ROOT_B));
+    client.notify(n.agentMessage(ROOT, turnId, 'resumed done'));
+    client.notify(n.turnCompleted(ROOT, turnId));
+  }
+
+  it('counts a resumed root from its updates: agent_result = Σ counted last, no top-up, no drift', async () => {
+    const db = createDb();
+    try {
+      const { logger, lines } = recordingLogger();
+      const { manager, client } = makeManager(db, { onTurnStart: updatesOnly }, logger);
+      await manager.spawnCliProcess(laneTurn({ resumeSessionId: ROOT }));
+      expect(client().requests.map((request) => request.method)).toContain('thread/resume');
+      expect(client().stopCalls).toBe(1);
+
+      expect(agentResultUsages(db)).toEqual([expected(ROOT_A, ROOT_B)]);
+      expect([...usageRows(db).keys()]).toEqual([]);
+      expect(lines.filter((line) => /PROTOCOL DRIFT|response_usage_missing|oracle_mismatch/.test(line))).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('counts a resumed root\'s descendants from their updates too', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, {
+        onTurnStart: ({ client, turnId }) => {
+          client.notify(n.spawnAgent(ROOT, turnId, ['child-1'], 'gpt-child'));
+          client.notify(n.tokenUsage('child-1', 'child-turn', CHILD_A, CHILD_A));
+          client.notify(n.turnCompleted('child-1', 'child-turn'));
+          client.notify(n.tokenUsage(ROOT, turnId, ROOT_A, ROOT_A));
+          client.notify(n.turnCompleted(ROOT, turnId));
+        },
+      });
+      await manager.spawnCliProcess(laneTurn({ resumeSessionId: ROOT }));
+      expect(agentResultUsages(db)).toEqual([expected(ROOT_A)]);
+      expect([...usageRows(db).keys()]).toEqual([`codex-subagent:${invocationId(db)}:child-1`]);
+      expect(usageRows(db).get(`codex-subagent:${invocationId(db)}:child-1`)?.message.usage).toEqual(expected(CHILD_A));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('leaves a STARTED thread response-sourced: updates alone top up and flag drift', async () => {
+    const db = createDb();
+    try {
+      const { logger, lines } = recordingLogger();
+      const { manager } = makeManager(db, { onTurnStart: updatesOnly }, logger);
+      await manager.spawnCliProcess(laneTurn());
+      expect(agentResultUsages(db)).toEqual([undefined]);
+      expect(usageRows(db).get('codex-usage-topup:run-1:root-thread')?.message.usage).toEqual(expected(ROOT_A, ROOT_B));
+      expect(lines.some((line) => line.includes('PROTOCOL DRIFT'))).toBe(true);
     } finally {
       db.close();
     }

@@ -1133,6 +1133,9 @@ export class CodexSdkManager extends AbstractCliManager {
               'Codex app-server thread start',
             );
         entry.threadId = thread.threadId;
+        // Only thread/start carries `experimentalRawEvents`; a resumed thread
+        // emits no rawResponse/completed, so its usage counts from updates.
+        entry.usage.markThreadOrigin(thread.threadId, options.resumeSessionId ? 'resumed' : 'started');
       }
 
       if (entry.threadId === null || entry.initializeResponse === null) {
