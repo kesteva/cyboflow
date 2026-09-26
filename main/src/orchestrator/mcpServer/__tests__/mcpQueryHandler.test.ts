@@ -7328,6 +7328,38 @@ describe('McpQueryHandler — mcp-register-verify-runbook', () => {
     expect(row.host_fingerprint_json).toBe('host-fp-1');
   });
 
+  it("A8: re-registering an UNCHANGED proven record keeps its origin (no 'setup-flow' relabel)", async () => {
+    // Migration 107's column, so the origin stamp is observable at all.
+    rdb.exec('ALTER TABLE verify_runbook_local ADD COLUMN origin TEXT');
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+    const first = await store.registerDraft(1, worktree, 'web');
+    if ('error' in first) throw new Error(first.error);
+    expect(store.markProven(1, 'web', first.hash, first.version, '{}')).toEqual({ ok: true });
+    store.setOrigin(1, 'web', 'lane-bootstrap');
+    const origin = (): unknown =>
+      (rdb.prepare("SELECT origin FROM verify_runbook_local WHERE project_id = 1 AND modality = 'web'").get() as {
+        origin: unknown;
+      }).origin;
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-a8', runId: 'run-rb', modality: 'web' },
+      socket,
+    );
+    expect(parseLastWrite(writes).ok).toBe(true);
+    expect(origin()).toBe('lane-bootstrap');
+
+    // A CHANGED registration does write, and is the setup flow's.
+    writeRunbook(JSON.stringify({ ...VALID_RUNBOOK, levers: { portEnv: 'PORT' } }));
+    const again = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-a8b', runId: 'run-rb', modality: 'web' },
+      again.socket,
+    );
+    expect(parseLastWrite(again.writes).ok).toBe(true);
+    expect(origin()).toBe('setup-flow');
+  });
+
   // COMMITTED-AT-HEAD backstop (live dogfood 2026-07-31). registerDraft reads the
   // WORKING TREE, but the proof builds a detached snapshot at a commit — and many
   // repos ignore or locally-exclude `.cyboflow/`, which makes `git add` on the

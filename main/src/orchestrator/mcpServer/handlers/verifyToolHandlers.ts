@@ -1217,8 +1217,11 @@ export class VerifyToolHandlers {
       // to trust a proven runbook needs to be able to tell the two apart — both
       // are proven by the same engine-enforced run, and they did not earn the
       // same amount of trust. Fail-soft: a badge that could not be written must
-      // never undo a registration that succeeded.
-      store.setOrigin(ctx.projectId, msg.modality, 'setup-flow');
+      // never undo a registration that succeeded. Skipped on A8's `unchanged`
+      // no-op: nothing was written, so the proven record keeps the provenance
+      // it earned (a lane-derived or learned proof must not be relabelled
+      // 'setup-flow' by a register call that changed nothing).
+      if (result.unchanged !== true) store.setOrigin(ctx.projectId, msg.modality, 'setup-flow');
       // COMMITTED-AT-HEAD backstop. registerDraft reads the WORKING TREE, but
       // the proof runs against a detached snapshot at a commit — so a runbook
       // that never reached HEAD registers cleanly and then proves against a

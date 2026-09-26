@@ -83,7 +83,7 @@
  * skips with a setup CTA, which is a bad day, not a broken one. There is no
  * failure mode of this store that may produce a spurious `'proven'`.
  */
-import type { DatabaseLike, LoggerLike } from '../types';
+import type { DatabaseLike, LoggerLike, PreparedStatement } from '../types';
 import type { VerificationModality } from '../../../../shared/types/visualVerification';
 import {
   parseVerifyRunbookV1,
@@ -385,14 +385,53 @@ interface RunbookLocalRow {
   proof_json: string | null;
   input_hash: string | null;
   host_fingerprint_json: string | null;
+  /**
+   * Migration 107's provenance — `null` on a pre-107 DB, which the widened
+   * SELECT's fall-back rung reads as `NULL AS origin` (see {@link selectRow}).
+   */
+  origin: string | null;
 }
+
+/**
+ * The `origin` a record LEARNED from a passing explore request carries
+ * (docs/proposals/runbook-optional-verification.md §A5). It is the one origin
+ * the store itself writes: {@link VerifyRunbookStore.registerLearnedDraft}
+ * stamps it inside its own UPSERT, because the CAS that decides whether a
+ * learned draft may be written keys on it.
+ */
+export const LEARNED_RUNBOOK_ORIGIN = 'learned';
 
 /** The subset of a row `getByHash` hands the runner for §5.2 pin execution. */
 export interface PinnedRunbookRecord {
   runbook: VerifyRunbookV1;
   version: number;
   status: 'proven' | 'unproven-draft';
+  /**
+   * §A5 — WHO derived the record (migration 107 `origin`), or `null`. It is on
+   * the pin-execution record for exactly one reason: a LEARNED PIN
+   * ({@link isLearnedPinRecord}) — an `'unproven-draft'` record of origin
+   * `'learned'` — takes the proof half of `checkRunbookPin` (accept unproven,
+   * require the exact version) rather than the ordinary one. Optional so the
+   * many hand-built fakes of this shape keep compiling; absent reads as `null`.
+   */
+  origin?: string | null;
 }
+
+/**
+ * §A5 — is this record a LEARNED PIN target: a machine-learned recipe that no
+ * proof has promoted yet? Such a record is executed by the lane's own ORDINARY
+ * request as its promotion proof. The predicate feeds exactly two decisions —
+ * the runner's accept-unproven half of `checkRunbookPin` and the engine's
+ * `markProven` condition — and nothing else (not the gate-3 exemption, the
+ * budget or priority exemptions, the bootstrap re-entry guard or any delivery
+ * exclusion).
+ */
+export function isLearnedPinRecord(record: Pick<PinnedRunbookRecord, 'status' | 'origin'> | null): boolean {
+  return record !== null && record.status === 'unproven-draft' && record.origin === LEARNED_RUNBOOK_ORIGIN;
+}
+
+/** Why {@link VerifyRunbookStore.registerLearnedDraft} wrote nothing. */
+export type LearnedDraftRejection = 'not-eligible' | 'cas-conflict';
 
 /** Narrowing helper — the CHECK constraint guarantees this, a hand-edited DB does not. */
 function isPersistedStatus(value: string): value is 'proven' | 'unproven-draft' {
@@ -517,7 +556,21 @@ export class VerifyRunbookStore {
       // whose scripts or lockfile moved away from what the proof was taken
       // against. `readPortableFile` guarantees `null` means ABSENT and never
       // UNREADABLE (Codex #8), so nothing unreadable reaches this path.
-      if (rawFile !== null) {
+      //
+      // §A5 — A LEARNED RECORD WAS NEVER A FILE. Its `portable_json` is a
+      // single-modality runbook built in memory from a passing explore run, so a
+      // tree whose committed file is about OTHER modalities (a web-only file
+      // beside a learned mobile record) says nothing about it: the whole-file
+      // hash can never equal the learned one, and comparing them would demote
+      // every learned proof on every branch that carries any runbook at all.
+      // The conjunct is skipped exactly as for an absent file. A file that DOES
+      // declare this modality is a committed entry, and a committed entry
+      // supersedes the learned one — that stays `content-drifted` (unless the
+      // file IS the learned runbook, hash for hash). An unparseable file keeps
+      // the ordinary rule: it cannot be shown not to declare the modality.
+      const learnedSkipsFile =
+        row.origin === LEARNED_RUNBOOK_ORIGIN && parsedFile !== null && !this.declaresModality(parsedFile, modality);
+      if (rawFile !== null && !learnedSkipsFile) {
         if (!parsedFile) {
           return this.drifted(projectId, modality, 'content-drifted', 'portable file no longer parses');
         }
@@ -594,11 +647,23 @@ export class VerifyRunbookStore {
    * A8 EXCEPTION (RS-12): when the computed portable hash AND `bindingsJson`
    * both equal those of an EXISTING record that is already `'proven'`, this is
    * a NO-OP — nothing is written, and the existing record's own `{ hash,
-   * version }` comes back unchanged. Without this, an idempotent re-register
-   * (the setup flow calling it twice, a retried bootstrap) would silently
-   * demote a proof that changed nothing and bump every pin waiting on it. ANY
-   * other difference — different content, different bindings, or no existing
-   * PROVEN record to compare against — updates and demotes exactly as before.
+   * version }` comes back with `unchanged: true`. Without this, an idempotent
+   * re-register (the setup flow calling it twice, a retried bootstrap) would
+   * silently demote a proof that changed nothing and bump every pin waiting on
+   * it. ANY other difference — different content, different bindings, or no
+   * existing PROVEN record to compare against — updates and demotes exactly as
+   * before. `unchanged` is how a caller tells the two apart: its
+   * {@link VerifyRunbookStore.setOrigin} re-stamp must be SKIPPED on the no-op,
+   * or a Verify Setup call re-registering a lane-derived proof would relabel a
+   * record nobody reviewed as `'setup-flow'`.
+   *
+   * THE UPSERT CLEARS `origin` (§A5). New content has no provenance until the
+   * caller's `setOrigin` re-stamps it, and a stale badge is worse than none: a
+   * setup-flow registration over a `'learned'` record would otherwise keep
+   * reading `'learned'`, and every learned-only rule (the CAS in
+   * {@link VerifyRunbookStore.registerLearnedDraft}, the learned-pin promotion,
+   * the drift exemption in {@link VerifyRunbookStore.statusDetail}) would then
+   * apply to a human-authored runbook.
    *
    * Errors are RETURNED, not thrown — the setup flow surfaces them to the human
    * inline (a missing/malformed runbook is a normal wizard state, not a crash).
@@ -608,7 +673,7 @@ export class VerifyRunbookStore {
     worktreePath: string,
     modality: VerificationModality,
     bindingsJson?: string,
-  ): Promise<{ hash: string; version: number } | { error: string; kind?: 'unisolated-command' }> {
+  ): Promise<{ hash: string; version: number; unchanged?: true } | { error: string; kind?: 'unisolated-command' }> {
     try {
       const raw = await this.deps.readPortableFile(worktreePath);
       if (raw === null) {
@@ -649,7 +714,7 @@ export class VerifyRunbookStore {
       // below so the no-op path costs neither their IO nor a write.
       const existing = this.readRow(projectId, modality);
       if (existing && existing.status === 'proven' && existing.portable_hash === hash && existing.bindings_json === normalizedBindings) {
-        return { hash, version: existing.version };
+        return { hash, version: existing.version, unchanged: true };
       }
 
       const portableJson = JSON.stringify(parsed.runbook);
@@ -662,9 +727,12 @@ export class VerifyRunbookStore {
         const currentVersion = current?.version ?? 0;
         const nextVersion = currentVersion + 1;
 
-        const result = this.db
-          .prepare(
-            `INSERT INTO verify_runbook_local
+        // The widened statement clears migration 107's `origin` (see the doc
+        // above); a pre-107 DB has no such column, so `prepare` throws BEFORE
+        // anything runs and the narrow rung is taken — the same widen-then-fall-
+        // back ladder every other migration-gated write here uses.
+        const upsert = (clearsOrigin: boolean): string =>
+          `INSERT INTO verify_runbook_local
                (project_id, modality, portable_hash, portable_json, version, status,
                 bindings_json, proof_json, input_hash, host_fingerprint_json, updated_at)
              VALUES (?, ?, ?, ?, ?, 'unproven-draft', ?, NULL, ?, ?, ?)
@@ -677,9 +745,15 @@ export class VerifyRunbookStore {
                proof_json = NULL,
                input_hash = excluded.input_hash,
                host_fingerprint_json = excluded.host_fingerprint_json,
-               updated_at = excluded.updated_at
-             WHERE verify_runbook_local.version = ?`,
-          )
+               updated_at = excluded.updated_at${clearsOrigin ? ',\n               origin = NULL' : ''}
+             WHERE verify_runbook_local.version = ?`;
+        let statement: PreparedStatement;
+        try {
+          statement = this.db.prepare(upsert(true));
+        } catch {
+          statement = this.db.prepare(upsert(false));
+        }
+        const result = statement
           .run(
             projectId,
             modality,
@@ -882,6 +956,174 @@ export class VerifyRunbookStore {
   }
 
   /**
+   * §A5 "learn from success" — persist a recipe LEARNED from a passing explore
+   * request as an `'unproven-draft'` of origin `'learned'`
+   * (docs/proposals/runbook-optional-verification.md §A5).
+   *
+   * THE PINNED PROOF IS THE SOLE VALIDATOR OF AN AGENT-AUTHORED RECIPE. The
+   * checks the caller ran (learnedRecipe.ts) and the ones below only keep an
+   * unsafe or unrunnable recipe out; nothing here makes it trustworthy. It is
+   * promoted only when the lane's next ordinary request executes it verbatim as
+   * a learned pin and passes, through the same engine-enforced `markProven`
+   * every other proof takes.
+   *
+   * NEVER WRITES A TREE. The single-modality `portable_json` is built in memory
+   * from `entry` + `levers` and validated exactly as {@link registerDraft}
+   * validates a file: the portable parser, the modality declaration, and the
+   * §7.2 mobile isolation guard. The input hash and host fingerprint are
+   * stamped from `probePath`, the tree the gate probes, so a promotion's own
+   * drift baseline describes the tree it will be read against.
+   *
+   * ONE UPSERT, CAS'd, FIRST WRITER WINS. The INSERT stamps
+   * `origin = 'learned'`; the conflict arm updates ONLY a row that is still a
+   * learned draft AT `expectedVersion` (`null` ⇒ the caller saw no record, and
+   * no existing row can match). A proven record, a setup-flow or bootstrap
+   * draft, or a learned draft someone else rewrote in the meantime all make it
+   * write nothing: `'not-eligible'` when the row is not a learned draft at all,
+   * `'cas-conflict'` when it is and the version moved (or the caller expected
+   * no row). Errors are RETURNED, never thrown — learning is advisory and must
+   * never change the verdict it rode in on.
+   */
+  async registerLearnedDraft(
+    projectId: number,
+    modality: VerificationModality,
+    entry: VerifyRunbookModalityEntry,
+    levers: VerifyRunbookV1['levers'] | undefined,
+    probePath: string,
+    expectedVersion: number | null,
+  ): Promise<{ hash: string; version: number } | { error: LearnedDraftRejection | string; kind?: 'unisolated-command' }> {
+    try {
+      const parsed = parseVerifyRunbookV1({
+        version: 1,
+        modalities: { [modality]: entry },
+        ...(levers !== undefined ? { levers } : {}),
+      });
+      if (!parsed.ok) return { error: `learned recipe is invalid — ${parsed.error}` };
+      if (!this.declaresModality(parsed.runbook, modality)) {
+        return { error: `learned recipe declares no "${modality}" modality` };
+      }
+      const mobileEntry = parsed.runbook.modalities.mobile;
+      if (mobileEntry) {
+        const violation = checkMobileBuildIsolation(mobileEntry, parsed.runbook.levers);
+        if (violation) return { error: violation, kind: 'unisolated-command' };
+      }
+
+      const hash = runbookPortableHash(parsed.runbook);
+      const portableJson = JSON.stringify(parsed.runbook);
+      const inputHash = await this.deps.computeInputHash(probePath);
+      const fingerprint = await this.deps.hostFingerprint();
+      const nextVersion = (expectedVersion ?? 0) + 1;
+      const result = this.db
+        .prepare(
+          `INSERT INTO verify_runbook_local
+             (project_id, modality, portable_hash, portable_json, version, status,
+              bindings_json, proof_json, input_hash, host_fingerprint_json, updated_at, origin)
+           VALUES (?, ?, ?, ?, ?, 'unproven-draft', NULL, NULL, ?, ?, ?, '${LEARNED_RUNBOOK_ORIGIN}')
+           ON CONFLICT(project_id, modality) DO UPDATE SET
+             portable_hash = excluded.portable_hash,
+             portable_json = excluded.portable_json,
+             version = excluded.version,
+             status = 'unproven-draft',
+             bindings_json = NULL,
+             proof_json = NULL,
+             input_hash = excluded.input_hash,
+             host_fingerprint_json = excluded.host_fingerprint_json,
+             updated_at = excluded.updated_at,
+             origin = '${LEARNED_RUNBOOK_ORIGIN}'
+           WHERE verify_runbook_local.status = 'unproven-draft'
+             AND verify_runbook_local.origin = '${LEARNED_RUNBOOK_ORIGIN}'
+             AND verify_runbook_local.version = ?`,
+        )
+        .run(
+          projectId,
+          modality,
+          hash,
+          portableJson,
+          nextVersion,
+          inputHash,
+          fingerprint,
+          new Date().toISOString(),
+          // `-1` matches no row: a caller that saw no record must not overwrite one.
+          expectedVersion ?? -1,
+        );
+      if (result.changes > 0) return { hash, version: nextVersion };
+      const row = this.readRow(projectId, modality);
+      const isLearnedDraft = row !== undefined && row.status === 'unproven-draft' && row.origin === LEARNED_RUNBOOK_ORIGIN;
+      return { error: isLearnedDraft ? 'cas-conflict' : 'not-eligible' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.deps.logger?.warn('[VerifyRunbookStore] registerLearnedDraft failed (fail-soft)', {
+        projectId,
+        modality,
+        error: message,
+      });
+      return { error: message };
+    }
+  }
+
+  /**
+   * §A5 — drop a learned draft whose promotion failed, so the next passing
+   * explore request can learn afresh. A CAS DELETE: it removes the row only
+   * while it is STILL the exact learned draft the failed promotion pinned
+   * (`hash` + `version`, origin `'learned'`, status `'unproven-draft'`) — a
+   * record that was re-registered, promoted or relearned since is someone
+   * else's, and survives.
+   *
+   * SKIPPED WHILE ANOTHER REQUEST STILL PINS IT. Any non-terminal
+   * `verification_requests` row carrying this hash (other than
+   * `exceptRequestId`, the request whose failure is doing the discarding) is a
+   * promotion still in flight; deleting its record under it would turn that
+   * request's pin check into a mismatch it never earned. That request reaches
+   * its own exit and decides for itself.
+   *
+   * Never throws; `'pinned'` / `'cas-conflict'` / `'not-found'` say why nothing
+   * was deleted.
+   */
+  discardLearnedDraft(
+    projectId: number,
+    modality: VerificationModality,
+    hash: string,
+    version: number,
+    exceptRequestId: string | null = null,
+  ): { ok: true } | { ok: false; error: 'pinned' | 'cas-conflict' | 'not-found' | string } {
+    try {
+      // ONE statement, so the pin check and the delete cannot interleave with an
+      // enqueue that pins this hash in between.
+      const result = this.db
+        .prepare(
+          `DELETE FROM verify_runbook_local
+           WHERE project_id = ? AND modality = ? AND portable_hash = ? AND version = ?
+             AND origin = '${LEARNED_RUNBOOK_ORIGIN}' AND status = 'unproven-draft'
+             AND NOT EXISTS (
+               SELECT 1 FROM verification_requests
+               WHERE project_id = ? AND runbook_hash = ? AND status IN ('queued', 'leased', 'running')
+                 AND id IS NOT ?
+             )`,
+        )
+        .run(projectId, modality, hash, version, projectId, hash, exceptRequestId);
+      if (result.changes > 0) return { ok: true };
+      const pinned = this.db
+        .prepare(
+          `SELECT 1 FROM verification_requests
+           WHERE project_id = ? AND runbook_hash = ? AND status IN ('queued', 'leased', 'running') AND id IS NOT ?
+           LIMIT 1`,
+        )
+        .get(projectId, hash, exceptRequestId);
+      if (pinned !== undefined) return { ok: false, error: 'pinned' };
+      return { ok: false, error: this.readRow(projectId, modality) ? 'cas-conflict' : 'not-found' };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.deps.logger?.warn('[VerifyRunbookStore] discardLearnedDraft failed (fail-soft)', {
+        projectId,
+        modality,
+        hash,
+        error: message,
+      });
+      return { ok: false, error: message };
+    }
+  }
+
+  /**
    * Content-addressed fetch for the runner's §5.2 seam-3 pin validation: given
    * the `runbook_hash` + `runbook_local_version` stamped on the request row at
    * enqueue, resolve the EXACT revision to execute.
@@ -904,20 +1146,13 @@ export class VerifyRunbookStore {
     hash: string,
   ): PinnedRunbookRecord | null {
     try {
-      const row = this.db
-        .prepare(
-          `SELECT portable_hash, portable_json, version, status, bindings_json, proof_json,
-                  input_hash, host_fingerprint_json
-           FROM verify_runbook_local
-           WHERE project_id = ? AND modality = ? AND portable_hash = ?`,
-        )
-        .get(projectId, modality, hash) as RunbookLocalRow | undefined;
+      const row = this.selectRow('project_id = ? AND modality = ? AND portable_hash = ?', [projectId, modality, hash]);
       if (!row) return null;
       if (!isPersistedStatus(row.status)) return null;
 
       const parsed = this.parsePortable(row.portable_json, `db:${projectId}/${modality}`);
       if (!parsed) return null;
-      return { runbook: parsed, version: row.version, status: row.status };
+      return { runbook: parsed, version: row.version, status: row.status, origin: row.origin };
     } catch (err) {
       this.deps.logger?.warn('[VerifyRunbookStore] getByHash failed (fail-soft)', {
         projectId,
@@ -953,9 +1188,9 @@ export class VerifyRunbookStore {
    * `origin` (migration 107 — WHO derived the record, see
    * {@link VerifyRunbookStore.setOrigin}) rides along for the explore lever
    * source (docs/proposals/runbook-optional-verification.md §A1.3), which
-   * records `{ hash, status, origin }` as provenance. It is read by
-   * {@link VerifyRunbookStore.readOrigin} in its own query, so a pre-107 DB
-   * answers `origin: null` rather than losing the record.
+   * records `{ hash, status, origin }` as provenance, and for §A5's learned
+   * draft resolution. {@link selectRow}'s fall-back rung makes a pre-107 DB
+   * answer `origin: null` rather than lose the record.
    */
   getCurrent(
     projectId: number,
@@ -972,7 +1207,7 @@ export class VerifyRunbookStore {
         version: row.version,
         status: row.status,
         hash: row.portable_hash,
-        origin: this.readOrigin(projectId, modality),
+        origin: row.origin,
       };
     } catch (err) {
       this.deps.logger?.warn('[VerifyRunbookStore] getCurrent failed (fail-soft)', {
@@ -995,31 +1230,29 @@ export class VerifyRunbookStore {
    * rather than being confused with "no such record".
    */
   private readRow(projectId: number, modality: VerificationModality): RunbookLocalRow | undefined {
-    return this.db
-      .prepare(
-        `SELECT portable_hash, portable_json, version, status, bindings_json, proof_json,
-                input_hash, host_fingerprint_json
-         FROM verify_runbook_local
-         WHERE project_id = ? AND modality = ?`,
-      )
-      .get(projectId, modality) as RunbookLocalRow | undefined;
+    return this.selectRow('project_id = ? AND modality = ?', [projectId, modality]);
   }
 
   /**
-   * Migration 107's `origin` for the (project, modality) record, or `null`.
-   * Its OWN fail-soft query, for the reason {@link VerifyRunbookStore.setOrigin}
-   * is not folded into `registerDraft`: widening {@link readRow} would make a
-   * pre-107 DB lose the whole record over a provenance badge.
+   * The one row SELECT, `origin` included (§A5: the learned-record drift rule,
+   * the learned-draft CAS and the learned pin all read it). Widen-then-fall-
+   * back: a pre-107 DB has no `origin` column, `prepare` throws before anything
+   * runs, and the narrow rung answers `NULL AS origin` — a missing provenance
+   * badge must never cost the RECORD, which is why this used to be a separate
+   * query. A pre-096 DB throws on both rungs, to the caller's fail-soft catch.
    */
-  private readOrigin(projectId: number, modality: VerificationModality): string | null {
+  private selectRow(where: string, params: unknown[]): RunbookLocalRow | undefined {
+    const columns = `portable_hash, portable_json, version, status, bindings_json, proof_json,
+                input_hash, host_fingerprint_json`;
+    let statement: PreparedStatement;
     try {
-      const row = this.db
-        .prepare('SELECT origin FROM verify_runbook_local WHERE project_id = ? AND modality = ?')
-        .get(projectId, modality) as { origin: unknown } | undefined;
-      return typeof row?.origin === 'string' && row.origin.length > 0 ? row.origin : null;
+      statement = this.db.prepare(`SELECT ${columns}, origin FROM verify_runbook_local WHERE ${where}`);
     } catch {
-      return null;
+      statement = this.db.prepare(`SELECT ${columns}, NULL AS origin FROM verify_runbook_local WHERE ${where}`);
     }
+    const row = statement.get(...params) as RunbookLocalRow | undefined;
+    if (!row) return undefined;
+    return { ...row, origin: typeof row.origin === 'string' && row.origin.length > 0 ? row.origin : null };
   }
 
   /**

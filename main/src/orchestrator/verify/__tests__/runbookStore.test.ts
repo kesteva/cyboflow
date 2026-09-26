@@ -438,7 +438,7 @@ describe('VerifyRunbookStore drift → computed, non-writing', () => {
     // hash + version, not through a pointless re-register of identical content.
     const noop = await h.store.registerDraft(1, WORKTREE, 'web');
     if ('error' in noop) throw new Error(noop.error);
-    expect(noop).toEqual(pin);
+    expect(noop).toEqual({ ...pin, unchanged: true });
 
     const fresh = await h.store.freshProvenance(WORKTREE);
     expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{"sha":"cafe"}', fresh)).toEqual({ ok: true });
@@ -1356,7 +1356,7 @@ describe('VerifyRunbookStore.registerDraft — A8 no-op over an unchanged proven
     const again = await h.store.registerDraft(1, WORKTREE, 'web', '{"chromium":"/usr/bin/chromium"}');
     expect('error' in again).toBe(false);
     if ('error' in again) return;
-    expect(again).toEqual({ hash: registered.hash, version: registered.version });
+    expect(again).toEqual({ hash: registered.hash, version: registered.version, unchanged: true });
 
     // Byte-for-byte the same record: nothing was written.
     expect(persistedRow(h.db)).toEqual(before);
@@ -1372,7 +1372,7 @@ describe('VerifyRunbookStore.registerDraft — A8 no-op over an unchanged proven
     const before = persistedRow(h.db);
 
     const again = await h.store.registerDraft(1, WORKTREE, 'web'); // still no bindingsJson
-    expect(again).toEqual({ hash: registered.hash, version: registered.version });
+    expect(again).toEqual({ hash: registered.hash, version: registered.version, unchanged: true });
     expect(persistedRow(h.db)).toEqual(before);
     h.db.close();
   });
