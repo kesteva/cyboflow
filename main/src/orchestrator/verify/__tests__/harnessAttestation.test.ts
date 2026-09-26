@@ -157,7 +157,12 @@ describe('performHarnessAttestation — cdp-token', () => {
       probes,
     );
     expect(result).toMatchObject({ verified: true, kind: 'cdp-token' });
-    expect(probes.cdpEvaluate).toHaveBeenCalledWith(DRIVER_PORT, 'window.__BUILD__', expect.any(Number));
+    // The declared pair doubles as the PAGE selector: an app embedding web
+    // content exposes several pages on one endpoint, and only its own satisfies it.
+    expect(probes.cdpEvaluate).toHaveBeenCalledWith(DRIVER_PORT, 'window.__BUILD__', expect.any(Number), {
+      expression: 'window.__BUILD__',
+      expected: 'v1-abc',
+    });
   });
 
   it('does not verify a near-miss, and says what it saw', async () => {

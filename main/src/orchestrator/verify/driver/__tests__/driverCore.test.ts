@@ -584,6 +584,59 @@ describe('runDriverCommand — attach-only mode', () => {
     expect(gotos).toEqual(['http://localhost:3000/ => https://example.com']);
   });
 
+  describe('cdp-token page selection', () => {
+    const SELECT_ENV = {
+      ...ATTACH_ENV,
+      VERIFY_DRIVER_PAGE_EXPRESSION: 'window.__CYBOFLOW_VERIFY__.token',
+      VERIFY_DRIVER_PAGE_EXPECTED: 'cyboflow-verify-cdp-v1',
+    };
+    const makePage = (url: string, token: string | Error, gotos: string[]) => ({
+      url: () => url,
+      async evaluate(): Promise<string> {
+        if (token instanceof Error) throw token;
+        return token;
+      },
+      async goto(u: string): Promise<{ ok: () => boolean; status: () => number }> {
+        gotos.push(`${url} => ${u}`);
+        return { ok: () => true, status: () => 200 };
+      },
+      locator: () => ({ async click(): Promise<void> {}, async fill(): Promise<void> {} }),
+      async setViewportSize(): Promise<void> {},
+      async screenshot(): Promise<Buffer> {
+        return Buffer.from('');
+      },
+    });
+    const browserWith = (pages: unknown[]) =>
+      ({
+        contexts: () => [{ pages: () => pages, newPage: async () => Promise.reject(new Error('no new page')) }],
+        newContext: async () => Promise.reject(new Error('no new context')),
+        close: async () => undefined,
+      }) as unknown as Browser;
+
+    it('drives the page that satisfies the attestation, not an embedded site listed first', async () => {
+      const gotos: string[] = [];
+      // An embedded web-viewer tab is created AFTER the app window in real life,
+      // but nothing guarantees target order — put it first to prove selection.
+      const embedded = makePage('https://example.com/', new TypeError("Cannot read properties of undefined (reading 'token')"), gotos);
+      const app = makePage('http://localhost:4521/', 'cyboflow-verify-cdp-v1', gotos);
+      const deps = makeDeps(freshCalls(), { connectOverCDP: vi.fn(async () => browserWith([embedded, app])) });
+      expect(await runDriverCommand(['goto', 'http://localhost:4521/#x'], SELECT_ENV, deps)).toBe(0);
+      expect(gotos).toEqual(['http://localhost:4521/ => http://localhost:4521/#x']);
+    });
+
+    it('fails loudly — never falls back to the first page — when nothing satisfies it', async () => {
+      const gotos: string[] = [];
+      const stderrLines: string[] = [];
+      const deps = makeDeps(freshCalls(), {
+        connectOverCDP: vi.fn(async () => browserWith([makePage('https://example.com/', 'spoof-attempt', gotos)])),
+        stderr: (line: string) => stderrLines.push(line),
+      });
+      expect(await runDriverCommand(['goto', 'https://example.com'], SELECT_ENV, deps)).toBe(1);
+      expect(gotos).toEqual([]);
+      expect(stderrLines.join('\n')).toMatch(/satisfies the task's cdp-token attestation/);
+    });
+  });
+
   it('stop in attach mode still closes via CDP and is harmless with no recorded pid', async () => {
     const calls = freshCalls();
     const deps = makeDeps(calls);

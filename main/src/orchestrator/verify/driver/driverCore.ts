@@ -684,8 +684,28 @@ async function runWindowsScreenCapture(
 // ---------------------------------------------------------------------------
 
 type EnvCheck =
-  | { ok: true; port: number; artifactsDir: string; attachOnly: boolean }
+  | { ok: true; port: number; artifactsDir: string; attachOnly: boolean; pageSelector: PageSelector | null }
   | { ok: false; message: string };
+
+/**
+ * Positive page selection: the page whose `expression` evaluates to exactly
+ * `expected` — the task's `cdp-token` attestation, exported by the runner as
+ * VERIFY_DRIVER_PAGE_EXPRESSION / VERIFY_DRIVER_PAGE_EXPECTED.
+ *
+ * WHY. An app that embeds web content in its own targets (cyboflow's native web
+ * viewer: every open tab is a WebContentsView, i.e. another CDP page on the SAME
+ * endpoint) makes "the first non-devtools page" a coin flip between the app and
+ * some site it happens to be showing. The attestation already names what the
+ * app's own page evaluates to, and an embedded page — which has no app preload —
+ * cannot, so it is the discriminator.
+ */
+export interface PageSelector {
+  expression: string;
+  expected: string;
+}
+
+/** Per-candidate budget for the selector probe. */
+const PAGE_SELECT_PROBE_MS = 3_000;
 
 /** Validates VERIFY_DRIVER_PORT + VERIFY_ARTIFACTS_DIR for the browser-touching commands. */
 function requireEnv(env: NodeJS.ProcessEnv): EnvCheck {
@@ -706,7 +726,11 @@ function requireEnv(env: NodeJS.ProcessEnv): EnvCheck {
   // launch fallback becomes connect-ONLY — never launch a blank chromium (which
   // would let the agent screenshot the WRONG surface and mis-judge).
   const attachOnly = env.VERIFY_DRIVER_ATTACH_ONLY === '1';
-  return { ok: true, port, artifactsDir, attachOnly };
+  const expression = env.VERIFY_DRIVER_PAGE_EXPRESSION;
+  const expected = env.VERIFY_DRIVER_PAGE_EXPECTED;
+  const pageSelector =
+    expression && expression.trim().length > 0 && typeof expected === 'string' ? { expression, expected } : null;
+  return { ok: true, port, artifactsDir, attachOnly, pageSelector };
 }
 
 /**
@@ -851,7 +875,7 @@ export async function runDriverCommand(
     // with no file — the runner distinguishes "the channel disagreed" from
     // "the step never ran" purely by that file's presence.
     return runAttestCommand(command, env, pageEnv.artifactsDir, deps, () =>
-      ensurePage(pageEnv.port, pageEnv.artifactsDir, pageEnv.attachOnly, deps),
+      ensurePage(pageEnv.port, pageEnv.artifactsDir, pageEnv.attachOnly, deps, pageEnv.pageSelector),
     );
   }
 
@@ -867,6 +891,7 @@ export async function runDriverCommand(
       envResult.artifactsDir,
       envResult.attachOnly,
       deps,
+      envResult.pageSelector,
     );
     return await executeCommand(command, page, envResult.artifactsDir, deps);
   } catch (err) {
@@ -880,15 +905,17 @@ export async function runDriverCommand(
  * browser. In `attachOnly` mode the launch fallback is DISABLED — a failed
  * connect is a hard error (the app under test must already be listening on the
  * driver port), because launching a blank chromium there would screenshot the
- * wrong surface. Attach mode also prefers the first NON-devtools page: an
- * Electron target's CDP endpoint commonly exposes `devtools://` inspector
- * pages alongside the real app window.
+ * wrong surface. Attach mode also skips `devtools://` inspector pages, and —
+ * when the task carries a `cdp-token` attestation — selects the page that
+ * SATISFIES it rather than the first one ({@link PageSelector}); none
+ * satisfying it is a hard error, never a fallback to whichever page is first.
  */
 async function ensurePage(
   port: number,
   artifactsDir: string,
   attachOnly: boolean,
   deps: DriverDeps,
+  pageSelector: PageSelector | null = null,
 ): Promise<Page> {
   const cdpUrl = `http://127.0.0.1:${port}`;
   let browser: Browser;
@@ -907,8 +934,38 @@ async function ensurePage(
   const context = contexts.length > 0 ? contexts[0] : await browser.newContext();
   const pages = context.pages();
   const usablePages = attachOnly ? pages.filter((p) => !isDevtoolsPage(p)) : pages;
+  if (attachOnly && pageSelector !== null) {
+    const selected = await selectPage(usablePages, pageSelector, PAGE_SELECT_PROBE_MS);
+    if (selected === null) {
+      throw new Error(
+        `no page on CDP port ${port} satisfies the task's cdp-token attestation (${pageSelector.expression}) — ${usablePages.length} candidate page(s), none the app under test`,
+      );
+    }
+    return selected;
+  }
   const page = usablePages.length > 0 ? usablePages[0] : await context.newPage();
   return page;
+}
+
+/**
+ * The first page whose `selector.expression` evaluates to exactly
+ * `selector.expected`, probing in target order. A page that throws, hangs past
+ * `timeoutMs`, or answers anything else is skipped. Null when none match.
+ */
+export async function selectPage<P extends Pick<Page, 'evaluate'>>(
+  pages: readonly P[],
+  selector: PageSelector,
+  timeoutMs: number,
+): Promise<P | null> {
+  for (const page of pages) {
+    try {
+      const value: unknown = await withDeadline(page.evaluate(selector.expression), timeoutMs, 'page selector');
+      if (String(value) === selector.expected) return page;
+    } catch {
+      // An embedded page without the app's globals throws here — not a match.
+    }
+  }
+  return null;
 }
 
 /**
@@ -1595,7 +1652,12 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string):
  * That asymmetry is load-bearing here: the probe must leave the surface running,
  * because the runner tears everything down deliberately, afterwards.
  */
-export async function evaluateOverCdp(port: number, expression: string, timeoutMs: number): Promise<string> {
+export async function evaluateOverCdp(
+  port: number,
+  expression: string,
+  timeoutMs: number,
+  select: PageSelector | null = null,
+): Promise<string> {
   const browser = await withDeadline(
     defaultConnectOverCDP(`http://127.0.0.1:${port}`),
     timeoutMs,
@@ -1606,7 +1668,11 @@ export async function evaluateOverCdp(port: number, expression: string, timeoutM
     if (contexts.length === 0) {
       throw new Error(`CDP endpoint on port ${port} exposes no browser context`);
     }
-    const page = contexts[0].pages().find((p) => !isDevtoolsPage(p));
+    const candidates = contexts[0].pages().filter((p) => !isDevtoolsPage(p));
+    // Positive selection first (see PageSelector), else the first candidate —
+    // whose answer then goes into the mismatch detail, which is the useful
+    // diagnostic when nothing on the endpoint is the app.
+    const page = (select ? await selectPage(candidates, select, timeoutMs) : null) ?? candidates[0];
     if (!page) {
       throw new Error(`CDP endpoint on port ${port} exposes no page (the surface was closed?)`);
     }

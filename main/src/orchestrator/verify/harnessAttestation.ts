@@ -69,7 +69,16 @@ export interface HarnessAttestationDeps {
   /** GET the URL and return its body; REJECTS on a non-2xx status or a refused/timed-out connection. */
   httpGetBody: (url: string, timeoutMs: number) => Promise<string>;
   /** Evaluate `expression` over the CDP endpoint on `port` and return `String(result)`. */
-  cdpEvaluate: (port: number, expression: string, timeoutMs: number) => Promise<string>;
+  /**
+   * `select`: evaluate on the page satisfying this `cdp-token` pair rather than
+   * the first page (an app embedding web content exposes several).
+   */
+  cdpEvaluate: (
+    port: number,
+    expression: string,
+    timeoutMs: number,
+    select?: { expression: string; expected: string },
+  ) => Promise<string>;
   /**
    * List the window titles of ONE application (peekaboo) for the
    * `window-identity` channel. Scoped rather than host-wide because peekaboo
@@ -399,7 +408,10 @@ async function probeOnce(
     }
     case 'cdp-token': {
       if (driverPort === null) return noDriverPort('cdp-token');
-      const actual = await deps.cdpEvaluate(driverPort, spec.expression, HARNESS_ATTEST_PROBE_TIMEOUT_MS);
+      const actual = await deps.cdpEvaluate(driverPort, spec.expression, HARNESS_ATTEST_PROBE_TIMEOUT_MS, {
+        expression: spec.expression,
+        expected: spec.expected,
+      });
       if (actual !== spec.expected) {
         return {
           verified: false,
