@@ -264,8 +264,11 @@ auto-mode classifier even runs (`CYBOFLOW_MCP_TOOL_PREFIX` /
 `claudeCodeManager.ts`'s always-installed dynamic PreToolUse hook), so a
 verification fired from chat spends real per-project budget and deploys a
 real SDK verification agent with NO PreToolUse prompt in front of it. What
-bounds this: the runbook's build/serve commands were human-reviewed at
-verify-setup time (the setup-flow layer below); the verifier runs against an
+bounds this: a pinned request runs a runbook whose build/serve commands were
+human-reviewed at verify-setup time (the setup-flow layer below), and an
+explore request (no proven runbook) runs agent-chosen commands under the
+explore guardrails (a `kill`/`simctl` lifecycle deny, the PATH dependency
+shim, the literal driver port); the verifier runs against an
 isolated, detached snapshot worktree, never the live checkout; it carries
 zero MCP servers; `Bash` sits in its tool ceiling but is deliberately excluded
 from its SDK `allowedTools` auto-approve list (`verificationAgentQuery.ts`), so
@@ -285,8 +288,10 @@ drops it.
 
 Two deliberate decisions on this path, recorded so they are not re-litigated:
 
-- **The proven-runbook gate has ONE enforcement point, at drain** (and only for
-  a task that `derivesEnvironment`, i.e. carries a build or serve). It is
+- **The runbook gate has ONE enforcement point, at drain** (and only for a task
+  that `derivesEnvironment`, i.e. carries a build or serve). Since
+  runbook-optional verification it selects an execution mode rather than
+  skipping — see the setup-flow paragraph below. It is
   deliberately NOT also checked at enqueue. The cost is one throwaway queue row
   per attempt on a project whose runbook is unproven; the benefit is that the
   two enqueue paths (this MCP seam and the programmatic
@@ -316,15 +321,29 @@ harness-derived evidence and converts a blocking FAIL into a lane-advancing
 skip; everything model-authored stays blocking), a pre-deploy preflight
 (`preflight.ts`) + per-(project, modality) capability ledger with a circuit
 breaker (`capabilityStore.ts`, migration 095) stop repeat environment burns,
-and build/serve tasks only run against a **proven runbook**
-(`.cyboflow/verify-runbook.json` portable half + `verify_runbook_local`
-machine-local record, `runbookStore.ts`/`runbookHash.ts`, migration 096 —
-content-addressed pin stamped at enqueue, validated by the runner, proven by
-an engine-observed passing setup run). Requests resolve a **modality**
+and a **proven runbook** (`.cyboflow/verify-runbook.json` portable half +
+`verify_runbook_local` machine-local record, `runbookStore.ts`/`runbookHash.ts`,
+migration 096 — content-addressed pin stamped at enqueue, validated by the
+runner, proven by an engine-observed passing setup run) makes a build/serve
+request run **pinned**, on the proven recipe. Without one, gate 3 of
+`agentEngine.evaluateAgentGates` selects **explore** instead of skipping
+(`docs/proposals/runbook-optional-verification.md`; `web` and `mobile` always,
+`cdp-app` only when a registered record names a `dataDirEnv` lever,
+`native-screen` never): the composed commands become hints, the contract
+(`verifyHarnessContract.ts`) turns mode-conditional, and a pass is capped at
+`low_confidence` unless the harness bound the verbatim composed serve (or
+verified mobile `bundle-identity`). A passing explore run can leave a
+`learned` runbook draft (`learnedRecipe.ts`/`learnedRunbook.ts`) that the
+lane's next request proves as a learned pin. The kill switch
+`visualVerify.requireProvenRunbook` / `CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1`
+restores the skip. Requests resolve a **modality**
 (`web | cdp-app | native-screen | mobile`) driving slot-pool concurrency
 (`agentSlots` + `VERIFY_SCREEN_LEASE`), per-modality **attestation** (driver
-`attest` commands + `VERIFY_ATTEST_NONCE`; no attestation ⇒ no clean pass),
-and observe-only native-screen. Dependency mutation inside snapshots is
+`attest` commands + `VERIFY_ATTEST_NONCE`; no verified identity ⇒ no clean
+pass), observe-only native-screen, and a `mobile` drive rung chosen by
+`visualVerify.mobileDriveEngine` (the Xcode 27 DeviceInteraction bridge,
+owned by the runner in main under `orchestrator/verify/xcode/`, else Maestro,
+else observe-only). Dependency mutation inside snapshots is
 triple-guarded (§7.2): enqueue rejection + a default-deny `canUseTool` Bash
 guard (`dependencyCommandGuard.ts`) + `depPreparer.ts`'s keyed read-side
 dependency mirror that snapshots symlink instead of the live worktree. The

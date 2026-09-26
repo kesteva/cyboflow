@@ -27,7 +27,95 @@ capture" further down is LEGACY-ENGINE-ONLY, not the dogfooding path.
 (Separately, cyboflow the *product* now also ships a `mobile` modality —
 iOS Simulator, on `xcodebuild`/`xcrun simctl` — for verifying a project's own
 iOS app; that is the agent engine's concern, not this dogfooding CDP/Peekaboo
-path, and is documented in `docs/proposals/mobile-verification-tier.md`.)
+path. Its host prerequisites are below; the design is in
+`docs/proposals/mobile-verification-tier.md` and Part B of
+`docs/proposals/runbook-optional-verification.md`.)
+
+## Runbook-optional verification (explore mode)
+
+A verification request no longer needs a proven runbook
+(`docs/proposals/runbook-optional-verification.md`). The runbook decides *how*
+the request runs:
+
+- **Pinned** — a proven runbook exists for the modality (or the lane carries a
+  learned pin, below). The harness replaces the task's build, serve/app and
+  attestation with the proven recipe and runs it exactly.
+- **Explore** — no proven runbook. `web` and `mobile` always explore; `cdp-app`
+  explores only when a registered runbook record (any status) names a
+  `dataDirEnv` lever; `native-screen` never does and is still skipped. The
+  composed build/serve/app are hints the agent may adapt. A web or cdp-app run
+  reaches `passed` only when the composed `serve.cmd` ran verbatim through the
+  driver and the harness bound the port to it; any other stand-up caps at
+  `low_confidence`. A mobile run passes on a verified `bundle-identity`.
+  `unverifiable` lands as `low_confidence` plus a finding and never loops the
+  implementer; `wrong_environment` re-dispatches the request once under the
+  modality the agent says it needs.
+- **Learned runbooks.** A passing explore run may report the commands that
+  stood the deliverable up. The harness validates them and stores an unproven
+  draft of origin `learned` (the first one wins, and a committed
+  `.cyboflow/verify-runbook.json` entry takes precedence). The lane's next
+  request runs that draft as a learned pin: a pass marks it proven, a failed
+  stand-up discards it and re-runs the request in explore. Both events file a
+  non-blocking finding naming the commands.
+- **Kill switch.** `"visualVerify": { "requireProvenRunbook": true }` in the
+  data dir's `config.json` (`~/.cyboflow/config.json` for the stable build), or
+  launching with `CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1`, restores the old
+  behaviour: a request with no proven runbook is skipped and nothing is
+  learned. `visualVerify.exploreDeadlineFloorMs` (default 15 min) is the
+  minimum deadline of an explore request.
+
+## Mobile (iOS) verification: host prerequisites
+
+Build, install, launch and `bundle-identity` run on `xcodebuild` +
+`xcrun simctl` and need only Xcode. **Driving** the app (tap, type, swipe) uses
+the engine `visualVerify.mobileDriveEngine` picks in `config.json`:
+
+- `auto` (default) — Xcode DeviceInteraction when its probe is available or
+  inconclusive, else Maestro when it resolves with a device-pin flag, else
+  none.
+- `xcode` / `maestro` / `none` — pin one. `none` is observe-only: behaviours
+  that need driving come back `not_testable`.
+
+A chosen engine that fails degrades to the next rung instead of skipping the
+request; the report's provenance records the engine requested, the engine used
+and why it degraded.
+
+**Xcode DeviceInteraction** is checked by the `xcode-mcp` row of the Verify
+Queue's health panel; each failing check names its fix:
+
+1. **Xcode 27 or later** as the active developer directory
+   (`sudo xcode-select -s /Applications/Xcode.app`), so `xcrun --find
+   mcpbridge` succeeds.
+2. **An iOS 27+ simulator runtime**: `xcodebuild -downloadPlatform iOS`.
+   DeviceInteraction does not work on older runtimes. Without one, the request
+   leases a simulator on the default runtime and drives through Maestro or not
+   at all.
+3. **Headless mode**: `sudo xcrun mcp-server enable`. Check it with
+   `xcrun mcp-server status --format json` (`permission.enabled`).
+4. **Approval.** Xcode approves the binary that spawns `xcrun mcpbridge`,
+   which is the Cyboflow app itself. A dev build runs an unsigned Electron, so
+   its grant lasts 24 hours and likely resets on each Electron upgrade; a
+   signed, packaged build may be granted durably. Click **Approve Xcode
+   access** on the row while you are at the Mac. Cyboflow asks Xcode to open a
+   scaffold project under `<data dir>/xcode-approval/`, which raises Xcode's
+   own approval prompt (the button reads "Waiting for Xcode…" until you
+   answer). The panel also shows the command that grants it from a terminal,
+   `sudo xcrun mcp-server approve <id> --for-24-hours`, and, for a signed build
+   only and behind an explicit click, the durable `--always` form. Cyboflow
+   never runs either command and never uses
+   `--unsafe-always-allow-all-agents`. Read the disclosure it shows: approving
+   Cyboflow approves every agent it hosts, Claude and Codex alike, for the
+   grant window, across all of Xcode's tools on every folder you have
+   permitted. The row goes back to "Approve Xcode access" shortly before a
+   grant expires.
+
+**Maestro** needs a JDK. The login shell's `/usr/bin/java` is only a macOS
+stub, so the harness resolves `JAVA_HOME` itself — a valid `JAVA_HOME` already
+set, then `/usr/libexec/java_home`, then the newest Homebrew `openjdk*` — and
+exports it to Maestro and the agent. If none is found, install one
+(`brew install openjdk@17`).
+
+## Dogfooding: verifying cyboflow's own renderer
 
 This project is an Electron app. The Vite renderer at `http://localhost:4521`
 depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone,

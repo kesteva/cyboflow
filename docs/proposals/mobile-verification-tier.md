@@ -1,7 +1,12 @@
 # Mobile verification tier — iOS Simulator on Apple's own toolchain
 
-Status: PROPOSED (2026-09-17), revised after Codex adversarial review round 1
-(§20). Follow-up to `verification-setup-flow.md` §4, which deferred `mobile`
+Status: Stage 1 SHIPPED (2026-09-18). Stage 3 SHIPPED 2026-09-26 as a
+harness-owned drive/observe rung, not an engine; the Xcode-built path ("3b")
+was rejected on measured evidence (§3, §11, §16, and Part B of
+`runbook-optional-verification.md`). Originally PROPOSED 2026-09-17, revised
+after Codex adversarial review round 1 (§20). The paragraphs below keep the
+Stage 1 reasoning; where they describe Xcode 27 from secondary sources, §3's
+measured block supersedes them. Follow-up to `verification-setup-flow.md` §4, which deferred `mobile`
 with the note "Maestro/mobile deferred — Xcode has a new MCP coming". That note
 is now answerable, and the answer is not the one the note expected: **Apple's
 Xcode MCP cannot be the mobile tier, on any host, today.** This proposal ships
@@ -88,17 +93,17 @@ that needs saying plainly before any code is written.
 `XcodeListNavigatorIssues`, `XcodeRefreshCodeIssuesInFile`, `ExecuteSnippet`,
 `RenderPreview`, `DocumentationSearch`, `XcodeListWindows`.
 
-| Capability the tier needs | Xcode 26.3 mcpbridge |
-|---|---|
-| Boot / create / destroy a simulator | **No tool exists** |
-| Install an app on a simulator | **No tool exists** |
-| Launch an app on a simulator | **No tool exists** |
-| Screenshot a *running app* | **No tool exists** (`RenderPreview` snapshots the SwiftUI *Preview canvas*, which can diverge from the running app) |
-| Tap / type / swipe / read the UI hierarchy | **No tool exists** |
-| Build into a caller-chosen `-derivedDataPath` | **No** — it builds the frontmost window's scheme into Xcode's own DerivedData |
-| Target a directory the caller names | **No** — every tool but `XcodeListWindows` takes a `tabIdentifier` naming a window **Xcode.app already has open in the foreground** |
-| Read structured build diagnostics | **Yes** — `GetBuildLog`, `XcodeListNavigatorIssues` are genuinely better than parsing `xcodebuild` output |
-| Search Apple framework docs while judging | **Yes** — `DocumentationSearch` |
+| Capability the tier needs | Xcode 26.3 mcpbridge | Xcode 27.0 mcpbridge (measured 2026-09-24) |
+|---|---|---|
+| Boot / create / destroy a simulator | **No tool exists** | **No tool exists** — still `simctl` |
+| Install an app on a simulator | **No tool exists** | `DeviceInteractionInstallAndRun`, workspace-bound: it builds the open workspace's scheme through Xcode's DerivedData. Not used |
+| Launch an app on a simulator | **No tool exists** | The same, or `DeviceInteractionSynthesize` activation, which launches an installed app that is not running (and so masks a crash) |
+| Screenshot a *running app* | **No tool exists** (`RenderPreview` snapshots the SwiftUI *Preview canvas*, which can diverge from the running app) | **Yes** — `DeviceInteractionSynthesize` returns a screenshot path, on any simulator by UDID |
+| Tap / type / swipe / read the UI hierarchy | **No tool exists** | **Yes** — `DeviceInteractionSynthesize`'s command grammar, plus a hierarchy file with labels, identifiers, hit points and the app's pid |
+| Build into a caller-chosen `-derivedDataPath` | **No** — it builds the frontmost window's scheme into Xcode's own DerivedData | **No** |
+| Target a directory the caller names | **No** — every tool but `XcodeListWindows` takes a `tabIdentifier` naming a window **Xcode.app already has open in the foreground** | `XcodeOpenWorkspace` by absolute path, but each folder needs its own approval |
+| Read structured build diagnostics | **Yes** — `GetBuildLog`, `XcodeListNavigatorIssues` are genuinely better than parsing `xcodebuild` output | `GetBuildLog` only. Unused |
+| Search Apple framework docs while judging | **Yes** — `DocumentationSearch` | **Gone** from the 27.0 list |
 
 The `tabIdentifier` binding is the disqualifier, not the missing simulator
 tools. The verifier builds in a **detached snapshot worktree** that Xcode.app
@@ -110,20 +115,46 @@ end, so `BuildProject`/`RunProject`/`RunAllTests`/`RunSomeTests`/`ExecuteSnippet
 `RenderPreview` and every write tool are on a **hard per-call deny list**, not
 merely omitted from an allowlist.
 
-**Xcode 27 changes the picture, but not the ship path.** Xcode 27.0 went GA
-on 2026-09-14 (build 27A266a) and its bridge exposes **54 tools** (community
-`tools/list` capture of the RC build, same build number as GA). Confirmed
-present: `XcodeOpenWorkspace` by **absolute path** with a `workspaceIdentifier`
-usable in a **headless mode** (Settings → Intelligence → External Agent Access =
-"Always" — tools reachable with Xcode closed, per one secondary source; the
-default is still "While Xcode is Open"), `XcodeListRunDestinations` /
-`XcodeSwitchRunDestination`, `RunProject` / `StopProject`, `GetConsoleOutput`,
-and a `DeviceInteraction*` family (`StartSession` / `StartWorkspaceSession` by
-device identifier, `InstallAndRun`, `Synthesize` — tap/swipe/type via a
-free-text mini-language returning screenshot + hierarchy + console paths — and
-`EndSession`). So on an Xcode 27 host the owner's literal ask — the Xcode MCP
-*as* the tier — is plausible for the first time: open the snapshot worktree by
-path, start a workspace device session, install-and-run, synthesize, screenshot.
+**Xcode 27, measured (corrected 2026-09-26).** This paragraph first described
+Xcode 27 from a community capture of the RC build (54 tools, headless mode as a
+Settings toggle). Stage 3 was built on Xcode 27.0 (27A266a) and measured it
+directly; the full record is `runbook-optional-verification.md` §B0. What holds:
+
+- **53 tools.** `xcrun mcpbridge` (`xcode-tools` 25317) lists 53; the trimmed
+  dump is committed at
+  `main/src/orchestrator/verify/xcode/__tests__/fixtures/mcpbridge-tools-list.json`.
+  `DocumentationSearch`, `ExecuteSnippet` (now `RunCodeSnippet`) and
+  `XcodeListWindows` are gone.
+- **Headless mode is a CLI switch:** `sudo xcrun mcp-server enable`.
+  `xcrun mcp-server status --format json` reports `permission.enabled`,
+  `permittedAgents[]` (an unsigned client is keyed by `{path, sha256,
+  expiration}`, the expiration in CFAbsoluteTime), `permittedFolders[]` and
+  `running`.
+- **Approval is interactive and keyed on the binary that spawns the bridge.**
+  Only `XcodeOpenWorkspace` / `XcodeNewProject` raise the prompt, and it blocks
+  the call; every other tool from an unapproved client fails with "This agent
+  isn't approved to use Xcode's tools yet". Unsigned clients get 24 hours;
+  signed ones may get durable trust (`approve --always`), unmeasured.
+- **Driving needs no workspace.** `DeviceInteractionStartSession({
+  deviceIdentifier: <UDID>, sessionIdentifier })` drives any simulator by UDID
+  with no workspace open and no folder approval, and needs an iOS 27.0+
+  simulator runtime. `DeviceInteractionSynthesize` sends one command (or none,
+  to capture) and returns screenshot, hierarchy and log paths. A non-workspace
+  session's `applicationState` always reads `NotRun`, so it cannot tell a
+  crash; the hierarchy's pid can.
+- **The workspace path does not fit verification.** `XcodeOpenWorkspace` +
+  `StartWorkspaceSession` + `InstallAndRun` builds through Xcode's own
+  DerivedData with no `-derivedDataPath` lever, needs a per-folder approval,
+  and was flaky in practice (a scheme-list race, a lost session).
+
+**What shipped as Stage 3:** the non-workspace session, as a harness-owned
+**drive + observe rung** for `mobile` (`VERIFY_MOBILE_DRIVE=xcode`). The runner
+in main spawns the bridge, starts one session per request on the leased
+simulator, and serves only `Synthesize` to the agent's `$VERIFY_DRIVER mobile-*`
+verbs over a token-guarded socket. The agent is never given the MCP. Build,
+install, launch and `bundle-identity` stay on the CLI engine below. The
+Xcode-built path ("3b": open the snapshot as a workspace and install-and-run)
+was rejected on the evidence above.
 
 Three reasons this design ships on the CLI engine and defers the Xcode 27 path
 to **Stage 3 as a separate engine adapter** (M8): (1) this host runs Xcode 26.2
@@ -147,20 +178,22 @@ Xcode-driven run. What a Stage 3 adapter **would** reuse is narrow and worth
 naming: the `app` block's *naming of the deliverable* (bundle id, scheme), the
 three gates, the `verify:mobile:<i>` slot pool, and migration 139. Everything
 else it would bring itself. This document does not claim engine-agnostic
-contracts and does not design that adapter.
+contracts and does not design that adapter. (That reasoning is why 3b was
+rejected; what shipped reuses the CLI engine and adds only a drive rung.)
 
-**Additionally, this host cannot test any of it.** Probed live 2026-09-17:
-Xcode **26.2 (17C52)**, `xcrun --find mcpbridge` → *unable to find utility*.
-Even after an upgrade the user must flip Settings → Intelligence → "Allow
-external agents to use Xcode tools", which cyboflow cannot do for them. Since
-Stage 1 grants no MCP at all, none of that is on the ship path.
+**Additionally, this host could not test any of it in Stage 1.** Probed live
+2026-09-17: Xcode **26.2 (17C52)**, `xcrun --find mcpbridge` → *unable to find
+utility*. Since Stage 1 grants no MCP at all, none of that was on the ship path.
+(The host has run Xcode 27.0 since 2026-09-24. Enabling external agents is the
+`sudo xcrun mcp-server enable` switch above, which cyboflow shows but never
+runs.)
 
 **Honest summary:** Apple's own *command-line* toolchain does the work, and
 Apple's *MCP* does none of it in Stage 1. The most of the owner's intent that
-reality permits is a working tier built on the tools Apple ships on the command
-line, plus §11's design record for the day an Xcode 27 host makes a second
-engine worth writing. The design says so rather than dressing up a tool grant
-as a capability.
+reality permitted in Stage 1 was a working tier built on the tools Apple ships on
+the command line. Stage 3 added Xcode 27's DeviceInteraction as the drive rung on
+top of it, owned by the harness, not granted to the agent. The design says so
+rather than dressing up a tool grant as a capability.
 
 ---
 
@@ -790,7 +823,32 @@ documented history of rebase collisions), which is why it is a single-file task.
 
 ## 11. Stage 3 design notes — the Xcode MCP grant, NOT built in Stage 1
 
-**Nothing in this section ships.** Stage 1 contains no `mobileXcodeMcpGrant`
+**Superseded by what Stage 3 actually built (2026-09-26).** Stage 3 did not grant
+the agent an Xcode MCP. The verifier's query still carries `mcpServers: {}` and
+the §11.1 filter is unchanged. Instead the **runner in main** owns the bridge
+(`orchestrator/verify/xcode/`, `runbook-optional-verification.md` §B2–§B8):
+
+- **Who spawns it.** The runner, per `mobile` request, spawns
+  `xcrun mcpbridge` directly (never a shell), so Xcode's approval is keyed on
+  the Cyboflow binary. The health probe (`xcode-mcp` row) never spawns it.
+- **What it calls.** Only `DeviceInteractionStartSession` (with a random
+  per-request session key and the leased UDID, which must match),
+  `DeviceInteractionSynthesize` and `DeviceInteractionEndSession`. The only
+  other tools cyboflow ever calls are `XcodeOpenWorkspace` and
+  `XcodeCloseWorkspace`, from the "Approve Xcode access" action, on a scaffold
+  project under `<data dir>/xcode-approval/`.
+- **What the agent gets.** `$VERIFY_DRIVER mobile-*` verbs that reach the
+  session through a per-request, token-guarded Unix socket. That socket is an
+  ergonomics, audit and ledger boundary, not a security one: while a grant is
+  live, anything Cyboflow hosts can exec the approved binary.
+- **Evidence.** The runner records every capture in a ledger, and a `pass`
+  under the xcode rung must cite a ledgered screenshot of the app under test.
+
+So the gating, tool-discovery, allowlist and deny-list machinery below was never
+needed. It stays as the record of what an agent-facing grant would have to
+specify.
+
+**Nothing below ships.** Stage 1 contains no `mobileXcodeMcpGrant`
 config knob, no `mcpbridgePresent()` probe method, no health-panel mcpbridge
 detail, and no MCP server entry: `mcpServers` is `{}` for every request,
 unchanged from today (M2). A flag plus a `xcrun --find` probe with no client
@@ -1011,15 +1069,27 @@ independent additions, either orderable first:
   rewritten. `mobile-flow <yaml>` (one invocation, many steps) is the Stage-1
   mitigation.
 
-**Stage 3 — an Xcode 27 `DeviceInteraction` engine adapter, unscheduled and
-undesigned.** Not "the same contracts on a different transport" (M8): a separate
-engine with its own build-artifact identity, its own session lease and lifetime,
-its own readiness signal, its own cleanup and its own attestation kind. It would
-reuse the `app` block's naming of the deliverable, the three gates, the slot
-pool and migration 139, and bring everything else itself. Blocked on an Xcode 27
-host; its first step is re-dumping `tools/list` against whatever build is
-installed. §11 holds the design notes for the read-only grant, which Stage 1
-does not ship in any form.
+**Stage 3 — Xcode 27 DeviceInteraction: drive/observe rung SHIPPED
+(2026-09-26); Xcode-built "3b" REJECTED with evidence.** Designed and built as
+Part B of `runbook-optional-verification.md` after `tools/list` was re-dumped
+against Xcode 27.0 (§3's measured block).
+
+- *Shipped:* a harness-owned drive + observe rung, `VERIFY_MOBILE_DRIVE=xcode`,
+  selected by `visualVerify.mobileDriveEngine` (`auto` by default: xcode, else
+  Maestro, else none; a failing rung degrades rather than skips). It needs an
+  iOS 27+ runtime, headless mode and an approval (see
+  `docs/VISUAL-VERIFICATION-SETUP.md`). Build, install, launch, readiness and
+  `bundle-identity` are unchanged from Stage 1, so this is a rung on the CLI
+  engine, not the separate engine M8 described.
+- *Rejected, "3b":* building and installing through Xcode
+  (`XcodeOpenWorkspace` + `StartWorkspaceSession` + `InstallAndRun`). It has no
+  `-derivedDataPath` lever, so §9's comparison has nothing to stand on; it
+  needs a per-folder approval; and it was flaky when measured (a scheme-list
+  race, a lost session).
+- *Still unmeasured:* the swipe and home-button grammar spellings, whether
+  deleting a device ends a session, and durable trust for a signed build.
+
+§11 now records what shipped in place of the agent-facing grant.
 
 **Stage 4 — lane auto-derive for mobile, if wanted.** Its own change: the
 drafting prompt's Xcode branch, a scheme surveyor, the modality-conditional

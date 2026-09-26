@@ -1,6 +1,6 @@
 # Runbook-optional verification + the Xcode 27 DeviceInteraction drive engine (Stage 3)
 
-Status: DESIGN v2, 2026-09-24, green-brook.
+Status: IMPLEMENTED (2026-09-26, green-brook). Parts A and B are built; the "As built" notes under A5 and B2–B8 record where the code differs from the design text, and where they disagree the notes win. Design v2 dated 2026-09-24.
 
 v1 went through a four-lens adversarial review (regression safety, feasibility, Stage 3 engine, thesis completeness). The review raised 36 blocking or major findings, and all 36 survived an independent skeptic pass. They are folded in below and cited by their IDs: RS-n, F-n, B-n and T-n (the thesis lens).
 
