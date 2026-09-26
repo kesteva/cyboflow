@@ -18,6 +18,7 @@ import type { DatabaseService } from './database/database';
 import { WebTabsRepository } from './database/webTabsRepository';
 import { PersistingWebViewer } from './services/webViewer/webViewerPersistence';
 import { WebViewerConsent, WEB_CONSENT_EVENT } from './services/webViewer/webViewerConsent';
+import { WebViewerAgentOps } from './services/webViewer/webViewerAgentOps';
 import { onRunTerminal } from './services/cyboflow/transitions';
 import {
   WebViewerManager,
@@ -26,11 +27,13 @@ import {
   WEB_VIEWER_NAVIGATED,
   WEB_VIEWER_POPUP,
   WEB_VIEWER_TAB_CLOSED,
+  WEB_VIEWER_TAB_OPENED,
   WEB_VIEWER_TAB_STATE,
 } from './services/webViewer/webViewerManager';
 import type {
   WebViewerConsentLike,
   WebViewerEventsLike,
+  WebViewerAgentLike,
   WebViewerLike,
 } from './orchestrator/trpc/contracts/webViewerOps';
 import type { WebViewerNavigatedEvent } from './services/webViewer/webViewerManager';
@@ -53,8 +56,10 @@ export interface WebViewerComposition {
   webViewer: WebViewerLike;
   webViewerEvents: WebViewerEventsLike;
   webViewerConsent: WebViewerConsentLike;
-  /** The consent service itself, for the MCP tool handlers. */
+  /** The consent service itself. */
   consent: WebViewerConsent;
+  /** The MCP tools' surface: list / read / open, under the consent rules. */
+  webViewerAgent: WebViewerAgentLike;
   manager: WebViewerManager;
   /** Destroy every view for one cyboflow session (archive / merge / delete). */
   disposeSession: (sessionId: string) => void;
@@ -120,6 +125,25 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
       }
     },
   };
+
+  // What an agent may do (§6). Flags read LIVE, so flipping agent access in
+  // Settings applies to the very next tool call.
+  const webViewerAgent = new WebViewerAgentOps({
+    manager,
+    viewer,
+    consent,
+    flags: () => {
+      const cfg = configManager.getWebViewerConfig();
+      return { agentObserve: cfg.agentObserve, agentDrive: cfg.agentDrive };
+    },
+    audit: (event) => {
+      try {
+        repo.appendEvent(event);
+      } catch (err) {
+        console.warn('[WebViewer] audit write failed:', err);
+      }
+    },
+  });
 
   // ---------------------------------------------------------------------
   // Per-tab context menu.
@@ -194,6 +218,7 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
       emitter: manager,
       tabStateChannel: WEB_VIEWER_TAB_STATE,
       tabClosedChannel: WEB_VIEWER_TAB_CLOSED,
+      tabOpenedChannel: WEB_VIEWER_TAB_OPENED,
       chordChannel: WEB_VIEWER_CHORD,
       popupChannel: WEB_VIEWER_POPUP,
       consentEmitter: consent,
@@ -201,6 +226,7 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
     },
     webViewerConsent,
     consent,
+    webViewerAgent,
     manager,
     disposeSession: (sessionId: string) => {
       consent.disposeSession(sessionId);

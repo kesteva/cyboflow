@@ -171,6 +171,25 @@ export const webViewerRouter = router({
       }
     }),
 
+  /**
+   * NEW tabs main opened on its own — an agent's background open. The renderer
+   * created every other tab itself; this is how an agent tab reaches the strip.
+   */
+  onTabOpened: protectedProcedure
+    .input(z.object({ sessionId: z.string().min(1) }))
+    .subscription(async function* ({ ctx, input, signal }): AsyncGenerator<WebTabStateEvent> {
+      const events = ctx.webViewerEvents;
+      if (!events?.tabOpenedChannel) return;
+      const abortSignal = signal ?? new AbortController().signal;
+      for await (const ev of eventToAsyncIterable<WebTabStateEvent>(
+        events.emitter,
+        events.tabOpenedChannel,
+        abortSignal,
+      )) {
+        if (ev.sessionId === input.sessionId && ev.snapshot.openedBy === 'agent') yield ev;
+      }
+    }),
+
   /** Per-session tab-gone stream, distinguishing a close from an evict or crash. */
   onTabClosed: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1) }))

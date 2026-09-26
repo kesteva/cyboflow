@@ -11,6 +11,7 @@ type PopupHandler = (ev: { sessionId: string; openerTabId: string; url: string }
 let popupHandler: PopupHandler | null = null;
 type ConsentHandler = (ev: unknown) => void;
 let consentHandler: ConsentHandler | null = null;
+let openedHandler: ((ev: unknown) => void) | null = null;
 const openMutate = vi.fn();
 const restoreMutate = vi.fn();
 const sub = () => ({ unsubscribe: vi.fn() });
@@ -30,6 +31,12 @@ vi.mock('../../trpc/client', () => ({
         open: { mutate: (...a: unknown[]) => openMutate(...a) },
         restore: { mutate: (...a: unknown[]) => restoreMutate(...a) },
         pendingConsents: { query: () => Promise.resolve([]) },
+        onTabOpened: {
+          subscribe: vi.fn((_input: unknown, opts: { onData: (ev: unknown) => void }) => {
+            openedHandler = opts.onData;
+            return sub();
+          }),
+        },
         onConsent: {
           subscribe: vi.fn((_input: unknown, opts: { onData: ConsentHandler }) => {
             consentHandler = opts.onData;
@@ -141,5 +148,25 @@ describe('useWebViewerBridge consent', () => {
     expect(Object.keys(useWebConsentStore.getState().byRequestId)).toEqual(['r1']);
     act(() => consentHandler!({ kind: 'resolved', sessionId: KEY, requestId: 'r1', tabId: 'web:1' }));
     expect(useWebConsentStore.getState().byRequestId).toEqual({});
+  });
+});
+
+describe('useWebViewerBridge agent tabs', () => {
+  it('adds an agent-opened tab to the strip unfocused and pulsing, under main’s id', async () => {
+    renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(openedHandler).not.toBeNull());
+    act(() =>
+      openedHandler!({
+        sessionId: KEY,
+        snapshot: {
+          tabId: 'web:agent-1', sessionId: KEY, state: 'hidden', currentUrl: 'http://localhost:5173/',
+          title: null, openedBy: 'agent', openedByRunId: 'run-7', humanTouched: false,
+          canGoBack: false, canGoForward: false, loading: true, blockedReason: null,
+        },
+      }),
+    );
+    const [tab] = webTabs();
+    expect(tab).toMatchObject({ id: 'web:agent-1', openedBy: 'agent', openedByRunId: 'run-7', isNew: true });
+    expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).not.toBe('web:agent-1');
   });
 });

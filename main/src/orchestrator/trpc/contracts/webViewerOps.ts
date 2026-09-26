@@ -104,6 +104,8 @@ export interface WebViewerEventsLike {
   emitter: import('events').EventEmitter;
   tabStateChannel: string;
   tabClosedChannel: string;
+  /** New (non-restore) tabs — how an agent-opened tab reaches the strip. */
+  tabOpenedChannel?: string;
   chordChannel: string;
   /**
    * A popup (`window.open` / `target=_blank`) a viewer page asked for. Never a
@@ -130,4 +132,84 @@ export interface WebViewerConsentLike {
   revokeGrant(grantId: string): boolean;
   revokeTab(tabId: string): void;
   activity(sessionId: string, tabId?: string): WebActivityEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// Agent surface (the MCP tools, §6). The MCP handler family is under
+// orchestrator/** and may not import the service; it gets this seam.
+// ---------------------------------------------------------------------------
+
+/**
+ * A tab as an AGENT sees it. `url` and `title` are null unless the caller may
+ * read the tab (free or granted): full URLs carry OAuth codes, reset tokens and
+ * signed parameters, and a title can carry an inbox subject line. Pre-grant an
+ * agent gets the opaque id, the state, who opened it and the ORIGIN only.
+ */
+export interface AgentWebTab {
+  tabId: string;
+  state: import('../../../../../shared/types/webViewer').WebTabState;
+  openedBy: 'user' | 'agent';
+  ownedByCaller: boolean;
+  access: 'free' | 'granted' | 'consent_required';
+  origin: string | null;
+  url: string | null;
+  title: string | null;
+}
+
+export interface AgentTelemetrySlice<T> {
+  entries: T[];
+  /** Pass back as `since` next time. */
+  cursor: number;
+  /** Entries after your cursor that were evicted before this read. */
+  gap: number;
+  /** Entries from a frame origin this read is not granted for, left out on purpose. */
+  withheld?: number;
+}
+
+export interface AgentFrameRead {
+  frameToken: string;
+  isTop: boolean;
+  url: string | null;
+  principal: string;
+  text?: string;
+  dom?: string;
+  truncated: boolean;
+  error?: string;
+}
+
+export interface AgentReadArgs {
+  tabId: string;
+  since?: { console?: number; network?: number; navigation?: number };
+  include?: Array<'text' | 'dom'>;
+  frame?: 'top' | 'all';
+  reason?: string;
+}
+
+export interface AgentReadResult {
+  tab: AgentWebTab;
+  console: AgentTelemetrySlice<unknown>;
+  network: AgentTelemetrySlice<unknown>;
+  navigation: AgentTelemetrySlice<unknown>;
+  frames?: AgentFrameRead[];
+}
+
+export type AgentResult<T> = ({ ok: true } & T) | { ok: false; error: string };
+
+/**
+ * Who is asking. `sessionKey` is the key the renderer files the caller's tabs
+ * under (`workflow_runs.session_id`, or the run id for a run with no session);
+ * the MCP handler resolves it from the run row, never from agent input.
+ */
+export interface AgentCaller {
+  runId: string;
+  sessionKey: string;
+}
+
+export interface WebViewerAgentLike {
+  listTabs(caller: AgentCaller): Promise<AgentResult<{ tabs: AgentWebTab[] }>>;
+  readTab(caller: AgentCaller, args: AgentReadArgs): Promise<AgentResult<AgentReadResult>>;
+  openTab(
+    caller: AgentCaller,
+    args: { url: string; reason?: string; waitForLoad?: boolean },
+  ): Promise<AgentResult<{ tab: AgentWebTab }>>;
 }

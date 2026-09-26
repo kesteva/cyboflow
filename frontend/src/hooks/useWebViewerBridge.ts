@@ -73,6 +73,28 @@ export function useWebViewerBridge(sessionKey: string | null): void {
       },
     );
 
+    // An agent opened a tab in the background: it joins the strip unfocused,
+    // pulsing — it never steals focus from what the human is doing.
+    const agentTabs = trpc.cyboflow.webViewer.onTabOpened.subscribe(
+      { sessionId: sessionKey },
+      {
+        onData: (ev) => {
+          const snap = ev.snapshot;
+          const url = snap.currentUrl;
+          if (url === null) return;
+          useCenterPaneStore.getState().openWebTab(sessionKey, {
+            id: snap.tabId,
+            url,
+            openedBy: 'agent',
+            ...(snap.openedByRunId !== null ? { openedByRunId: snap.openedByRunId } : {}),
+            ...(snap.title ? { label: snap.title } : {}),
+            focus: false,
+          });
+        },
+        onError: (err: unknown) => console.warn('[useWebViewerBridge] onTabOpened error:', err),
+      },
+    );
+
     const chords = trpc.cyboflow.webViewer.onReservedChord.subscribe(
       { sessionId: sessionKey },
       {
@@ -111,6 +133,7 @@ export function useWebViewerBridge(sessionKey: string | null): void {
     return () => {
       cancelled = true;
       consents.unsubscribe();
+      agentTabs.unsubscribe();
       chords.unsubscribe();
       popups.unsubscribe();
       closed.unsubscribe();

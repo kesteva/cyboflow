@@ -19,6 +19,7 @@ const KIND_LABEL: Record<string, string> = {
   consent_denied: 'Access denied',
   consent_timeout: 'Request timed out',
   consent_revoked: 'Access revoked',
+  agent_read: 'Agent read the page',
 };
 
 export function WebAccessModal({

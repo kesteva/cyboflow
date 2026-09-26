@@ -158,6 +158,8 @@ import {
 } from './handlers/workflowConfigHandlers';
 import { GlobalAgentToolHandlers } from './handlers/globalAgentToolHandlers';
 import { VerifyToolHandlers } from './handlers/verifyToolHandlers';
+import { handleWebViewerTool, type WebViewerToolContext } from './handlers/webViewerToolHandlers';
+import { createPrepareProposalDeps } from '../agentThread/prepareProposal';
 export type { McpQueryMessage, McpQueryResponse, McpQueryHandlerDeps, WorkflowConfigLike } from './mcpQueryMessages';
 export { resolveGlobalAgentContext } from './globalAgentContext';
 
@@ -426,6 +428,9 @@ export class McpQueryHandler {
    */
   private readonly verifyTools: VerifyToolHandlers;
 
+  /** The web-viewer observe tools (handlers/webViewerToolHandlers.ts). */
+  private readonly webViewerCtx: WebViewerToolContext;
+
   /**
    * @param db     Orchestrator DB surface.
    * @param logger Optional structured logger. Passed through for connect /
@@ -463,6 +468,11 @@ export class McpQueryHandler {
       resolveProjectPath: (projectId) => this.resolveProjectPath(projectId),
       readExecutionModel: (runId) => this.readExecutionModel(runId),
     });
+    this.webViewerCtx = {
+      db: this.db,
+      deps: this.deps,
+      writeResponse: (client, response) => this.writeResponse(client, response),
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -598,6 +608,12 @@ export class McpQueryHandler {
           // FIRE-AND-CONTINUE: awaits only the snapshot + enqueue (never the jury),
           // then replies with the queued/requeued/in_flight status or a reason code.
           await this.verifyTools.handleRunEval(msg, client);
+          break;
+        case 'mcp-web-tabs':
+        case 'mcp-read-web-tab':
+        case 'mcp-open-web-tab':
+          // AWAITED: a read can block on a consent prompt shown on the tab.
+          await handleWebViewerTool(this.webViewerCtx, msg, client);
           break;
         case 'mcp-list-workflows':
           handleListWorkflows(this.workflowConfigCtx, msg, client);
@@ -1200,54 +1216,6 @@ export class McpQueryHandler {
     return { ok: true, projectId, actor };
   }
 
-  /**
-   * Re-read an entity's identity columns after a chokepoint write so the
-   * response carries the canonical ref / stage / version / type. Table identity
-   * is the discriminator (migration 015), so we try ideas -> epics -> tasks in
-   * turn and return the type of the matching table. Returns undefined only if
-   * the row vanished between commit and read (caller surfaces not_found).
-   */
-  private readTaskIdentity(
-    taskId: string,
-  ): { ref: string; stage_id: string; version: number; type: TaskType } | undefined {
-    const tables: Array<{ table: string; type: TaskType }> = [
-      { table: 'ideas', type: 'idea' },
-      { table: 'epics', type: 'epic' },
-      { table: 'tasks', type: 'task' },
-    ];
-    for (const { table, type } of tables) {
-      const row = this.db
-        .prepare(`SELECT ref, stage_id, version FROM ${table} WHERE id = ?`)
-        .get(taskId) as { ref?: unknown; stage_id?: unknown; version?: unknown } | undefined;
-      if (!row) continue;
-      return {
-        ref: typeof row.ref === 'string' ? row.ref : '',
-        stage_id: typeof row.stage_id === 'string' ? row.stage_id : '',
-        version: typeof row.version === 'number' ? row.version : Number(row.version),
-        type,
-      };
-    }
-    return undefined;
-  }
-
-  /**
-   * Resolve a ref-or-id into the OPAQUE id of an existing entity of `type`
-   * within `projectId`, or null when it does not exist / is the wrong type /
-   * belongs to another project. Used by the global agent's
-   * create-backlog-items propose path to validate + normalize the
-   * parentEpicId / originatingIdeaId links a proposed batch points at
-   * (resolveBacklogRef round-trips an opaque id unchanged, so one call covers
-   * both input forms).
-   */
-  private resolveExistingEntity(projectId: number, refOrId: string, type: TaskType): string | null {
-    const id = resolveBacklogRef(this.db, projectId, refOrId) ?? refOrId;
-    const table = type === 'idea' ? 'ideas' : type === 'epic' ? 'epics' : 'tasks';
-    const row = this.db
-      .prepare(`SELECT 1 FROM ${table} WHERE id = ? AND project_id = ?`)
-      .get(id, projectId);
-    return row !== undefined ? id : null;
-  }
-
   private async handleCreateTask(
     msg: Extract<McpQueryMessage, { type: 'mcp-create-task' }>,
     client: net.Socket,
@@ -1297,7 +1265,7 @@ export class McpQueryHandler {
 
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
-      const identity = this.readTaskIdentity(taskId);
+      const identity = createPrepareProposalDeps(this.db).readTaskIdentity(taskId);
 
       // Content-driven artifact mint: a successful entity create may have just made
       // a templated deliverable non-empty (idea -> idea-spec; epic/task ->
@@ -1367,7 +1335,7 @@ export class McpQueryHandler {
 
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
-      const identity = this.readTaskIdentity(taskId);
+      const identity = createPrepareProposalDeps(this.db).readTaskIdentity(taskId);
 
       // Content-driven artifact mint: an update that filled in the idea body /
       // summary (idea -> idea-spec) or an entity's content (epic/task ->
@@ -1423,7 +1391,7 @@ export class McpQueryHandler {
 
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
-      const identity = this.readTaskIdentity(taskId);
+      const identity = createPrepareProposalDeps(this.db).readTaskIdentity(taskId);
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,

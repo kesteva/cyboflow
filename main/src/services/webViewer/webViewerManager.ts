@@ -45,7 +45,7 @@ import {
 } from './webViewerGuard';
 import { hardenPartition, partitionFor } from './webViewerPartitions';
 import { DEFAULT_CAP_LIMITS, checkOpen, selectEvictions, type CapRecord } from './webViewerCaps';
-import { WebViewerTelemetry } from './webViewerTelemetry';
+import { WebViewerTelemetry, redactUrl } from './webViewerTelemetry';
 
 /** Channel names on the manager's emitter, bridged by the tRPC subscriptions. */
 export const WEB_VIEWER_TAB_STATE = 'web-viewer:tab-state';
@@ -54,6 +54,11 @@ export const WEB_VIEWER_CHORD = 'web-viewer:chord';
 export const WEB_VIEWER_HUMAN_TOUCH = 'web-viewer:human-touch';
 export const WEB_VIEWER_POPUP = 'web-viewer:popup';
 export const WEB_VIEWER_CONTEXT_MENU = 'web-viewer:context-menu';
+/**
+ * A NEW tab (not a restore). The renderer strip learns of agent-opened tabs from
+ * this — it created every other tab itself.
+ */
+export const WEB_VIEWER_TAB_OPENED = 'web-viewer:tab-opened';
 /** A committed main-frame navigation: consent rebinds or drops grants on it. */
 export const WEB_VIEWER_NAVIGATED = 'web-viewer:navigated';
 
@@ -65,6 +70,25 @@ export interface WebViewerNavigatedEvent {
   principal: string | null;
   /** Same-document change (pushState / hash). */
   inPage: boolean;
+}
+
+/**
+ * One frame of a tab, as the agent read path sees it: identity plus a way to run
+ * a READ-ONLY script in it. Electron's `WebFrameMain` never crosses this seam.
+ */
+export interface WebFrameTarget {
+  /** Stable for the frame's current document (`processId:routingId`). */
+  frameToken: string;
+  isTop: boolean;
+  /** Redacted frame URL. */
+  url: string | null;
+  /**
+   * The frame's security principal: its origin, or `opaque:<frameToken>` for a
+   * sandboxed/opaque document — so every sandboxed frame in the app does not
+   * collapse into one "null" identity.
+   */
+  principal: string;
+  execute(code: string): Promise<unknown>;
 }
 
 /** What the consent layer needs to know about a tab, resolved at the moment of use. */
@@ -223,7 +247,9 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     }
 
     this.publish(record);
-    return { ok: true, snapshot: this.snapshot(record) };
+    const snapshot = this.snapshot(record);
+    if (!restore) this.emit(WEB_VIEWER_TAB_OPENED, { sessionId: record.sessionId, snapshot });
+    return { ok: true, snapshot };
   }
 
   async navigate(tabId: string, url: string): Promise<WebViewerAck> {
@@ -390,6 +416,65 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   noteAgentRead(tabId: string): void {
     const record = this.tabs.get(tabId);
     if (record) record.lastAgentReadAt = this.now();
+  }
+
+  /**
+   * Make sure a tab has a live, LOADED view for an agent read — without showing
+   * it. An evicted tab is re-navigated to its committed URL (not a focus change,
+   * so it never steals focus) and this waits for the load to stop, bounded.
+   * Returns the tab's state afterwards; the caller maps non-live states to errors.
+   */
+  async loadForAgent(tabId: string, timeoutMs = 15_000): Promise<WebTabState | null> {
+    const record = this.tabs.get(tabId);
+    if (!record) return null;
+    if (record.state === 'crashed' || record.state === 'auth_required' || record.state === 'certificate_error') {
+      return record.state;
+    }
+    const wc = this.ensureLoaded(record);
+    if (!wc) return record.state;
+    if (record.loading || wc.isLoading()) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(done, timeoutMs);
+        function done(): void {
+          clearTimeout(timer);
+          wc?.removeListener('did-stop-loading', done);
+          resolve();
+        }
+        wc.once('did-stop-loading', done);
+      });
+    }
+    return record.state;
+  }
+
+  /**
+   * The tab's frames for a script read: the top frame only, or every frame in
+   * the tree (out-of-process iframes included — `framesInSubtree` is what makes
+   * an artifact iframe readable at all). Empty when the tab has no live view.
+   */
+  frameTargets(tabId: string, which: 'top' | 'all'): WebFrameTarget[] {
+    const wc = this.tabs.get(tabId)?.view?.webContents;
+    if (!wc || wc.isDestroyed()) return [];
+    const top = wc.mainFrame;
+    const frames = which === 'top' ? [top] : top.framesInSubtree;
+    const out: WebFrameTarget[] = [];
+    for (const frame of frames) {
+      try {
+        const frameToken = `${frame.processId}:${frame.routingId}`;
+        const origin = frame.origin;
+        out.push({
+          frameToken,
+          isTop: frame === top,
+          url: redactUrl(frame.url),
+          principal: origin && origin !== 'null' ? origin : `opaque:${frameToken}`,
+          // Never with a user gesture: a read must not unlock popups, clipboard
+          // or fullscreen for the page.
+          execute: (code) => frame.executeJavaScript(code, false),
+        });
+      } catch {
+        // The frame was detached between enumeration and read — skip it.
+      }
+    }
+    return out;
   }
 
   /** The tab as the consent layer sees it, resolved now. Null for an unknown tab. */

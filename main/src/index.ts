@@ -2450,6 +2450,8 @@ async function initializeServices(): Promise<boolean> {
       // cyboflow_create_sprint_batch backstop must honor the CURRENT setting, not
       // one frozen at launch.
       getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+      // Web-viewer observe tools; consent lives behind the seam (webViewerComposition.ts).
+      webViewerAgent: webViewerComposition?.webViewerAgent,
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
