@@ -60,6 +60,11 @@ import {
   type AppleCliExec,
   type AppleCliExecResult,
 } from '../../orchestrator/verify/mobileSimulatorSession';
+import {
+  degradeReasonForProbe,
+  type XcodeApprovalState,
+  type XcodeDeviceInteractionOutcome,
+} from '../../orchestrator/verify/xcode/driveEngineSelection';
 import { parseXcodeVersion, SIMCTL_FIRST_LAUNCH_HINT } from './xcodeToolchainBackend';
 
 /** The preflight / health-panel row id (§B2). */
@@ -80,12 +85,11 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_CEILING_MS = 20 * 60_000;
 const DEFAULT_EXPIRY_MARGIN_MS = 5 * 60_000;
 
-export type XcodeDeviceInteractionOutcome =
-  | 'available'
-  | 'approval-required'
-  | 'expiring'
-  | 'inconclusive'
-  | 'unavailable';
+// The outcome / approval vocabulary and the degrade mapping live in the
+// standalone orchestrator tree (the runner reads them and may not import this
+// file); re-exported here so the probe's own callers keep one import site.
+export type { XcodeApprovalState, XcodeDeviceInteractionOutcome };
+export { degradeReasonForProbe };
 
 export type XcodeMcpCheckId = 'mcpbridge' | 'xcode-version' | 'ios-runtime' | 'headless-enabled' | 'approval';
 
@@ -99,18 +103,6 @@ export interface XcodeMcpCheck {
   /** What the user can do, or `null` when nothing (or nothing needed). Shown, never run. */
   remedy: string | null;
 }
-
-/** The approval answer behind the `approval` check. */
-export type XcodeApprovalState =
-  | 'approved'
-  /** Approved now, but the grant ends before a request could finish. */
-  | 'expiring'
-  | 'expired'
-  /** A grant names our path but a different sha256 — the binary changed since approval. */
-  | 'binary-changed'
-  | 'missing'
-  /** Could not tell: an unrecognised trust shape, an unreadable binary, or no status at all. */
-  | 'unknown';
 
 /** The grant that decided an approved/expiring/expired answer. */
 export interface XcodeMcpGrant {
@@ -169,27 +161,6 @@ export function parseXcodeMajor(stdout: string): number | null {
   if (version === null) return null;
   const major = Number.parseInt(version.split('.')[0] as string, 10);
   return Number.isInteger(major) ? major : null;
-}
-
-/**
- * The degrade reason the runner records (§B3) when this probe steers it off
- * xcode, or `null` when the probe does not (available / inconclusive: under
- * `auto` both still attempt xcode, and StartSession decides).
- */
-export function degradeReasonForProbe(
-  result: Pick<XcodeDeviceInteractionProbeResult, 'outcome' | 'approval'>,
-): 'xcode-approval-missing' | 'xcode-approval-expired' | 'xcode-unavailable' | null {
-  switch (result.outcome) {
-    case 'unavailable':
-      return 'xcode-unavailable';
-    case 'expiring':
-      return 'xcode-approval-expired';
-    case 'approval-required':
-      return result.approval === 'expired' ? 'xcode-approval-expired' : 'xcode-approval-missing';
-    case 'available':
-    case 'inconclusive':
-      return null;
-  }
 }
 
 function errorText(err: unknown): string {
