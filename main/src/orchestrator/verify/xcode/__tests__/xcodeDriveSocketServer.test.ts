@@ -88,7 +88,8 @@ function rawExchange(socketPath: string, payload: string): Promise<string[]> {
 
 const OK: DriveResponse = { ok: true, exit: 0, applicationState: 'Running' };
 
-describe('createDriveSocket — path and modes', () => {
+// Unix-domain sockets + POSIX modes — the drive socket is macOS-only (Xcode).
+describe.skipIf(process.platform === 'win32')('createDriveSocket — path and modes', () => {
   it('binds <dataDir>/sockets/xd-<16hex>.sock in a 0700 dir, socket 0600', async () => {
     const { socket } = await start(() => OK);
     expect(socket.socketPath).toMatch(new RegExp(`^${root}/data/sockets/xd-[0-9a-f]{16}\\.sock$`));
@@ -151,7 +152,7 @@ describe('createDriveSocket — path and modes', () => {
   });
 });
 
-describe('frames', () => {
+describe.skipIf(process.platform === 'win32')('frames', () => {
   it('round-trips an authenticated frame and hands the handler verb + args, never the token', async () => {
     const seen: DriveRequest[] = [];
     const { socket, token } = await start((request) => {
@@ -279,7 +280,7 @@ describe('frames', () => {
   });
 });
 
-describe('close', () => {
+describe.skipIf(process.platform === 'win32')('close', () => {
   it('unlinks the socket; later frames fail to connect', async () => {
     const { socket, token } = await start(() => OK);
     await socket.close();
@@ -308,7 +309,7 @@ describe('close', () => {
   });
 });
 
-describe('sendDriveFrame', () => {
+describe.skipIf(process.platform === 'win32')('sendDriveFrame', () => {
   it('times out a verb that never answers', async () => {
     const { socket, token } = await start(() => new Promise<DriveResponse>(() => {}));
     const error = await sendDriveFrame(socket.socketPath, token, 'slow', {}, 50).catch((err: unknown) => err);
@@ -349,7 +350,7 @@ describe('sendDriveFrame', () => {
   });
 });
 
-describe('sweepStaleDriveSockets', () => {
+describe.skipIf(process.platform === 'win32')('sweepStaleDriveSockets', () => {
   it('removes a dead xd-* socket, keeps a live one, ignores other files', async () => {
     const dataDir = path.join(root, 'data');
     const live = await start(() => OK, { dataDir });
