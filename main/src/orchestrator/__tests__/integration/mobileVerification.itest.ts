@@ -68,11 +68,13 @@ import {
   type VerificationAgentQueryOutcome,
   type VerificationAgentRequest,
   type VerificationAgentRunnerDeps,
+  type VerificationAgentRunnerMobileDeps,
   type VerificationAgentRunResult,
 } from '../../verify/verificationAgentRunner';
 import { classifyVerificationFailure } from '../../verify/failureClassifier';
 import { mobileToolchainDetail } from '../../verify/mobileGates';
 import {
+  MOBILE_EXIT_APP_EXITED,
   MOBILE_EXIT_OK,
   MOBILE_EXIT_REFUSED,
   MOBILE_EXIT_READINESS_TIMEOUT,
@@ -222,7 +224,16 @@ interface World {
   driverCliPath: string;
 }
 
-function makeWorld(opts: { maestro: boolean; failBoot?: boolean; blankFrames?: boolean }): World {
+/** The fake bridge's modes (fixtures/fakeAppleToolchain/fakeMcpbridge.mjs). */
+type BridgeMode = 'ok' | 'approval-refused' | 'device-mismatch' | 'pid-change' | 'block-missing' | 'bridge-killed';
+
+function makeWorld(opts: {
+  maestro: boolean;
+  failBoot?: boolean;
+  blankFrames?: boolean;
+  /** Stage 3: offer an iOS 27 runtime and run the fake bridge in this mode. */
+  xcode?: BridgeMode;
+}): World {
   const root = mkdtempSync(join(tmpdir(), 'cyboflow-mobile-itest-'));
   const world: World = {
     root,
@@ -259,6 +270,10 @@ function makeWorld(opts: { maestro: boolean; failBoot?: boolean; blankFrames?: b
   writeFileSync(join(world.stateDir, 'frame.png'), opts.blankFrames ? BLANK_FRAME : PAINTED_FRAME);
   writeFileSync(join(world.stateDir, 'bundle-id'), BUNDLE_ID);
   if (opts.failBoot) writeFileSync(join(world.stateDir, 'fail-boot'), '');
+  if (opts.xcode !== undefined) {
+    writeFileSync(join(world.stateDir, 'ios27'), '');
+    writeFileSync(join(world.stateDir, 'mcpbridge-mode'), opts.xcode);
+  }
   return world;
 }
 
@@ -325,6 +340,9 @@ function composeStack(world: World): {
     // Pin the composition's own Maestro answer at the fixture copy so its probe
     // never spawns a real Maestro JVM on a host that happens to have one.
     env: { VERIFY_MAESTRO_BIN: join(FIXTURE_DIR, 'maestro') },
+    // Any bridge the composition spawns (the sweep's EndSession) goes to the
+    // fake — NEVER the host's real `/usr/bin/xcrun mcpbridge`.
+    xcrunPath: join(world.binDir, 'xcrun'),
     logger,
   });
   const session = composition.session;
@@ -488,7 +506,12 @@ interface Harness {
   composition: ReturnType<typeof composeMobileVerification>;
 }
 
-function makeHarness(world: World, script: AgentScript, readyTimeoutMs: number): Harness {
+function makeHarness(
+  world: World,
+  script: AgentScript,
+  readyTimeoutMs: number,
+  mobileExtra: Partial<VerificationAgentRunnerMobileDeps> = {},
+): Harness {
   const { session, composition, toolchain } = composeStack(world);
   const seen: { env: Record<string, string> | null; calls: number } = { env: null, calls: 0 };
   const snapshotDispose = vi.fn(async () => {});
@@ -522,6 +545,7 @@ function makeHarness(world: World, script: AgentScript, readyTimeoutMs: number):
       dataDir: world.dataDir,
       bootTimeoutMs: 10_000,
       readyTimeoutMs,
+      ...mobileExtra,
     },
   };
   const runner = new VerificationAgentRunner(deps);
@@ -568,10 +592,12 @@ describe.skipIf(process.platform === 'win32')('mobile verification over a fake A
   let world: World | null = null;
   let savedPath: string | undefined;
   let savedState: string | undefined;
+  let savedBridge: { node: string | undefined; js: string | undefined } = { node: undefined, js: undefined };
 
   beforeEach(() => {
     savedPath = process.env.PATH;
     savedState = process.env.FAKE_APPLE_STATE;
+    savedBridge = { node: process.env.FAKE_NODE, js: process.env.FAKE_MCPBRIDGE_JS };
     logger.info.mockClear();
     logger.warn.mockClear();
     logger.error.mockClear();
@@ -596,6 +622,10 @@ describe.skipIf(process.platform === 'win32')('mobile verification over a fake A
     else process.env.PATH = savedPath;
     if (savedState === undefined) delete process.env.FAKE_APPLE_STATE;
     else process.env.FAKE_APPLE_STATE = savedState;
+    if (savedBridge.node === undefined) delete process.env.FAKE_NODE;
+    else process.env.FAKE_NODE = savedBridge.node;
+    if (savedBridge.js === undefined) delete process.env.FAKE_MCPBRIDGE_JS;
+    else process.env.FAKE_MCPBRIDGE_JS = savedBridge.js;
   });
 
   /** Install the world's fake toolchain in front of the real one. */
@@ -603,6 +633,9 @@ describe.skipIf(process.platform === 'win32')('mobile verification over a fake A
     world = w;
     process.env.PATH = `${w.binDir}${delimiter}${savedPath ?? ''}`;
     process.env.FAKE_APPLE_STATE = w.stateDir;
+    // The `xcrun mcpbridge` arm execs the fake bridge under THIS node.
+    process.env.FAKE_NODE = process.execPath;
+    process.env.FAKE_MCPBRIDGE_JS = join(FIXTURE_DIR, 'fakeMcpbridge.mjs');
     return w;
   }
 
@@ -939,6 +972,190 @@ describe.skipIf(process.platform === 'win32')('mobile verification over a fake A
     // The live owner's are untouched — this process is still holding them.
     expect(existsSync(join(w.stateDir, 'devices', liveUdid))).toBe(true);
     expect(existsSync(join(w.dataDir, VERIFY_MOBILE_DIRNAME, 'live', 'owner.json'))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Stage 3 — the Xcode DeviceInteraction rung over the fake `xcrun mcpbridge`
+  // (runbook-optional-verification.md §B7)
+  // -------------------------------------------------------------------------
+
+  /** The runner's xcode deps: a probe that says go, and the fake xcrun as the resolved one. */
+  function xcodeDeps(w: World): Partial<VerificationAgentRunnerMobileDeps> {
+    return {
+      driveEngine: () => 'auto',
+      xcode: {
+        probe: async () => ({ outcome: 'available', approval: 'approved', detail: 'the fake host is approved' }),
+        xcrunPath: join(w.binDir, 'xcrun'),
+      },
+    };
+  }
+
+  /** Every tools/call the fake bridge saw, in order. */
+  function bridgeCalls(w: World): Array<{ name: string; args: Record<string, unknown> }> {
+    const file = join(w.stateDir, 'mcpbridge-calls');
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { name: string; args: Record<string, unknown> });
+  }
+
+  /** The standard xcode-rung agent: build, install, launch, capture, tap. */
+  function xcodeAgent(observed: Record<string, DriverRun>): AgentScript {
+    return async (ctx) => {
+      await ctx.build();
+      observed.install = await ctx.driver(['mobile-install']);
+      observed.launch = await ctx.driver(['mobile-launch']);
+      observed.capture = await ctx.driver(['mobile-capture', 'home']);
+      observed.tap = await ctx.driver(['mobile-tap', 'Settings']);
+      return report(
+        [
+          { id: 'b1', result: 'pass', evidence: { screenshots: ['home.png'], notes: 'content rendered' } },
+          { id: 'b2', result: 'pass', evidence: { screenshots: ['home.png'], notes: 'settings opened' } },
+        ],
+        [{ fileName: 'home.png', caption: 'the home screen' }],
+      );
+    };
+  }
+
+  it('(x-ok) drives through Xcode: pinned launch, ledger-backed pass, EndSession before the device goes', async () => {
+    const w = activate(makeWorld({ maestro: true, xcode: 'ok' }));
+    const observed: Record<string, DriverRun> = {};
+    const harness = makeHarness(w, xcodeAgent(observed), 8_000, xcodeDeps(w));
+
+    const result = await harness.run();
+
+    expect(observed.launch.code).toBe(MOBILE_EXIT_OK);
+    expect(observed.capture.code).toBe(MOBILE_EXIT_OK);
+    expect(observed.capture.stdout).toContain('screenshot: home.png');
+    expect(observed.tap.code).toBe(MOBILE_EXIT_OK);
+
+    const env = harness.seen.env as Record<string, string>;
+    expect(env.VERIFY_MOBILE_DRIVE).toBe('xcode');
+    expect(env.VERIFY_SIM_RUNTIME).toBe('iOS 27.0');
+    expect(env.VERIFY_MAESTRO_BIN).toBeUndefined();
+
+    expect(result.status).toBe('passed');
+    // xcode does NOT coerce the drive-required claim.
+    expect(result.report?.behaviors.find((b) => b.id === 'b2')?.result).toBe('pass');
+    expect(result.report?.provenance).toMatchObject({ driveEngineRequested: 'auto', driveEngineUsed: 'xcode' });
+    const ledger = result.report?.provenance?.captureLedger;
+    expect(ledger?.entries[0]).toMatchObject({ kind: 'launch' });
+    expect(ledger?.entries.some((e) => e.kind === 'capture' && e.name === 'home.png' && e.foregroundBundleId === BUNDLE_ID)).toBe(
+      true,
+    );
+
+    const calls = bridgeCalls(w);
+    const start = calls[0];
+    expect(start?.name).toBe('DeviceInteractionStartSession');
+    expect(start?.args.deviceIdentifier).toBe(env.VERIFY_SIM_UDID);
+    // The tap resolved "Settings" against the fresh hierarchy's hitPoint.
+    expect(calls.some((c) => c.name === 'DeviceInteractionSynthesize' && c.args.interactionCommand === 't 201 406.3')).toBe(true);
+    expect(calls[calls.length - 1]?.name).toBe('DeviceInteractionEndSession');
+    expect(calls[calls.length - 1]?.args.interactionSessionKey).toBe(start?.args.sessionIdentifier);
+    // Teardown: device gone, request dir gone, socket gone.
+    expect(deviceDirs(w)).toEqual([]);
+    expect(existsSync(requestDir(w))).toBe(false);
+    expect(existsSync(env.VERIFY_XCODE_DRIVE_SOCKET)).toBe(false);
+  });
+
+  it('(x-approval-refused) degrades to Maestro, records why, and still verifies', async () => {
+    const w = activate(makeWorld({ maestro: true, xcode: 'approval-refused' }));
+    const observed: Record<string, DriverRun> = {};
+    const harness = makeHarness(
+      w,
+      async (ctx) => {
+        await ctx.build();
+        observed.install = await ctx.driver(['mobile-install']);
+        observed.launch = await ctx.driver(['mobile-launch']);
+        observed.shot = await ctx.driver(['mobile-screenshot', 'home']);
+        return report(
+          [{ id: 'b1', result: 'pass', evidence: { screenshots: ['home.png'], notes: 'content rendered' } }, { id: 'b2', result: 'not_testable', evidence: { screenshots: [], notes: 'not driven' } }],
+          [{ fileName: 'home.png', caption: 'the home screen' }],
+        );
+      },
+      8_000,
+      xcodeDeps(w),
+    );
+    const result = await harness.run();
+    const env = harness.seen.env as Record<string, string>;
+    expect(env.VERIFY_MOBILE_DRIVE).toBe('maestro');
+    expect(env.VERIFY_XCODE_DRIVE_SOCKET).toBeUndefined();
+    expect(result.report?.provenance).toMatchObject({ driveEngineUsed: 'maestro', degradeReason: 'xcode-approval-missing' });
+    expect(result.deployed).toBe(true);
+  });
+
+  it('(x-device-mismatch) ends the wrongly-bound session and degrades without driving it', async () => {
+    const w = activate(makeWorld({ maestro: false, xcode: 'device-mismatch' }));
+    const harness = makeHarness(
+      w,
+      async () => report([{ id: 'b1', result: 'not_testable', evidence: { screenshots: [], notes: 'n/a' } }, { id: 'b2', result: 'not_testable', evidence: { screenshots: [], notes: 'n/a' } }], []),
+      8_000,
+      xcodeDeps(w),
+    );
+    const result = await harness.run();
+    expect((harness.seen.env as Record<string, string>).VERIFY_MOBILE_DRIVE).toBe('none');
+    expect(result.report?.provenance).toMatchObject({ driveEngineUsed: 'none', degradeReason: 'xcode-session-failed' });
+    expect(bridgeCalls(w).map((c) => c.name)).toEqual(['DeviceInteractionStartSession', 'DeviceInteractionEndSession']);
+  });
+
+  it.each([['pid-change'], ['block-missing']] as const)(
+    '(x-%s) a capture after the pinned launch exits 4 (app-exited)',
+    async (mode) => {
+      const w = activate(makeWorld({ maestro: false, xcode: mode }));
+      const observed: Record<string, DriverRun> = {};
+      const harness = makeHarness(w, xcodeAgent(observed), 8_000, xcodeDeps(w));
+      await harness.run();
+      expect(observed.launch.code).toBe(MOBILE_EXIT_OK);
+      expect(observed.capture.code).toBe(MOBILE_EXIT_APP_EXITED);
+      expect(observed.capture.stderr).toMatch(/^app-exited pid=\d+ state=/m);
+      expect(bridgeCalls(w).at(-1)?.name).toBe('DeviceInteractionEndSession');
+    },
+  );
+
+  it('(x-bridge-killed) a bridge that dies mid-run is exit 2 for the verb, and teardown still completes', async () => {
+    const w = activate(makeWorld({ maestro: false, xcode: 'bridge-killed' }));
+    const observed: Record<string, DriverRun> = {};
+    const harness = makeHarness(w, xcodeAgent(observed), 8_000, xcodeDeps(w));
+    const result = await harness.run();
+    expect(observed.capture.code).toBe(MOBILE_EXIT_REFUSED);
+    expect(result.report?.provenance?.driveEngineUsed).toBe('xcode');
+    expect(deviceDirs(w)).toEqual([]);
+    expect(existsSync(requestDir(w))).toBe(false);
+  });
+
+  it('the boot sweep ends a dead owner’s Xcode session (through the fake bridge) before deleting its device', async () => {
+    const w = activate(makeWorld({ maestro: true, xcode: 'ok' }));
+    const { composition } = composeStack(w);
+    const exec = createHostAppleCliExec();
+    const created = await exec('xcrun', [
+      'simctl',
+      'create',
+      'cyboflow-verify-orphan',
+      'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+      'com.apple.CoreSimulator.SimRuntime.iOS-26-2',
+    ]);
+    const udid = created.stdout.trim();
+    const dir = join(w.dataDir, VERIFY_MOBILE_DIRNAME, 'orphan');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'owner.json'),
+      JSON.stringify({
+        pid: await deadPid(),
+        pidStartedAt: '',
+        simName: 'cyboflow-verify-orphan',
+        simUdid: udid,
+        requestId: 'orphan',
+        createdAt: new Date().toISOString(),
+        xcodeSessionKey: 'Cyboflow Verify orphaned',
+      }),
+    );
+    await composition.sweepAtBoot();
+    expect(bridgeCalls(w)).toEqual([
+      { name: 'DeviceInteractionEndSession', args: { interactionSessionKey: 'Cyboflow Verify orphaned' } },
+    ]);
+    expect(existsSync(join(w.stateDir, 'devices', udid))).toBe(false);
   });
 });
 
