@@ -285,7 +285,6 @@ export class VerificationScheduler {
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
     this.runbookStatus =
       deps.runbookStatus ??
-      // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
       (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
     this.staleProofFinding = deps.staleProofFinding;
@@ -329,6 +328,7 @@ export class VerificationScheduler {
       mobileToolchainProbe: deps.mobileToolchainProbe,
       runbookStatus: this.runbookStatus,
       runbookStore: this.runbookStore,
+      learningFinding: deps.runbookLearningFinding,
       delivery: this.delivery,
       inFlight: this.inFlight,
       agentGateColumnsForRow: (id) => this.agentGateColumnsForRow(id),

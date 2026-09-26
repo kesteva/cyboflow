@@ -31,6 +31,7 @@ import {
   createVerdictDelivery,
   createCapabilityBreakerFinding,
   createExploreStaleProofFinding,
+  createRunbookLearningFinding,
 } from '../verify/verdictDelivery';
 import {
   VERIFY_NO_RUNBOOK_REASON,
@@ -1829,6 +1830,33 @@ describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () =>
     expect(findings[0].audience).toBe('human');
     const { body } = db.prepare(`SELECT body FROM review_items WHERE id = ?`).get(findings[0].id) as { body: string };
     expect(body).toContain('the recorded proof is stale');
+  });
+
+  it('§A5 runbook learning: files ONE non-blocking finding per dedupeKey at the given severity', async () => {
+    seedRun(db, 'run-learn', 'tsk_1');
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_1', 1, 'TASK-100', 'T', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const file = createRunbookLearningFinding({ db: dbAdapter(db) });
+    const finding = {
+      projectId: 1,
+      runId: 'run-learn',
+      modality: 'web' as const,
+      title: 'Verification recipe learned for web (unproven)',
+      body: 'pnpm run build\npnpm run preview --port ${PORT} — from request vr_1',
+      dedupeKey: 'visual-verify:runbook-learned:1:web:abc',
+      severity: 'info' as const,
+    };
+    await file(finding);
+    await file(finding);
+
+    const findings = findingRows(db, 'run-learn');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ source: finding.dedupeKey, blocking: 0, audience: 'human', severity: 'info' });
+    expect(findings[0].entity_id).toBe('tsk_1');
+    const { body } = db.prepare(`SELECT body FROM review_items WHERE id = ?`).get(findings[0].id) as { body: string };
+    expect(body).toContain('vr_1');
   });
 
   it('is FAIL-SOFT: a router failure never throws back into the settled verdict path', async () => {

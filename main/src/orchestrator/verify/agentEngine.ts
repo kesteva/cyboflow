@@ -52,6 +52,7 @@ import { isBindableLeverName } from './runbookLevers';
 import { probeProjectSurface, tagInferredApp } from './projectSurfaceProbe';
 import type { VerificationRequestRow } from './verificationRequestRows';
 import type { TerminalDelivery } from './terminalDelivery';
+import { learnFromExploreSuccess, type RunbookLearningFindingFn } from './learnedRunbook';
 
 /** The §3.2 runbook-status resolver the scheduler is composed with (VerificationSchedulerDeps.runbookStatus). */
 export type RunbookStatusResolver = (
@@ -183,6 +184,12 @@ export interface AgentEngineDeps {
   mobileToolchainProbe?: () => Promise<boolean>;
   runbookStatus: RunbookStatusResolver;
   runbookStore?: VerifyRunbookStore;
+  /**
+   * §A5 — files the non-blocking "recipe learned" / "learned recipe promoted" /
+   * "suggested runbook entry" notices (verdictDelivery's
+   * `createRunbookLearningFinding`). Absent ⇒ learning still happens, silently.
+   */
+  learningFinding?: RunbookLearningFindingFn;
   /** The terminal-write + delivery chokepoint every exit of the engine goes through. */
   delivery: TerminalDelivery;
   /** The scheduler's in-flight AbortController registry, SHARED BY REFERENCE (cancelForRun reaches in). */
@@ -232,6 +239,7 @@ export class AgentEngine {
   private readonly mobileToolchainProbe?: () => Promise<boolean>;
   private readonly runbookStatus: RunbookStatusResolver;
   private readonly runbookStore?: VerifyRunbookStore;
+  private readonly learningFinding?: RunbookLearningFindingFn;
   private readonly delivery: TerminalDelivery;
   private readonly inFlight: Map<string, AbortController>;
   private readonly agentGateColumnsForRow: AgentEngineDeps['agentGateColumnsForRow'];
@@ -260,6 +268,7 @@ export class AgentEngine {
     this.mobileToolchainProbe = deps.mobileToolchainProbe;
     this.runbookStatus = deps.runbookStatus;
     this.runbookStore = deps.runbookStore;
+    this.learningFinding = deps.learningFinding;
     this.delivery = deps.delivery;
     this.inFlight = deps.inFlight;
     this.agentGateColumnsForRow = deps.agentGateColumnsForRow;
@@ -1332,7 +1341,45 @@ export class AgentEngine {
       evidenceDetail,
       this.capabilityRunbookKey(row.id),
     );
+
+    // §A5 LEARN FROM SUCCESS — after the verdict is written, never before it,
+    // and never able to change it. Only a terminal `passed` EXPLORE request
+    // learns (the floor verified the surface and the snapshot is unmutated —
+    // either would have capped it); never low_confidence, unverifiable,
+    // wrong_environment or fail, never pinned or legacy. The runner validated
+    // the recipe (`learnedRecipe`); the kill switch is re-read LIVE so a flip
+    // mid-run stops learning at once.
+    if (
+      mode === 'explore' &&
+      status === 'passed' &&
+      snapshotSha !== null &&
+      result.learnedRecipe?.ok === true &&
+      !requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)
+    ) {
+      await this.learnFromSuccess(row, modality, result.learnedRecipe);
+    }
     return 'settled';
+  }
+
+  /** §A5 — hand a validated explore recipe to {@link learnFromExploreSuccess} (fail-soft). */
+  private async learnFromSuccess(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    recipe: Extract<NonNullable<VerificationAgentRunResult['learnedRecipe']>, { ok: true }>,
+  ): Promise<void> {
+    if (!this.runbookStore) return;
+    const worktreePath = this.worktreePathForRun(row.run_id);
+    await learnFromExploreSuccess({
+      store: this.runbookStore,
+      status: this.runbookStatus,
+      worktreePath,
+      probePath: worktreePath ?? this.projectPathFor(row.project_id),
+      row,
+      modality,
+      recipe: { entry: recipe.entry, ...(recipe.levers !== undefined ? { levers: recipe.levers } : {}) },
+      ...(this.learningFinding ? { finding: this.learningFinding } : {}),
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
   }
 
   /**
