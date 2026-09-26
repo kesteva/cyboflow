@@ -54,7 +54,9 @@ export type WebEventKind =
   | 'consent_timeout'
   | 'consent_revoked'
   /** An agent read a consent-gated tab (free reads of its own tabs are not audited). */
-  | 'agent_read';
+  | 'agent_read'
+  /** An agent drove a tab — the verb, never a URL, selector or typed value. */
+  | 'agent_drive';
 
 export interface WebEventInput {
   sessionId: string;

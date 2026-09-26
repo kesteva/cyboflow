@@ -133,6 +133,7 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_design_ack_feedback',
   'cyboflow_design_get_idea',
   'cyboflow_design_update_draft',
+  'cyboflow_drive_web_tab',
   'cyboflow_entity',
   'cyboflow_fs_grep',
   'cyboflow_fs_list',

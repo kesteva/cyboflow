@@ -20,6 +20,7 @@ const KIND_LABEL: Record<string, string> = {
   consent_timeout: 'Request timed out',
   consent_revoked: 'Access revoked',
   agent_read: 'Agent read the page',
+  agent_drive: 'Agent acted on the page',
 };
 
 export function WebAccessModal({

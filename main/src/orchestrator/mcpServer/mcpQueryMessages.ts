@@ -475,6 +475,23 @@ export type McpQueryMessage =
       reason?: string;
       waitForLoad?: boolean;
     }
+  | {
+      /**
+       * One drive verb on a tab. BLOCKS on a `drive` consent prompt unless the
+       * tab is the caller's own and untouched. Needs the agentDrive flag.
+       */
+      type: 'mcp-drive-web-tab';
+      requestId: string;
+      runId: string;
+      tabId: string;
+      action: 'navigate' | 'back' | 'forward' | 'reload' | 'click' | 'type' | 'eval';
+      url?: string;
+      selector?: string;
+      text?: string;
+      expression?: string;
+      frame?: string;
+      reason?: string;
+    }
   // -------------------------------------------------------------------------
   // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
   //
@@ -1075,7 +1092,7 @@ export interface McpQueryHandlerDeps {
 
   /**
    * The web viewer's agent surface (cyboflow_web_tabs / _read_web_tab /
-   * _open_web_tab), wired from webViewerComposition.ts. A structural seam: the
+   * _open_web_tab / _drive_web_tab), wired from webViewerComposition.ts. A structural seam: the
    * service imports electron. Absent ⇒ every web tool replies 'viewer_unavailable'.
    */
   webViewerAgent?: WebViewerAgentLike;

@@ -205,6 +205,32 @@ export interface AgentCaller {
   sessionKey: string;
 }
 
+export type AgentDriveAction = 'navigate' | 'back' | 'forward' | 'reload' | 'click' | 'type' | 'eval';
+
+export interface AgentDriveArgs {
+  tabId: string;
+  action: AgentDriveAction;
+  /** navigate */
+  url?: string;
+  /** click / type — a CSS selector, resolved in the target frame. */
+  selector?: string;
+  /** type — REPLACES the field's value. */
+  text?: string;
+  /** eval — a JS expression (await allowed), run in the target frame. */
+  expression?: string;
+  /** click / type / eval — a frame token from a read; default the top frame. */
+  frame?: string;
+  reason?: string;
+}
+
+export interface AgentDriveResult {
+  tab: AgentWebTab;
+  /** eval's JSON-serializable result (null for undefined). */
+  value?: unknown;
+  /** The result was cut to fit; `value` is then a string prefix of its JSON. */
+  truncated?: boolean;
+}
+
 export interface WebViewerAgentLike {
   listTabs(caller: AgentCaller): Promise<AgentResult<{ tabs: AgentWebTab[] }>>;
   readTab(caller: AgentCaller, args: AgentReadArgs): Promise<AgentResult<AgentReadResult>>;
@@ -212,4 +238,5 @@ export interface WebViewerAgentLike {
     caller: AgentCaller,
     args: { url: string; reason?: string; waitForLoad?: boolean },
   ): Promise<AgentResult<{ tab: AgentWebTab }>>;
+  driveTab(caller: AgentCaller, args: AgentDriveArgs): Promise<AgentResult<AgentDriveResult>>;
 }

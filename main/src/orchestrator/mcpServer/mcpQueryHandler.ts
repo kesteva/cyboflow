@@ -612,7 +612,7 @@ export class McpQueryHandler {
         case 'mcp-web-tabs':
         case 'mcp-read-web-tab':
         case 'mcp-open-web-tab':
-          // AWAITED: a read can block on a consent prompt shown on the tab.
+        case 'mcp-drive-web-tab': // AWAITED: read/drive can block on a consent prompt on the tab.
           await handleWebViewerTool(this.webViewerCtx, msg, client);
           break;
         case 'mcp-list-workflows':

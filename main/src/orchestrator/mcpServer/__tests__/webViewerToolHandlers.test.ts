@@ -48,6 +48,10 @@ function makeAgent(): WebViewerAgentLike & { calls: unknown[] } {
         },
       };
     }),
+    driveTab: vi.fn(async (caller, args) => {
+      calls.push(['drive', caller, args]);
+      return { ok: false as const, error: 'origin_changed' };
+    }),
   };
 }
 
@@ -87,6 +91,22 @@ describe('resolveWebCaller', () => {
 });
 
 describe('handleWebViewerTool', () => {
+  it('passes every drive field through to the seam', async () => {
+    const agent = makeAgent();
+    const { ctx, writes } = makeCtx(agent);
+    await handleWebViewerTool(
+      ctx,
+      { type: 'mcp-drive-web-tab', requestId: 'd1', runId: 'run-a', tabId: 'web:1', action: 'type', selector: '#q', text: 'hi', frame: '2:7' },
+      client,
+    );
+    expect(agent.calls[0]).toEqual([
+      'drive',
+      { runId: 'run-a', sessionKey: 'sess-1' },
+      { tabId: 'web:1', action: 'type', url: undefined, selector: '#q', text: 'hi', expression: undefined, frame: '2:7', reason: undefined },
+    ]);
+    expect(writes[0]).toMatchObject({ ok: false, error: 'origin_changed' });
+  });
+
   it('replies viewer_unavailable when no seam is wired', async () => {
     const { ctx, writes } = makeCtx(undefined);
     await handleWebViewerTool(ctx, { type: 'mcp-web-tabs', requestId: 'r1', runId: 'run-a' }, client);

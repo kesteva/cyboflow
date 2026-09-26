@@ -844,9 +844,9 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
   }),
 
   // --------------------------------------------------------------------------
-  // Web viewer — observe (docs/proposals/native-web-viewer.md §6). Off unless
-  // the user turned on agent observation in Settings (every tool then replies
-  // `viewer_disabled: …`).
+  // Web viewer (docs/proposals/native-web-viewer.md §6). Off unless the user
+  // turned on agent observation (and, for drive, agent control) in Settings —
+  // every tool then replies `viewer_disabled: …`.
   // --------------------------------------------------------------------------
 
   defineTool({
@@ -895,5 +895,34 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
     }),
     envelope: 'mcp-open-web-tab',
     toEnvelope: (args) => ({ url: args.url, reason: args.reason, waitForLoad: args.wait_for_load }),
+  }),
+
+  defineTool({
+    name: 'cyboflow_drive_web_tab',
+    description:
+      'Act on a web tab in your session: navigate (url), back, forward, reload, click (a CSS selector), type (selector + text — REPLACES the field\'s value, firing input/change events), or eval (a JavaScript expression, `await` allowed, run in the page; returns its JSON-serializable value, capped). Off unless the human turned on agent control in Settings (viewer_disabled). CONSENT: on a tab you did not open, or one a human has interacted with, this shows an Allow/Deny prompt ON THE TAB and BLOCKS until answered (up to 5 minutes). The grant is bound to the page\'s origin: navigating away to another site ends it, and a verb aimed at a document whose origin changed since you were granted fails origin_changed — read the tab again and let the human re-approve. click/type/eval act on the top frame unless you pass `frame` (a frameToken from cyboflow_read_web_tab with frame=\'all\'); an iframe on another origin needs its own Allow. Every verb is recorded in the tab\'s activity log. Errors: tab_not_found, tab_closed, tab_crashed (only reload works), auth_required, certificate_error, frame_not_found, frame_principal_changed, navigating (retry shortly), origin_changed, consent_denied, consent_timeout, element_not_found, element_not_editable, drive_timeout, script_error: <message>, invalid_arguments, viewer_disabled.',
+    input: z.object({
+      tab_id: z.string().min(1).describe('The tab id (required).'),
+      action: z.enum(['navigate', 'back', 'forward', 'reload', 'click', 'type', 'eval']).describe('The verb (required).'),
+      url: z.string().min(1).describe('navigate: the http(s) URL.').optional(),
+      selector: z.string().min(1).describe('click / type: a CSS selector, resolved in the target frame.').optional(),
+      text: z.string().describe('type: the value to set.').optional(),
+      expression: z.string().min(1).describe('eval: a JavaScript expression; wrap statements in an IIFE.').optional(),
+      frame: z.string().min(1).describe('Optional frameToken for click / type / eval; default the top frame.').optional(),
+      reason: z.string().max(280).describe('Optional one-line reason shown to the human if a consent prompt is needed.').optional(),
+    }),
+    envelope: 'mcp-drive-web-tab',
+    // Blocks on a consent prompt; bounded by the consent layer's own timeout.
+    timeoutMs: null,
+    toEnvelope: (args) => ({
+      tabId: args.tab_id,
+      action: args.action,
+      url: args.url,
+      selector: args.selector,
+      text: args.text,
+      expression: args.expression,
+      frame: args.frame,
+      reason: args.reason,
+    }),
   }),
 ];

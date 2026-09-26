@@ -1,6 +1,6 @@
 /**
- * webViewerToolHandlers — the cyboflow_web_tabs / _read_web_tab / _open_web_tab
- * MCP handler family (docs/proposals/native-web-viewer.md §6).
+ * webViewerToolHandlers — the cyboflow_web_tabs / _read_web_tab / _open_web_tab /
+ * _drive_web_tab MCP handler family (docs/proposals/native-web-viewer.md §6).
  *
  * Thin by design. Every consent decision lives behind the `webViewerAgent` seam
  * (services/webViewer/webViewerAgentOps.ts), which this orchestrator-layer module
@@ -21,7 +21,10 @@ export interface WebViewerToolContext {
   writeResponse(client: net.Socket, response: McpQueryResponse): void;
 }
 
-type WebToolMessage = Extract<McpQueryMessage, { type: 'mcp-web-tabs' | 'mcp-read-web-tab' | 'mcp-open-web-tab' }>;
+type WebToolMessage = Extract<
+  McpQueryMessage,
+  { type: 'mcp-web-tabs' | 'mcp-read-web-tab' | 'mcp-open-web-tab' | 'mcp-drive-web-tab' }
+>;
 
 /**
  * The run's session key — the key the renderer files that run's tabs under:
@@ -80,5 +83,18 @@ export async function handleWebViewerTool(
       );
     case 'mcp-open-web-tab':
       return reply(await agent.openTab(caller, { url: msg.url, reason: msg.reason, waitForLoad: msg.waitForLoad }));
+    case 'mcp-drive-web-tab':
+      return reply(
+        await agent.driveTab(caller, {
+          tabId: msg.tabId,
+          action: msg.action,
+          url: msg.url,
+          selector: msg.selector,
+          text: msg.text,
+          expression: msg.expression,
+          frame: msg.frame,
+          reason: msg.reason,
+        }),
+      );
   }
 }

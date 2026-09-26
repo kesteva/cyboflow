@@ -4,7 +4,8 @@
  * consent views and frames directly (no electron).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { WebViewerAgentOps, type WebViewerAgentOpsDeps } from '../webViewerAgentOps';
+import * as vm from 'node:vm';
+import { WebViewerAgentOps, clickScript, evalScript, typeScript, type WebViewerAgentOpsDeps } from '../webViewerAgentOps';
 import { WebViewerConsent } from '../webViewerConsent';
 import { WebViewerTelemetry } from '../webViewerTelemetry';
 import type { WebFrameTarget, WebTabConsentView } from '../webViewerManager';
@@ -86,6 +87,23 @@ class FakeManager {
   }
   noteAgentRead(tabId: string): void {
     this.reads.push(tabId);
+  }
+  navs: string[] = [];
+  async navigate(tabId: string, url: string): Promise<{ ok: true }> {
+    this.navs.push(`navigate ${tabId} ${url}`);
+    return { ok: true };
+  }
+  async back(tabId: string): Promise<{ ok: true }> {
+    this.navs.push(`back ${tabId}`);
+    return { ok: true };
+  }
+  async forward(tabId: string): Promise<{ ok: true }> {
+    this.navs.push(`forward ${tabId}`);
+    return { ok: true };
+  }
+  async reload(tabId: string): Promise<{ ok: true }> {
+    this.navs.push(`reload ${tabId}`);
+    return { ok: true };
   }
 }
 
@@ -334,5 +352,145 @@ describe('openTab', () => {
     expect(manager.loads).toEqual([]);
     await ops.openTab(ME, { url: 'http://localhost:5173/', waitForLoad: true });
     expect(manager.loads).toEqual(['web:new']);
+  });
+});
+
+describe('driveTab', () => {
+  /** A frame that records the scripts it is asked to run and answers `reply`. */
+  function scriptedFrame(token: string, principal: string, isTop: boolean, reply: unknown, seen: string[]): WebFrameTarget {
+    return { frameToken: token, isTop, url: `${principal}/`, principal, execute: async (code) => (seen.push(code), reply) };
+  }
+
+  beforeEach(() => {
+    flags.agentDrive = true;
+  });
+
+  it('needs the drive flag on top of observe', async () => {
+    flags.agentDrive = false;
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me' }));
+    const r = await ops.driveTab(ME, { tabId: 'web:mine', action: 'reload' });
+    expect(!r.ok && r.error).toMatch(/^viewer_disabled/);
+    expect(manager.navs).toEqual([]);
+  });
+
+  it('drives its own untouched tab without a prompt and audits the verb, never the selector', async () => {
+    const seen: string[] = [];
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me' }));
+    manager.frames.set('web:mine', [scriptedFrame('1:1', 'https://app.example', true, { ok: true }, seen)]);
+    const r = await ops.driveTab(ME, { tabId: 'web:mine', action: 'click', selector: '#pay-now' });
+    expect(r.ok && r.tab.access).toBe('free');
+    expect(seen).toHaveLength(1);
+    expect(audit).toEqual([expect.objectContaining({ kind: 'agent_drive', detail: 'click', origin: 'https://app.example' })]);
+    expect(JSON.stringify(audit)).not.toContain('pay-now');
+  });
+
+  it('an observe grant does not cover drive: a second, drive prompt appears', async () => {
+    manager.views.set('web:h', view({ tabId: 'web:h' }));
+    let answered = answerNext('allow');
+    expect((await ops.readTab(ME, { tabId: 'web:h' })).ok).toBe(true);
+    await answered;
+    const caps: string[] = [];
+    consent.on('web-viewer:consent', (ev: { kind: string; request?: { capability: string } }) => {
+      if (ev.kind === 'requested' && ev.request) caps.push(ev.request.capability);
+    });
+    answered = answerNext('deny');
+    expect(await ops.driveTab(ME, { tabId: 'web:h', action: 'reload' })).toEqual({ ok: false, error: 'consent_denied' });
+    await answered;
+    expect(caps).toEqual(['drive']);
+    expect(manager.navs).toEqual([]);
+  });
+
+  it('refuses to dispatch into a document that changed while the prompt was up', async () => {
+    const seen: string[] = [];
+    const v = view({ tabId: 'web:h' });
+    manager.views.set('web:h', v);
+    manager.frames.set('web:h', [scriptedFrame('1:1', 'https://app.example', true, 42, seen)]);
+    consent.once('web-viewer:consent', (ev: { request?: { requestId: string } }) => {
+      v.epoch = 9;
+      if (ev.request) consent.respond(ev.request.requestId, 'allow');
+    });
+    expect(await ops.driveTab(ME, { tabId: 'web:h', action: 'eval', expression: 'document.cookie' })).toEqual({
+      ok: false,
+      error: 'origin_changed',
+    });
+    expect(seen).toEqual([]);
+  });
+
+  it('an iframe on another principal needs its own drive grant', async () => {
+    const seen: string[] = [];
+    manager.views.set('web:h', view({ tabId: 'web:h' }));
+    manager.frames.set('web:h', [
+      scriptedFrame('1:1', 'https://app.example', true, 1, seen),
+      scriptedFrame('2:7', 'https://artifact.example', false, 2, seen),
+    ]);
+    const origins: string[] = [];
+    consent.on('web-viewer:consent', (ev: { kind: string; request?: { requestId: string; origin: string | null } }) => {
+      if (ev.kind !== 'requested' || !ev.request) return;
+      origins.push(ev.request.origin ?? '');
+      const id = ev.request.requestId;
+      queueMicrotask(() => consent.respond(id, 'allow'));
+    });
+    const r = await ops.driveTab(ME, { tabId: 'web:h', action: 'eval', expression: '1 + 1', frame: '2:7' });
+    expect(origins).toEqual(['https://app.example', 'https://artifact.example']);
+    expect(r.ok && r.value).toBe(2);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('fails navigating while the page is mid-load, and frame_not_found for an unknown token', async () => {
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me', loading: true }));
+    manager.frames.set('web:mine', [frame('1:1', 'https://app.example', true)]);
+    expect(await ops.driveTab(ME, { tabId: 'web:mine', action: 'eval', expression: '1' })).toEqual({ ok: false, error: 'navigating' });
+    expect(await ops.driveTab(ME, { tabId: 'web:mine', action: 'eval', expression: '1', frame: '9:9' })).toEqual({
+      ok: false,
+      error: 'frame_not_found',
+    });
+  });
+
+  it('a crashed tab only accepts reload', async () => {
+    manager.views.set('web:c', view({ tabId: 'web:c', state: 'crashed', openedBy: 'agent', openedByRunId: 'run-me' }));
+    expect(await ops.driveTab(ME, { tabId: 'web:c', action: 'click', selector: 'a' })).toEqual({ ok: false, error: 'tab_crashed' });
+    expect((await ops.driveTab(ME, { tabId: 'web:c', action: 'reload' })).ok).toBe(true);
+    expect(manager.navs).toEqual(['reload web:c']);
+  });
+
+  it('navigate audits the target origin only', async () => {
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me' }));
+    await ops.driveTab(ME, { tabId: 'web:mine', action: 'navigate', url: 'https://x.example/reset?token=s3cret' });
+    expect(manager.navs).toEqual(['navigate web:mine https://x.example/reset?token=s3cret']);
+    expect(audit[0]?.detail).toBe('navigate → https://x.example');
+  });
+
+  it('rejects a verb missing its argument before anything runs', async () => {
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me' }));
+    expect(await ops.driveTab(ME, { tabId: 'web:mine', action: 'type', selector: '#q' })).toEqual({
+      ok: false,
+      error: 'invalid_arguments: type needs selector and text',
+    });
+    expect(audit).toEqual([]);
+  });
+
+  it('caps a huge eval result and says so', async () => {
+    const seen: string[] = [];
+    manager.views.set('web:mine', view({ tabId: 'web:mine', openedBy: 'agent', openedByRunId: 'run-me' }));
+    manager.frames.set('web:mine', [scriptedFrame('1:1', 'https://app.example', true, 'x'.repeat(60_000), seen)]);
+    const r = await ops.driveTab(ME, { tabId: 'web:mine', action: 'eval', expression: 'big' });
+    expect(r.ok && r.truncated).toBe(true);
+    expect(r.ok && typeof r.value === 'string' && r.value.length).toBe(50_000);
+  });
+});
+
+describe('drive scripts', () => {
+  it('embed selector and text as JSON literals — a quote cannot break out', () => {
+    const hostile = `"]'); fetch('https://evil.example'); ('`;
+    expect(clickScript(hostile)).toContain(JSON.stringify(hostile));
+    expect(typeScript('#q', hostile)).toContain(JSON.stringify(hostile));
+  });
+
+  it('eval wrapper returns JSON-safe values and survives a trailing line comment', async () => {
+    const run = (expr: string): Promise<unknown> => vm.runInNewContext(evalScript(expr)) as Promise<unknown>;
+    expect(await run('1 + 1')).toBe(2);
+    expect(await run('undefined')).toBeNull();
+    expect(await run('Promise.resolve({ a: [1, 2] }) // trailing')).toEqual({ a: [1, 2] });
+    expect(await run('(() => { const f = () => 1; return f; })()')).toMatch(/=>/);
   });
 });
