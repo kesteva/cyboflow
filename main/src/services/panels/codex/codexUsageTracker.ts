@@ -73,7 +73,7 @@ const USAGE_FIELDS = [
   'reasoning_output_tokens',
 ] as const;
 
-function completeUsage(usage: AgentUsage | undefined): Required<AgentUsage> {
+export function completeUsage(usage: AgentUsage | undefined): Required<AgentUsage> {
   return {
     input_tokens: usage?.input_tokens ?? 0,
     output_tokens: usage?.output_tokens ?? 0,
@@ -92,6 +92,19 @@ function addUsage(a: Required<AgentUsage>, b: Required<AgentUsage>): Required<Ag
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/**
+ * The one Codex usage-row upsert, bound as (run_id, payload_json, created_at,
+ * dedup_key) — shared by the live writer below and the historical replay
+ * (codexUsageReplay.ts).
+ */
+export const CODEX_USAGE_ROW_UPSERT_SQL = `
+  INSERT INTO raw_events (run_id, event_type, payload_json, created_at, dedup_key)
+  VALUES (?, 'subagent_usage', ?, ?, ?)
+  ON CONFLICT(dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
+    payload_json = excluded.payload_json,
+    created_at = excluded.created_at
+`;
 
 /**
  * Upserts Codex `subagent_usage` rows under their dedup key — the same
@@ -128,13 +141,7 @@ export class CodexUsageRowWriter {
         }
         stored = { ...payload, message: { ...payload.message, usage: addUsage(base, payload.message.usage) } };
       }
-      this.upsertStmt ??= this.db.prepare(`
-        INSERT INTO raw_events (run_id, event_type, payload_json, created_at, dedup_key)
-        VALUES (?, 'subagent_usage', ?, ?, ?)
-        ON CONFLICT(dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
-          payload_json = excluded.payload_json,
-          created_at = excluded.created_at
-      `);
+      this.upsertStmt ??= this.db.prepare(CODEX_USAGE_ROW_UPSERT_SQL);
       this.upsertStmt.run(runId, JSON.stringify(stored), new Date().toISOString(), dedupKey);
     } catch (error) {
       this.logger?.warn(
