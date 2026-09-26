@@ -623,6 +623,37 @@ export interface VerificationRunProvenance {
   driveEngineUsed?: 'xcode' | 'maestro' | 'none';
   /** Why the drive engine (or attestation) degraded, when it did. */
   degradeReason?: string;
+  /**
+   * Mobile + xcode rung only (§B5): the runner-held record of every capture
+   * the harness took through Xcode DeviceInteraction, and every pinned launch.
+   * A `pass` behaviour counts only when it cites one of these captures.
+   */
+  captureLedger?: VerificationCaptureLedger;
+}
+
+/** One entry of {@link VerificationCaptureLedger}: a harness capture, or a pinned `mobile-launch`. */
+export type VerificationCaptureLedgerEntry =
+  | {
+      kind: 'capture';
+      seq: number;
+      name: string;
+      verb: string;
+      /** sha256 of the capture's copy in the artifacts dir; `null` when the copy failed. */
+      sha256: string | null;
+      file: string | null;
+      applicationState: string;
+      foregroundBundleId: string | null;
+      pid: number | null;
+      activated: boolean;
+      at: string;
+    }
+  | { kind: 'launch'; seq: number; pid: number; at: string };
+
+/** The §B5 capture ledger, persisted verbatim as {@link VerificationRunProvenance.captureLedger}. */
+export interface VerificationCaptureLedger {
+  version: 1;
+  appBundleId: string;
+  entries: VerificationCaptureLedgerEntry[];
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */

@@ -23,12 +23,9 @@ import {
   mintSessionIdentifier,
   nodeBridgeSpawn,
   sessionKeyFingerprint,
-  XCODE_MCP_PROTOCOL_VERSION,
-  type BridgeChild,
   type BridgeSpawn,
   type XcodeMcpBridgeClientOptions,
 } from '../xcodeMcpBridgeClient';
-import type { LoggerLike } from '../../../types';
 import {
   END_OK,
   FakeBridge,
@@ -37,9 +34,7 @@ import {
   SCHEMAS,
   START_OK,
   SYNTH_OK,
-  toolErrorResult,
   type FakeBridgeOptions,
-  type ToolScript,
 } from './fakeMcpBridge';
 
 interface Harness {
