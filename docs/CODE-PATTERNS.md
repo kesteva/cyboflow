@@ -384,6 +384,34 @@ envelope the entry names — so a wrong camelCase key is now a build error rathe
   on purpose: a value import would drag electron, better-sqlite3, and the services layer into
   the subprocess bundle.
 
+### Overlays take an occlusion lease (native web tabs)
+
+A web tab is a native `WebContentsView` drawn above the renderer, so z-index cannot put a modal
+over it. Any overlay that can overlap the center pane calls `useOcclusion(open, reason)`
+(`frontend/src/hooks/useOcclusion.ts`) — or, outside React, `acquireOcclusion(reason)` from
+`frontend/src/utils/occlusion.ts`, whose release is idempotent. The shared primitives
+(`ui/Modal`, `ui/Dropdown`, `ConfirmDialog`, the context-menu provider, the resize hooks) already
+do; a hand-rolled overlay must do it itself. `occlusionRegistry.test.ts` scans for fixed/absolute
+high-z and `createPortal` sites without a lease; add to its `EXEMPT` list only with a reason
+(e.g. a tooltip that never overlaps the center pane), and a stale exemption fails the test.
+
+### Agent access to web tabs goes through consent, never around it
+
+Every agent read or action on a web tab goes through `WebViewerAgentOps`
+(`main/src/services/webViewer/webViewerAgentOps.ts`), which applies `consentRequirement` and
+re-resolves the tab's principal and navigation epoch IMMEDIATELY before reading or dispatching.
+Rules for code touching this path:
+
+- Compare against the principal/epoch **values** captured when consent was resolved, never a
+  view object re-read later — a prompt can sit open for minutes while the tab navigates.
+- Each distinct frame principal needs its own grant; a grant for the top origin does not cover
+  a cross-origin iframe, and telemetry entries from ungranted frame origins are withheld (and
+  counted in `withheld`).
+- Nothing URL-shaped reaches an agent before a grant (origin only), and nothing URL-, selector-
+  or value-shaped reaches `session_web_events`.
+- Agent-initiated page actions run as page script, not synthetic input events: the manager
+  treats input events and view focus as a HUMAN touch.
+
 ### Per-session mutation serialization
 
 Any state mutation for a workflow run passes through a per-run `SimpleQueue({concurrency: 1})`.

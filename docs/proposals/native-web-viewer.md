@@ -3,7 +3,10 @@
 Links from agent chat open as additional tabs in the center pane, rendered by a main-process
 `WebContentsView`, with MCP tools that let an agent observe and drive a tab.
 
-Status: proposal. Not implemented.
+Status: implemented through §10 commit 12 (branch `ivory-meadow-20260923`), except MCP tab
+screenshots (§6 capture store) — see `docs/ARCHITECTURE.md` → "Native web viewer". Where the
+build deviates from this text, the commit messages say so (migration 146, not 145;
+`webRequest.onSendHeaders`, not `onBeforeRequest`; `revokeRun` via `onRunTerminal`).
 
 Survey and adversarial critique that produced this document are summarised in
 "Evidence" at the end; every constraint below was verified against the tree at

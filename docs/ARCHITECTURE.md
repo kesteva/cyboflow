@@ -549,6 +549,58 @@ declaration/validation/dispatch lockstep is held by
 `mcpServer/__tests__/toolRegistryRatchet.test.ts`. Adding a tool means adding one entry; see
 `docs/CODE-PATTERNS.md` → "`cyboflow_*` MCP tools are declared ONCE".
 
+### Native web viewer (`main/src/services/webViewer/`)
+
+Links from agent chat open as **web tabs** in the center pane, and agents can observe and drive
+them over MCP (`docs/proposals/native-web-viewer.md`). A web tab is NOT an iframe: each is a
+main-process `WebContentsView` composited **above** the renderer, positioned over an anchor
+`<div>` the renderer reports bounds for (CSS px; the manager scales by the window's zoom factor).
+Composed in `main/src/webViewerComposition.ts` — a sibling of `index.ts`, like
+`verifyComposition.ts`, because it imports `electron` and services and so cannot live under
+`orchestrator/**`. The router and the MCP handlers reach it only through the structural seams in
+`orchestrator/trpc/contracts/webViewerOps.ts`.
+
+- **`webViewerManager.ts`** — view lifecycle, keyed by an opaque tab id (`web:<uuid>`,
+  `makeWebTabId`) that the renderer mints and every layer correlates on. Hiding a tab detaches the
+  view (the document keeps running); past the hard caps (`WEB_VIEWER_LIMITS` in `webViewerGuard.ts`,
+  applied by `webViewerCaps.ts`: 6 loaded views per session, 12 globally, 24 tabs, an agent-open
+  rate limit) the least-recently-used view is
+  DESTROYED and the tab reports `evicted` — a URL row that a read re-navigates. An agent read
+  pins a tab for 10 minutes, but pins compete within the loaded cap. Every surface reports an
+  explicit `state` (`live | hidden | evicted | crashed | auth_required | certificate_error`).
+  The manager latches `human_touched` on any keystroke into, or focus of, the view.
+- **`webViewerGuard.ts` / `webViewerPartitions.ts`** — http(s) only, navigation/popup policy,
+  and two partitions: human tabs share one login jar (persistent, or in-memory when
+  `persistLogin` is off), agent tabs get an ephemeral per-session jar. Viewer pages get no
+  permissions at all in v1.
+- **`webViewerTelemetry.ts`** — per-tab console / network / navigation ring buffers from
+  non-detachable sources (`console-message`, navigation events, the partition's `webRequest`
+  observers) — deliberately NOT an always-on CDP session. Writers take typed fields only and
+  store URLs through `redactUrl` (userinfo/fragment dropped, query values replaced). Readers pass
+  a per-kind cursor and get an exact `gap` count for evicted entries.
+- **`webViewerConsent.ts`** — agent access. Free only for a tab the calling run opened itself
+  that no human has touched, in a cookie jar no human has touched; everything else needs a grant
+  keyed `(runId, tabId, principal, navigationEpoch)`. The prompt is a sheet ON THE TAB with its
+  own timeout — it never uses `QuestionRouter` (whose supersede and plan-approval side effects a
+  consent answer must never trigger). Grants follow an in-page same-origin navigation and drop on
+  anything else; `onRunTerminal` (`services/cyboflow/transitions.ts`) revokes a finished run's.
+- **`webViewerAgentOps.ts`** — the MCP surface (`cyboflow_web_tabs`, `_read_web_tab`,
+  `_open_web_tab`, `_drive_web_tab`; run scope; handlers in
+  `orchestrator/mcpServer/handlers/webViewerToolHandlers.ts`, which resolve the caller's session
+  from its `workflow_runs` row). Order per call: scope → load (an evicted tab reloads BEFORE
+  consent, since a reload's new epoch would drop a grant taken first) → consent for the top
+  principal and every other frame principal involved → principal/epoch recheck immediately
+  before reading or dispatching. Pre-grant listings carry origin only, never URL or title.
+  Drive verbs run as page script, not input events, so an agent never trips its own
+  `human_touched` latch.
+- **`webViewerPersistence.ts`** — the persisting wrapper the router sees: tab rows and the audit
+  trail (migration 146, under Data Model). Session teardown hooks `sessionManager`'s
+  `session-deleted`, which fires for an archive too (archive never cascades).
+
+Kill switch: `AppConfig.webViewer` `{ enabled, agentObserve, agentDrive, persistLogin }`,
+resolved by `ConfigManager.getWebViewerConfig()` and read live per call. Human browsing ships on;
+every agent capability ships off.
+
 ### Telemetry (`main/src/services/telemetry/`)
 
 Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`initTelemetry` in
@@ -1101,6 +1153,22 @@ NO `shell.openExternal` fallback — the reason `srcdoc` was rejected. The frame
 (`'null'`), so the parent authenticates messages by `event.source` identity and the guard, not by
 origin string.
 
+### Web viewer tabs + audit (migration 146)
+
+- `session_web_tabs` — one row per web tab, keyed by the tab's opaque id (reused verbatim on
+  restore, so grants, telemetry cursors and the renderer strip stay correlated). Restored tabs
+  come back unloaded, `human_touched` included. A tab whose session key is not a `sessions` row
+  (a run with no parent session) is simply not persisted — `insertTab` is guarded by `EXISTS`.
+- `session_web_events` — the web audit trail: opens, closes, evictions, crashes, the human-touch
+  latch, every consent request/answer/revocation, gated agent reads (`agent_read`) and every
+  drive verb (`agent_drive`). Its own table because `raw_events` is run-scoped and cascade-deleted
+  with the run, and a human's tab belongs to no run. `origin` is the redacted origin only;
+  `detail` never carries a URL, selector or typed value. Kept across archive; removed only by a
+  real session delete.
+
+Neither table is mirrored into `schema.sql`. Numbered 146 because 145 is claimed by an
+unmerged branch.
+
 ## Build & Run
 
 ```
@@ -1326,6 +1394,16 @@ The approval-router / MCP-runtime gap that this section previously tracked has S
 (including `cyboflow_report_step` and `cyboflow_report_finding`) are all live and wired in
 `main/src/index.ts`. The only remaining stub is the dead `cyboflow:approveRun` raw-IPC handler,
 superseded by the live tRPC `cyboflow.approvals.*` path (see "cyboflow.* transport status").
+
+### Web viewer — deferred pieces
+
+- **Screenshots of a web tab** (`include: ['screenshot']` on `cyboflow_read_web_tab`): needs a
+  capture store under the data dir (0700/0600, quotas, TTL, deletion on revoke/dispose) and a
+  CDP forced-frame capture for a hidden, non-painting view. Not built; the read returns text/DOM
+  only.
+- **Visual verification of embedded page content** must run under the `native-screen` modality:
+  a CDP/Playwright page screenshot of the cyboflow window shows the web tab's anchor rect EMPTY,
+  because the native view composites above the renderer surface.
 
 ### Team-tier v2 — long-horizon
 
