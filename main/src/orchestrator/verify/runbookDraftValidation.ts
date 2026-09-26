@@ -59,7 +59,7 @@ export type RunbookDraftValidation = { ok: true } | { ok: false; rejection: Runb
  * on every verification of this project from then on. Redirection is refused on
  * the same grounds.
  */
-const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|&`<>]|\$\(|\n|\r)/;
+export const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|&`<>]|\$\(|\n|\r)/;
 
 /**
  * Package-manager prefixes whose next non-flag token names a script.

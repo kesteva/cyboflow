@@ -72,6 +72,7 @@ import {
 } from './snapshotProvisioner';
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
 import type { PinnedRunbookRecord } from './runbookStore';
+import { validateLearnedRecipe, type LearnedRecipeValidation } from './learnedRecipe';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
@@ -468,6 +469,18 @@ export interface VerificationAgentRunResult {
    * `'deliverable'`.
    */
   foreignSurface?: boolean;
+  /**
+   * §A5 "learn from success" — the harness's validation of the recipe a
+   * PASSING EXPLORE request reported (`report.recipeJson`), present only on
+   * that shape: `status` is `'passed'` (so the attestation floor verified the
+   * surface and the snapshot was not mutated — either would have capped it),
+   * the run was in snapshot mode, and the agent returned a recipe. Validated
+   * HERE because only the runner holds the snapshot's `package.json`, the
+   * leased port/UDID and the snapshot path the rules check against (see
+   * learnedRecipe.ts). Advisory: the engine decides whether anything is
+   * learned, and neither answer changes this result's verdict.
+   */
+  learnedRecipe?: LearnedRecipeValidation;
 }
 
 /**
@@ -731,6 +744,13 @@ export interface VerificationAgentRunnerDeps {
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
+  /**
+   * §A5 — read one file's text, `null` when it is absent or unreadable. Used
+   * for the snapshot root's `package.json` a learned web/cdp-app recipe is
+   * validated against (its commands must be scripts the snapshot declares).
+   * Defaults to `fs.readFile`; faked in tests.
+   */
+  readTextFile?: (absPath: string) => Promise<string | null>;
   fileExists?: (absPath: string) => Promise<boolean>;
   /**
    * Write the `$VERIFY_DRIVER` wrapper script; returns its absolute path.
@@ -2404,6 +2424,14 @@ const defaultProcessInfo = async (pid: number): Promise<{ pgid: number; command:
   }
 };
 
+const defaultReadTextFile = async (absPath: string): Promise<string | null> => {
+  try {
+    return await readFile(absPath, 'utf8');
+  } catch {
+    return null;
+  }
+};
+
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
   try {
     await access(absPath);
@@ -3901,8 +3929,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // The report is persisted AS-IS (including the agent's own attestation
       // echo) — the floor changes the verdict, never the record of what the
       // agent said.
-      return {
-        ...mapReportToResult(report, {
+      const mapped = mapReportToResult(report, {
           provisionMode: mode,
           mutated,
           model: verdictModel,
@@ -3918,9 +3945,43 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             driveUnsupported,
             driveCoerced: coerced,
           }),
-        }),
-        preflight,
-      };
+        });
+      // (f0) §A5 — validate a passing explore request's recipe while the
+      // snapshot (its package.json) and the leases it must not name still
+      // exist. `passed` already means the floor verified the surface and the
+      // snapshot is unmutated; the snapshot-mode guard keeps a dirty-fallback
+      // run (which proves nothing about a commit) out of learning.
+      const learnedRecipe =
+        executionMode === 'explore' &&
+        mapped.status === 'passed' &&
+        mode === 'snapshot' &&
+        snapshot !== null &&
+        report.recipeJson !== undefined
+          ? validateLearnedRecipe({
+              recipeJson: report.recipeJson,
+              modality,
+              composed: req.task,
+              packageJsonRaw:
+                modality === 'web' || modality === 'cdp-app'
+                  ? await (this.deps.readTextFile ?? defaultReadTextFile)(join(snapshot.worktreePath, 'package.json'))
+                  : null,
+              leased: {
+                ports: [req.verifyPort, req.verifyDriverPort].filter((p): p is number => p !== null),
+                udid: mobileHandle?.udid ?? null,
+                snapshotPath: snapshot.worktreePath,
+              },
+              ...(exploreRecord?.runbook.levers !== undefined ? { fallbackLevers: exploreRecord.runbook.levers } : {}),
+            })
+          : undefined;
+      if (learnedRecipe !== undefined && !learnedRecipe.ok) {
+        logger?.info('[VerificationAgentRunner] explore recipe not learnable (§A5; verdict unaffected)', {
+          runId: req.runId,
+          requestId: req.requestId,
+          modality,
+          reason: learnedRecipe.reason,
+        });
+      }
+      return { ...mapped, preflight, ...(learnedRecipe !== undefined ? { learnedRecipe } : {}) };
     } catch (err) {
       // The outer catch can fire before OR after the deploy; `deployedProvenance`
       // is not in scope here, so budget attribution falls back to the honest

@@ -168,7 +168,7 @@ function hasLeveredDestination(command: string, varNames: readonly string[]): bo
  *     resolving a package ahead of the real build) is not held to these
  *     three — it has no DerivedData/destination/signing concept of its own.
  */
-function checkMobileBuildIsolation(
+export function checkMobileBuildIsolation(
   entry: VerifyRunbookModalityEntry,
   levers: VerifyRunbookV1['levers'],
 ): string | null {
