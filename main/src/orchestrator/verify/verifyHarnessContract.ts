@@ -205,11 +205,14 @@ MOBILE (VERIFY_MODALITY "mobile") — an iOS Simulator leased for this request a
   capture too), mobile-tap <label-or-id> | --at <x> <y>, mobile-swipe <dir> | --from
   x1 y1 --to x2 y2, mobile-type, mobile-press home|enter, mobile-interact "<raw>",
   mobile-activate (after mobile-press home, or when something covers the app);
-  mobile-flow is refused. Exit 4 means the app EXITED (crash or relaunch) — evidence
-  about the app, not a harness hiccup; exit 5 means the tap target was missing or
-  ambiguous (the refusal lists candidates). A "pass" must cite a screenshot the
-  driver captured of the app under test. "none": every drive command is refused, so
-  a behavior you cannot exercise without driving MUST be "not_testable".
+  mobile-flow is refused. Drive-verb exit codes: 2 = refused, or the Xcode session
+  was lost mid-run — the behavior is "not_testable" with the refusal line; 4 = the
+  app EXITED (crash or relaunch) — evidence about the app, so a behavior that crashed
+  it is "fail"; 5 = the tap target matched nothing or several controls (the refusal
+  lists the candidates) — retry with an identifier or --at <x> <y>. A "pass" must
+  cite a screenshot the driver captured of the app under test. "none": every drive
+  command is refused, so a behavior you cannot exercise without driving MUST be
+  "not_testable".
 - Attestation ("bundle-identity") is harness-owned here too: it re-hashes the installed
   app itself after your session. Install THROUGH the driver or there is nothing to attest.
 
@@ -267,11 +270,26 @@ EXPLORE MODE — this project has no proven verification runbook for this modali
   fixed product. bundle-identity proves only that the installed app is the one staged
   in DerivedData; it does NOT make a build sound however it was produced, so never
   claim it does.
-- recipeJson: once the deliverable is up, return the exact commands that stood it up
-  as ONE portable-runbook entry for VERIFY_MODALITY, serialized to a JSON string — its
-  "build" array, its "serve" ({ "cmd", "attach"?, "readyWhen"? }) or, for mobile, its
-  "app", and its "attestation". Describe what actually ran, with \${PORT} and the
-  VERIFY_* names in place of every leased value (never a literal port, UDID or path).
+- recipeJson: only when you are reporting "pass", return the exact commands that stood
+  the deliverable up as ONE portable-runbook entry for VERIFY_MODALITY, serialized to
+  a JSON string: { "build": [...], "serve": { "cmd", "attach"?, "readyWhen"? } (web,
+  cdp-app) or "app" (mobile), "attestation", "levers"? }. The harness validates it and
+  stores it as an unproven draft that a later request must prove before anyone relies
+  on it. A recipe that breaks any rule below is dropped (your verdict is unaffected):
+    - web / cdp-app: "serve.cmd" is the task's composed serve.cmd, character for
+      character — the only serve a pass can rest on. Keep \${PORT},
+      "$VERIFY_DRIVER_PORT" and "$VERIFY_DATA_DIR" spelled as levers.
+    - mobile: each build step is one xcodebuild invocation with the options allowed
+      above, "$VERIFY_DERIVED_DATA" only as the -derivedDataPath /
+      -clonedSourcePackagesDirPath value, and "$VERIFY_SIM_UDID" for the device.
+      "app.bundleId" is the bundle id that was installed.
+    - never a literal port, UDID, snapshot path or any other absolute path, and no
+      dependency install or rebuild.
+    - "attestation" is the channel the task declared (mobile: bundle-identity on
+      app.bundleId). With none declared, name one only if your own attest self-check
+      verified it; otherwise omit recipeJson — a recipe must carry a channel.
+    - "levers" (optional) names the env vars the app reads, e.g.
+      { "dataDirEnv": "CYBOFLOW_DIR" }; without it, the levers bound for this run apply.
 `;
 
 const RULES_LABEL = `
