@@ -1382,7 +1382,7 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
     // version), so the recovery is a fresh proof against the SAME revision,
     // re-stamped with this host's provenance.
     const reProof = await proveModality(store, 'web');
-    expect(reProof).toEqual(firstProof);
+    expect(reProof).toEqual({ ...firstProof, unchanged: true });
     expect(
       store.markProven(1, 'web', reProof.hash, reProof.version, '{"fixture":true}', await store.freshProvenance(LIVE_WORKTREE)),
     ).toEqual({ ok: true });
