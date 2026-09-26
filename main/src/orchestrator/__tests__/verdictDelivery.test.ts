@@ -909,6 +909,51 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     expect(findingRows(db, 'run-s2')).toHaveLength(0);
   });
 
+  it.each([
+    ['passed', 'integrated'],
+    ['failed', 'running'],
+  ] as const)(
+    '§A5: a LEARNED-PIN promotion request (pinned, bootstrap_proof=0) is an ordinary lane verdict — %s drives the lane (%s)',
+    async (status, laneStatus) => {
+      // The learned pin is the lane's OWN request: it reaches applyMergeGateVerdict
+      // like any pinned request, never the bootstrap-proof exclusion.
+      for (const f of ['096_verify_runbook_local.sql', '107_bootstrap_proof.sql']) {
+        db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+      }
+      db.prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+         VALUES ('tsk_l', 1, 'TASK-050', 'L', 'board-1-default', 'stage-board-1-default-5')`,
+      ).run();
+      const store = SprintLaneStore.getInstance();
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_l']);
+      seedSprintRun(db, 'run-learned', batchId, 'tsk_l', 'orchestrated');
+      store.updateLane({ runId: 'run-learned', batchId, taskId: 'tsk_l', status: 'running', currentStepId: 'awaiting-verify' });
+      db.prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, runbook_hash, runbook_local_version, bootstrap_proof)
+         VALUES ('vr_learned', 'run-learned', 1, ?, 'interactive-web-behavior', '{}', ?, 1, 0)`,
+      ).run(status, 'l'.repeat(64));
+
+      const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/x', fileExists: () => false });
+      await deliver({
+        requestId: 'vr_learned',
+        runId: 'run-learned',
+        projectId: 1,
+        type: 'interactive-web-behavior',
+        status,
+        verdict: status === 'passed' ? PASS_VERDICT : FAIL_VERDICT,
+        fileNames: ['home.png'],
+        input: { intent: 'shows the submit button', taskRef: 'TASK-050' },
+      });
+
+      const lane = db
+        .prepare('SELECT status, current_step_id AS step FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, 'tsk_l') as { status: string; step: string };
+      expect(lane.status).toBe(laneStatus);
+      if (status === 'failed') expect(lane.step).toBe('implement');
+    },
+  );
+
   it('R4: TIMEOUT on a sprint lane ADVANCES it to integrated AND raises a NON-blocking finding', async () => {
     // R4: a timeout is an environment failure — advance-with-visibility. The parked
     // lane is driven OFF awaiting-verify (never wedged), and a NON-blocking finding is

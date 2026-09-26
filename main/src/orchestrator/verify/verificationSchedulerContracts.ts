@@ -734,6 +734,20 @@ export interface ProvenRunbookRevision {
   entry: VerifyRunbookModalityEntry;
 }
 
+/**
+ * The arguments of the two enqueue-side revision resolvers
+ * ({@link VerificationScheduler.resolveProvenRunbook} and its §A5 twin
+ * `resolveLearnedDraft`). `probePath` is the caller's own worktree when it has
+ * one (skips the run-row lookup); absent ⇒ the run's worktree, else the
+ * project root.
+ */
+export interface RunbookRevisionArgs {
+  projectId: number;
+  runId: string;
+  modality: VerificationModality;
+  probePath?: string;
+}
+
 /** The §3.4 circuit-breaker notice seam — see {@link VerificationSchedulerDeps.capabilityFinding}. */
 export type CapabilityBreakerFindingFn = (args: {
   projectId: number;

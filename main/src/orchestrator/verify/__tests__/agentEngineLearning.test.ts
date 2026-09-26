@@ -313,3 +313,183 @@ describe('AgentEngine — §A5 learning trigger', () => {
     expect(h.findings).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Promotion via a learned pin — the exits
+// ---------------------------------------------------------------------------
+
+/** Seed a learned draft and pin the row to it, as `prepareVerificationEnqueue` would have. */
+async function pinToLearnedDraft(h: Harness): Promise<{ hash: string; version: number }> {
+  const out = await h.store.registerLearnedDraft(1, 'web', ENTRY, undefined, '/wt', null);
+  if ('error' in out) throw new Error(out.error);
+  h.db.prepare('UPDATE verification_requests SET runbook_hash = ?, runbook_local_version = ? WHERE id = ?').run(out.hash, out.version, 'r1');
+  return out;
+}
+
+function failedBehaviourReport(): VerificationReportV1 {
+  return report({
+    outcome: 'fail',
+    behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: ['s.png'], notes: 'wrong' } }],
+  });
+}
+
+describe('AgentEngine — §A5 promotion via a learned pin', () => {
+  let h: Harness;
+  afterEach(() => h.db.close());
+
+  it('the row runs PINNED as an ordinary request (no proof flag) and a pass PROMOTES the draft, then delivers + files the promotion finding', async () => {
+    h = harness();
+    const pin = await pinToLearnedDraft(h);
+    h.run.mockResolvedValue({ status: 'passed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report() });
+    await drain(h);
+
+    const req = h.run.mock.calls[0][0];
+    expect(req).toMatchObject({ executionMode: 'pinned', runbookHash: pin.hash, runbookLocalVersion: pin.version });
+    expect(req).not.toHaveProperty('setupProof');
+    expect(record(h.db)).toMatchObject({ status: 'proven', origin: 'learned', version: pin.version });
+    expect(requestRow(h.db).status).toBe('passed');
+    expect(h.onVerdict).toHaveBeenCalledTimes(1);
+    expect(h.findings).toHaveLength(1);
+    expect(h.findings[0].title).toMatch(/promoted/);
+    expect(h.findings[0].body).toContain('pnpm run build');
+    expect(h.findings[0].body).toContain('r1');
+  });
+
+  it('a stood-up surface with a FAILING behaviour delivers normally and KEEPS the draft', async () => {
+    h = harness();
+    await pinToLearnedDraft(h);
+    h.run.mockResolvedValue({ status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: failedBehaviourReport() });
+    await drain(h);
+    expect(requestRow(h.db).status).toBe('failed');
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned' });
+    expect(h.nudge).not.toHaveBeenCalled();
+    expect(h.findings).toEqual([]);
+  });
+
+  it('a pre-deploy harness skip (the recipe never ran) delivers normally and keeps the draft', async () => {
+    h = harness();
+    await pinToLearnedDraft(h);
+    h.run.mockResolvedValue({ status: 'skipped', fileNames: [], deployed: false, errorMessage: 'preflight: chromium absent' });
+    await drain(h);
+    expect(requestRow(h.db).status).toBe('skipped');
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft' });
+  });
+
+  const DISCARDS: Array<[string, VerificationAgentRunResult]> = [
+    [
+      'build_failed',
+      {
+        status: 'failed',
+        fileNames: [],
+        deployed: true,
+        provisionMode: 'snapshot',
+        report: report({ outcome: 'build_failed', behaviors: [] }),
+        errorMessage: 'tsc exploded',
+      },
+    ],
+    ['low_confidence', { status: 'low_confidence', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report() }],
+    ['an identity failure', { status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report(), foreignSurface: true }],
+    ['a runbook mismatch', { status: 'skipped', fileNames: [], deployed: false, runbookMismatch: true, errorMessage: 'runbook/sha mismatch' }],
+    [
+      'wrong_environment',
+      {
+        status: 'low_confidence',
+        fileNames: [],
+        deployed: true,
+        report: report({ outcome: 'wrong_environment', neededModality: 'mobile', diagnosis: 'iOS app' }),
+        redispatch: { modality: 'mobile', diagnosis: 'iOS app' },
+      },
+    ],
+  ];
+
+  it.each(DISCARDS)('%s: the draft is DISCARDED, the pin cleared, and the SAME row re-dispatched once in explore', async (_name, result) => {
+    h = harness();
+    await pinToLearnedDraft(h);
+    h.run.mockResolvedValueOnce(result);
+    await drain(h);
+
+    expect(record(h.db)).toBeUndefined();
+    const r = requestRow(h.db);
+    expect(r).toMatchObject({ status: 'queued', runbook_hash: null, runbook_local_version: null });
+    expect(JSON.parse(r.task_json)).toMatchObject({ _redispatchedFrom: 'web', serve: { cmd: SERVE } });
+    expect(h.nudge).toHaveBeenCalledTimes(1);
+    expect(h.onVerdict).not.toHaveBeenCalled();
+
+    // The re-drain explores, and the lane gets THAT verdict (here a pass that learns afresh).
+    h.run.mockResolvedValueOnce(passedWithRecipe());
+    await drain(h);
+    expect(h.run.mock.calls[1][0].executionMode).toBe('explore');
+    expect(h.run.mock.calls[1][0]).not.toHaveProperty('runbookHash');
+    expect(requestRow(h.db).status).toBe('passed');
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned' });
+  });
+
+  it('the one-shot budget is SHARED with wrong_environment: the explore re-run cannot be re-dispatched again', async () => {
+    h = harness();
+    await pinToLearnedDraft(h);
+    h.run.mockResolvedValueOnce({ status: 'low_confidence', fileNames: [], deployed: true, report: report() });
+    await drain(h);
+    expect(requestRow(h.db).status).toBe('queued');
+
+    h.run.mockResolvedValueOnce({
+      status: 'low_confidence',
+      fileNames: [],
+      deployed: true,
+      report: report({ outcome: 'wrong_environment', neededModality: 'mobile', diagnosis: 'iOS app' }),
+      redispatch: { modality: 'mobile', diagnosis: 'iOS app', app: { platform: 'ios-simulator', bundleId: 'a.b', scheme: 'A' } },
+    });
+    await drain(h);
+    const r = h.db.prepare('SELECT status, error_message FROM verification_requests WHERE id = ?').get('r1') as {
+      status: string;
+      error_message: string;
+    };
+    expect(r.status).toBe('low_confidence');
+    expect(r.error_message).toContain('already re-dispatched once');
+  });
+
+  it('a learned recipe that runs out the DEADLINE is discarded and the row explores', async () => {
+    h = harness({}, { agentRequestTimeoutMs: 20, agentRequestCeilingMs: 20 });
+    await pinToLearnedDraft(h);
+    h.run.mockImplementationOnce(() => new Promise<VerificationAgentRunResult>(() => {}));
+    await drain(h);
+    expect(record(h.db)).toBeUndefined();
+    expect(requestRow(h.db)).toMatchObject({ status: 'queued', runbook_hash: null });
+    expect(h.nudge).toHaveBeenCalledTimes(1);
+  });
+
+  it('the discard is SKIPPED while another live request pins the same draft; the row still explores', async () => {
+    h = harness();
+    const pin = await pinToLearnedDraft(h);
+    h.db
+      .prepare(
+        `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, runbook_hash, runbook_local_version)
+         VALUES ('r2', 'run-2', 1, 'queued', 'interactive-web-behavior', '{}', ?, ?)`,
+      )
+      .run(pin.hash, pin.version);
+    h.run.mockResolvedValueOnce({ status: 'low_confidence', fileNames: [], deployed: true, report: report() });
+    await drain(h);
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned' });
+    expect(requestRow(h.db)).toMatchObject({ status: 'queued', runbook_hash: null });
+  });
+
+  it("KILL SWITCH ON: a learned pin is not honoured — the row meets today's gate 3 and the draft is untouched", async () => {
+    h = harness();
+    await pinToLearnedDraft(h);
+    h.live.requireProvenRunbook = true;
+    await drain(h);
+    expect(h.run).not.toHaveBeenCalled();
+    expect(requestRow(h.db).status).toBe('skipped');
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned' });
+  });
+
+  it('a pin to a NON-learned draft is not a learned pin (it explores, as a stale pin always has)', async () => {
+    h = harness();
+    h.files.set('/wt', JSON.stringify({ version: 1, modalities: { web: ENTRY } }));
+    const reg = await h.store.registerDraft(1, '/wt', 'web');
+    if ('error' in reg) throw new Error(reg.error);
+    h.store.setOrigin(1, 'web', 'setup-flow');
+    h.db.prepare('UPDATE verification_requests SET runbook_hash = ?, runbook_local_version = ?').run(reg.hash, reg.version);
+    await drain(h);
+    expect(h.run.mock.calls[0][0].executionMode).toBe('explore');
+  });
+});

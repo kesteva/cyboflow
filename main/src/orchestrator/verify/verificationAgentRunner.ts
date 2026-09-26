@@ -71,7 +71,7 @@ import {
   type ProvisionSnapshotOptions,
 } from './snapshotProvisioner';
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
-import type { PinnedRunbookRecord } from './runbookStore';
+import { isLearnedPinRecord, type PinnedRunbookRecord } from './runbookStore';
 import { validateLearnedRecipe, type LearnedRecipeValidation } from './learnedRecipe';
 import type {
   VerifyRunbookModality,
@@ -3229,8 +3229,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     const resolveRunbookByHash = this.deps.resolveRunbookByHash;
     if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
       const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
+      // §A5 — a LEARNED PIN (an unproven draft of origin 'learned') is the
+      // lane's own request acting as that draft's promotion proof, so it takes
+      // the PROOF half of the check: an unproven record is accepted, and it
+      // must be the exact version the request was pinned to. It is the only
+      // thing the learned pin changes here — the request is otherwise ordinary.
       const pinned = checkRunbookPin(record, modality, req.task, req.runbookHash, {
-        setupProof: req.setupProof === true,
+        setupProof: req.setupProof === true || isLearnedPinRecord(record),
         localVersion: typeof req.runbookLocalVersion === 'number' ? req.runbookLocalVersion : null,
       });
       if (!pinned.ok) {

@@ -15,11 +15,18 @@
  * it, through the same engine-enforced `markProven` every proof takes.
  */
 import type { LoggerLike } from '../types';
-import type { VerificationModality, VerificationRequestInput } from '../../../../shared/types/visualVerification';
+import type { VerificationModality } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../shared/types/verifyRunbook';
-import { LEARNED_RUNBOOK_ORIGIN, type VerifyRunbookStatusDetail, type VerifyRunbookStore } from './runbookStore';
+import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
+import {
+  LEARNED_RUNBOOK_ORIGIN,
+  isLearnedPinRecord,
+  type VerifyRunbookStatusDetail,
+  type VerifyRunbookStore,
+} from './runbookStore';
 import { learnedRecipeCommands } from './learnedRecipe';
 import type { VerificationAgentRunResult } from './verificationAgentRunner';
+import type { ProvenRunbookRevision } from './verificationSchedulerContracts';
 
 /** One §A5 review-surface notice — the shape the injected sink files as a non-blocking finding. */
 export interface RunbookLearningFinding {
@@ -210,7 +217,6 @@ export function learnedPromotionFinding(args: {
   modality: VerificationModality;
   hash: string;
   entry: VerifyRunbookModalityEntry | undefined;
-  input?: VerificationRequestInput;
 }): RunbookLearningFinding {
   const { row, modality, entry } = args;
   return {
@@ -227,4 +233,56 @@ export function learnedPromotionFinding(args: {
       'No human or drafting agent reviewed these commands — the passing proof is their only validation. Commit them to `.cyboflow/verify-runbook.json` (or run Verify Setup) to replace this with a reviewed runbook.',
     ].join('\n\n'),
   };
+}
+
+/**
+ * The ENQUEUE-side revision resolver behind both
+ * `VerificationScheduler.resolveProvenRunbook` (§5.2 seam 3) and its §A5 twin
+ * `resolveLearnedDraft` — one body, so the two can never disagree about which
+ * tree they read or how an entry is picked out of the record.
+ *
+ *   - `'proven'`: the (project, modality) record reads `proven` in `probePath`
+ *     (the full drift conjunction, `status()`).
+ *   - `'learned'`: the record is a LEARNED PIN target
+ *     ({@link isLearnedPinRecord}: `'unproven-draft'` of origin `'learned'`)
+ *     AND the tree carries no committed entry for the modality — a committed
+ *     entry supersedes a learned one (the same rule `decideLearning` and the
+ *     learned-record drift check apply), so it is never pinned over one.
+ *
+ * `null` for everything else, including every fail-soft store error — a
+ * resolution hiccup must never fail an enqueue; the gate decides unpinned.
+ */
+export async function resolveRunbookRevision(args: {
+  store: VerifyRunbookStore;
+  projectId: number;
+  modality: VerificationModality;
+  probePath: string;
+  which: 'proven' | 'learned';
+  logger?: LoggerLike;
+}): Promise<ProvenRunbookRevision | null> {
+  const { store, projectId, modality, probePath } = args;
+  try {
+    if (args.which === 'proven') {
+      if ((await store.status(projectId, probePath, modality)) !== 'proven') return null;
+    } else {
+      const detail = await store.statusDetail(projectId, probePath, modality);
+      if (detail.reason !== 'draft' || detail.fileDeclaresModality === true) return null;
+    }
+    const current = store.getCurrent(projectId, modality);
+    if (current === null) return null;
+    if (args.which === 'learned' && !isLearnedPinRecord(current)) return null;
+    // The cast is safe by construction: `parseVerifyRunbookV1` only ever
+    // populates keys from VERIFY_RUNBOOK_MODALITIES, so a modality outside that
+    // set simply misses — the same narrowing the store's `declaresModality` does.
+    const entry = current.runbook.modalities[modality as VerifyRunbookModality];
+    if (entry === undefined) return null;
+    return { hash: current.hash, version: current.version, entry };
+  } catch (err) {
+    args.logger?.warn(`[VerificationScheduler] ${args.which}-runbook resolution failed (fail-soft)`, {
+      projectId,
+      modality,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }

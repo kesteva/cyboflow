@@ -610,6 +610,34 @@ describe('SchedulerVisualVerifyGate', () => {
       await expect(pending).resolves.toEqual({ kind: 'advance' });
     });
 
+    // §A5 (runbook-optional-verification.md): a LEARNED-PIN promotion request is
+    // the lane's OWN ordinary request — pinned, bootstrap_proof=0 — so the gate
+    // binds and resolves it from the row like any other, never excluded.
+    it('§A5: binds a parked lane to its learned-pin request and resolves the FAILED verdict from the row', async () => {
+      upgradeTo105();
+      const { batchId } = singleLaneParked('run-1');
+      seedRequest(db, { id: 'vr_learned', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+      db.prepare("UPDATE verification_requests SET runbook_hash = ?, runbook_local_version = 1 WHERE id = 'vr_learned'").run(
+        'l'.repeat(64),
+      );
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_a')).toBe(true);
+
+      db.prepare("UPDATE verification_requests SET status = 'failed' WHERE id = 'vr_learned'").run();
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+      await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'loopback', attempt: 2 });
+    });
+
+    it('§A5: a learned-pin promotion that PASSED advances the lane from the row', async () => {
+      upgradeTo105();
+      const { batchId } = singleLaneParked('run-1');
+      seedRequest(db, { id: 'vr_learned', runId: 'run-1', status: 'passed', taskRef: 'TASK-001' });
+      db.prepare("UPDATE verification_requests SET runbook_hash = ?, runbook_local_version = 1 WHERE id = 'vr_learned'").run(
+        'l'.repeat(64),
+      );
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+      await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'advance' });
+    });
+
     it('a pre-105 DB (no bootstrap_proof column) attributes requests exactly as before', () => {
       // The narrowed query must never be able to WIDEN behavior: if the added
       // predicate made `prepare` throw, the catch would answer "no request" and

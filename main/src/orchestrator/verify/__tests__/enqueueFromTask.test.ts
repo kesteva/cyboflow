@@ -2103,3 +2103,127 @@ describe('§A2 — the project-surface rung inside resolveEnqueueModality', () =
     expect(parsed.ok && parsed.task.app).toEqual(IOS_APP);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §A5 — promotion via a LEARNED PIN, on both enqueue seams
+// (docs/proposals/runbook-optional-verification.md §A5 "Enqueue side")
+// ---------------------------------------------------------------------------
+
+describe('prepareVerificationEnqueue — §A5 learned-draft pin (both seams)', () => {
+  const composed: VerificationTaskV1 = {
+    ...task,
+    build: ['pnpm run build'],
+    serve: { cmd: 'pnpm dev --port ${PORT}' },
+  };
+  const LEARNED_ENTRY: VerifyRunbookModalityEntry = {
+    build: ['pnpm run build:web'],
+    serve: { cmd: 'pnpm run preview --port ${PORT}' },
+    attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+  };
+
+  /** A store over a tree WITHOUT a committed runbook file (the learned case), on a DB with migration 107's origin. */
+  async function seedLearnedDraft(files: Map<string, string> = new Map()): Promise<{ store: VerifyRunbookStore; hash: string; version: number }> {
+    db.exec('ALTER TABLE verify_runbook_local ADD COLUMN origin TEXT');
+    const store = new VerifyRunbookStore(dbAdapter(db), {
+      readPortableFile: async (dir) => files.get(dir) ?? null,
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fingerprint-1',
+    });
+    const out = await store.registerLearnedDraft(1, 'web', LEARNED_ENTRY, undefined, gitRepo, null);
+    if ('error' in out) throw new Error(out.error);
+    return { store, ...out };
+  }
+
+  it('MCP seam: with no proven record, a learned draft is merged and returned as an ORDINARY pin the runner accepts as a learned pin', async () => {
+    seedRun(db, { runId: 'run-learned-mcp' });
+    const { store, hash, version } = await seedLearnedDraft();
+    initScheduler(db, store);
+
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-learned-mcp',
+      type: 'static-render-snapshot',
+      task: composed,
+      probePath: gitRepo,
+    });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.pin).toEqual({ hash, localVersion: version });
+    expect(prepared.task?.build).toEqual(['pnpm run build:web']);
+    expect(prepared.task?.serve?.cmd).toBe('pnpm run preview --port ${PORT}');
+
+    // Round trip: the runner's pin check takes the proof half for it.
+    const reparsed = parseVerificationTaskV1(JSON.parse(JSON.stringify(prepared.task)));
+    const record = store.getByHash(1, 'web', hash);
+    expect(checkRunbookPin(record, 'web', reparsed.ok ? reparsed.task : composed, hash, { setupProof: true, localVersion: version })).toEqual({
+      ok: true,
+    });
+  });
+
+  it('programmatic seam: enqueueTaskVerification persists the learned pin on the lane row (no proof flag)', async () => {
+    seedRun(db, { runId: 'run-learned-prog' });
+    const { store, hash, version } = await seedLearnedDraft();
+    initScheduler(db, store);
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      runId: 'run-learned-prog',
+      task: composed,
+      laneTaskRef: 'TASK-007',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+    expect(result.outcome).toBe('enqueued');
+    const row = db
+      .prepare('SELECT runbook_hash, runbook_local_version, setup_proof, bootstrap_proof, enqueue_key, task_json FROM verification_requests')
+      .get() as { runbook_hash: string; runbook_local_version: number; setup_proof: number; bootstrap_proof: number; enqueue_key: string; task_json: string };
+    expect(row).toMatchObject({ runbook_hash: hash, runbook_local_version: version, setup_proof: 0, bootstrap_proof: 0 });
+    expect(row.enqueue_key).toBe(laneEnqueueKey('run-learned-prog', 'TASK-007', 1));
+    expect((JSON.parse(row.task_json) as VerificationTaskV1).build).toEqual(['pnpm run build:web']);
+  });
+
+  it('KILL SWITCH ON: no learned pin — the composed task goes through unpinned', async () => {
+    seedRun(db, { runId: 'run-learned-off' });
+    const { store } = await seedLearnedDraft();
+    initScheduler(db, store, { config: { ...baseConfig, requireProvenRunbook: true } });
+
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-learned-off',
+      type: 'static-render-snapshot',
+      task: composed,
+      probePath: gitRepo,
+    });
+    expect(prepared.ok && prepared.pin).toBeUndefined();
+    expect(prepared.ok && prepared.task?.build).toEqual(['pnpm run build']);
+  });
+
+  it('a committed file declaring the modality supersedes the learned draft: no learned pin', async () => {
+    seedRun(db, { runId: 'run-learned-file' });
+    const { store } = await seedLearnedDraft(new Map([[gitRepo, JSON.stringify(RUNBOOK)]]));
+    initScheduler(db, store);
+
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-learned-file',
+      type: 'static-render-snapshot',
+      task: composed,
+      probePath: gitRepo,
+    });
+    expect(prepared.ok && prepared.pin).toBeUndefined();
+  });
+
+  it('a NON-learned draft is never pinned by the learned resolver', async () => {
+    seedRun(db, { runId: 'run-setup-draft' });
+    db.exec('ALTER TABLE verify_runbook_local ADD COLUMN origin TEXT');
+    const store = new VerifyRunbookStore(dbAdapter(db), {
+      readPortableFile: async () => JSON.stringify(RUNBOOK),
+      computeInputHash: async () => 'input-hash-1',
+      hostFingerprint: async () => 'host-fingerprint-1',
+    });
+    await store.registerDraft(1, gitRepo, 'web');
+    store.setOrigin(1, 'web', 'setup-flow');
+    initScheduler(db, store);
+    expect(await VerificationScheduler.getInstance().resolveLearnedDraft({ projectId: 1, runId: 'run-setup-draft', modality: 'web', probePath: gitRepo })).toBeNull();
+  });
+});
