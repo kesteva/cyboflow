@@ -2042,6 +2042,41 @@ describe('§A2 — the project-surface rung inside resolveEnqueueModality', () =
     expect(out).toEqual({ modality: 'web', task: buildTask });
   });
 
+  describe('an app-less mobile-flow request', () => {
+    const resolveFlow = (t: VerificationTaskV1, root: string = iosRoot) =>
+      resolveEnqueueModality({ type: 'mobile-flow', task: t, projectId: 1, runId: 'run-a2', surfaceRoot: root });
+
+    it('with no proven mobile record gets the inferred, tagged app', async () => {
+      wirePresence([]);
+      const out = await resolveFlow(buildTask);
+      expect(out.modality).toBe('mobile');
+      expect(out.task.app).toMatchObject(IOS_APP);
+      expect(taskJsonHasInferredApp(JSON.stringify(out.task))).toBe(true);
+    });
+
+    it('with a PROVEN mobile record keeps the task: injection supplies the app', async () => {
+      wirePresence([]);
+      vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(async ({ modality }) =>
+        modality === 'mobile' ? { hash: 'h', version: 1, entry: { app: IOS_APP, attestation: { kind: 'bundle-identity', bundleId: IOS_APP.bundleId } } } : null,
+      );
+      const out = await resolveFlow(buildTask);
+      expect(out).toEqual({ modality: 'mobile', task: buildTask });
+    });
+
+    it('with an app already declared never probes', async () => {
+      wirePresence([]);
+      const declared: VerificationTaskV1 = { ...buildTask, app: { ...IOS_APP, bundleId: 'com.example.other' } };
+      const out = await resolveFlow(declared);
+      expect(out.task).toBe(declared);
+    });
+
+    it('on a project with no Xcode evidence keeps the task', async () => {
+      wirePresence([]);
+      const out = await resolveFlow(buildTask, webRoot);
+      expect(out).toEqual({ modality: 'mobile', task: buildTask });
+    });
+  });
+
   it('surfaceRoot alone is enough (the MCP immediate path leaves probePath to the scheduler)', async () => {
     wirePresence([]);
     const out = await resolveEnqueueModality({

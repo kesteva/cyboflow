@@ -302,6 +302,55 @@ export function surfaceProbeMayFire(type: VerificationType, task: EnqueueResolva
 }
 
 /**
+ * §A2 — a `mobile-flow` request is `mobile` by its TYPE, so it matches its own
+ * shape and never reaches the surface rung; yet with no `app` block the runner
+ * can only refuse it (MOBILE_NO_APP_BLOCK). When no PROVEN mobile record exists
+ * to supply the app at injection, read it off the project's Xcode files instead.
+ * Returns null — keep the declared path — on any miss, a proven record, an app
+ * already present, no tree to read, or any throw (fail-soft, like the rung).
+ */
+async function inferMobileFlowApp<T extends EnqueueResolvableTask | null>(args: {
+  type: VerificationType;
+  task: T;
+  projectId: number;
+  runId: string;
+  probePath?: string;
+  surfaceRoot?: string;
+  logger?: LoggerLike;
+}): Promise<EnqueueModalityResolution<T> | null> {
+  const { task, logger } = args;
+  const surfaceRoot = args.surfaceRoot ?? args.probePath;
+  if (args.type !== 'mobile-flow' || task === null || task.app !== undefined || surfaceRoot === undefined) return null;
+  try {
+    const scheduler = VerificationScheduler.tryGetInstance();
+    if (scheduler === null) return null;
+    const proven = await scheduler.resolveProvenRunbook({
+      projectId: args.projectId,
+      runId: args.runId,
+      modality: 'mobile',
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+    });
+    if (proven !== null) return null;
+    const found = await probeProjectSurface(surfaceRoot);
+    logger?.info('[resolveEnqueueModality] project surface probe for an app-less mobile-flow', {
+      projectId: args.projectId,
+      runId: args.runId,
+      result: found.kind,
+      detail: found.detail,
+    });
+    if (found.kind !== 'ios-app') return null;
+    return { modality: 'mobile', task: withInferredApp(task as NonNullable<T>, found.app) };
+  } catch (err) {
+    logger?.debug('[resolveEnqueueModality] mobile-flow surface probe unavailable; keeping the declaration', {
+      projectId: args.projectId,
+      runId: args.runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Resolve the modality this enqueue runs under.
  *
  *   1. A declaration that MATCHES the task's own shape wins outright, with no
@@ -364,6 +413,8 @@ export async function resolveEnqueueModality<T extends EnqueueResolvableTask | n
   const keep = (modality: VerificationModality): EnqueueModalityResolution<T> => ({ modality, task });
 
   if (declared !== null && declared === shape) {
+    const inferred = await inferMobileFlowApp(args);
+    if (inferred !== null) return inferred;
     logger?.info('[resolveEnqueueModality] modality declared by the request', {
       projectId: args.projectId,
       runId: args.runId,
