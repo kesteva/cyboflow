@@ -83,6 +83,27 @@ export const MOBILE_EXIT_REFUSED = 2;
  */
 export const MOBILE_EXIT_READINESS_TIMEOUT = 3;
 
+/**
+ * Exit code when the app under test is no longer the process `mobile-launch`
+ * pinned (runbook-optional-verification.md §B4.6, B-5) — xcode rung only. The
+ * pinned pid died, the app's hierarchy block vanished, a different pid now
+ * owns it (DeviceInteraction activation silently RELAUNCHES a dead app, which
+ * would otherwise mask a crash), or the state reads `Crashed`. The verb did
+ * NOT retry or re-activate; its stderr carries `app-exited pid=<pin>
+ * state=<s>` plus the tail of the app's console log. That is evidence ABOUT
+ * the app — a behavior that crashed it is a `fail`, not `not_testable`.
+ */
+export const MOBILE_EXIT_APP_EXITED = 4;
+
+/**
+ * Exit code when `mobile-tap <text-or-id>` could not resolve its target to
+ * exactly ONE element in the fresh hierarchy (xcode rung, §B4.5): none matched,
+ * or several distinct controls did. The refusal lists the candidates. Distinct
+ * from 2 so the agent can tell "I named it wrong / ambiguously" from "the rung
+ * refused": re-run with an identifier or `mobile-tap --at <x> <y>`.
+ */
+export const MOBILE_EXIT_TARGET_UNRESOLVED = 5;
+
 /** Default `VERIFY_APP_PRODUCT_GLOB`, relative to `$VERIFY_DERIVED_DATA`. */
 export const DEFAULT_APP_PRODUCT_GLOB = 'Build/Products/*-iphonesimulator/*.app';
 
