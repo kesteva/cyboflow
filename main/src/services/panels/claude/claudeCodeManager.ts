@@ -713,6 +713,12 @@ export interface SpawnEventsSink {
     runId: string,
   ): void;
   dispose(runId?: string): void;
+  /**
+   * Optional: stamp the SDK process identity on every persisted event (see
+   * RawEventsSink.setProcessInstanceId). A sink that does not persist into
+   * raw_events may omit it.
+   */
+  setProcessInstanceId?(processInstanceId: string | null): void;
 }
 
 export interface ClaudeSpawnOptions {
@@ -2068,6 +2074,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
         abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
         try {
           const query = await loadSdkQuery();
+          // Each query() is its own SDK process (a warm run's spans many turns; a
+          // model-fallback retry is a fresh one). Mint its identity and stamp it on
+          // every raw_events row it produces — `modelUsage` is cumulative per
+          // process, so the usage fold segments on it exactly (usageFold.ts).
+          this.pipelines.get(spawnKey)?.sink.setProcessInstanceId?.(randomUUID());
           const q = query({ prompt: promptInput.stream, options: { ...activeOptions, abortController } });
           for await (const event of q) {
             if (firstEventTimer) {

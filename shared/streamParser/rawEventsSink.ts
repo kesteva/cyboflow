@@ -51,6 +51,13 @@ export function setStreamParserPerfBump(fn: (name: string, n?: number) => void):
   perfBump = fn;
 }
 
+/**
+ * Top-level payload key carrying the producing SDK process's identity (see
+ * RawEventsSink.setProcessInstanceId). Persistence-only bookkeeping: readers that
+ * replay stored payloads to the UI strip it.
+ */
+export const PROCESS_INSTANCE_ID_FIELD = 'cyboflow_process_instance_id';
+
 /** The prepared-statement surface the sink uses — run() only, no reads. */
 interface RawEventsSinkStatement {
   run(...params: unknown[]): unknown;
@@ -75,6 +82,8 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
   private readonly insertStmt: RawEventsSinkStatement;
   private upsertSubagentUsageStmt: RawEventsSinkStatement | undefined;
   private readonly skipEventTypes: ReadonlySet<string>;
+  /** See {@link setProcessInstanceId}; null = stamp nothing. */
+  private processInstanceId: string | null = null;
 
   /**
    * Map from runId → teardown function returned by EventRouter.onRun().
@@ -125,6 +134,17 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
         `[rawEventsSink] subagent usage upsert failed for runId=${runId}: ${message}`,
       );
     }
+  }
+
+  /**
+   * Stamp every event persisted from now on with a top-level
+   * `cyboflow_process_instance_id` — the identity of the SDK process that
+   * produced it (minted by ClaudeCodeManager per `query()`), so the usage fold
+   * can segment the process-cumulative `modelUsage` counters exactly. Persistence
+   * only: the routed event objects are never touched. null stops stamping.
+   */
+  setProcessInstanceId(processInstanceId: string | null): void {
+    this.processInstanceId = processInstanceId;
   }
 
   /**
@@ -186,7 +206,11 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
         return;
       }
       perfBump('raw.claude');
-      const payloadJson = JSON.stringify(event);
+      const payloadJson = JSON.stringify(
+        this.processInstanceId === null
+          ? event
+          : { ...event, [PROCESS_INSTANCE_ID_FIELD]: this.processInstanceId },
+      );
       const createdAt = new Date().toISOString();
       this.insertStmt.run(runId, eventType, payloadJson, createdAt);
     } catch (err) {
