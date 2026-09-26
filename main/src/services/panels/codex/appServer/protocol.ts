@@ -214,6 +214,43 @@ export interface ThreadTokenUsageUpdatedNotification {
   tokenUsage: ThreadTokenUsage;
 }
 
+/**
+ * `rawResponse/completed` — typed internal-only upstream: the exact usage of ONE
+ * Responses API completion, for ANY thread of the process (collab children
+ * included). `usage` is null when the upstream response carried none. Pinned
+ * against the generated bindings by rawResponseProtocolShape.test.ts.
+ */
+export interface RawResponseCompletedNotification {
+  threadId: string;
+  turnId: string;
+  responseId: string;
+  usage: TokenUsageBreakdown | null;
+  usageMetadata: AppServerJsonValue | null;
+}
+
+/** The collab tools a `collabAgentToolCall` item can carry. */
+export type CollabAgentTool =
+  | 'spawnAgent'
+  | 'sendInput'
+  | 'resumeAgent'
+  | 'wait'
+  | 'closeAgent'
+  | 'sendMessage'
+  | 'followupTask'
+  | 'interruptAgent'
+  | 'listAgents';
+
+export type CollabAgentStatus =
+  | 'pendingInit'
+  | 'running'
+  | 'interrupted'
+  | 'completed'
+  | 'errored'
+  | 'shutdown'
+  | 'notFound';
+
+export type SubAgentActivityKind = 'started' | 'interacted' | 'interrupted' | 'completed';
+
 export type CommandAction =
   | { type: 'read'; command: string; name: string; path: string }
   | { type: 'listFiles'; command: string; path: string | null }
