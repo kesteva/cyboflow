@@ -249,6 +249,23 @@ A rejection means nothing is learned. The verdict is unaffected.
   - orchestrated: `verdictDelivery` reaches `applyMergeGateVerdict`;
   - programmatic: `visualVerifyGate` resolves from the row.
 
+**As built (2026-09-26): where the code differs from the text above.**
+- **Validation runs in the runner** (`learnedRecipe.ts`, called before teardown). Only the runner holds the snapshot's `package.json`, the leased ports and UDID, and the snapshot path. It attaches `learnedRecipe` to the result, and the engine decides eligibility and writes.
+- **Stricter validation.** Two extra checks:
+  - web/cdp-app: the recipe's `serve.cmd` must equal the composed `serve.cmd` the binding verified;
+  - mobile: `app.bundleId` must equal the attested one.
+
+  "No step may write outside the snapshot or `$VERIFY_DATA_DIR`" is enforced as "no absolute path in any command".
+- **First writer wins** is decided before any write. A `draft` of origin `learned` with no committed entry is skipped rather than handed to the store. The store's CAS enforces the same rule.
+- **A drifted proven learned record is not replaced.** The store's CAS matches only `unproven-draft` learned rows, as specified, so the "may replace after a failed reprove" clause is not implemented. A7's reprove owns that record.
+- **Learned-record drift:** a committed file that declares the modality is `content-drifted` only when its hash differs from the learned record's. A byte-identical file is the learned runbook itself.
+- **Learned-pin exits:**
+  - A pre-deploy harness skip (preflight, provisioning, no resolvable agent) keeps the draft and delivers normally, because the recipe never ran. It is not treated as "anything else".
+  - The "anything else" re-dispatch keeps the row's modality and its (merged) task, so the learned commands ride along as explore hints. This includes a learned pin's `wrong_environment`.
+- **Provenance:** the learned entry's `notes` records the source request, and the promotion finding reads it back. Because `notes` is part of the portable hash, two runs reporting the same recipe learn distinct hashes (first writer wins anyway).
+- **`readRow`** selects `origin` through a widen-then-fall-back ladder, so a pre-107 DB still reads its records.
+- **`registerDraft`'s A8 no-op** returns `unchanged: true`. Both callers (the MCP register tool and the lane bootstrap) then skip `setOrigin`.
+
 ### A6. Run posture
 When explore is on, `verificationPosture` no longer declines **`mobile-flow`** runs for runbook absence. It still declines `native-desktop` runs, because native-screen is pinned-only. Host-capability declines are unchanged. The mid-run posture flip still fires on host declines; the claim that it becomes unreachable was false (F12).
 
