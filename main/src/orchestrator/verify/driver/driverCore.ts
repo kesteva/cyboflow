@@ -797,7 +797,7 @@ export async function runDriverCommand(
   if (env.VERIFY_MODALITY === 'mobile' && isDriveCommand(command)) {
     deps.stderr(MOBILE_CDP_REFUSAL);
     deps.stderr(
-      'mobile surface: "mobile-screenshot <name>" to observe, "mobile-tap"/"mobile-type"/"mobile-swipe"/"mobile-press"/"mobile-flow" to drive (when VERIFY_MOBILE_DRIVE=maestro), "mobile-openurl <url>" to navigate.',
+      'mobile surface: "mobile-screenshot <name>" / "mobile-capture <name>" to observe, "mobile-tap"/"mobile-type"/"mobile-swipe"/"mobile-press" to drive (when VERIFY_MOBILE_DRIVE is maestro or xcode; "mobile-flow" on maestro, "mobile-interact"/"mobile-activate" on xcode), "mobile-openurl <url>" to navigate.',
     );
     return 1;
   }

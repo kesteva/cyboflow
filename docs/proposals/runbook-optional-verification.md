@@ -371,6 +371,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - `sudo xcrun mcp-server enable`;
   - "Approve Xcode access" (B8);
   - the grant's expiry time.
+- **As built.** The probe is composed once in `mobileComposition.ts` and shared by the runner, the health row (`xcodeMcpHealth.xcodeProbeRow`) and the B8 re-read. The row maps `available` → `ok` (detail names the grant expiry), `approval-required`/`expiring` → `missing` with the approve button, `unavailable` → `missing` with no button and each failed check's remedy in the detail, `inconclusive` → `inconclusive` (the button only when the grant itself could not be read). In the runner, `'xcode-mcp'` is an **advisory** preflight row (`ok: true` always) that records the engine decision, so it survives into `preflight_json` for a request that ends with no report. It never fails preflight: degrade, never skip.
 
 ### B3. Engine selection
 - **Config:** `VisualVerifyConfig.mobileDriveEngine: 'auto'|'xcode'|'maestro'|'none'` (default `'auto'`). Floor it in `configManager.getVisualVerifyConfig` and extend the resolved config.
@@ -383,6 +384,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - keep the drive coercion keyed strictly on `'none'`.
 - When xcode is selected, `mobileSimulatorSession.acquire` requires runtime major ≥ 27 (`minRuntimeMajor`).
 - **Concurrency:** assumes `mobileSimSlots=1` (the default). If it is raised, add a count-1 `verify:xcode` lease that leaves the row *queued* on a miss. Never degrade the rung on contention.
+- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the drain's configured engine is `auto`/`xcode`; it rides the slot lease's handle, so the agent engine's existing release paths free both.
 
 ### B4. Lifecycle (runner mobile arm)
 1. Acquire the simulator (existing flow).
@@ -390,7 +392,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    - Mint `sessionIdentifier = 'Cyboflow Verify ' + randomBytes(16).hex`. Keep it only in runner memory; log the requestId ↔ (hash of the key), never the key itself.
    - **Write the key into the owner marker** (`owner.json`) *before* StartSession.
    - Spawn one bridge: resolved `xcrun` with `['mcpbridge']`, never a shell.
-   - `DeviceInteractionStartSession`. Require `deviceUUID === udid`; otherwise EndSession and degrade.
+   - `DeviceInteractionStartSession`. Require `deviceUUID === udid`; otherwise EndSession and degrade. (As built: compared case-insensitively.)
 3. **Drive socket.**
    - Location: `<dataDir>/sockets/xd-<16hex>.sock` inside a 0700 dir. If `sun_path` would exceed 103 bytes, use a 0700 `mkdtemp` under a short tmpdir. Assert the length.
    - Never pre-unlink; fail on EADDRINUSE. Do not change the umask.
@@ -415,11 +417,19 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    | `mobile-flow` | Refused under xcode (exit 2), with a message pointing at `mobile-interact` |
 
    Commit a real `hierarchy.txt` fixture from this host plus parser tests.
+
+   **As built** (`xcode/xcodeDriveSession.ts`, `driver/mobileCommands.ts`):
+   - An unresolved or ambiguous `mobile-tap` target exits `MOBILE_EXIT_TARGET_UNRESOLVED = 5`. A target whose element carries `activationBundleId` is refused (exit 2) with a pointer to `mobile-activate`.
+   - A Synthesize whose `hierarchyPath` is missing gets ONE capture-only retry (the tool's own "AX transient, retry" note), never a re-sent command.
+   - Every capture is copied into the artifacts dir by name; its hierarchy is copied to `xcode-hierarchy/<name>.txt` and returned so the agent can read labels.
+   - **Grammar, UNMEASURED:** only `t x y` and `type <text>` were exercised live. The swipe (`s x1 y1 x2 y2 dur`) and home-button (`b home`) spellings come from single-letter tokens recovered from the framework's disassembly (the skill text's keywords are Swift small-string immediates `strings` drops). They live in one builder each; the live smoke must confirm them.
+   - Off the xcode rung each verb keeps one meaning: `mobile-capture` is a simctl screenshot, `--at` / `--from/--to` render as Maestro point flows, and `mobile-interact`/`mobile-activate` are refused.
 6. **Pid pinning** (B-5).
    - Under xcode, `mobile-launch` reports its parsed `simctl launch` pid to the runner over the socket. That pid becomes the pin and is logged as a `launch` ledger event.
    - Before each Synthesize the runner checks `isProcessAlive(pin)`.
    - After each Synthesize it parses the `Application, pid: N` line in the `Application bundle identifier: $VERIFY_APP_BUNDLE_ID` block.
    - The verb fails without activating or retrying if the pin is dead, the block is missing, the pid differs, or the state is not `Running`. It exits `MOBILE_EXIT_APP_EXITED = 4` and prints `app-exited pid=<pin> state=<s>` plus the `logsPath` tail.
+   - **Deviation (measured, B0 transcripts):** a NON-workspace session's `applicationState` describes the workspace "run application", which does not exist — it reads `NotRun` even while the driven app is on screen. "State must be `Running`" would fail every verb, so the pin rests on `isProcessAlive(pin)` plus the block's pid, and only a positive `Crashed` state counts. `mobile-press home` alone is exempt from "the block must exist" (backgrounding the app is its purpose); its pid must still be alive, and the next verb (normally `mobile-activate`) is strict again.
 7. **Mid-run bridge errors** ("Session with that key doesn't exist", "Target device doesn't match…", "isn't approved") → verb exit 2, which is `not_testable`.
 8. **`finally`** runs after attestation and before the simulator is disposed. Each step is independent, has a bounded timeout (~10 s), and is **not** bound to `controller.signal`, which the `finally` aborts first:
    1. `DeviceInteractionEndSession`
@@ -446,6 +456,8 @@ The runner records every capture in memory:
 
 The ledger is persisted in `provenance.captureLedger`.
 
+**As built** (`xcode/xcodePassEvidence.ts`): the cited screenshots are re-hashed from the artifacts dir at validation time, so a capture the agent overwrote no longer matches its ledger entry. The cap is applied after `mapReportToResult` through the same `capPassedAtLowConfidence` fold an undeclared channel uses, with the per-behaviour reasons in `errorMessage`. It never fails a request.
+
 ### B6. Maestro `JAVA_HOME`
 The harness login shell resolves `java` to the macOS stub `/usr/bin/java`, so `maestro test --help` fails and the rung silently becomes `none`. This was measured: with `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home`, `--udid` resolves.
 
@@ -455,6 +467,8 @@ The toolchain resolves a JDK home in this order:
 3. `/usr/local/opt/openjdk*/…`
 
 It exports `JAVA_HOME` for the probe and for the agent env.
+
+**As built:** the agent env gets `JAVA_HOME` (and `$JAVA_HOME/bin` first on PATH) whenever a pinnable Maestro resolved for the request — i.e. whenever Maestro is, or could have been, the rung.
 
 ### B7. Tests and live smoke
 - **Unit tests:**
@@ -480,6 +494,11 @@ It exports `JAVA_HOME` for the probe and for the agent env.
 - Never use `--unsafe-always-allow-all-agents`.
 - The only folder cyboflow ever causes to be approved is the scaffold.
 - Offer durable trust only as an explicit opt-in, with that disclosure.
+- **As built** (`services/visualVerify/xcodeMcpHealth.ts`, tRPC `verificationRequests.approveXcodeAccess`, the Verify health panel):
+  - The `<id>` is the status's pending-request id when one exists (its key is unmeasured), else our own `permittedAgents[].id`; it is shown only when it is a plain identifier. With no id, the panel points at Xcode's own prompt.
+  - The `--always` command is returned only for a packaged (signed) build, and the panel hides it behind an explicit "show the durable command" click.
+  - The scaffold is a minimal target-less `project.pbxproj`; whether Xcode opens it cleanly is for the live smoke to confirm.
+  - Concurrent clicks share one attempt, so a double click cannot raise two prompts.
 
 ### B9. Docs
 - Correct `mobile-verification-tier.md` §3, §11 and §16 against the Xcode 27 dump. §16's Stage 3 becomes "drive/observe rung shipped; Xcode-built 3b rejected with evidence".

@@ -52,9 +52,9 @@ import {
   type VerificationType,
   type AttestationSpec,
   type MobileAppSpec,
+  type MobileDriveEngine,
   type VerificationExecutionMode,
   type VerificationRunProvenance,
-  DEFAULT_MOBILE_PRODUCT_GLOB,
   UNVERIFIABLE_COERCION_NOTE,
   normalizeVerificationReportV1,
   resolveTaskModality,
@@ -104,6 +104,15 @@ import {
   type MobileAttestationContext,
 } from './harnessAttestation';
 import type { MobileSimulatorHandle, MobileSimulatorSessionFactory } from './mobileSimulatorSession';
+import {
+  acquireMobileSimulator,
+  buildMobileDriveEnv,
+  planXcodeIntent,
+  type MobileXcodeDeps,
+} from './mobileDriveRung';
+import type { MobileDriveRung } from './xcode/driveEngineSelection';
+import type { XcodeDriveSession } from './xcode/xcodeDriveSession';
+import { XCODE_LEDGER_CAP_MESSAGE, xcodePassEvidenceReasons } from './xcode/xcodePassEvidence';
 import type { XcodeToolchainBackend } from '../../services/visualVerify/xcodeToolchainBackend';
 import {
   composeVerifyUserPrompt,
@@ -515,7 +524,19 @@ export interface VerificationAgentRunnerMobileDeps {
    * a gate that probed one Maestro while the driver shelled another is the exact
    * 2026-08-05 peekaboo lesson this tier was told not to repeat.
    */
-  toolchain: Pick<XcodeToolchainBackend, 'resolveMaestroBin' | 'resolvePinFlag' | 'healthCheck'>;
+  toolchain: Pick<XcodeToolchainBackend, 'resolveMaestroBin' | 'resolvePinFlag' | 'healthCheck'> &
+    Partial<Pick<XcodeToolchainBackend, 'resolveJavaHome'>>;
+  /**
+   * §B3 — the LIVE `mobileDriveEngine` knob (read per request, like the other
+   * live verify knobs). Absent ⇒ `'auto'`.
+   */
+  driveEngine?: () => MobileDriveEngine;
+  /**
+   * §B2/§B4 — the Xcode 27 DeviceInteraction rung's collaborators: the
+   * spawn-free probe and the resolved `xcrun`. Absent ⇒ under `auto`/`xcode`
+   * the rung degrades with `xcode-unavailable` (recorded, never skipped).
+   */
+  xcode?: MobileXcodeDeps;
   /** The cyboflow data dir this instance owns; `verify-mobile/<requestId>` is created under it. */
   dataDir: string;
   /** Optional device-type pin from config (`mobileSimDeviceType`). Absent ⇒ the newest compatible iPhone. */
@@ -1772,7 +1793,7 @@ export interface UnverifiableCorroborationFacts {
   probe: HarnessAttestationResult | null;
   task: VerificationTaskV1;
   modality: VerificationModality;
-  mobileDrive: 'maestro' | 'none' | null;
+  mobileDrive: MobileDriveRung | null;
   driveUnsupported: boolean;
   driveCoerced: number;
 }
@@ -2784,56 +2805,6 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   }
 
   /**
-   * The §5.1/§5.4 MOBILE ENVIRONMENT — the eight-or-nine names that exist for a
-   * `mobile` request and for no other modality.
-   *
-   * `VERIFY_MOBILE_DRIVE` is the load-bearing one: it is `'maestro'` only when a
-   * Maestro binary resolved AND that build's own `--help` named a device-pin
-   * flag, because an unpinned `maestro test` lands on whichever simulator
-   * happens to be booted — which, with a developer's own device open, is the
-   * silent mis-targeting §5.4 refuses to ship. Anything less than both facts is
-   * `'none'`, and `'none'` is what makes every `requiresDrive` behavior coerce
-   * to `not_testable` downstream.
-   *
-   * Both toolchain calls are caught rather than allowed to propagate: a probe
-   * that cannot answer must degrade the drive rung, never fail the request. The
-   * observe-only arm is a real, useful verification.
-   */
-  private async buildMobileEnv(
-    app: MobileAppSpec,
-    mobile: VerificationAgentRunnerMobileDeps,
-    handle: MobileSimulatorHandle,
-    logger: LoggerLike | undefined,
-  ): Promise<Record<string, string>> {
-    let maestroBin: string | null = null;
-    try {
-      const bin = await mobile.toolchain.resolveMaestroBin();
-      maestroBin = bin !== null && (await mobile.toolchain.resolvePinFlag(bin)) !== null ? bin : null;
-      if (bin !== null && maestroBin === null) {
-        logger?.info('[VerificationAgentRunner] maestro resolved but names no device-pin flag; observe-only', {
-          maestro: bin,
-        });
-      }
-    } catch (err) {
-      logger?.info('[VerificationAgentRunner] maestro probe failed; mobile runs observe-only', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      maestroBin = null;
-    }
-    return {
-      VERIFY_SIM_UDID: handle.udid,
-      VERIFY_SIM_NAME: handle.name,
-      VERIFY_SIM_RUNTIME: handle.runtimeName,
-      VERIFY_DERIVED_DATA: handle.derivedDataDir,
-      VERIFY_APP_BUNDLE_ID: app.bundleId,
-      VERIFY_APP_PRODUCT_GLOB: app.productGlob ?? DEFAULT_MOBILE_PRODUCT_GLOB,
-      VERIFY_MOBILE_DRIVE: maestroBin === null ? 'none' : 'maestro',
-      ...(maestroBin === null ? {} : { VERIFY_MAESTRO_BIN: maestroBin }),
-      VERIFY_MOBILE_READY_TIMEOUT_MS: String(mobile.readyTimeoutMs ?? DEFAULT_MOBILE_READY_TIMEOUT_MS),
-    };
-  }
-
-  /**
    * §7.1 serve-identity binding for ONE request: resolve whether it applies
    * ({@link serveBindingTarget}) and, when it does, run
    * {@link checkServeIdentityBinding} against the injected probes. Returns
@@ -3331,9 +3302,14 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     // preflight runs before pin validation, provider resolution and several
     // early returns, and a device acquired there leaks on every one of them (B2).
     let mobileHandle: MobileSimulatorHandle | null = null;
-    // `'maestro' | 'none'` once a mobile request has resolved its drive rung;
-    // `null` on every other modality. Read once, at coercion time.
-    let mobileDrive: 'maestro' | 'none' | null = null;
+    // The EXPORTED drive rung once a mobile request has resolved it (§B3);
+    // `null` on every other modality. The coercion keys strictly on `'none'`.
+    let mobileDrive: MobileDriveRung | null = null;
+    // §B3 provenance for the report, and §B4's live xcode session — hoisted so
+    // the `finally` can close it (EndSession → bridge → socket) before the
+    // simulator is disposed.
+    let mobileDriveProvenance: Pick<VerificationRunProvenance, 'driveEngineRequested' | 'driveEngineUsed' | 'degradeReason'> = {};
+    let xcodeSession: XcodeDriveSession | null = null;
     // §7.1: the per-REQUEST identity secret. Minted HERE, before the env is
     // built, because two consumers need the same value: the agent's environment
     // (so its serve step can inject it into the deliverable) and the HARNESS's
@@ -3496,14 +3472,24 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             fileNames: [],
           };
         }
+        // §B3 phase 1: the engine decision that must precede acquisition (an
+        // xcode run needs an iOS 27+ runtime, `minRuntimeMajor`).
+        let xcodePlan = await planXcodeIntent(mobile.driveEngine, mobile.xcode, logger);
         try {
-          mobileHandle = await mobile.session.acquire({
-            requestId: req.requestId,
-            dataDir: mobile.dataDir,
-            ...(mobile.deviceType !== undefined ? { deviceType: mobile.deviceType } : {}),
-            ...(mobile.runtime !== undefined ? { runtime: mobile.runtime } : {}),
-            bootTimeoutMs: mobile.bootTimeoutMs ?? DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
-          });
+          const acquired = await acquireMobileSimulator(
+            mobile.session,
+            {
+              requestId: req.requestId,
+              dataDir: mobile.dataDir,
+              ...(mobile.deviceType !== undefined ? { deviceType: mobile.deviceType } : {}),
+              ...(mobile.runtime !== undefined ? { runtime: mobile.runtime } : {}),
+              bootTimeoutMs: mobile.bootTimeoutMs ?? DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
+            },
+            xcodePlan.intent,
+            logger,
+          );
+          mobileHandle = acquired.handle;
+          xcodePlan = { ...xcodePlan, intent: acquired.intent };
         } catch (err) {
           // `acquire()` rolls its OWN partial state back (it deletes the device
           // and the request dir before it throws), so there is nothing to
@@ -3523,8 +3509,29 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             fileNames: [],
           };
         }
-        mobileEnv = await this.buildMobileEnv(app, mobile, mobileHandle, logger);
-        mobileDrive = mobileEnv.VERIFY_MOBILE_DRIVE === 'maestro' ? 'maestro' : 'none';
+        // §B3 phase 2 / §B4: open the xcode session when intended, resolve
+        // Maestro, and export the rung that actually came up.
+        const drive = await buildMobileDriveEnv({
+          requestId: req.requestId,
+          app,
+          handle: mobileHandle,
+          plan: xcodePlan,
+          toolchain: mobile.toolchain,
+          xcode: mobile.xcode,
+          dataDir: mobile.dataDir,
+          artifactsDir: req.artifactsDir,
+          readyTimeoutMs: mobile.readyTimeoutMs ?? DEFAULT_MOBILE_READY_TIMEOUT_MS,
+          logger,
+        });
+        xcodeSession = drive.session;
+        mobileEnv = drive.env;
+        mobileDrive = drive.decision.used;
+        mobileDriveProvenance = {
+          driveEngineRequested: drive.decision.requested,
+          driveEngineUsed: drive.decision.used,
+          ...(drive.decision.degradeReason !== null ? { degradeReason: drive.decision.degradeReason } : {}),
+        };
+        preflight.checks.push(drive.preflightRow);
       }
 
       env = {
@@ -3534,7 +3541,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // Written under whatever case THIS process spells it (`Path` on
         // Windows): the consumer merges this map over `process.env`, and a
         // second, case-variant PATH key there is a coin flip (round-2 review).
-        [pathEnvKey()]: pathEnv,
+        [pathEnvKey()]:
+          // B6: Maestro's JDK first on PATH, so the driver's Maestro (and its
+          // `--help` pin probe) never lands on the macOS `/usr/bin/java` stub.
+          mobileEnv.JAVA_HOME !== undefined ? `${join(mobileEnv.JAVA_HOME, 'bin')}${delimiter}${pathEnv}` : pathEnv,
         VERIFY_DATA_DIR: dataDir,
         ...(req.verifyDriverPort === null
           ? {}
@@ -3800,6 +3810,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         ...(exploreRecord !== null
           ? { leverSource: { hash: exploreRecord.hash, status: exploreRecord.status, origin: exploreRecord.origin } }
           : {}),
+        ...mobileDriveProvenance,
+        // §B5: the ledger as it stands once the session is over (a snapshot —
+        // the live object belongs to the still-open socket until `finally`).
+        ...(xcodeSession !== null
+          ? { captureLedger: { ...xcodeSession.ledger, entries: [...xcodeSession.ledger.entries] } }
+          : {}),
       };
       // (d1) §4 fn.² native-screen coercion — applied BEFORE any verdict
       // mapping so every downstream branch (the attestation floor, the
@@ -3935,22 +3951,36 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // echo) — the floor changes the verdict, never the record of what the
       // agent said.
       const mapped = mapReportToResult(report, {
-          provisionMode: mode,
-          mutated,
-          model: verdictModel,
-          executionMode,
-          modality,
+        provisionMode: mode,
+        mutated,
+        model: verdictModel,
+        executionMode,
+        modality,
+        floor,
+        corroboration: unverifiableCorroboration({
           floor,
-          corroboration: unverifiableCorroboration({
-            floor,
-            probe,
-            task: req.task,
-            modality,
-            mobileDrive,
-            driveUnsupported,
-            driveCoerced: coerced,
-          }),
-        });
+          probe,
+          task: req.task,
+          modality,
+          mobileDrive,
+          driveUnsupported,
+          driveCoerced: coerced,
+        }),
+      });
+      // (d3) §B5 — under the xcode rung a `pass` behaviour must cite a harness
+      // capture of the app under test since its pinned launch; otherwise the
+      // pass is folded to low_confidence the way an undeclared channel is.
+      if (xcodeSession !== null && mapped.status === 'passed') {
+        const reasons = await xcodePassEvidenceReasons(report, xcodeSession.ledger, req.artifactsDir);
+        if (reasons.length > 0) {
+          logger?.info('[VerificationAgentRunner] xcode capture ledger does not back every pass; capped', {
+            runId: req.runId,
+            requestId: req.requestId,
+            reasons,
+          });
+          return { ...capPassedAtLowConfidence(mapped, `${XCODE_LEDGER_CAP_MESSAGE}: ${reasons.join('; ')}`), preflight };
+        }
+      }
       // (f0) §A5 — validate a passing explore request's recipe while the
       // snapshot (its package.json) and the leases it must not name still
       // exist. `passed` already means the floor verified the surface and the
@@ -4057,6 +4087,21 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // dispose already catches terminate/shutdown/delete/rm independently, so
       // one `simctl` that hangs cannot mask the next; this outer catch is the
       // guarantee that none of them can mask the snapshot either.
+      // §B4.8 — the xcode session ends BEFORE its device goes. `close()` is
+      // bounded per step and independent of `controller.signal` (aborted
+      // above); its contract is never-throw, and the catch is the guarantee
+      // that a violation cannot skip the simulator or the snapshot below.
+      if (xcodeSession) {
+        try {
+          await xcodeSession.close();
+        } catch (err) {
+          logger?.warn('[VerificationAgentRunner] xcode session close threw (ignored)', {
+            runId: req.runId,
+            requestId: req.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       if (mobileHandle) {
         try {
           await mobileHandle.dispose();

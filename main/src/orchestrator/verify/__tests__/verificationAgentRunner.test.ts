@@ -2518,6 +2518,7 @@ function makeHandle(overrides: Partial<MobileSimulatorHandle> = {}): MobileSimul
     deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
     derivedDataDir: SIM_DERIVED,
     requestDir: '/data/verify-mobile/vr-1',
+    recordXcodeSessionKey: async () => {},
     dispose: async () => {},
     ...overrides,
   };

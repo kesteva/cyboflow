@@ -31,6 +31,7 @@ const {
   provisionChromiumSpy,
   requestAccessibilitySpy,
   openScreenRecordingSettingsSpy,
+  approveXcodeAccessSpy,
   goToWizardSpy,
 } = vi.hoisted(() => ({
   useVerificationRequestsSpy: vi.fn(),
@@ -42,6 +43,7 @@ const {
   provisionChromiumSpy: vi.fn(),
   requestAccessibilitySpy: vi.fn(),
   openScreenRecordingSettingsSpy: vi.fn(),
+  approveXcodeAccessSpy: vi.fn(),
   goToWizardSpy: vi.fn(),
 }));
 
@@ -68,6 +70,7 @@ vi.mock('../../../trpc/client', () => ({
         provisionChromium: { mutate: provisionChromiumSpy },
         requestAccessibility: { mutate: requestAccessibilitySpy },
         openScreenRecordingSettings: { mutate: openScreenRecordingSettingsSpy },
+        approveXcodeAccess: { mutate: approveXcodeAccessSpy },
       },
     },
   },
@@ -742,6 +745,43 @@ describe('VerifyQueueView — health panel', () => {
     await waitFor(() => {
       expect(screen.getByTestId('verify-probe-state-browser-driving')).toHaveTextContent('Healthy');
     });
+  });
+
+  it('§B8: "Approve Xcode access" SHOWS the command and the disclosure; the durable form is an opt-in', async () => {
+    useVerificationRequestsSpy.mockReturnValue({ requests: [], isLoading: false, error: null });
+    const row = {
+      id: 'xcode-mcp',
+      state: 'missing',
+      detail: 'Xcode has no MCP grant for this build',
+      fix: 'approve-xcode-access',
+    };
+    hostProbesQuerySpy.mockResolvedValue({ probes: [row] });
+    approveXcodeAccessSpy.mockResolvedValue({
+      report: { probes: [row] },
+      approval: {
+        outcome: 'prompted',
+        detail: 'Xcode opened the scaffold project.',
+        approveCommand: 'sudo xcrun mcp-server approve ABC-123 --for-24-hours',
+        durableApproveCommand: 'sudo xcrun mcp-server approve ABC-123 --always',
+        disclosure: 'Approving Cyboflow approves every agent it hosts — Claude and Codex alike.',
+        scaffoldPath: '/data/xcode-approval/CyboflowApproval.xcodeproj',
+      },
+    });
+    render(<VerifyQueueView />);
+
+    const button = await screen.findByTestId('verify-probe-fix-xcode-mcp');
+    expect(button).toHaveTextContent('Approve Xcode access');
+    await userEvent.click(button);
+    await waitFor(() => expect(approveXcodeAccessSpy).toHaveBeenCalledTimes(1));
+    expect(await screen.findByTestId('verify-xcode-approve-command')).toHaveTextContent(
+      'sudo xcrun mcp-server approve ABC-123 --for-24-hours',
+    );
+    expect(screen.getByTestId('verify-xcode-approval-disclosure')).toHaveTextContent('every agent it hosts');
+    // Durable trust is never shown until the user asks for it.
+    expect(screen.queryByTestId('verify-xcode-durable-command')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('verify-xcode-show-durable'));
+    expect(screen.getByTestId('verify-xcode-durable-command')).toHaveTextContent('--always');
+    expect(provisionChromiumSpy).not.toHaveBeenCalled();
   });
 
   it('routes each grant row to its OWN action, not to the chromium installer', async () => {

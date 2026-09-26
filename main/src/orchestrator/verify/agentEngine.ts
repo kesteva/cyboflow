@@ -751,6 +751,7 @@ export class AgentEngine {
       leasePool: this.leasePool,
       modality,
       mobileSimSlots: this.config.mobileSimSlots,
+      mobileDriveEngine: this.config.mobileDriveEngine,
       devServerPorts: this.config.devServerPorts,
       portFromLease: (name) => this.portFromLease(name),
       requestId: row.id,

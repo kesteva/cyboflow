@@ -62,6 +62,12 @@ import type {
  * {@link PreflightCheckResult}-shaped, env-classified failure row (source
  * `'preflight'` via the generic `failureClassifier.ts` loop) when simulator
  * acquisition itself throws — this module never constructs one.
+ *
+ * `'xcode-mcp'` is likewise never emitted here: it is the runner's ADVISORY
+ * record of the mobile drive-engine decision (runbook-optional-verification.md
+ * §B2/§B3, `mobileDriveRung.ts`), always `ok: true` — a degraded drive rung is
+ * how a request ran, never a reason to skip it — so the decision survives into
+ * `preflight_json` even for a request that ends with no report.
  */
 export interface PreflightCheckResult {
   id:
@@ -73,7 +79,8 @@ export interface PreflightCheckResult {
     | 'driver-port-free'
     | 'native-capture'
     | 'mobile-toolchain'
-    | 'mobile-simulator';
+    | 'mobile-simulator'
+    | 'xcode-mcp';
   ok: boolean;
   /** Bounded human-readable detail — what was resolved, or why the check failed / was inconclusive. */
   detail: string;

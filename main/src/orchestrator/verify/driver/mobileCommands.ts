@@ -55,6 +55,13 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, join, sep } from 'node:path';
 import { inflateSync } from 'node:zlib';
+import {
+  DriveTransportError,
+  sendDriveFrame as defaultSendDriveFrame,
+  VERIFY_XCODE_DRIVE_SOCKET_ENV,
+  VERIFY_XCODE_DRIVE_TOKEN_ENV,
+  type DriveResponse,
+} from '../xcode/xcodeDriveSocketServer';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,6 +89,27 @@ export const MOBILE_EXIT_REFUSED = 2;
  * frame, and a verdict built on `fail` there would be a false accusation.
  */
 export const MOBILE_EXIT_READINESS_TIMEOUT = 3;
+
+/**
+ * Exit code when the app under test is no longer the process `mobile-launch`
+ * pinned (runbook-optional-verification.md §B4.6, B-5) — xcode rung only. The
+ * pinned pid died, the app's hierarchy block vanished, a different pid now
+ * owns it (DeviceInteraction activation silently RELAUNCHES a dead app, which
+ * would otherwise mask a crash), or the state reads `Crashed`. The verb did
+ * NOT retry or re-activate; its stderr carries `app-exited pid=<pin>
+ * state=<s>` plus the tail of the app's console log. That is evidence ABOUT
+ * the app — a behavior that crashed it is a `fail`, not `not_testable`.
+ */
+export const MOBILE_EXIT_APP_EXITED = 4;
+
+/**
+ * Exit code when `mobile-tap <text-or-id>` could not resolve its target to
+ * exactly ONE element in the fresh hierarchy (xcode rung, §B4.5): none matched,
+ * or several distinct controls did. The refusal lists the candidates. Distinct
+ * from 2 so the agent can tell "I named it wrong / ambiguously" from "the rung
+ * refused": re-run with an identifier or `mobile-tap --at <x> <y>`.
+ */
+export const MOBILE_EXIT_TARGET_UNRESOLVED = 5;
 
 /** Default `VERIFY_APP_PRODUCT_GLOB`, relative to `$VERIFY_DERIVED_DATA`. */
 export const DEFAULT_APP_PRODUCT_GLOB = 'Build/Products/*-iphonesimulator/*.app';
@@ -124,11 +152,14 @@ export const MOBILE_COMMAND_WORDS = [
   'mobile-install',
   'mobile-launch',
   'mobile-screenshot',
+  'mobile-capture',
   'mobile-openurl',
   'mobile-tap',
   'mobile-type',
   'mobile-swipe',
   'mobile-press',
+  'mobile-interact',
+  'mobile-activate',
   'mobile-flow',
 ] as const;
 
@@ -136,12 +167,25 @@ export const MOBILE_COMMAND_WORDS = [
 export const MOBILE_USAGE = `  mobile-install
   mobile-launch
   mobile-screenshot <name>
+  mobile-capture <name>
   mobile-openurl <url>
-  mobile-tap <text-or-id>
+  mobile-tap <text-or-id> | mobile-tap --at <x> <y>
   mobile-type <text...>
-  mobile-swipe <up|down|left|right>
+  mobile-swipe <up|down|left|right> | mobile-swipe --from <x1> <y1> --to <x2> <y2> [seconds]
   mobile-press <home|back|enter>
-  mobile-flow <path-to-yaml>`;
+  mobile-interact "<raw DeviceInteraction command>"   (VERIFY_MOBILE_DRIVE=xcode only)
+  mobile-activate                                     (VERIFY_MOBILE_DRIVE=xcode only)
+  mobile-flow <path-to-yaml>                          (VERIFY_MOBILE_DRIVE=maestro only)`;
+
+/** `VERIFY_MOBILE_DRIVE`'s value when the Xcode DeviceInteraction rung drives (§B4.4). */
+export const MOBILE_DRIVE_XCODE = 'xcode';
+
+/**
+ * How long one xcode verb may take end to end. A resolved tap is TWO
+ * Synthesize calls (capture, then tap), each bounded runner-side at 90 s, plus
+ * the copies — so the driver's wait must cover both, with margin.
+ */
+export const XCODE_VERB_TIMEOUT_MS = 240_000;
 
 // ---------------------------------------------------------------------------
 // Command model
@@ -155,27 +199,40 @@ export type PressKey = 'home' | 'back' | 'enter';
  * single `kind` with a `sub` discriminant — so the dispatcher can exclude the
  * whole family in one clause rather than nine.
  */
+/** A point in the simulator's coordinate space (points, as the hierarchy reports them). */
+export interface MobilePoint {
+  x: number;
+  y: number;
+}
+
 export type MobileCommand =
   | { kind: 'mobile'; sub: 'install' }
   | { kind: 'mobile'; sub: 'launch' }
   | { kind: 'mobile'; sub: 'screenshot'; name: string }
+  | { kind: 'mobile'; sub: 'capture'; name: string }
   | { kind: 'mobile'; sub: 'openurl'; url: string }
   | { kind: 'mobile'; sub: 'tap'; target: string }
+  | { kind: 'mobile'; sub: 'tap'; at: MobilePoint }
   | { kind: 'mobile'; sub: 'type'; text: string }
   | { kind: 'mobile'; sub: 'swipe'; direction: SwipeDirection }
+  | { kind: 'mobile'; sub: 'swipe'; from: MobilePoint; to: MobilePoint; durationS?: number }
   | { kind: 'mobile'; sub: 'press'; key: PressKey }
+  | { kind: 'mobile'; sub: 'interact'; command: string }
+  | { kind: 'mobile'; sub: 'activate' }
   | { kind: 'mobile'; sub: 'flow'; flowPath: string };
 
-/** The five subcommands that DRIVE the device and therefore need the Maestro rung. */
+/** The subcommands that DRIVE the device and therefore need a drive rung (Maestro or xcode). */
 const DRIVE_SUBS: ReadonlySet<MobileCommand['sub']> = new Set([
   'tap',
   'type',
   'swipe',
   'press',
+  'interact',
+  'activate',
   'flow',
 ]);
 
-/** True for a subcommand that requires `VERIFY_MOBILE_DRIVE=maestro`. */
+/** True for a subcommand that requires a drive rung (`VERIFY_MOBILE_DRIVE` = `maestro` or `xcode`). */
 export function isMobileDriveSub(sub: MobileCommand['sub']): boolean {
   return DRIVE_SUBS.has(sub);
 }
@@ -244,6 +301,18 @@ export interface MobileDeps {
   cwd(): string;
   stdout(line: string): void;
   stderr(line: string): void;
+  /**
+   * The xcode rung's transport (§B4.3): one frame to the runner's drive
+   * socket, one answer back. Optional — absent ⇒ the real
+   * `xcodeDriveSocketServer.sendDriveFrame`; tests inject a fake.
+   */
+  sendDriveFrame?(
+    socketPath: string,
+    token: string,
+    verb: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<DriveResponse>;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,18 +337,20 @@ export function parseMobileArgv(cmd: string, rest: string[]): ParseMobileResult 
     case 'mobile-launch':
       if (rest.length !== 0) return { ok: false, message: 'mobile-launch takes no arguments' };
       return { ok: true, command: { kind: 'mobile', sub: 'launch' } };
-    case 'mobile-screenshot': {
+    case 'mobile-screenshot':
+    case 'mobile-capture': {
+      const sub = cmd === 'mobile-capture' ? 'capture' : 'screenshot';
       if (rest.length !== 1) {
-        return { ok: false, message: 'mobile-screenshot requires exactly one argument: <name>' };
+        return { ok: false, message: `${cmd} requires exactly one argument: <name>` };
       }
       const name = sanitizeMobileScreenshotName(rest[0]);
       if (!name) {
         return {
           ok: false,
-          message: `invalid mobile-screenshot name: ${rest[0]} — pass a bare filename (no "/", no "\\", no "..")`,
+          message: `invalid ${cmd} name: ${rest[0]} — pass a bare filename (no "/", no "\\", no "..")`,
         };
       }
-      return { ok: true, command: { kind: 'mobile', sub: 'screenshot', name } };
+      return { ok: true, command: { kind: 'mobile', sub, name } };
     }
     case 'mobile-openurl': {
       if (rest.length !== 1 || rest[0].trim().length === 0) {
@@ -288,10 +359,15 @@ export function parseMobileArgv(cmd: string, rest: string[]): ParseMobileResult 
       return { ok: true, command: { kind: 'mobile', sub: 'openurl', url: rest[0] } };
     }
     case 'mobile-tap': {
+      if (rest[0] === '--at') {
+        const at = rest.length === 3 ? parsePoint(rest[1], rest[2]) : null;
+        if (at === null) return { ok: false, message: 'mobile-tap --at requires exactly two numbers: <x> <y>' };
+        return { ok: true, command: { kind: 'mobile', sub: 'tap', at } };
+      }
       if (rest.length !== 1 || rest[0].trim().length === 0) {
         return {
           ok: false,
-          message: 'mobile-tap requires exactly one argument: <text-or-id> (quote it)',
+          message: 'mobile-tap requires exactly one argument: <text-or-id> (quote it), or --at <x> <y>',
         };
       }
       return { ok: true, command: { kind: 'mobile', sub: 'tap', target: rest[0] } };
@@ -307,6 +383,16 @@ export function parseMobileArgv(cmd: string, rest: string[]): ParseMobileResult 
       return { ok: true, command: { kind: 'mobile', sub: 'type', text } };
     }
     case 'mobile-swipe': {
+      if (rest[0] === '--from') {
+        const swipe = parseSwipePoints(rest);
+        if (swipe === null) {
+          return {
+            ok: false,
+            message: 'mobile-swipe --from requires: --from <x1> <y1> --to <x2> <y2> [seconds]',
+          };
+        }
+        return { ok: true, command: { kind: 'mobile', sub: 'swipe', ...swipe } };
+      }
       const direction = rest.length === 1 ? rest[0].trim().toLowerCase() : '';
       if (!isSwipeDirection(direction)) {
         return {
@@ -323,6 +409,18 @@ export function parseMobileArgv(cmd: string, rest: string[]): ParseMobileResult 
       }
       return { ok: true, command: { kind: 'mobile', sub: 'press', key } };
     }
+    case 'mobile-interact': {
+      if (rest.length !== 1 || rest[0].trim().length === 0) {
+        return {
+          ok: false,
+          message: 'mobile-interact requires exactly one argument: the raw DeviceInteraction command (quote it)',
+        };
+      }
+      return { ok: true, command: { kind: 'mobile', sub: 'interact', command: rest[0] } };
+    }
+    case 'mobile-activate':
+      if (rest.length !== 0) return { ok: false, message: 'mobile-activate takes no arguments' };
+      return { ok: true, command: { kind: 'mobile', sub: 'activate' } };
     case 'mobile-flow': {
       if (rest.length !== 1 || rest[0].trim().length === 0) {
         return { ok: false, message: 'mobile-flow requires exactly one argument: <path-to-yaml>' };
@@ -332,6 +430,30 @@ export function parseMobileArgv(cmd: string, rest: string[]): ParseMobileResult 
     default:
       return null;
   }
+}
+
+/** A finite number out of one argv word, or `null`. Strict: `12px`, `''` and `NaN` are refused. */
+function parseCoordinate(raw: string | undefined): number | null {
+  if (raw === undefined || !/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return null;
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parsePoint(x: string | undefined, y: string | undefined): MobilePoint | null {
+  const px = parseCoordinate(x);
+  const py = parseCoordinate(y);
+  return px === null || py === null ? null : { x: px, y: py };
+}
+
+/** `--from x1 y1 --to x2 y2 [seconds]` — exact shape, nothing loose. */
+function parseSwipePoints(rest: string[]): { from: MobilePoint; to: MobilePoint; durationS?: number } | null {
+  if ((rest.length !== 6 && rest.length !== 7) || rest[0] !== '--from' || rest[3] !== '--to') return null;
+  const from = parsePoint(rest[1], rest[2]);
+  const to = parsePoint(rest[4], rest[5]);
+  if (from === null || to === null) return null;
+  if (rest.length === 6) return { from, to };
+  const durationS = parseCoordinate(rest[6]);
+  return durationS === null || durationS <= 0 ? null : { from, to, durationS };
 }
 
 function isSwipeDirection(value: string): value is SwipeDirection {
@@ -435,6 +557,18 @@ export async function runMobileCommand(
     return MOBILE_EXIT_USAGE;
   }
 
+  // §B4.4 — the xcode rung routes every observe and drive verb through the
+  // runner's socket. Install, launch and openurl stay on the CLI path (launch
+  // additionally pins its pid runner-side).
+  if (env.VERIFY_MOBILE_DRIVE?.trim() === MOBILE_DRIVE_XCODE) {
+    try {
+      return await runXcodeCommand(command, env, udid.value, artifactsDir.value, deps);
+    } catch (err) {
+      deps.stderr(`${commandWord(command)} failed: ${errorText(err)}`);
+      return MOBILE_EXIT_REFUSED;
+    }
+  }
+
   // The drive guard fires BEFORE any work, so a host without Maestro produces
   // the same refusal whatever the command would have done — the agent must be
   // able to tell "this rung does not exist here" from "the tap missed".
@@ -450,9 +584,18 @@ export async function runMobileCommand(
       case 'launch':
         return await mobileLaunch(env, udid.value, artifactsDir.value, deps);
       case 'screenshot':
+      case 'capture':
+        // One engine-neutral meaning (§B4.5): off the xcode rung a capture IS
+        // a simulator screenshot.
         return await mobileScreenshot(command.name, udid.value, artifactsDir.value, deps);
       case 'openurl':
         return await mobileOpenUrl(command.url, udid.value, deps);
+      case 'interact':
+      case 'activate':
+        deps.stderr(
+          `${commandWord(command)} exists only on the xcode drive rung (VERIFY_MOBILE_DRIVE=${env.VERIFY_MOBILE_DRIVE?.trim() || 'unset'}) — report the behavior as not_testable (drive-unsupported) or use the Maestro verbs`,
+        );
+        return MOBILE_EXIT_REFUSED;
       default:
         return await mobileDrive(command, env, udid.value, artifactsDir.value, deps);
     }
@@ -464,6 +607,125 @@ export async function runMobileCommand(
 
 function commandWord(command: MobileCommand): string {
   return `mobile-${command.sub}`;
+}
+
+// ---------------------------------------------------------------------------
+// The xcode drive rung (§B4.4, §B4.5)
+// ---------------------------------------------------------------------------
+
+/** The socket frame one xcode verb sends, or a local refusal line. */
+function xcodeFrame(command: MobileCommand): { verb: string; args: Record<string, unknown> } | { refuse: string } {
+  switch (command.sub) {
+    case 'screenshot':
+    case 'capture':
+      // Under xcode a screenshot is routed through a capture too, so EVERY
+      // harness screenshot is a ledger entry (§B4.5).
+      return { verb: command.sub, args: { name: command.name } };
+    case 'tap':
+      return 'at' in command
+        ? { verb: 'tap', args: { x: command.at.x, y: command.at.y } }
+        : { verb: 'tap', args: { target: command.target } };
+    case 'swipe':
+      return 'direction' in command
+        ? { verb: 'swipe', args: { direction: command.direction } }
+        : {
+            verb: 'swipe',
+            args: {
+              from: [command.from.x, command.from.y],
+              to: [command.to.x, command.to.y],
+              ...(command.durationS !== undefined ? { duration: command.durationS } : {}),
+            },
+          };
+    case 'type':
+      return { verb: 'type', args: { text: command.text } };
+    case 'press':
+      if (command.key === 'back') {
+        return { refuse: 'mobile-press back is refused: iOS has no back button — tap the on-screen back control instead' };
+      }
+      return { verb: 'press', args: { key: command.key } };
+    case 'interact':
+      return { verb: 'interact', args: { command: command.command } };
+    case 'activate':
+      return { verb: 'activate', args: {} };
+    case 'flow':
+      return {
+        refuse:
+          'mobile-flow is Maestro-only and this host drives through Xcode (VERIFY_MOBILE_DRIVE=xcode) — send the steps with mobile-tap / mobile-type / mobile-swipe, or a raw chain with mobile-interact "<command>"',
+      };
+    case 'install':
+    case 'launch':
+    case 'openurl':
+      return { refuse: `${commandWord(command)} does not go through the drive socket` };
+  }
+}
+
+/** Relay one socket answer: the message to the right stream, the exit code as the verb's own. */
+function relayDriveResponse(command: MobileCommand, response: DriveResponse, deps: MobileDeps): number {
+  if (response.ok) {
+    deps.stdout(response.message ?? `ok: ${commandWord(command)}`);
+    if (response.screenshot !== undefined) deps.stdout(`screenshot: ${response.screenshot}`);
+    if (response.hierarchy !== undefined) deps.stdout(`hierarchy: ${response.hierarchy}`);
+    return response.exit;
+  }
+  deps.stderr(response.message ?? `${commandWord(command)} refused`);
+  return response.exit === MOBILE_EXIT_OK ? MOBILE_EXIT_REFUSED : response.exit;
+}
+
+/** The socket env is missing: a harness bug, not something the agent can fix. */
+const XCODE_SOCKET_ENV_MISSING = `VERIFY_MOBILE_DRIVE=xcode but ${VERIFY_XCODE_DRIVE_SOCKET_ENV} / ${VERIFY_XCODE_DRIVE_TOKEN_ENV} are not set`;
+
+async function sendXcodeFrame(
+  env: NodeJS.ProcessEnv,
+  verb: string,
+  args: Record<string, unknown>,
+  deps: MobileDeps,
+): Promise<DriveResponse | string> {
+  const socket = env[VERIFY_XCODE_DRIVE_SOCKET_ENV]?.trim() ?? '';
+  const token = env[VERIFY_XCODE_DRIVE_TOKEN_ENV] ?? '';
+  if (socket.length === 0 || token.length === 0) return XCODE_SOCKET_ENV_MISSING;
+  const send = deps.sendDriveFrame ?? defaultSendDriveFrame;
+  try {
+    return await send(socket, token, verb, args, XCODE_VERB_TIMEOUT_MS);
+  } catch (err) {
+    const why = err instanceof DriveTransportError ? `[${err.reason}] ${err.message}` : errorText(err);
+    return `the xcode drive socket did not answer: ${why} — report the behavior as not_testable (drive-unavailable)`;
+  }
+}
+
+async function runXcodeCommand(
+  command: MobileCommand,
+  env: NodeJS.ProcessEnv,
+  udid: string,
+  artifactsDir: string,
+  deps: MobileDeps,
+): Promise<number> {
+  switch (command.sub) {
+    case 'install':
+      return mobileInstall(env, udid, artifactsDir, deps);
+    case 'openurl':
+      return mobileOpenUrl(command.url, udid, deps);
+    case 'launch':
+      // B-5: the parsed `simctl launch` pid becomes the runner's pin BEFORE
+      // readiness is awaited, so a crash during readiness is already pinned.
+      return mobileLaunch(env, udid, artifactsDir, deps, async (pid) => {
+        const answer = await sendXcodeFrame(env, 'launch', { pid }, deps);
+        if (typeof answer === 'string') return answer;
+        return answer.ok ? null : (answer.message ?? 'the runner refused the launch pin');
+      });
+    default: {
+      const frame = xcodeFrame(command);
+      if ('refuse' in frame) {
+        deps.stderr(frame.refuse);
+        return MOBILE_EXIT_REFUSED;
+      }
+      const answer = await sendXcodeFrame(env, frame.verb, frame.args, deps);
+      if (typeof answer === 'string') {
+        deps.stderr(answer);
+        return answer === XCODE_SOCKET_ENV_MISSING ? MOBILE_EXIT_USAGE : MOBILE_EXIT_REFUSED;
+      }
+      return relayDriveResponse(command, answer, deps);
+    }
+  }
 }
 
 function errorText(err: unknown): string {
@@ -820,6 +1082,8 @@ async function mobileLaunch(
   udid: string,
   artifactsDir: string,
   deps: MobileDeps,
+  /** xcode rung only: hand the parsed pid to the runner as the pin; resolves an error line, or `null` on success. */
+  pin?: (pid: number) => Promise<string | null>,
 ): Promise<number> {
   const bundleIdVar = requireVar(env, 'VERIFY_APP_BUNDLE_ID');
   if (!bundleIdVar.ok) {
@@ -844,6 +1108,15 @@ async function mobileLaunch(
       `simctl launch reported no pid (stdout: ${tail(launch.stdout, 200) || '(empty)'}) — cannot verify the app stayed up`,
     );
     return MOBILE_EXIT_REFUSED;
+  }
+  if (pin !== undefined) {
+    const pinError = await pin(pid);
+    if (pinError !== null) {
+      // An unpinned launch under xcode would leave every later capture
+      // uncountable as pass evidence (§B5) — refuse loudly instead.
+      deps.stderr(`could not pin the launched pid ${pid} with the runner: ${pinError}`);
+      return MOBILE_EXIT_REFUSED;
+    }
   }
 
   const framePath = join(artifactsDir, READINESS_FRAME_RELATIVE);
@@ -1266,11 +1539,18 @@ export function maestroFlowYaml(
   const header = `appId: ${yamlScalar(bundleId)}\n---\n`;
   switch (command.sub) {
     case 'tap':
-      return `${header}- tapOn: ${yamlScalar(command.target)}\n`;
+      return 'at' in command
+        ? `${header}- tapOn:\n    point: ${yamlScalar(`${command.at.x},${command.at.y}`)}\n`
+        : `${header}- tapOn: ${yamlScalar(command.target)}\n`;
     case 'type':
       return `${header}- inputText: ${yamlScalar(command.text)}\n`;
-    case 'swipe':
-      return `${header}- swipe:\n    direction: ${command.direction.toUpperCase()}\n`;
+    case 'swipe': {
+      if ('direction' in command) return `${header}- swipe:\n    direction: ${command.direction.toUpperCase()}\n`;
+      const start = yamlScalar(`${command.from.x}, ${command.from.y}`);
+      const end = yamlScalar(`${command.to.x}, ${command.to.y}`);
+      const duration = command.durationS !== undefined ? `    duration: ${Math.round(command.durationS * 1000)}\n` : '';
+      return `${header}- swipe:\n    start: ${start}\n    end: ${end}\n${duration}`;
+    }
     case 'press':
       return `${header}- pressKey: ${PRESS_KEY_NAMES[command.key]}\n`;
   }

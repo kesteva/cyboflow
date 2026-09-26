@@ -680,7 +680,8 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
       const scheduler = initScheduler({
         agentRunner: runner,
         mobileToolchainProbe: async () => true,
-        config: { ...CONFIG, mobileSimSlots: configured, agentSlots: 8 },
+        // Maestro: the §B3 count-1 xcode lease would otherwise serialise the pool.
+        config: { ...CONFIG, mobileSimSlots: configured, agentSlots: 8, mobileDriveEngine: 'maestro' },
       });
 
       for (let i = 0; i < 5; i++) enqueueOne(scheduler, 'run-clamp', 'mobile-flow');

@@ -623,6 +623,37 @@ export interface VerificationRunProvenance {
   driveEngineUsed?: 'xcode' | 'maestro' | 'none';
   /** Why the drive engine (or attestation) degraded, when it did. */
   degradeReason?: string;
+  /**
+   * Mobile + xcode rung only (§B5): the runner-held record of every capture
+   * the harness took through Xcode DeviceInteraction, and every pinned launch.
+   * A `pass` behaviour counts only when it cites one of these captures.
+   */
+  captureLedger?: VerificationCaptureLedger;
+}
+
+/** One entry of {@link VerificationCaptureLedger}: a harness capture, or a pinned `mobile-launch`. */
+export type VerificationCaptureLedgerEntry =
+  | {
+      kind: 'capture';
+      seq: number;
+      name: string;
+      verb: string;
+      /** sha256 of the capture's copy in the artifacts dir; `null` when the copy failed. */
+      sha256: string | null;
+      file: string | null;
+      applicationState: string;
+      foregroundBundleId: string | null;
+      pid: number | null;
+      activated: boolean;
+      at: string;
+    }
+  | { kind: 'launch'; seq: number; pid: number; at: string };
+
+/** The §B5 capture ledger, persisted verbatim as {@link VerificationRunProvenance.captureLedger}. */
+export interface VerificationCaptureLedger {
+  version: 1;
+  appBundleId: string;
+  entries: VerificationCaptureLedgerEntry[];
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
@@ -2518,7 +2549,15 @@ export type VerifyProbeId =
   | 'browser-driving'
   | 'screen-recording'
   | 'accessibility'
-  | 'mobile-simulator';
+  | 'mobile-simulator'
+  /**
+   * The Xcode 27 DeviceInteraction drive rung (runbook-optional-verification.md
+   * §B2): mcpbridge present, Xcode ≥ 27, an iOS 27+ runtime, headless mode on,
+   * and this app's binary approved. Spawn-free — it never starts the bridge.
+   * A host without it still verifies mobile apps (the rung degrades to Maestro
+   * or observe-only); the row says why the drive rung is not Xcode's.
+   */
+  | 'xcode-mcp';
 
 /**
  * The outcome of one probe.
@@ -2547,7 +2586,48 @@ export type VerifyProbeFix =
   | 'provision-chromium'
   | 'request-accessibility'
   | 'open-screen-recording-settings'
+  /**
+   * §B8: open cyboflow's own scaffold project through the Xcode bridge so
+   * Xcode shows its approval prompt while the user is present, then SHOW (never
+   * run) the exact `sudo xcrun mcp-server approve …` command.
+   */
+  | 'approve-xcode-access'
   | null;
+
+/**
+ * What the §B8 "Approve Xcode access" action did and what the user can do
+ * next. The command strings are for DISPLAY: the app never runs them (they
+ * need sudo, and approving is the user's decision).
+ */
+export interface XcodeAccessApproval {
+  /**
+   * - `prompted`         — Xcode was asked to open the scaffold, which is what
+   *                        raises its approval prompt; the re-read status decides
+   *                        whether the grant landed;
+   * - `approved`         — after the attempt, the status shows a live grant;
+   * - `bridge-refused`   — the bridge answered but refused (e.g. the prompt was
+   *                        declined) — the commands below are the fallback;
+   * - `unavailable`      — no bridge on this host (off macOS, Xcode < 27).
+   */
+  outcome: 'prompted' | 'approved' | 'bridge-refused' | 'unavailable';
+  detail: string;
+  /**
+   * `sudo xcrun mcp-server approve <id> --for-24-hours`, when the status names
+   * an id to approve; `null` when none is known (Xcode's own prompt is then the
+   * only path).
+   */
+  approveCommand: string | null;
+  /**
+   * The `--always` form — offered ONLY for a signed (packaged) build, and only
+   * as an explicit opt-in shown next to {@link disclosure}. `null` otherwise.
+   * Never `--unsafe-always-allow-all-agents`.
+   */
+  durableApproveCommand: string | null;
+  /** What approving grants, in plain words. Always shown with either command. */
+  disclosure: string;
+  /** The one folder cyboflow ever causes to be approved. */
+  scaffoldPath: string;
+}
 
 /** One row of the health panel's probe table. */
 export interface VerifyProbeRow {

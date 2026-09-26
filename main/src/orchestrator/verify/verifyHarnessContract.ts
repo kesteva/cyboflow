@@ -200,8 +200,16 @@ MOBILE (VERIFY_MODALITY "mobile") — an iOS Simulator leased for this request a
 - Observe with "$VERIFY_DRIVER" mobile-screenshot <name>. "$VERIFY_DRIVER" mobile-openurl
   <url> is NAVIGATION, not driving — available on both arms below.
 - DRIVING is keyed on VERIFY_MOBILE_DRIVE. "maestro": mobile-tap / mobile-type /
-  mobile-swipe / mobile-press / mobile-flow <yaml>. "none": every drive command is
-  refused, so a behavior you cannot exercise without driving MUST be "not_testable".
+  mobile-swipe / mobile-press / mobile-flow <yaml>. "xcode": the harness drives through
+  Xcode DeviceInteraction — mobile-capture <name> (observe; mobile-screenshot is a
+  capture too), mobile-tap <label-or-id> | --at <x> <y>, mobile-swipe <dir> | --from
+  x1 y1 --to x2 y2, mobile-type, mobile-press home|enter, mobile-interact "<raw>",
+  mobile-activate (after mobile-press home, or when something covers the app);
+  mobile-flow is refused. Exit 4 means the app EXITED (crash or relaunch) — evidence
+  about the app, not a harness hiccup; exit 5 means the tap target was missing or
+  ambiguous (the refusal lists candidates). A "pass" must cite a screenshot the
+  driver captured of the app under test. "none": every drive command is refused, so
+  a behavior you cannot exercise without driving MUST be "not_testable".
 - Attestation ("bundle-identity") is harness-owned here too: it re-hashes the installed
   app itself after your session. Install THROUGH the driver or there is nothing to attest.
 

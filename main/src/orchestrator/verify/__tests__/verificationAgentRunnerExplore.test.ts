@@ -246,6 +246,7 @@ function mobileDeps(opts: { maestro: boolean }): VerificationAgentRunnerMobileDe
     deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
     derivedDataDir: '/data/verify-mobile/vr-1/DerivedData',
     requestDir: '/data/verify-mobile/vr-1',
+    recordXcodeSessionKey: async () => {},
     dispose: async () => {},
   };
   return {
