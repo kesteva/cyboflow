@@ -123,6 +123,7 @@ import {
 } from './verifyHarnessContract';
 import { materializeDependencyGuardShim, type DependencyGuardShimOptions } from './dependencyGuardShim';
 import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
+import { raceWithAbort } from './verificationLeases';
 
 // The contract text moved to its own module when it became mode-conditional
 // (runbook-optional-verification.md §A1.1); re-exported so every existing
@@ -358,6 +359,15 @@ export interface VerificationAgentRequest {
    * Drives {@link reclassifyInferredAppFailure}. Absent ⇒ false.
    */
   appInferred?: boolean;
+  /**
+   * §B3 — the `mobileDriveEngine` the scheduler resolved from the LIVE config
+   * for this row, and already used to decide whether the row took the count-1
+   * `verify:xcode` lease. The runner drives with THIS value rather than
+   * re-reading the knob, so a Settings flip between lease and deploy can never
+   * put an unleased row on the xcode rung. Absent ⇒ the live knob (fakes, and
+   * callers that took no lease decision).
+   */
+  mobileDriveEngine?: MobileDriveEngine;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -3305,6 +3315,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     const onAbort = (): void => controller.abort();
     if (req.signal.aborted) controller.abort();
     else req.signal.addEventListener('abort', onAbort, { once: true });
+    // X-1 — the query is raced against the abort INSIDE the runner too: a query
+    // that ignores its signal would otherwise keep this method out of its
+    // `finally`, and with it the simulator/xcode teardown the scheduler's
+    // mobile lease is waiting on. The abandoned query is detached and logged.
+    const unboundedQuery = queryFn;
+    queryFn = (args) => raceWithAbort(unboundedQuery(args), controller.signal, 'verification agent query', logger);
 
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;
@@ -3490,7 +3506,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
         // §B3 phase 1: the engine decision that must precede acquisition (an
         // xcode run needs an iOS 27+ runtime, `minRuntimeMajor`).
-        let xcodePlan = await planXcodeIntent(mobile.driveEngine, mobile.xcode, logger);
+        const leasedEngine = req.mobileDriveEngine;
+        let xcodePlan = await planXcodeIntent(
+          leasedEngine !== undefined ? () => leasedEngine : mobile.driveEngine,
+          mobile.xcode,
+          logger,
+        );
         try {
           const acquired = await acquireMobileSimulator(
             mobile.session,

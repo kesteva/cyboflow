@@ -28,6 +28,7 @@ import {
   recordLedgerLaunch,
   sendDriveFrame,
   sweepStaleDriveSockets,
+  driveSocketFallbackRoot,
   type DriveRequest,
   type DriveResponse,
   type DriveSocket,
@@ -116,10 +117,11 @@ describe.skipIf(process.platform === 'win32')('createDriveSocket — path and mo
     await expect(start(() => OK, { dataDir })).rejects.toThrow(/not a directory/);
   });
 
-  it('falls back to a 0700 mkdtemp under the short tmpdir when the path would exceed the sun_path bound', async () => {
+  it('falls back to the stable 0700 per-user root under the short tmpdir when the path would exceed the sun_path bound', async () => {
     const longDataDir = path.join(root, 'x'.repeat(120));
     const { socket, token } = await start(() => OK, { dataDir: longDataDir });
-    expect(socket.fallbackDir).not.toBeNull();
+    expect(socket.fallbackDir).toBe(driveSocketFallbackRoot(root));
+    expect(socket.fallbackDir).toBe(path.join(root, `cfxd-${process.getuid?.() ?? 'user'}`));
     expect(socket.socketPath.startsWith(`${socket.fallbackDir as string}/xd-`)).toBe(true);
     expect(Buffer.byteLength(socket.socketPath)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
     expect(fs.statSync(socket.fallbackDir as string).mode & 0o777).toBe(0o700);
@@ -134,7 +136,7 @@ describe.skipIf(process.platform === 'win32')('createDriveSocket — path and mo
     await expect(start(() => OK, { dataDir: path.join(root, 'z'.repeat(120)), shortTmpDir: hugeTmp })).rejects.toThrow(
       /sun_path/,
     );
-    // The fallback dir it made was removed again.
+    // The length is asserted before the fallback root is made: nothing is left behind.
     expect(fs.readdirSync(hugeTmp)).toEqual([]);
   });
 
@@ -290,12 +292,22 @@ describe.skipIf(process.platform === 'win32')('close', () => {
     expect((error as DriveTransportError).reason).toBe('connect');
   });
 
-  it('removes the fallback dir and is idempotent', async () => {
+  it('unlinks a fallback socket but keeps the SHARED root (another request may be using it), and is idempotent', async () => {
     const { socket } = await start(() => OK, { dataDir: path.join(root, 'q'.repeat(120)) });
+    const other = await start(() => OK, { dataDir: path.join(root, 'r'.repeat(120)) });
+    expect(other.socket.fallbackDir).toBe(socket.fallbackDir);
     const first = socket.close();
     expect(socket.close()).toBe(first);
     await first;
-    expect(fs.existsSync(socket.fallbackDir as string)).toBe(false);
+    expect(fs.existsSync(socket.socketPath)).toBe(false);
+    expect(fs.existsSync(other.socket.socketPath)).toBe(true);
+  });
+
+  it('refuses a fallback root that is a symlink', async () => {
+    fs.mkdirSync(path.join(root, 'elsewhere'));
+    fs.symlinkSync(path.join(root, 'elsewhere'), driveSocketFallbackRoot(root));
+    await expect(start(() => OK, { dataDir: path.join(root, 's'.repeat(120)) })).rejects.toThrow(/not a directory/);
+    expect(fs.readdirSync(path.join(root, 'elsewhere'))).toEqual([]);
   });
 
   it('does not wait on an in-flight handler; the driver sees the socket close', async () => {
@@ -350,6 +362,17 @@ describe.skipIf(process.platform === 'win32')('sendDriveFrame', () => {
   });
 });
 
+/** Bind a socket and drop its server WITHOUT the unlink — the node a hard kill leaves. */
+async function leaveStaleSocket(dir: string, name: string): Promise<string> {
+  const stalePath = path.join(dir, name);
+  const stale = net.createServer();
+  await new Promise<void>((resolve) => stale.listen(stalePath, resolve));
+  fs.renameSync(stalePath, `${stalePath}.moved`);
+  await new Promise<void>((resolve) => stale.close(() => resolve()));
+  fs.renameSync(`${stalePath}.moved`, stalePath);
+  return stalePath;
+}
+
 describe.skipIf(process.platform === 'win32')('sweepStaleDriveSockets', () => {
   it('removes a dead xd-* socket, keeps a live one, ignores other files', async () => {
     const dataDir = path.join(root, 'data');
@@ -366,7 +389,7 @@ describe.skipIf(process.platform === 'win32')('sweepStaleDriveSockets', () => {
     fs.writeFileSync(path.join(socketsDir, 'orch.sock'), '');
     fs.writeFileSync(path.join(socketsDir, 'xd-bbbbbbbbbbbbbbbb.sock'), 'not a socket');
 
-    const removed = await sweepStaleDriveSockets(dataDir);
+    const removed = await sweepStaleDriveSockets(dataDir, undefined, 500, root);
     expect(removed).toEqual([stalePath]);
     expect(fs.existsSync(stalePath)).toBe(false);
     expect(fs.existsSync(live.socket.socketPath)).toBe(true);
@@ -375,7 +398,28 @@ describe.skipIf(process.platform === 'win32')('sweepStaleDriveSockets', () => {
   });
 
   it('returns nothing for a data dir with no sockets dir', async () => {
-    await expect(sweepStaleDriveSockets(path.join(root, 'absent'))).resolves.toEqual([]);
+    await expect(sweepStaleDriveSockets(path.join(root, 'absent'), undefined, 500, root)).resolves.toEqual([]);
+  });
+
+  it('X-5: sweeps a hard-killed FALLBACK socket from the per-user root, keeping a live one', async () => {
+    const longDataDir = path.join(root, 'x'.repeat(120));
+    const live = await start(() => OK, { dataDir: longDataDir });
+    const fallbackRoot = driveSocketFallbackRoot(root);
+    const stalePath = await leaveStaleSocket(fallbackRoot, 'xd-cccccccccccccccc.sock');
+
+    const removed = await sweepStaleDriveSockets(longDataDir, undefined, 500, root);
+    expect(removed).toEqual([stalePath]);
+    expect(fs.existsSync(stalePath)).toBe(false);
+    expect(fs.existsSync(live.socket.socketPath)).toBe(true);
+  });
+
+  it('X-5: never scans a fallback root that is a symlink', async () => {
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    const stalePath = await leaveStaleSocket(elsewhere, 'xd-dddddddddddddddd.sock');
+    fs.symlinkSync(elsewhere, driveSocketFallbackRoot(root));
+    await expect(sweepStaleDriveSockets(path.join(root, 'data'), undefined, 500, root)).resolves.toEqual([]);
+    expect(fs.existsSync(stalePath)).toBe(true);
   });
 });
 

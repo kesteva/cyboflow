@@ -25,7 +25,8 @@
  * Main-process only (it spawns the bridge); no electron import — the caller
  * passes `signedBuild` in.
  */
-import { promises as fsp } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { constants as fsConstants, promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import type { LoggerLike } from '../../orchestrator/types';
 import type { XcodeProbeSummary } from '../../orchestrator/verify/xcode/driveEngineSelection';
@@ -158,15 +159,85 @@ export interface XcodeApprovalActionDeps {
   xcrunPath?: string;
   /** Test seam over {@link createXcodeMcpBridgeClient}. */
   createClient?: (options: XcodeMcpBridgeClientOptions) => XcodeMcpBridgeClient;
-  /** Test seam: write the scaffold. Defaults to the real filesystem. */
+  /** Test seam: write the scaffold. Defaults to the real filesystem ({@link writeScaffoldNoFollow}). */
   writeScaffold?: (projectDir: string, pbxproj: string) => Promise<void>;
+  /**
+   * Test seam: the containment check run right before `XcodeOpenWorkspace`.
+   * Defaults to {@link confirmScaffoldContained}; rejects to refuse the open.
+   */
+  confirmScaffold?: (dataDir: string, projectDir: string) => Promise<void>;
   openTimeoutMs?: number;
   logger?: LoggerLike;
 }
 
-async function defaultWriteScaffold(projectDir: string, pbxproj: string): Promise<void> {
-  await fsp.mkdir(projectDir, { recursive: true, mode: 0o700 });
-  await fsp.writeFile(path.join(projectDir, 'project.pbxproj'), pbxproj, 'utf8');
+/**
+ * Refuse `dir` unless it is a real directory this user owns — never a symlink,
+ * which a recursive `mkdir` would silently accept and every later write would
+ * follow (X-4). Absent ⇒ created 0700, non-recursively (its parent was checked).
+ */
+async function ensureOwnedDir(dir: string): Promise<void> {
+  let info: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    info = await fsp.lstat(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    await fsp.mkdir(dir, { mode: 0o700 });
+    return;
+  }
+  if (info.isSymbolicLink()) throw new Error(`${dir} is a symbolic link`);
+  if (!info.isDirectory()) throw new Error(`${dir} is not a directory`);
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error(`${dir} is not owned by this user`);
+  }
+}
+
+/**
+ * The real scaffold writer (X-4). Every component under `<dataDir>/` —
+ * `xcode-approval/`, the `.xcodeproj` and its `project.pbxproj` — is refused
+ * when it is a symlink, so a pre-planted link can neither redirect the write
+ * into another project nor make Xcode open a folder other than the scaffold.
+ * The file is written to a fresh `O_EXCL | O_NOFOLLOW` temp file in the checked
+ * directory and renamed into place (a rename replaces a name, it never follows
+ * one).
+ */
+export async function writeScaffoldNoFollow(projectDir: string, pbxproj: string): Promise<void> {
+  await ensureOwnedDir(path.dirname(projectDir));
+  await ensureOwnedDir(projectDir);
+  const target = path.join(projectDir, 'project.pbxproj');
+  try {
+    if ((await fsp.lstat(target)).isSymbolicLink()) throw new Error(`${target} is a symbolic link`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const temp = path.join(projectDir, `.project.pbxproj.${randomBytes(6).toString('hex')}.tmp`);
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
+  const handle = await fsp.open(temp, flags, 0o600);
+  try {
+    await handle.writeFile(pbxproj, 'utf8');
+  } finally {
+    await handle.close();
+  }
+  try {
+    await fsp.rename(temp, target);
+  } catch (err) {
+    await fsp.rm(temp, { force: true });
+    throw err;
+  }
+}
+
+/**
+ * The last check before Xcode is asked to open the scaffold (X-4): its REAL
+ * path must be exactly `<realpath(dataDir)>/xcode-approval/<project>`. A
+ * component swapped for a symlink after the write resolves elsewhere and is
+ * refused, so the only folder the action can cause to be approved stays the
+ * scaffold.
+ */
+export async function confirmScaffoldContained(dataDir: string, projectDir: string): Promise<void> {
+  const expected = path.join(await fsp.realpath(dataDir), XCODE_APPROVAL_DIRNAME, SCAFFOLD_PROJECT);
+  const actual = await fsp.realpath(projectDir);
+  if (actual !== expected) {
+    throw new Error(`the approval scaffold resolves to ${actual}, outside ${path.dirname(expected)}`);
+  }
 }
 
 function errorText(err: unknown): string {
@@ -185,7 +256,7 @@ export function createXcodeApprovalAction(deps: XcodeApprovalActionDeps): () => 
   const attempt = async (): Promise<XcodeAccessApproval> => {
     const base = { disclosure: XCODE_APPROVAL_DISCLOSURE, scaffoldPath: projectPath };
     try {
-      await (deps.writeScaffold ?? defaultWriteScaffold)(projectPath, SCAFFOLD_PBXPROJ);
+      await (deps.writeScaffold ?? writeScaffoldNoFollow)(projectPath, SCAFFOLD_PBXPROJ);
     } catch (err) {
       return {
         ...base,
@@ -204,7 +275,18 @@ export function createXcodeApprovalAction(deps: XcodeApprovalActionDeps): () => 
     });
     try {
       const connected = await client.connect();
+      let contained: string | null = null;
       if (connected.ok) {
+        try {
+          await (deps.confirmScaffold ?? confirmScaffoldContained)(deps.dataDir, projectPath);
+        } catch (err) {
+          contained = errorText(err);
+        }
+      }
+      if (connected.ok && contained !== null) {
+        // Not `reached`: nothing was asked of Xcode, so this is not a refusal.
+        opened = { ok: false, message: `refused to open the approval scaffold: ${contained}` };
+      } else if (connected.ok) {
         reached = true;
         const result = await client.call(
           'XcodeOpenWorkspace',

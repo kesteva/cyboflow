@@ -29,6 +29,7 @@ import { VerifyCapabilityStore } from '../capabilityStore';
 import {
   MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL,
   MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
+  VERIFY_XCODE_LEASE,
   verifyMobileSlot,
 } from '../mobileGates';
 import { Mutex } from '../../../utils/mutex';
@@ -692,6 +693,40 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
       releaseAll();
       await flushDrain();
     }
+  });
+
+  it('X-3: the verify:xcode lease follows the LIVE engine, and the runner is handed the same value', async () => {
+    seedRun(db, 'run-mobile-live-engine');
+    const { runner, run, releaseAll } = gatedRunner();
+    // Booted on maestro (no xcode lease), then flipped to xcode in Settings.
+    const boot: ResolvedVisualVerifyConfig = { ...CONFIG, mobileSimSlots: 2, mobileDriveEngine: 'maestro' };
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      mobileToolchainProbe: async () => true,
+      config: boot,
+      liveConfig: () => ({ ...boot, mobileDriveEngine: 'xcode' }),
+    });
+
+    const ids = [
+      enqueueOne(scheduler, 'run-mobile-live-engine', 'mobile-flow'),
+      enqueueOne(scheduler, 'run-mobile-live-engine', 'mobile-flow'),
+    ];
+    await flushDrain();
+
+    // Two simulator slots, but ONE Xcode session at a time: the second row waits.
+    const queued = ids.filter((id) => statusOf(id) === 'queued');
+    expect(ids.filter((id) => statusOf(id) === 'running')).toHaveLength(1);
+    expect(queued).toHaveLength(1);
+    expect(mutex.isLocked(VERIFY_XCODE_LEASE)).toBe(true);
+    expect(mutex.isLocked(verifyMobileSlot(1))).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect((run.mock.calls[0][0] as VerificationAgentRequest).mobileDriveEngine).toBe('xcode');
+
+    releaseAll();
+    await flushDrain();
+    expect(statusOf(queued[0])).toBe('running');
+    releaseAll();
+    await flushDrain();
   });
 
   it('runs a mobile row on a port-EXHAUSTED pool (it needs no port at all)', async () => {

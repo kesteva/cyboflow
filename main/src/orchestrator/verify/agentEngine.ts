@@ -18,6 +18,7 @@ import {
 } from '../../../../shared/types/visualVerification';
 import type {
   MobileAppSpec,
+  MobileDriveEngine,
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationExecutionMode,
@@ -49,6 +50,7 @@ import {
   skipReasonForRunbookDecline,
 } from './verificationSkipReasons';
 import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
+import { MobileTeardownHolds, trackSettle, type TrackedSettle } from './mobileTeardownHold';
 import { isBindableLeverName } from './runbookLevers';
 import { probeProjectSurface, tagInferredApp } from './projectSurfaceProbe';
 import type { VerificationRequestRow } from './verificationRequestRows';
@@ -221,6 +223,8 @@ export interface AgentEngineDeps {
   isProjectBudgetExhausted: (projectId: number) => boolean;
   incrementJudgeCallsUsed: (id: string) => void;
   portFromLease: (name: string | null) => number | null;
+  /** X-1 — the hard bound on holding a detached mobile runner's lease; defaults to `MOBILE_TEARDOWN_HOLD_BOUND_MS` (mobileTeardownHold.ts). */
+  mobileTeardownHoldMs?: number;
 }
 
 /**
@@ -264,6 +268,8 @@ export class AgentEngine {
   private readonly isProjectBudgetExhausted: (projectId: number) => boolean;
   private readonly incrementJudgeCallsUsed: (id: string) => void;
   private readonly portFromLease: (name: string | null) => number | null;
+  /** X-1 — mobile rows whose detached runner is still tearing down, each holding its simulator lease. */
+  private readonly teardownHolds: MobileTeardownHolds;
 
   constructor(deps: AgentEngineDeps) {
     this.db = deps.db;
@@ -293,6 +299,10 @@ export class AgentEngine {
     this.isProjectBudgetExhausted = deps.isProjectBudgetExhausted;
     this.incrementJudgeCallsUsed = deps.incrementJudgeCallsUsed;
     this.portFromLease = deps.portFromLease;
+    this.teardownHolds = new MobileTeardownHolds({
+      ...(deps.mobileTeardownHoldMs !== undefined ? { boundMs: deps.mobileTeardownHoldMs } : {}),
+      ...(deps.logger !== undefined ? { logger: deps.logger } : {}),
+    });
   }
 
   /** Read the request's `task_json` / `snapshot_sha` (migration 078); fail-soft to nulls. */
@@ -706,6 +716,16 @@ export class AgentEngine {
       );
       return { work: null };
     }
+    // X-1 — this request id's previous attempt is still tearing down its
+    // simulator (a same-id §A5 requeue): leasing it now would share its
+    // request dir with a runner that is about to delete it. Stay queued; the
+    // hold nudges the drain when that teardown settles.
+    if (this.teardownHolds.isHeld(row.id)) {
+      this.logger?.debug('[VerificationScheduler] previous attempt still tearing down; leaving queued', {
+        requestId: row.id,
+      });
+      return { work: null };
+    }
 
     const task = this.taskForAgentRow(row.id, input);
 
@@ -774,7 +794,10 @@ export class AgentEngine {
       leasePool: this.leasePool,
       modality,
       mobileSimSlots: this.config.mobileSimSlots,
-      mobileDriveEngine: this.config.mobileDriveEngine,
+      // §B3 — the SAME live snapshot as every other per-row knob: the lease
+      // decision and the rung the runner drives must read one value, or a
+      // Settings flip lets two rows open Xcode sessions side by side.
+      mobileDriveEngine: live.mobileDriveEngine,
       devServerPorts: this.config.devServerPorts,
       portFromLease: (name) => this.portFromLease(name),
       requestId: row.id,
@@ -839,6 +862,7 @@ export class AgentEngine {
         selection,
         live.exploreDeadlineFloorMs,
         learnedPin,
+        live.mobileDriveEngine,
       ),
     };
   }
@@ -944,6 +968,8 @@ export class AgentEngine {
     exploreFloorMs: number,
     /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
     learnedPin = false,
+    /** §B3 — the live engine the lease decision used; handed to the runner so it drives with the same value. */
+    mobileDriveEngine?: MobileDriveEngine,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
@@ -977,6 +1003,9 @@ export class AgentEngine {
     }
 
     let batchLease: LeaseHandle | null = null;
+    // X-1 — the runner's own settlement, observed so the `finally` can tell a
+    // detached (still-tearing-down) mobile runner from one that finished.
+    let runner: TrackedSettle | null = null;
     try {
       // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
       // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
@@ -1091,13 +1120,16 @@ export class AgentEngine {
         // shape alone could disagree with the one that just decided whether this
         // request may touch the screen at all.
         modality,
+        ...(modality === 'mobile' && mobileDriveEngine !== undefined ? { mobileDriveEngine } : {}),
         signal: controller.signal,
       };
 
       // ABORT-BOUNDED (R1 #1a): a runner that never settles can no more hang the
       // drain than a hung capture — race it against the deadline/cancel signal.
+      const running = this.agentRunner!.run(req);
+      runner = trackSettle(running);
       const result = await raceWithAbort(
-        this.agentRunner!.run(req),
+        running,
         controller.signal,
         'agent',
         this.logger,
@@ -1202,10 +1234,20 @@ export class AgentEngine {
       if (portLease !== null && leasedPort !== null) {
         await this.releaseOrQuarantinePort(portLease, leasedPort);
       }
-      // The mobile slot releases UNCONDITIONALLY too, and for the screen lease's
-      // reason: the per-request simulator is created and destroyed inside the
-      // runner, so nothing this deployment leaves behind can occupy the slot.
-      mobileLease?.release();
+      // The mobile slot is created and destroyed inside the runner, so it frees
+      // once the RUNNER is done with it — which, after an abort detached it, is
+      // later than now (X-1): hand it to a teardown hold that releases it (and
+      // nudges) when the runner settles, bounded. Otherwise release it here.
+      let heldForTeardown = false;
+      if (mobileLease !== null && runner !== null && !runner.isSettled()) {
+        heldForTeardown = true;
+        this.teardownHolds.hold(row.id, runner, () => {
+          mobileLease.release();
+          this.nudge();
+        });
+      } else {
+        mobileLease?.release();
+      }
       // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
       // port (which a leaked dev server can keep genuinely occupied past
       // teardown), the display is not a resource this deployment can leave dirty
@@ -1215,8 +1257,9 @@ export class AgentEngine {
       agentLease.release();
       // §A3 — only now, with every lease back in the pool and the in-flight
       // controller gone, can the requeued row be drained again; nudging before
-      // the release would find its own slot/port/simulator still held.
-      if (requeued) this.nudge();
+      // the release would find its own slot/port/simulator still held. A held
+      // mobile row is nudged by its teardown hold instead (X-1).
+      if (requeued && !heldForTeardown) this.nudge();
     }
   }
 

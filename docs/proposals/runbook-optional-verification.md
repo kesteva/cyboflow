@@ -386,7 +386,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - keep the drive coercion keyed strictly on `'none'`.
 - When xcode is selected, `mobileSimulatorSession.acquire` requires runtime major ≥ 27 (`minRuntimeMajor`).
 - **Concurrency:** assumes `mobileSimSlots=1` (the default). If it is raised, add a count-1 `verify:xcode` lease that leaves the row *queued* on a miss. Never degrade the rung on contention.
-- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the drain's configured engine is `auto`/`xcode`; it rides the slot lease's handle, so the agent engine's existing release paths free both.
+- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the row's engine is `auto`/`xcode` — that engine is read from the LIVE config once per row and handed to the runner on the request (`mobileDriveEngine`), so the lease decision and the rung driven never disagree; it rides the slot lease's handle, so the agent engine's existing release paths free both.
 
 ### B4. Lifecycle (runner mobile arm)
 1. Acquire the simulator (existing flow).
@@ -438,6 +438,10 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    2. bridge SIGTERM, then SIGKILL
    3. close and unlink the socket
 9. **Sweep.** When `sweepStaleSimulators` finds a dead-owner marker carrying a session key, it spawns one bridge and calls `EndSession(key)` best-effort (short timeout; ignore "doesn't exist" and "isn't approved") before `destroyDevice`. Sweep stale `xd-*` sockets at boot. The claim "device deletion ends a session" is UNVERIFIED until the smoke measures it.
+   **As built (post-review):**
+   - When the deadline or a cancel detaches a mobile row's runner mid-teardown, the scheduler keeps the row's simulator slot (and the `verify:xcode` lease riding it) until the runner settles, bounded at 5 min (`mobileTeardownHold.ts`); a same-id requeue is neither nudged nor re-leased until then. The runner also races its agent query against the abort, so a query that ignores the signal cannot keep it out of this `finally`.
+   - A StartSession that fails WITHOUT a definitive refusal (timeout, lost or malformed answer, bridge death) may still have created the session, so `openXcodeDriveSession` ends it by the minted key — on a fresh bridge if the first died — before degrading. When that cannot be proven (EndSession neither succeeded nor said the key does not exist), the key is copied into a sibling `verify-mobile/<requestId>.xcode-<hash>/owner.json` that dispose leaves behind, so the boot sweep still ends it.
+   - The long-path socket fallback is a stable per-user root `/tmp/cfxd-<uid>/` (0700, ownership-checked, a symlink refused) instead of a per-request `mkdtemp`, and the boot sweep scans it alongside `<dataDir>/sockets`, removing only `xd-*` sockets no listener answers.
 
 **Threat model** (F11, B-2, B-7). The drive socket is an **ergonomics, audit and ledger boundary, not a security boundary.**
 - Xcode approval is keyed on the binary that spawns the bridge.
@@ -501,6 +505,7 @@ It exports `JAVA_HOME` for the probe and for the agent env.
   - The `--always` command is returned only for a packaged (signed) build, and the panel hides it behind an explicit "show the durable command" click.
   - The scaffold is a minimal target-less `project.pbxproj`; whether Xcode opens it cleanly is for the live smoke to confirm.
   - Concurrent clicks share one attempt, so a double click cannot raise two prompts.
+  - The scaffold path stays fixed, but every component under `<dataDir>/` is refused when it is a symlink or not ours, `project.pbxproj` is written through an `O_EXCL|O_NOFOLLOW` temp file renamed into place, and the project's realpath must equal `<realpath(dataDir)>/xcode-approval/CyboflowApproval.xcodeproj` right before `XcodeOpenWorkspace` (post-review).
 
 ### B9. Docs
 - Correct `mobile-verification-tier.md` §3, §11 and §16 against the Xcode 27 dump. §16's Stage 3 becomes "drive/observe rung shipped; Xcode-built 3b rejected with evidence".

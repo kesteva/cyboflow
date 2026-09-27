@@ -7,7 +7,10 @@
  * committed tools_list fixture declares) and a scripted probe. No real
  * `xcrun mcpbridge` is spawned and no Xcode prompt is raised.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createXcodeMcpBridgeClient } from '../../../orchestrator/verify/xcode/xcodeMcpBridgeClient';
 import { FakeBridge, type ToolScript } from '../../../orchestrator/verify/xcode/__tests__/fakeMcpBridge';
 import type { XcodeDeviceInteractionProbeResult } from '../xcodeDeviceInteractionProbe';
@@ -15,6 +18,8 @@ import {
   createXcodeApprovalAction,
   SCAFFOLD_PBXPROJ,
   XCODE_APPROVAL_DISCLOSURE,
+  XCODE_APPROVAL_DIRNAME,
+  writeScaffoldNoFollow,
   xcodeProbeRow,
 } from '../xcodeMcpHealth';
 
@@ -110,6 +115,7 @@ function actionWith(
       writes.push(projectDir);
       expect(pbxproj).toBe(SCAFFOLD_PBXPROJ);
     },
+    confirmScaffold: async () => {},
   });
   return { run, bridge, writes, invalidations };
 }
@@ -179,5 +185,95 @@ describe('createXcodeApprovalAction (§B8)', () => {
     const [a, b] = await Promise.all([h.run(), h.run()]);
     expect(a).toBe(b);
     expect(h.bridge.calls.filter((c) => c.name === 'XcodeOpenWorkspace')).toHaveLength(1);
+  });
+});
+
+// X-4 — the REAL scaffold writer and containment check, over a real tmp dir.
+describe.skipIf(process.platform === 'win32')('createXcodeApprovalAction — the scaffold never follows a symlink (X-4)', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length > 0) rmSync(dirs.pop() as string, { recursive: true, force: true });
+  });
+  function tmp(): string {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cf-xapprove-')));
+    dirs.push(dir);
+    return dir;
+  }
+  /** A victim project the planted link points at; its pbxproj must survive untouched. */
+  function victim(root: string): string {
+    const dir = join(root, 'Victim.xcodeproj');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'project.pbxproj'), 'VICTIM');
+    return dir;
+  }
+  function realAction(dataDir: string, extra: { writeScaffold?: (projectDir: string, pbxproj: string) => Promise<void> } = {}) {
+    const bridge = new FakeBridge({ tools: { XcodeOpenWorkspace: OPEN_OK, XcodeCloseWorkspace: CLOSE_OK } });
+    const { probe } = scriptedProbe(result({ outcome: 'approval-required', approval: 'missing' }));
+    const run = createXcodeApprovalAction({
+      dataDir,
+      probe,
+      signedBuild: false,
+      createClient: (options) => createXcodeMcpBridgeClient({ ...options, spawn: () => bridge, killGraceMs: 40 }),
+      ...extra,
+    });
+    return { run, bridge };
+  }
+
+  it('writes a fresh 0700 scaffold and opens exactly it', async () => {
+    const dataDir = tmp();
+    const { run, bridge } = realAction(dataDir);
+    const approval = await run();
+    const project = join(dataDir, XCODE_APPROVAL_DIRNAME, 'CyboflowApproval.xcodeproj');
+    expect(readFileSync(join(project, 'project.pbxproj'), 'utf8')).toBe(SCAFFOLD_PBXPROJ);
+    expect(bridge.calls[0]).toEqual({ name: 'XcodeOpenWorkspace', arguments: { path: project } });
+    expect(approval.outcome).toBe('prompted');
+    expect(statSync(project).mode & 0o777).toBe(0o700);
+    // A second write over the existing scaffold replaces it in place, leaving no temp file.
+    await writeScaffoldNoFollow(project, SCAFFOLD_PBXPROJ);
+    expect(readdirSync(project)).toEqual(['project.pbxproj']);
+  });
+
+  it('refuses a pre-planted .xcodeproj symlink: the target is not written and Xcode is never asked', async () => {
+    const dataDir = tmp();
+    const target = victim(tmp());
+    mkdirSync(join(dataDir, XCODE_APPROVAL_DIRNAME));
+    symlinkSync(target, join(dataDir, XCODE_APPROVAL_DIRNAME, 'CyboflowApproval.xcodeproj'));
+    const { run, bridge } = realAction(dataDir);
+    const approval = await run();
+    expect(approval.outcome).toBe('unavailable');
+    expect(approval.detail).toContain('symbolic link');
+    expect(readFileSync(join(target, 'project.pbxproj'), 'utf8')).toBe('VICTIM');
+    expect(bridge.calls).toEqual([]);
+  });
+
+  it('refuses a symlinked xcode-approval dir and a symlinked project.pbxproj', async () => {
+    const elsewhere = tmp();
+    const dataDir = tmp();
+    symlinkSync(elsewhere, join(dataDir, XCODE_APPROVAL_DIRNAME));
+    expect((await realAction(dataDir).run()).outcome).toBe('unavailable');
+    expect(existsSync(join(elsewhere, 'CyboflowApproval.xcodeproj'))).toBe(false);
+
+    const dataDir2 = tmp();
+    const target = victim(tmp());
+    const project = join(dataDir2, XCODE_APPROVAL_DIRNAME, 'CyboflowApproval.xcodeproj');
+    mkdirSync(project, { recursive: true });
+    symlinkSync(join(target, 'project.pbxproj'), join(project, 'project.pbxproj'));
+    expect((await realAction(dataDir2).run()).outcome).toBe('unavailable');
+    expect(readFileSync(join(target, 'project.pbxproj'), 'utf8')).toBe('VICTIM');
+  });
+
+  it('a project swapped for a symlink AFTER the write fails the containment check right before the open', async () => {
+    const dataDir = tmp();
+    const target = victim(tmp());
+    const { run, bridge } = realAction(dataDir, {
+      writeScaffold: async (projectDir) => {
+        mkdirSync(join(dataDir, XCODE_APPROVAL_DIRNAME), { recursive: true });
+        symlinkSync(target, projectDir);
+      },
+    });
+    const approval = await run();
+    expect(approval.outcome).toBe('unavailable');
+    expect(approval.detail).toContain('refused to open the approval scaffold');
+    expect(bridge.calls).toEqual([]);
   });
 });

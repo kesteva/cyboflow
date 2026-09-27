@@ -11,7 +11,7 @@
  * mkdtemp filesystem.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -146,6 +146,35 @@ describe('recordXcodeSessionKey (§B4.2)', () => {
     const handle = await factory.acquire({ requestId: 'req-ro', dataDir: dir, bootTimeoutMs: 1000 });
     rmSync(handle.requestDir, { recursive: true, force: true });
     await expect(handle.recordXcodeSessionKey('Cyboflow Verify dead')).rejects.toThrow();
+  });
+});
+
+describe('retainXcodeSessionKey (X-2)', () => {
+  it('keeps the key past dispose, where a dead-owner sweep ends it and reclaims the marker', async () => {
+    const dir = dataDir();
+    const ended: string[] = [];
+    const { factory } = factoryFor({
+      ownerDead: true,
+      endXcodeSession: async (key) => {
+        ended.push(key);
+      },
+    });
+    const handle = await factory.acquire({ requestId: 'req-lost', dataDir: dir, bootTimeoutMs: 1000 });
+    await handle.recordXcodeSessionKey('Cyboflow Verify lost');
+    await handle.retainXcodeSessionKey?.('Cyboflow Verify lost');
+    await handle.dispose();
+
+    // The request dir (and its owner.json) is gone; the retained marker is not.
+    const root = join(dir, VERIFY_MOBILE_DIRNAME);
+    const left = readdirSync(root);
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatch(/^req-lost\.xcode-[0-9a-f]{12}$/);
+    const marker = JSON.parse(readFileSync(join(root, left[0], 'owner.json'), 'utf8')) as SimulatorOwnerMarker;
+    expect(marker).toMatchObject({ xcodeSessionKey: 'Cyboflow Verify lost', simUdid: UDID, pid: 4711 });
+
+    await factory.sweepStaleSimulators({ dataDir: dir });
+    expect(ended).toEqual(['Cyboflow Verify lost']);
+    expect(readdirSync(root)).toEqual([]);
   });
 });
 
