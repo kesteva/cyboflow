@@ -207,6 +207,8 @@ describe('openXcodeDriveSession — the §B4.2 order', () => {
     const result = await openXcodeDriveSession(world.options);
     expect(result).toMatchObject({ ok: false, degradeReason: 'xcode-approval-missing' });
     expect(world.bridge.signals).toContain('SIGTERM');
+    // A definitive refusal: Xcode never made the session, so nothing is ended.
+    expect(world.bridge.calls.map((c) => c.name)).not.toContain('DeviceInteractionEndSession');
   });
 
   it('a session bound to ANOTHER device is ended and degraded, never driven', async () => {
@@ -225,6 +227,69 @@ describe('openXcodeDriveSession — the §B4.2 order', () => {
     expect(result).toMatchObject({ ok: false, degradeReason: 'xcode-session-failed' });
     expect(world.bridge.calls.map((c) => c.name)).toContain('DeviceInteractionEndSession');
     expect(world.bridge.signals).toContain('SIGTERM');
+  });
+});
+
+describe('openXcodeDriveSession — an indeterminate StartSession (X-2)', () => {
+  function retaining(world: World): string[] {
+    const retained: string[] = [];
+    world.options.retainSessionKey = async (key) => {
+      retained.push(key);
+    };
+    return retained;
+  }
+
+  it('a TIMED-OUT StartSession is ended by its key on the same bridge before the bridge goes', async () => {
+    const world = makeWorld({ DeviceInteractionStartSession: () => 'hang' });
+    world.options.startSessionTimeoutMs = 40;
+    const retained = retaining(world);
+    const result = await openXcodeDriveSession(world.options);
+    expect(result).toMatchObject({ ok: false, degradeReason: 'xcode-session-failed' });
+    expect(world.bridge.calls.find((c) => c.name === 'DeviceInteractionEndSession')?.arguments).toEqual({
+      interactionSessionKey: KEY,
+    });
+    expect(world.bridge.signals).toContain('SIGTERM');
+    expect(retained).toEqual([]);
+  });
+
+  it('a bridge that DIED during StartSession: the key is ended on a FRESH bridge', async () => {
+    const world = makeWorld({ DeviceInteractionStartSession: () => 'die' });
+    const retained = retaining(world);
+    const second = new FakeBridge({ tools: { DeviceInteractionEndSession: END_OK } });
+    let spawned = 0;
+    world.options.createClient = (opts: XcodeMcpBridgeClientOptions) => {
+      spawned += 1;
+      const child = spawned === 1 ? world.bridge : second;
+      return createXcodeMcpBridgeClient({ ...opts, spawn: () => child, killGraceMs: 40 });
+    };
+    const result = await openXcodeDriveSession(world.options);
+    expect(result).toMatchObject({ ok: false, degradeReason: 'xcode-session-failed' });
+    expect(spawned).toBe(2);
+    expect(second.calls).toEqual([{ name: 'DeviceInteractionEndSession', arguments: { interactionSessionKey: KEY } }]);
+    expect(second.signals).toContain('SIGTERM');
+    expect(retained).toEqual([]);
+  });
+
+  it('a MALFORMED answer whose EndSession cannot complete keeps the key for the boot sweep', async () => {
+    const world = makeWorld({
+      DeviceInteractionStartSession: () => ({ structured: { summary: 'no key, no device' } }),
+      DeviceInteractionEndSession: () => 'hang',
+    });
+    const retained = retaining(world);
+    const result = await openXcodeDriveSession(world.options);
+    expect(result).toMatchObject({ ok: false, degradeReason: 'xcode-session-failed' });
+    expect(world.bridge.calls.map((c) => c.name)).toContain('DeviceInteractionEndSession');
+    expect(retained).toEqual([KEY]);
+  });
+
+  it('an EndSession that says the session never existed is proof enough — nothing is retained', async () => {
+    const world = makeWorld({
+      DeviceInteractionStartSession: () => ({ structured: { summary: 'no key, no device' } }),
+      DeviceInteractionEndSession: () => ({ toolError: "Session with that key doesn't exist" }),
+    });
+    const retained = retaining(world);
+    await openXcodeDriveSession(world.options);
+    expect(retained).toEqual([]);
   });
 });
 

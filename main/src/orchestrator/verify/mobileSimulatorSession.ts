@@ -39,6 +39,7 @@
  * a `cyboflow-verify-*` device with no marker under this data dir is logged and
  * LEFT ALONE.
  */
+import { createHash } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
@@ -110,6 +111,15 @@ export interface MobileSimulatorHandle {
    * starts the session, because an unrecorded session is one no sweep can end.
    */
   recordXcodeSessionKey(key: string): Promise<void>;
+  /**
+   * X-2 — keep `key` reachable by the boot sweep AFTER {@link dispose}, for a
+   * session whose StartSession outcome was unknown and that could not be proven
+   * ended. Writes a sibling marker dir (`<requestId>.xcode-<hash>/owner.json`)
+   * naming this process, the device and the key: {@link dispose} leaves it, a
+   * same-id re-dispatch cannot overwrite it, and the sweep ends the key once
+   * this process is dead. Rejects on a write failure. Optional so fakes compile.
+   */
+  retainXcodeSessionKey?(key: string): Promise<void>;
   /** Best-effort, idempotent, NEVER throws. Shutdown → delete → remove the request dir. */
   dispose(): Promise<void>;
 }
@@ -199,6 +209,9 @@ const DERIVED_DATA_DIRNAME = 'DerivedData';
 
 /** The ownership marker's filename. */
 const OWNER_MARKER_FILENAME = 'owner.json';
+
+/** A retained session key's marker dir is `<requestId>` + this + a hash of the key (X-2). */
+const RETAINED_KEY_DIR_INFIX = '.xcode-';
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 
@@ -627,6 +640,12 @@ export function createMobileSimulatorSessionFactory(
         async recordXcodeSessionKey(key: string): Promise<void> {
           // Throws on a write failure, deliberately: see the interface doc.
           await writeMarker(requestDir, { ...createdMarker, xcodeSessionKey: key });
+        },
+        async retainXcodeSessionKey(key: string): Promise<void> {
+          const keyHash = createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 12);
+          const retainedDir = path.join(args.dataDir, VERIFY_MOBILE_DIRNAME, `${args.requestId}${RETAINED_KEY_DIR_INFIX}${keyHash}`);
+          await fs.mkdir(retainedDir, { recursive: true });
+          await writeMarker(retainedDir, { ...createdMarker, xcodeSessionKey: key });
         },
         async dispose(): Promise<void> {
           if (disposed) return;

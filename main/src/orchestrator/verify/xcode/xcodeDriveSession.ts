@@ -207,6 +207,15 @@ export interface OpenXcodeDriveSessionOptions {
   artifactsDir: string;
   /** Stamp the key into `owner.json` (MobileSimulatorHandle.recordXcodeSessionKey). */
   recordSessionKey: (key: string) => Promise<void>;
+  /**
+   * Keep the key for the boot sweep PAST the simulator's disposal
+   * (MobileSimulatorHandle.retainXcodeSessionKey). Called only when a
+   * StartSession whose outcome is unknown could not be proven ended (X-2):
+   * such a session may be live, and the normal dispose deletes `owner.json`.
+   */
+  retainSessionKey?: (key: string) => Promise<void>;
+  /** StartSession's own bound. Defaults to the client's (120 s — it may boot the device). */
+  startSessionTimeoutMs?: number;
   /** The resolved `xcrun`. Defaults to the client's own `/usr/bin/xcrun`. */
   xcrunPath?: string;
   /** The bridge's environment. Defaults to `process.env`. */
@@ -279,6 +288,81 @@ function degradeFor(kind: BridgeFailureKind): XcodeDegradeReason {
 }
 
 /**
+ * Whether a failed StartSession may nonetheless have created the session. Only
+ * a tool's own answer is definitive: `not-approved` and `tool-error` are Xcode
+ * refusing; a `timeout`, a `protocol` failure (the answer was lost in framing
+ * or did not narrow) and `bridge-exited` all leave the outcome unknown.
+ */
+function startOutcomeUnknown(kind: BridgeFailureKind): boolean {
+  return kind === 'timeout' || kind === 'protocol' || kind === 'bridge-exited';
+}
+
+/**
+ * X-2 — best-effort `EndSession(sessionIdentifier)` after an indeterminate
+ * StartSession, on the original bridge while it lives, else on a fresh one.
+ * Bounded as one teardown step; never throws. When the session is not proven
+ * gone — ended, or reported as never having existed — the key is handed to
+ * `retainSessionKey` so the boot sweep can still end it after this request's
+ * simulator (and its `owner.json`) is disposed.
+ */
+async function endPossiblyStartedSession(
+  client: XcodeMcpBridgeClient,
+  sessionIdentifier: string,
+  options: OpenXcodeDriveSessionOptions,
+  stepTimeoutMs: number,
+  logContext: Record<string, unknown>,
+): Promise<void> {
+  const logger = options.logger;
+  // A holder, not a `let`: the closure below assigns it, which a narrowed local would hide.
+  const spawned: { fresh: XcodeMcpBridgeClient | null } = { fresh: null };
+  const step = await boundedStep('end-session', stepTimeoutMs, async () => {
+    let endClient = client;
+    if (!client.isAlive()) {
+      const fresh = (options.createClient ?? createXcodeMcpBridgeClient)({
+        ...(options.xcrunPath !== undefined ? { xcrunPath: options.xcrunPath } : {}),
+        ...(options.bridgeEnv !== undefined ? { env: options.bridgeEnv } : {}),
+        ...(logger !== undefined ? { logger } : {}),
+        initTimeoutMs: stepTimeoutMs,
+      });
+      spawned.fresh = fresh;
+      const connected = await fresh.connect();
+      if (!connected.ok) throw new Error(`a fresh bridge could not connect: ${connected.kind}: ${connected.message}`);
+      endClient = fresh;
+    }
+    const ended = await endClient.endSession({ interactionSessionKey: sessionIdentifier }, stepTimeoutMs);
+    // EndSession reports an already-gone session as a SUCCESS; a tool error
+    // saying the key does not exist is the same fact.
+    if (ended.ok) return ended.structured.userMessage;
+    if (ended.kind === 'tool-error' && isSessionMissingMessage(ended.message)) return ended.message;
+    throw new Error(`${ended.kind}: ${ended.message}`);
+  });
+  const opened = spawned.fresh;
+  if (opened !== null) {
+    await boundedStep('bridge', stepTimeoutMs, async () => {
+      await opened.close();
+      return 'closed';
+    });
+  }
+  if (step.ok) {
+    logger?.info('[xcodeDriveSession] ended a session whose StartSession outcome was unknown', logContext);
+    return;
+  }
+  logger?.warn('[xcodeDriveSession] could not end a session whose StartSession outcome was unknown; keeping its key for the boot sweep', {
+    ...logContext,
+    detail: step.detail,
+  });
+  if (options.retainSessionKey === undefined) return;
+  try {
+    await options.retainSessionKey(sessionIdentifier);
+  } catch (err) {
+    logger?.warn('[xcodeDriveSession] could not retain the session key for the boot sweep', {
+      ...logContext,
+      error: errorText(err),
+    });
+  }
+}
+
+/**
  * Open one request's xcode drive session. Never throws: every failure is a
  * `{ ok: false, degradeReason }` with anything it had started already torn
  * down, so the caller only has to fall to the next rung.
@@ -320,8 +404,17 @@ export async function openXcodeDriveSession(options: OpenXcodeDriveSessionOption
     logger?.info('[xcodeDriveSession] bridge handshake failed; degrading', { ...logContext, kind: connected.kind });
     return { ok: false, degradeReason: degradeFor(connected.kind), detail: `xcrun mcpbridge: ${connected.message}` };
   }
-  const started = await client.startSession({ deviceIdentifier: options.udid, sessionIdentifier });
+  const started = await client.startSession(
+    { deviceIdentifier: options.udid, sessionIdentifier },
+    ...(options.startSessionTimeoutMs !== undefined ? [options.startSessionTimeoutMs] : []),
+  );
   if (!started.ok) {
+    // A timeout, a lost or malformed answer, or a dead bridge says nothing
+    // about whether Xcode CREATED the session — and sessions outlive the
+    // bridge (§B0). End it by the key we minted before letting go (X-2).
+    if (startOutcomeUnknown(started.kind)) {
+      await endPossiblyStartedSession(client, sessionIdentifier, options, stepTimeoutMs, logContext);
+    }
     await client.close();
     logger?.info('[xcodeDriveSession] StartSession failed; degrading', { ...logContext, kind: started.kind });
     return {

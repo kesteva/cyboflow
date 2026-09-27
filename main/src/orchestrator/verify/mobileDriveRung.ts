@@ -178,6 +178,9 @@ export async function buildMobileDriveEnv(args: {
       dataDir: args.dataDir,
       artifactsDir: args.artifactsDir,
       recordSessionKey: (key) => handle.recordXcodeSessionKey(key),
+      retainSessionKey: async (key) => {
+        await handle.retainXcodeSessionKey?.(key);
+      },
       ...(args.xcode?.xcrunPath !== undefined ? { xcrunPath: args.xcode.xcrunPath } : {}),
       ...(args.xcode?.shortTmpDir !== undefined ? { shortTmpDir: args.xcode.shortTmpDir } : {}),
       ...(logger !== undefined ? { logger } : {}),
