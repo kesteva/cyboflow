@@ -97,6 +97,14 @@ describe('validateLearnedRecipe — rejections (nothing learned)', () => {
     expect(reason(web({ ...WEB_RECIPE, build: ['pnpm install'] }))).toMatch(/mutates dependencies/);
   });
 
+  it('a leased port is matched by numeric value, not spelling (review F5)', () => {
+    expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --port 05173'] }))).toMatch(/leased port 5173/);
+    expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --port +5173'] }))).toMatch(/leased port 5173/);
+    expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --port=+005174'] }))).toMatch(/leased port 5174/);
+    // A different number that merely contains the digits is not the lease.
+    expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --port 51730'] }))).toBe('');
+  });
+
   it('a literal leased port, UDID or snapshot path, or any absolute path', () => {
     expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --port 5174'] }))).toMatch(/leased port 5174/);
     expect(reason(web({ ...WEB_RECIPE, build: ['pnpm run build --out /private/tmp/cyboflow-verify-AbC/snapshot/dist'] }))).toMatch(

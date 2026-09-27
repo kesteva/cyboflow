@@ -230,11 +230,17 @@ function mobileStepViolation(step: string, index: number, derivedDataVars: reado
  * path, or any other absolute path (for web/cdp-app that is also the "no step
  * may write outside the snapshot or `$VERIFY_DATA_DIR`" rule — every legitimate
  * location is a lever or relative to the snapshot root).
+ *
+ * A port is compared by VALUE, not spelling (Codex A5 review F5): every
+ * maximal decimal digit run is parsed, so `05173` and `+05173` — which a
+ * server parsing its port numerically binds as 5173 — are the leased port,
+ * while `51730` is not.
  */
 function leakedLeaseViolation(command: string, leased: LearnedRecipeLeases): string | null {
-  for (const port of leased.ports) {
-    if (new RegExp(`(?<![0-9])${port}(?![0-9])`).test(command)) {
-      return `carries the leased port ${port} as a literal (use \${PORT} / $VERIFY_PORT): ${command}`;
+  for (const digits of command.match(/[0-9]+/g) ?? []) {
+    const value = Number(digits);
+    if (leased.ports.includes(value)) {
+      return `carries the leased port ${value} as a literal (use \${PORT} / $VERIFY_PORT): ${command}`;
     }
   }
   if (leased.udid !== null && command.includes(leased.udid)) {
