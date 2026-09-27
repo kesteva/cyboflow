@@ -122,6 +122,7 @@ import {
 } from './verifyHarnessContract';
 import { materializeDependencyGuardShim, type DependencyGuardShimOptions } from './dependencyGuardShim';
 import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
+import { raceWithAbort } from './verificationLeases';
 
 // The contract text moved to its own module when it became mode-conditional
 // (runbook-optional-verification.md §A1.1); re-exported so every existing
@@ -3301,6 +3302,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     const onAbort = (): void => controller.abort();
     if (req.signal.aborted) controller.abort();
     else req.signal.addEventListener('abort', onAbort, { once: true });
+    // X-1 — the query is raced against the abort INSIDE the runner too: a query
+    // that ignores its signal would otherwise keep this method out of its
+    // `finally`, and with it the simulator/xcode teardown the scheduler's
+    // mobile lease is waiting on. The abandoned query is detached and logged.
+    const unboundedQuery = queryFn;
+    queryFn = (args) => raceWithAbort(unboundedQuery(args), controller.signal, 'verification agent query', logger);
 
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;

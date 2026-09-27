@@ -436,6 +436,8 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    2. bridge SIGTERM, then SIGKILL
    3. close and unlink the socket
 9. **Sweep.** When `sweepStaleSimulators` finds a dead-owner marker carrying a session key, it spawns one bridge and calls `EndSession(key)` best-effort (short timeout; ignore "doesn't exist" and "isn't approved") before `destroyDevice`. Sweep stale `xd-*` sockets at boot. The claim "device deletion ends a session" is UNVERIFIED until the smoke measures it.
+   **As built (post-review):**
+   - When the deadline or a cancel detaches a mobile row's runner mid-teardown, the scheduler keeps the row's simulator slot (and the `verify:xcode` lease riding it) until the runner settles, bounded at 5 min (`mobileTeardownHold.ts`); a same-id requeue is neither nudged nor re-leased until then. The runner also races its agent query against the abort, so a query that ignores the signal cannot keep it out of this `finally`.
 
 **Threat model** (F11, B-2, B-7). The drive socket is an **ergonomics, audit and ledger boundary, not a security boundary.**
 - Xcode approval is keyed on the binary that spawns the bridge.

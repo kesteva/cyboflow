@@ -461,6 +461,25 @@ describe('§B4.8 teardown through run()', () => {
     expect(h.order).toContain('dispose');
   });
 
+  it('X-1: an agent query that IGNORES the abort still lets run() reach its finally and tear down', async () => {
+    const order: string[] = [];
+    const fake = fakeSession(order, () => {});
+    const controller = new AbortController();
+    const h = makeHarness({
+      order,
+      openSession: fake.open,
+      agent: () => {
+        // The deadline fires mid-session, and the query never notices.
+        setTimeout(() => controller.abort(), 5);
+        return new Promise<VerificationReportV1>(() => {});
+      },
+    });
+    const result = await h.runner.run(req(h.artifactsDir, { signal: controller.signal }));
+    expect(result.status).toBe('timeout');
+    expect(fake.close).toHaveBeenCalledTimes(1);
+    expect(order.indexOf('xcode-close')).toBeLessThan(order.indexOf('dispose'));
+  });
+
   it('a close() that violates its never-throw contract cannot skip the simulator dispose', async () => {
     const h = makeHarness({
       openSession: async (options) => {
