@@ -13,8 +13,8 @@
  * `sandboxPolicy: { type: 'dangerFullAccess' }` — parity with the Claude verifier's
  * actual (OS-unsandboxed) posture, since the verifier must build/serve/drive a real
  * deliverable. It is nevertheless HERMETIC in config terms: the thread's only `config`
- * key is `allow_login_shell: false` (see startThread below), so there is no cyboflow
- * MCP server and no cyboflow-state write path.
+ * key — and only on an EXPLORE run — is `allow_login_shell: false` (see startThread
+ * below), so there is no cyboflow MCP server and no cyboflow-state write path.
  * The workflow persona + immutable harness contract ride as `developerInstructions`.
  *
  * Like verificationAgentQuery, on timeout/error this THROWS a
@@ -391,6 +391,10 @@ export function makeCodexVerificationAgentQuery(
     // enforcement on this runtime, so the Claude tool-ceiling is intentionally
     // ignored here.
     void args.allowedTools;
+    // The one guard this seam honours itself (the rest are Claude `canUseTool`
+    // rules): the login-shell switch below is EXPLORE ONLY, like the PATH shim it
+    // protects, so a pinned or legacy thread starts exactly as before §A1.4.
+    const explore = args.guards?.executionMode === 'explore';
 
     let executable: ResolvedCodexExecutable;
     try {
@@ -522,14 +526,16 @@ export function makeCodexVerificationAgentQuery(
           // config terms — no MCP server config is attached, so no cyboflow MCP
           // server.
           sandbox: 'danger-full-access',
-          // The ONE config key: keep the shell tool out of LOGIN shells. A login
-          // shell re-sorts PATH on macOS (path_helper + `brew shellenv` put
-          // `/opt/homebrew/bin` back in front), which pushes the runner's
-          // dependency-guard PATH shim (dependencyGuardShim.ts, §A1.4 F8 — the
-          // ONLY dependency guard on this runtime) behind the real package
-          // managers. Measured on 0.153.3: the default puts homebrew first; this
-          // keeps the prepended shim dir ahead of it.
-          config: { allow_login_shell: false },
+          // The ONE config key, EXPLORE ONLY: keep the shell tool out of LOGIN
+          // shells. A login shell re-sorts PATH on macOS (path_helper + `brew
+          // shellenv` put `/opt/homebrew/bin` back in front), which pushes the
+          // runner's dependency-guard PATH shim (dependencyGuardShim.ts, §A1.4
+          // F8 — the ONLY dependency guard on this runtime) behind the real
+          // package managers. Measured on 0.153.3: the default puts homebrew
+          // first; this keeps the prepended shim dir ahead of it. Pinned and
+          // legacy runs get no shim, so they keep the login-shell default (and
+          // the profile-derived env a pre-explore recipe may rely on).
+          ...(explore ? { config: { allow_login_shell: false } } : {}),
           approvalPolicy: 'never',
           // The workflow persona + immutable harness contract ride here.
           developerInstructions: args.systemPrompt,

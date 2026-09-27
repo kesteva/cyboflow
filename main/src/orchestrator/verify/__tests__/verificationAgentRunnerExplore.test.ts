@@ -992,11 +992,18 @@ describe('VerificationAgentRunner.run — explore binds ONLY the record\'s lever
 });
 
 describe("VerificationAgentRunner.run — the host's CYBOFLOW_DIR (§A1.3)", () => {
-  it.each(['legacy', 'pinned', 'explore'] as const)('%s: blanked in the agent env the serve children inherit', async (executionMode) => {
+  it('explore: blanked in the agent env the serve children inherit', async () => {
+    vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(query.mock.calls[0][0].env.CYBOFLOW_DIR).toBe('');
+  });
+
+  it.each(['legacy', 'pinned'] as const)('%s: left alone — the agent inherits the host value as before the feature', async (executionMode) => {
     vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
     const { runner, query } = makeRunner();
     await runner.run(makeReq({ executionMode }));
-    expect(query.mock.calls[0][0].env.CYBOFLOW_DIR).toBe('');
+    expect(query.mock.calls[0][0].env).not.toHaveProperty('CYBOFLOW_DIR');
   });
 
   it('a lever re-binding it wins: the request data dir, never the blank', async () => {
@@ -1059,11 +1066,19 @@ describe('VerificationAgentRunner.run — explore-only structural guards (§A1.4
 });
 
 describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4, F8)', () => {
-  it.each(['legacy', 'pinned', 'explore'] as const)('%s: prepended in front of the harness PATH', async (executionMode) => {
+  it('explore: prepended in front of the harness PATH', async () => {
+    const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
+    const { runner, query } = makeRunner({ materializeDependencyGuardShim: shim });
+    await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(query.mock.calls[0][0].env.PATH).toBe(['/artifacts/.driver/dep-guard/vr-explore-1/bin', FAKE_SHELL_PATH].join(delimiter));
+  });
+
+  it.each(['legacy', 'pinned'] as const)('%s: never materialized — the harness PATH exactly as before the feature', async (executionMode) => {
     const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
     const { runner, query } = makeRunner({ materializeDependencyGuardShim: shim });
     await runner.run(makeReq({ executionMode }));
-    expect(query.mock.calls[0][0].env.PATH).toBe(['/artifacts/.driver/dep-guard/vr-explore-1/bin', FAKE_SHELL_PATH].join(delimiter));
+    expect(shim).not.toHaveBeenCalled();
+    expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
   });
 
   it('is materialized per request with the driver wrapper\'s own interpreter, and never NODE_PATH', async () => {
@@ -1076,13 +1091,6 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
       nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
       executionMode: 'explore',
     });
-  });
-
-  it.each(['legacy', 'pinned'] as const)('%s: the shim is told the request mode for its deny message', async (executionMode) => {
-    const shim = vi.fn(async () => ({ binDir: null }));
-    const { runner } = makeRunner({ materializeDependencyGuardShim: shim });
-    await runner.run(makeReq({ executionMode }));
-    expect(shim).toHaveBeenCalledWith(expect.objectContaining({ executionMode }));
   });
 
   describe('Codex explore needs the shim: it is the ONLY dependency guard there (§A1.4)', () => {
@@ -1115,6 +1123,19 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
       expect(result).toMatchObject({ status: 'skipped', deployed: false, errorMessage: CODEX_EXPLORE_NO_GUARD_MESSAGE });
     });
 
+    it('a legacy Codex run (the kill switch) sees none of the explore guards: no shim, no host-env blank, the mode for the seam', async () => {
+      vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
+      const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
+      const { runner, codexQuery } = makeRunner({ ...codexAgent(), materializeDependencyGuardShim: shim });
+      await runner.run(makeReq({ executionMode: 'legacy' }));
+      expect(shim).not.toHaveBeenCalled();
+      const args = codexQuery.mock.calls[0][0];
+      expect(args.env.PATH).toBe(FAKE_SHELL_PATH);
+      expect(args.env).not.toHaveProperty('CYBOFLOW_DIR');
+      // The Codex seam keys its explore-only `allow_login_shell: false` on this.
+      expect(args.guards).toEqual({ executionMode: 'legacy' });
+    });
+
     it('Codex pinned/legacy and Claude explore keep the fail-soft and deploy', async () => {
       for (const executionMode of ['pinned', 'legacy'] as const) {
         const { runner, codexQuery } = makeRunner({ ...codexAgent(), materializeDependencyGuardShim: async () => ({ binDir: null }) });
@@ -1133,14 +1154,15 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
     expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
   });
 
-  it('a THROWING shim is fail-soft: logged, and the request still deploys and passes', async () => {
+  it('a THROWING shim is fail-soft on Claude explore: logged, and the request still deploys', async () => {
     const { runner, query, warn } = makeRunner({
       materializeDependencyGuardShim: async () => {
         throw new Error('EACCES');
       },
     });
-    const result = await runner.run(makeReq());
-    expect(result.status).toBe('passed');
+    const result = await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(result.deployed).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('dependency-guard PATH shim threw'),

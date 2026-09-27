@@ -120,6 +120,15 @@ export function isExploreEligible(
  * the runner never produced would read as a check that ran; source `'runner'`
  * with no `failure_class` of its own never feeds the §3.1 classifier.
  */
+/**
+ * The capability-ledger key for an EFFECTIVE execution mode: the pin hash for a
+ * `pinned` run, `''` (the shared unpinned bucket, §A11) for `explore` and
+ * `legacy` — see {@link AgentEngine.capabilityRunbookKey}.
+ */
+export function capabilityKeyForMode(pinHash: string, mode: VerificationExecutionMode): string {
+  return mode === 'pinned' ? pinHash : '';
+}
+
 function executionModeEvidence(mode: VerificationExecutionMode): VerificationFailureEvidence {
   return { source: 'runner', check: 'execution-mode', detail: mode };
 }
@@ -339,18 +348,20 @@ export class AgentEngine {
    *
    * `''` — migration 095's column default — is the genuinely-UNPINNED bucket:
    * degenerate pre-live requests that derive no environment, every legacy row
-   * from before 096, and every unpinned EXPLORE run
+   * from before 096, and every EXPLORE run
    * (docs/proposals/runbook-optional-verification.md §A1/§A11). It is a real
    * key, not a fallback for "we could not be bothered to look": those requests
    * share a capability story precisely because none of them runs a pinned
-   * revision's commands. The key is the row's pin COLUMN, not the mode, so the
-   * gate-(2) read (which runs before gate 3 picks a mode) and the settle-time
-   * write can never disagree — the one row that sees the difference is an
-   * explore run whose stale pin stopped reading proven, and it stays in its
-   * pin's bucket on both sides.
+   * revision's commands. The key therefore follows the EFFECTIVE execution
+   * mode, not the pin column: an explore run whose stale pin stopped reading
+   * proven runs none of that revision's commands, so it neither consults the
+   * dead revision's breaker nor feeds it — it lands in `''` with every other
+   * explore run. Gate (2) reads with the mode {@link evaluateAgentGates}
+   * resolves BEFORE it, and settlement writes with the mode the row ran under,
+   * which is the same answer, so the read and the write can never disagree.
    */
-  private capabilityRunbookKey(requestId: string): string {
-    return this.runbookPinForRow(requestId).hash ?? '';
+  private capabilityRunbookKey(requestId: string, mode: VerificationExecutionMode): string {
+    return capabilityKeyForMode(this.runbookPinForRow(requestId).hash ?? '', mode);
   }
 
   /**
@@ -520,8 +531,11 @@ export class AgentEngine {
     task: VerificationTaskV1,
     modality: VerificationModality,
     setupProof: boolean,
-    /** This row's ledger key — see {@link capabilityRunbookKey}; non-empty iff the row carries a pin. */
-    runbookHash: string,
+    /**
+     * The row's own pin COLUMN (`''` when unpinned). NOT the ledger key: the key
+     * is derived from it and the effective mode below — see {@link capabilityRunbookKey}.
+     */
+    pinHash: string,
     /**
      * Migration 107 — a LANE-DRIVEN bootstrap proof. Exempt from gate (3) on the
      * identical §3.6 reasoning that exempts `setupProof`: this request exists to
@@ -547,6 +561,30 @@ export class AgentEngine {
      */
     learnedPin = false,
   ): Promise<string | AgentExecutionSelection> {
+    // (0) Resolve the EFFECTIVE mode's explore half first (§A1/§A11): the
+    // ledger key of gates (1)/(2) depends on it. A proof row is always pinned —
+    // it executes the draft it exists to prove — and so is a learned pin.
+    const pinned: AgentExecutionSelection = { mode: 'pinned', exploreRecord: null };
+    const hasPin = pinHash.length > 0;
+    // The pin's status, when the explore branch already had to read it — reused
+    // below so one row costs one probe of its tree, as before.
+    let pinStatus: VerifyRunbookStatusDetail | null = null;
+    let explore: AgentExecutionSelection | null = null;
+    if (!setupProof && !bootstrapProof && !requireProvenRunbook && !learnedPin) {
+      const record = modality === 'native-screen' ? null : this.exploreRecordFor(row.project_id, modality);
+      if (isExploreEligible(modality, record)) {
+        // A pin that drifted (or was demoted) since enqueue explores instead of
+        // skipping. One still reading proven is NOT selected here: "pinned:
+        // today's contract, unchanged" (§A1) includes gate 3a, so it falls
+        // through to the path below exactly as with the switch on.
+        if (hasPin) pinStatus = await this.runbookStatusForRow(row, modality);
+        if (pinStatus?.status !== 'proven') explore = { mode: 'explore', exploreRecord: record };
+      }
+    }
+    // Only an effective PINNED run keys on its pin; explore (a stale pin
+    // included) and legacy share `''` — see capabilityRunbookKey.
+    const runbookHash = capabilityKeyForMode(pinHash, explore?.mode ?? (hasPin ? 'pinned' : 'legacy'));
+
     // (1) Modalities with no executable path on the agent engine (§3.3), plus the
     // probe-conditional native-screen lane (§4).
     const unsupportedDetail = await this.unsupportedModalityDetail(modality);
@@ -563,26 +601,11 @@ export class AgentEngine {
       return `verification suppressed for ${modality}: ${suppression.reason}`;
     }
 
-    // (3) The execution-mode selector (runbook-optional-verification.md §A1).
-    // A proof run is always pinned: it executes the draft it exists to prove.
-    const pinned: AgentExecutionSelection = { mode: 'pinned', exploreRecord: null };
+    // (3) The execution-mode selector (runbook-optional-verification.md §A1),
+    // whose explore half step (0) already resolved.
     if (setupProof || bootstrapProof) return pinned;
-    const hasPin = runbookHash.length > 0;
-    // The pin's status, when the explore branch already had to read it — reused
-    // below so one row costs one probe of its tree, as before.
-    let pinStatus: VerifyRunbookStatusDetail | null = null;
-    if (!requireProvenRunbook) {
-      if (learnedPin) return pinned;
-      const record = modality === 'native-screen' ? null : this.exploreRecordFor(row.project_id, modality);
-      if (isExploreEligible(modality, record)) {
-        // A pin that drifted (or was demoted) since enqueue explores instead of
-        // skipping. One still reading proven is NOT returned here: "pinned:
-        // today's contract, unchanged" (§A1) includes gate 3a, so it falls
-        // through to the path below exactly as with the switch on.
-        if (hasPin) pinStatus = await this.runbookStatusForRow(row, modality);
-        if (pinStatus?.status !== 'proven') return { mode: 'explore', exploreRecord: record };
-      }
-    }
+    if (!requireProvenRunbook && learnedPin) return pinned;
+    if (explore !== null) return explore;
 
     // The §3.2 degrade path, unchanged — the kill switch is on, the modality
     // cannot explore (native-screen; cdp-app with no data-dir lever), or the row
@@ -708,7 +731,7 @@ export class AgentEngine {
       task,
       modality,
       gate.setupProof,
-      this.capabilityRunbookKey(row.id),
+      this.runbookPinForRow(row.id).hash ?? '',
       gate.bootstrapProof,
       requireProvenRunbookEngaged(live),
       learnedPin,
@@ -1420,7 +1443,7 @@ export class AgentEngine {
       result,
       classified?.failureClass ?? null,
       evidenceDetail,
-      this.capabilityRunbookKey(row.id),
+      this.capabilityRunbookKey(row.id, mode),
     );
 
     if (learnedPin && promoted) await this.fileLearnedPromotion(row, modality);

@@ -186,7 +186,8 @@ export interface VerificationAgentQueryArgs {
    *     lifecycle is harness-owned).
    *   - `executionMode`: the request's resolved mode, which the dependency
    *     deny message keys on (explore and pinned tell the agent different
-   *     things about who owns the dependency tree). Carried in every mode; it
+   *     things about who owns the dependency tree), and the Codex seam turns
+   *     login shells off on it for explore only. Carried in every mode; it
    *     refuses nothing by itself.
    */
   guards?: { denyProcessKill?: boolean; denySimctlLifecycle?: boolean; executionMode?: VerificationExecutionMode };
@@ -801,7 +802,7 @@ export interface VerificationAgentRunnerDeps {
    * §A1.4 (F8) — materialize the dependency-guard PATH SHIM for one request:
    * wrappers for the package managers that refuse `FORBIDDEN_DEP_COMMAND_PATTERN`
    * subcommands and otherwise exec the real binary. `binDir` is prepended to the
-   * agent's PATH in EVERY mode and on BOTH runtimes; `null` (win32, or any
+   * agent's PATH on EXPLORE runs only, on BOTH runtimes; `null` (win32, or any
    * failure) ⇒ no prepend. Defaults to `dependencyGuardShim`'s real
    * implementation; faked in tests. Defence in depth, NOT a sandbox: the agent
    * can still invoke a binary by absolute path — Claude keeps its live
@@ -2504,7 +2505,8 @@ const HOST_DATA_DIR_ENV = 'CYBOFLOW_DIR';
 
 /**
  * §A1.3 "Host env" — keep the HOST's own `CYBOFLOW_DIR` away from the agent and
- * every serve child, in EVERY mode, unless a runbook lever re-bound it (to this
+ * every serve child of an EXPLORE run (§A1.3 is explore's lever section; the
+ * runner applies it to explore only), unless a runbook lever re-bound it (to this
  * request's `VERIFY_DATA_DIR` — cyboflow's own runbook declares
  * `dataDirEnv: "CYBOFLOW_DIR"`). Returns the env keys to layer LAST.
  *
@@ -3385,10 +3387,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // legitimate consumer (round-2 review — see `resolveNodeModulesRoot`).
       const shellPath = await this.resolvePathEnv(node);
       // §A1.4 (F8) — the dependency-guard PATH shim goes IN FRONT of the
-      // harness PATH, in every mode and on both runtimes, so a package manager
+      // harness PATH on EXPLORE runs, on both runtimes, so a package manager
       // reached BY NAME from the agent's shell, `$VERIFY_DRIVER` or a serve
       // child hits the guard first. Fail-soft: no shim ⇒ the plain harness PATH.
-      const shimBinDir = await this.materializeShimFailSoft(req, node, executionMode, logger);
+      // Pinned and legacy runs get none — an "Explore guardrail" in the design,
+      // and the kill switch must restore the pre-explore environment exactly.
+      const shimBinDir =
+        executionMode === 'explore' ? await this.materializeShimFailSoft(req, node, executionMode, logger) : null;
       // §A1.4: "Required before explore runs on Codex". The Codex seam runs
       // danger-full-access with no approval policy and no canUseTool, so in
       // explore — where the agent composes its own install/build steps — the
@@ -3619,9 +3624,16 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           dropped: leverEnv.dropped,
         });
       }
-      // §A1.3 — the HOST's own data dir never reaches the agent or its serve
-      // children, in any mode, unless a lever re-bound it (see stripHostDataDirEnv).
-      env = { ...env, ...leverEnv.additions, ...stripHostDataDirEnv(leverEnv.additions) };
+      // §A1.3 — on an EXPLORE run the HOST's own data dir never reaches the
+      // agent or its serve children unless a lever re-bound it (see
+      // stripHostDataDirEnv). Pinned and legacy keep the inherited env as before
+      // the feature: a proven recipe may rely on it, and the kill switch must
+      // restore exactly that.
+      env = {
+        ...env,
+        ...leverEnv.additions,
+        ...(executionMode === 'explore' ? stripHostDataDirEnv(leverEnv.additions) : {}),
+      };
 
       if (controller.signal.aborted) {
         return {
@@ -3685,8 +3697,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           // the design never widened what either may be refused.
           //
           // `executionMode` rides in EVERY mode: it refuses nothing on its own,
-          // and the dependency deny (which does apply in every mode) words its
-          // refusal by it.
+          // the dependency deny (which does apply in every mode) words its
+          // refusal by it, and the Codex seam keys its explore-only
+          // `allow_login_shell: false` on it.
           guards: {
             executionMode,
             ...(executionMode === 'explore' ? { denyProcessKill: true, denySimctlLifecycle: modality === 'mobile' } : {}),
