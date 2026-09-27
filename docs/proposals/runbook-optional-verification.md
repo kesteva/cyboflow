@@ -254,6 +254,7 @@ A rejection means nothing is learned. The verdict is unaffected.
 - **Stricter validation.** Two extra checks:
   - web/cdp-app: the recipe's `serve.cmd` must equal the composed `serve.cmd` the binding verified;
   - mobile: `app.bundleId` must equal the attested one.
+  - mobile path values: `-project`/`-workspace` must be relative with no `$`/`` ` ``/`~` expansion and no `..` segment; `-derivedDataPath` must be exactly the DerivedData lever, and `-clonedSourcePackagesDirPath` the lever or a `..`-free path beneath it.
 
   "No step may write outside the snapshot or `$VERIFY_DATA_DIR`" is enforced as "no absolute path in any command".
 - **First writer wins** is decided before any write. A `draft` of origin `learned` with no committed entry is skipped rather than handed to the store. The store's CAS enforces the same rule.

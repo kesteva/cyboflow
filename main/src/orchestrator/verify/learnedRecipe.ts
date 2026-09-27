@@ -137,12 +137,66 @@ function referencesVar(text: string, names: readonly string[]): boolean {
   return names.some((name) => new RegExp(`\\$\\{?${escapeRegExp(name)}\\}?(?![A-Za-z0-9_])`).test(text));
 }
 
+/** The xcodebuild options whose value names a location in the SNAPSHOT (relative, contained). */
+const SNAPSHOT_PATH_FLAGS = new Set(['-project', '-workspace']);
+/** Shell expansion that can point a path anywhere: `$VAR`, `${VAR}`, `` `cmd` ``, `~`. */
+const SHELL_EXPANSION_PATTERN = /[$`~]/;
+
+/** Whether a (tokenized, unquoted) path value carries a `..` segment. */
+function hasParentSegment(value: string): boolean {
+  return value.split('/').includes('..');
+}
+
+/**
+ * The lever spelling `value` starts with (`$NAME` / `${NAME}` for one of
+ * `names`), or `null`. Only a prefix counts — `$HOME/x/$VERIFY_DERIVED_DATA`
+ * references the lever but is not under it.
+ */
+function leverPrefix(value: string, names: readonly string[]): string | null {
+  for (const name of names) {
+    for (const spelling of [`\${${name}}`, `$${name}`]) {
+      if (value === spelling || value.startsWith(`${spelling}/`)) return spelling;
+    }
+  }
+  return null;
+}
+
+/**
+ * Codex A5 review F2 — where a path-valued option may point. `-project` /
+ * `-workspace` must name the snapshot as-is: relative, no expansion, no `..`
+ * (a `$HOME/…` or `../../…` project builds a DIFFERENT tree that bundle
+ * attestation cannot tell apart). `-derivedDataPath` must BE the lever, and
+ * `-clonedSourcePackagesDirPath` the lever or a contained path beneath it —
+ * `$VERIFY_DERIVED_DATA/../Shared` references the lever yet escapes it.
+ */
+function mobilePathValueViolation(flag: string, value: string, derivedDataVars: readonly string[]): string | null {
+  if (hasParentSegment(value)) return `${flag} traverses out with a ".." segment ("${value}")`;
+  if (flag === '-derivedDataPath') {
+    return leverPrefix(value, derivedDataVars) === value
+      ? null
+      : `${flag} must be exactly the request's DerivedData lever ($VERIFY_DERIVED_DATA), got "${value}"`;
+  }
+  if (flag === '-clonedSourcePackagesDirPath') {
+    const lever = leverPrefix(value, derivedDataVars);
+    if (lever === null || SHELL_EXPANSION_PATTERN.test(value.slice(lever.length))) {
+      return `${flag} must be under the request's DerivedData lever ($VERIFY_DERIVED_DATA), got "${value}"`;
+    }
+    return null;
+  }
+  if (SNAPSHOT_PATH_FLAGS.has(flag)) {
+    if (SHELL_EXPANSION_PATTERN.test(value)) return `${flag} expands the environment ("${value}") — it must name the snapshot's own project`;
+    if (value.startsWith('/')) return `${flag} is an absolute path ("${value}") — it must be relative to the snapshot`;
+  }
+  return null;
+}
+
 /**
  * §A1.4 — one learned mobile `build[]` step: a single `xcodebuild` invocation,
  * options from the allowlist only, and the DerivedData lever appearing ONLY as
  * the value of `-derivedDataPath` / `-clonedSourcePackagesDirPath` (the latter
  * must BE under it: a package clone anywhere else is a write outside the
- * request). `checkMobileBuildIsolation` runs after this over the whole entry.
+ * request), every path value contained (`mobilePathValueViolation`).
+ * `checkMobileBuildIsolation` runs after this over the whole entry.
  */
 function mobileStepViolation(step: string, index: number, derivedDataVars: readonly string[]): string | null {
   const label = `build[${index}]`;
@@ -155,13 +209,11 @@ function mobileStepViolation(step: string, index: number, derivedDataVars: reado
     if (XCODEBUILD_VALUE_FLAGS.has(token)) {
       const value = tokens[i + 1];
       if (value === undefined || value.startsWith('-')) return `${label}: ${token} has no value: ${step}`;
-      if (DERIVED_DATA_VALUE_FLAGS.has(token)) {
-        if (!referencesVar(value, derivedDataVars)) {
-          return `${label}: ${token} must be under the request's DerivedData lever ($VERIFY_DERIVED_DATA): ${step}`;
-        }
-      } else if (referencesVar(value, derivedDataVars)) {
+      if (!DERIVED_DATA_VALUE_FLAGS.has(token) && referencesVar(value, derivedDataVars)) {
         return `${label}: the DerivedData lever may appear only as the -derivedDataPath / -clonedSourcePackagesDirPath value: ${step}`;
       }
+      const pathViolation = mobilePathValueViolation(token, value, derivedDataVars);
+      if (pathViolation !== null) return `${label}: ${pathViolation}: ${step}`;
       i += 1;
       continue;
     }

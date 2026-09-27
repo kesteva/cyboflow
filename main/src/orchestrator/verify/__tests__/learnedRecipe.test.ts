@@ -145,6 +145,42 @@ describe('validateLearnedRecipe — rejections (nothing learned)', () => {
     expect(mobile({ ...MOBILE_RECIPE, build: [clonedInside] }).ok).toBe(true);
   });
 
+  it('mobile: -project / -workspace name the snapshot itself — no expansion, no absolute path, no ".." (review F2)', () => {
+    const withProject = (value: string) => ({ ...MOBILE_RECIPE, build: [XCODEBUILD.replace('-project App.xcodeproj', `-project ${value}`)] });
+    expect(reason(mobile(withProject('"$HOME/Developer/Other/App.xcodeproj"')))).toMatch(/-project expands the environment/);
+    expect(reason(mobile(withProject('"${HOME}"/Developer/Other/App.xcodeproj')))).toMatch(/-project expands the environment/);
+    expect(reason(mobile(withProject('"`pwd`/Other/App.xcodeproj"')))).toMatch(/not a single invocation/);
+    expect(reason(mobile(withProject("'$HOME/Other/App.xcodeproj'")))).toMatch(/-project expands the environment/);
+    expect(reason(mobile(withProject('~/Developer/Other/App.xcodeproj')))).toMatch(/absolute path/);
+    expect(reason(mobile(withProject('../../x.xcodeproj')))).toMatch(/-project traverses out/);
+    const workspace = XCODEBUILD.replace('-project App.xcodeproj', '-workspace ios/../../Other.xcworkspace');
+    expect(reason(mobile({ ...MOBILE_RECIPE, build: [workspace] }))).toMatch(/-workspace traverses out/);
+    // The legitimate forms still pass: a relative project / workspace inside the snapshot.
+    expect(reason(mobile(withProject('ios/App.xcodeproj')))).toBe('');
+    const okWorkspace = XCODEBUILD.replace('-project App.xcodeproj', '-workspace "ios/App.xcworkspace"');
+    expect(reason(mobile({ ...MOBILE_RECIPE, build: [okWorkspace] }))).toBe('');
+  });
+
+  it('mobile: -derivedDataPath is exactly the lever; -clonedSourcePackagesDirPath stays beneath it (review F2)', () => {
+    const withDerived = (value: string) => ({
+      ...MOBILE_RECIPE,
+      build: [XCODEBUILD.replace('-derivedDataPath "$VERIFY_DERIVED_DATA"', `-derivedDataPath ${value}`)],
+    });
+    expect(reason(mobile(withDerived('"$VERIFY_DERIVED_DATA/../Shared"')))).toMatch(/-derivedDataPath traverses out/);
+    expect(reason(mobile(withDerived('"$VERIFY_DERIVED_DATA/sub"')))).toMatch(/-derivedDataPath must be exactly/);
+    expect(reason(mobile(withDerived('"$HOME/$VERIFY_DERIVED_DATA"')))).toMatch(/-derivedDataPath must be exactly/);
+    expect(reason(mobile(withDerived('$VERIFY_DERIVED_DATA')))).toBe('');
+    expect(reason(mobile(withDerived('"${VERIFY_DERIVED_DATA}"')))).toBe('');
+
+    const cloned = (value: string) => ({ ...MOBILE_RECIPE, build: [`${XCODEBUILD} -clonedSourcePackagesDirPath ${value}`] });
+    expect(reason(mobile(cloned('"$VERIFY_DERIVED_DATA/../Shared"')))).toMatch(/-clonedSourcePackagesDirPath traverses out/);
+    expect(reason(mobile(cloned('"$HOME/x/$VERIFY_DERIVED_DATA"')))).toMatch(/-clonedSourcePackagesDirPath must be under/);
+    expect(reason(mobile(cloned('"$VERIFY_DERIVED_DATA/$HOME"')))).toMatch(/-clonedSourcePackagesDirPath must be under/);
+    expect(reason(mobile(cloned('"$VERIFY_DERIVED_DATAX/pkgs"')))).toMatch(/-clonedSourcePackagesDirPath must be under/);
+    expect(reason(mobile(cloned('"$VERIFY_DERIVED_DATA"')))).toBe('');
+    expect(reason(mobile(cloned('"${VERIFY_DERIVED_DATA}/SourcePackages/cache"')))).toBe('');
+  });
+
   it('mobile: checkMobileBuildIsolation (a missing CODE_SIGNING_ALLOWED=NO)', () => {
     expect(reason(mobile({ ...MOBILE_RECIPE, build: [XCODEBUILD.replace(' CODE_SIGNING_ALLOWED=NO', '')] }))).toMatch(
       /CODE_SIGNING_ALLOWED=NO/,
