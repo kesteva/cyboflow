@@ -18,6 +18,7 @@ import {
 } from '../../../../shared/types/visualVerification';
 import type {
   MobileAppSpec,
+  MobileDriveEngine,
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationExecutionMode,
@@ -751,7 +752,10 @@ export class AgentEngine {
       leasePool: this.leasePool,
       modality,
       mobileSimSlots: this.config.mobileSimSlots,
-      mobileDriveEngine: this.config.mobileDriveEngine,
+      // §B3 — the SAME live snapshot as every other per-row knob: the lease
+      // decision and the rung the runner drives must read one value, or a
+      // Settings flip lets two rows open Xcode sessions side by side.
+      mobileDriveEngine: live.mobileDriveEngine,
       devServerPorts: this.config.devServerPorts,
       portFromLease: (name) => this.portFromLease(name),
       requestId: row.id,
@@ -816,6 +820,7 @@ export class AgentEngine {
         selection,
         live.exploreDeadlineFloorMs,
         learnedPin,
+        live.mobileDriveEngine,
       ),
     };
   }
@@ -921,6 +926,8 @@ export class AgentEngine {
     exploreFloorMs: number,
     /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
     learnedPin = false,
+    /** §B3 — the live engine the lease decision used; handed to the runner so it drives with the same value. */
+    mobileDriveEngine?: MobileDriveEngine,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
@@ -1068,6 +1075,7 @@ export class AgentEngine {
         // shape alone could disagree with the one that just decided whether this
         // request may touch the screen at all.
         modality,
+        ...(modality === 'mobile' && mobileDriveEngine !== undefined ? { mobileDriveEngine } : {}),
         signal: controller.signal,
       };
 

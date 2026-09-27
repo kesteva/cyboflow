@@ -384,7 +384,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - keep the drive coercion keyed strictly on `'none'`.
 - When xcode is selected, `mobileSimulatorSession.acquire` requires runtime major ≥ 27 (`minRuntimeMajor`).
 - **Concurrency:** assumes `mobileSimSlots=1` (the default). If it is raised, add a count-1 `verify:xcode` lease that leaves the row *queued* on a miss. Never degrade the rung on contention.
-- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the drain's configured engine is `auto`/`xcode`; it rides the slot lease's handle, so the agent engine's existing release paths free both.
+- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the row's engine is `auto`/`xcode` — that engine is read from the LIVE config once per row and handed to the runner on the request (`mobileDriveEngine`), so the lease decision and the rung driven never disagree; it rides the slot lease's handle, so the agent engine's existing release paths free both.
 
 ### B4. Lifecycle (runner mobile arm)
 1. Acquire the simulator (existing flow).

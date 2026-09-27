@@ -356,6 +356,15 @@ export interface VerificationAgentRequest {
    * Drives {@link reclassifyInferredAppFailure}. Absent ⇒ false.
    */
   appInferred?: boolean;
+  /**
+   * §B3 — the `mobileDriveEngine` the scheduler resolved from the LIVE config
+   * for this row, and already used to decide whether the row took the count-1
+   * `verify:xcode` lease. The runner drives with THIS value rather than
+   * re-reading the knob, so a Settings flip between lease and deploy can never
+   * put an unleased row on the xcode rung. Absent ⇒ the live knob (fakes, and
+   * callers that took no lease decision).
+   */
+  mobileDriveEngine?: MobileDriveEngine;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -3474,7 +3483,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
         // §B3 phase 1: the engine decision that must precede acquisition (an
         // xcode run needs an iOS 27+ runtime, `minRuntimeMajor`).
-        let xcodePlan = await planXcodeIntent(mobile.driveEngine, mobile.xcode, logger);
+        const leasedEngine = req.mobileDriveEngine;
+        let xcodePlan = await planXcodeIntent(
+          leasedEngine !== undefined ? () => leasedEngine : mobile.driveEngine,
+          mobile.xcode,
+          logger,
+        );
         try {
           const acquired = await acquireMobileSimulator(
             mobile.session,

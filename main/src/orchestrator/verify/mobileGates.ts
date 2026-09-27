@@ -89,9 +89,9 @@ export const VERIFY_XCODE_LEASE = 'verify:xcode';
 /**
  * Whether a mobile row takes {@link VERIFY_XCODE_LEASE}: only when more than one
  * simulator slot exists (with one slot the slot lease already serialises), and
- * only when the configured engine may choose xcode. The engine is the one the
- * drain was configured with; the runner reads the live knob, so a live switch
- * to `maestro`/`none` can only cost concurrency here, never correctness.
+ * only when the engine may choose xcode. The engine is resolved ONCE per row
+ * from the live config and the same value is handed to the runner, so the
+ * lease decision and the rung actually driven can never disagree.
  */
 export function mobileNeedsXcodeLease(mobileSimSlots: number, engine: MobileDriveEngine | undefined): boolean {
   if (mobileSlotCount(mobileSimSlots) <= 1) return false;

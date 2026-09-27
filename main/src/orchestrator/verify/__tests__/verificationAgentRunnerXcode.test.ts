@@ -408,6 +408,26 @@ describe('the xcode rung, end to end through run()', () => {
     expect(result.report?.provenance?.degradeReason).toBeUndefined();
   });
 
+  it('X-3: the engine the scheduler leased with wins over a different live knob', async () => {
+    // The live knob now says xcode, but the scheduler resolved maestro for this
+    // row and took no `verify:xcode` lease — the runner must not open a session.
+    const open = vi.fn();
+    const h = makeHarness({
+      engine: 'xcode',
+      openSession: open,
+      maestro: true,
+      agent: async (_args, dir) => {
+        writeFileSync(join(dir, 'home.png'), 'x');
+        return passReport('home.png');
+      },
+    });
+    const result = await h.runner.run(req(h.artifactsDir, { mobileDriveEngine: 'maestro' }));
+    expect(open).not.toHaveBeenCalled();
+    expect(h.acquireArgs[0]).not.toHaveProperty('minRuntimeMajor');
+    expect(h.seenEnv().VERIFY_MOBILE_DRIVE).toBe('maestro');
+    expect(result.report?.provenance).toMatchObject({ driveEngineRequested: 'maestro', driveEngineUsed: 'maestro' });
+  });
+
   it('B6: the Maestro rung exports JAVA_HOME and puts its bin first on the agent PATH', async () => {
     const h = makeHarness({
       engine: 'maestro',
