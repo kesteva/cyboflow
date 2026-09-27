@@ -6,6 +6,48 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-09-26
+
+### Added
+
+- **Verification without a proven runbook.** A visual verification request no longer needs a proven
+  runbook first. It runs in one of three modes: *pinned* (a proven runbook), *explore* (the verifier
+  stands the app up itself and attests what it drove) or *legacy*. Lanes stop authoring a runbook for
+  requests that will explore. An explore web run can pass on a verified serve binding alone, and an
+  explore mobile run can attest bundle identity without a declared channel. When a request names no
+  iOS app, the app is inferred from the project. Verification reports gain `unverifiable` and
+  `wrong_environment` outcomes.
+- **Verifier guardrails.** During verification, dependency installs, process kills and `simctl`
+  lifecycle commands go through a guard.
+- **Stage 3 mobile drive.** Standalone Xcode 27 DeviceInteraction modules drive an iOS app, and
+  Maestro now runs under a resolved `JAVA_HOME`, so the mobile drive rung is no longer silently
+  `none`.
+- **Programmatic steps run directly.** A programmatic run dispatches each step to its agent rather
+  than delegating through an orchestrator turn. Direct Claude steps deny the Workflow tool.
+- **Native agent roles on Codex, OMP and pi.** A run's roles are registered natively: as Codex agent
+  roles, as OMP project agents, and as pi role files. The orchestrator delegates to them by name.
+- **Drafts survive closing a dialog.** Add Idea, New Task and the idea picker restore unsent drafts.
+
+### Fixed
+
+- The verify driver runs on `chrome-headless-shell`, so local pages load on macOS 26.
+- Non-npm and re-registered proven runbooks stay proven.
+- Queued verification requests age from UTC and from the drain's last progress.
+- A composed verification task that names nothing to stand up is skipped, and task-verify composes
+  iOS apps as mobile, never native-screen.
+- Low-confidence verification findings always show their reason.
+- Small ideas get their tasks created when the epics step absorbs the tasks step.
+- Codex workflow threads run on the standard service tier.
+- Codex 0.156.1 image input backed by a `fileId` is accepted.
+- The OMP config directory `.omp/` is excluded from git on every MCP config write.
+- The session card's diff stat follows the Diff view's selected base.
+- The landing's ready-for-review list drops a terminal flow run older than the session's own chat
+  activity.
+- Won't-do and delete no longer reap artifacts of runs still in flight.
+- Insights workflow cards share the chart's 30-day window and flag a per-model cost shortfall.
+- The quick-session canvas reserves the summary width while loading and wraps on narrow panes.
+- Compound write-back findings applied: gate policy, model-constant re-exports and stale docs.
+
 ### Changed
 
 - **Bundled Codex CLI upgraded 0.153.3 → 0.156.1** (`@openai/codex`). The server only offers the
@@ -15,6 +57,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - The runtime-mix tier map now targets the GPT-6 family: Opus- and Fable-tier steps go to
   `gpt-6-sol` (was `gpt-5.6-sol`), Sonnet- and Haiku-tier steps to `gpt-6-luna` (was
   `gpt-5.6-luna`). Mixed runs launched after this fork a new spec revision.
+- `McpQueryHandler` is down from 5,717 to 1,151 lines: its remaining tool families moved into
+  `mcpServer/handlers/` (issue #19, steps 10–15).
 
 ## [0.4.4] — 2026-09-24
 
