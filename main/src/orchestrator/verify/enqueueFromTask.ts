@@ -306,8 +306,12 @@ export function surfaceProbeMayFire(type: VerificationType, task: EnqueueResolva
  * shape and never reaches the surface rung; yet with no `app` block the runner
  * can only refuse it (MOBILE_NO_APP_BLOCK). When no PROVEN mobile record exists
  * to supply the app at injection, read it off the project's Xcode files instead.
- * Returns null — keep the declared path — on any miss, a proven record, an app
- * already present, no tree to read, or any throw (fail-soft, like the rung).
+ * The rung's own preconditions still hold here: a task naming a surface of its
+ * own (any `serve`, `target.url` or `target.htmlPath`) is never talked out of
+ * it, and a project with a cdp-app or web record is never probed.
+ * Returns null — keep the declared path — on any miss, a named surface, a
+ * web-axis record, a proven mobile record, an app already present, no tree to
+ * read, or any throw (fail-soft, like the rung).
  */
 async function inferMobileFlowApp<T extends EnqueueResolvableTask | null>(args: {
   type: VerificationType;
@@ -321,9 +325,12 @@ async function inferMobileFlowApp<T extends EnqueueResolvableTask | null>(args: 
   const { task, logger } = args;
   const surfaceRoot = args.surfaceRoot ?? args.probePath;
   if (args.type !== 'mobile-flow' || task === null || task.app !== undefined || surfaceRoot === undefined) return null;
+  if (task.serve !== undefined) return null;
+  if ((task.target?.url?.trim() ?? '').length > 0 || (task.target?.htmlPath?.trim() ?? '').length > 0) return null;
   try {
     const scheduler = VerificationScheduler.tryGetInstance();
     if (scheduler === null) return null;
+    if (await webAxisRecordPresent(scheduler, args)) return null;
     const proven = await scheduler.resolveProvenRunbook({
       projectId: args.projectId,
       runId: args.runId,

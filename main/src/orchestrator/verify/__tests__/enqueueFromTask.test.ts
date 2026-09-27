@@ -2075,6 +2075,23 @@ describe('§A2 — the project-surface rung inside resolveEnqueueModality', () =
       const out = await resolveFlow(buildTask, webRoot);
       expect(out).toEqual({ modality: 'mobile', task: buildTask });
     });
+
+    it.each<[string, VerificationTaskV1]>([
+      ['a serve', { ...buildTask, serve: { cmd: 'pnpm dev --port ${PORT}' } }],
+      ['a target.url', { ...buildTask, target: { url: 'http://localhost:3000' } }],
+      ['a target.htmlPath', { ...buildTask, target: { htmlPath: 'dist/index.html' } }],
+    ])('naming a surface of its own (%s) never gets an inferred app', async (_label, named) => {
+      wirePresence([]);
+      const out = await resolveFlow(named);
+      expect(out).toEqual({ modality: 'mobile', task: named });
+    });
+
+    it.each<VerificationModality>(['cdp-app', 'web'])('on a project with a %s record never probes the surface', async (present) => {
+      const asked = wirePresence([present]);
+      const out = await resolveFlow(buildTask);
+      expect(out).toEqual({ modality: 'mobile', task: buildTask });
+      expect(asked).toContain(present);
+    });
   });
 
   it('surfaceRoot alone is enough (the MCP immediate path leaves probePath to the scheduler)', async () => {
