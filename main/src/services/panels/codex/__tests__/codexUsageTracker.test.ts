@@ -39,18 +39,33 @@ function rowUsage(db: Database.Database, dedupKey: string): unknown {
   return row ? (JSON.parse(row.payloadJson) as { message: { usage: unknown } }).message.usage : undefined;
 }
 
+function rowModel(db: Database.Database, dedupKey: string): { model: string; inferred: boolean } | undefined {
+  const row = db.prepare('SELECT payload_json AS payloadJson FROM raw_events WHERE dedup_key = ?').get(dedupKey) as
+    | { payloadJson: string }
+    | undefined;
+  if (!row) return undefined;
+  const payload = JSON.parse(row.payloadJson) as { model_inferred: boolean; message: { model: string } };
+  return { model: payload.message.model, inferred: payload.model_inferred };
+}
+
 function expected(...usages: TokenUsageBreakdown[]): unknown {
   const totals = new CodexUsageTotals();
   for (const usage of usages) totals.add(usage);
   return totals.snapshot();
 }
 
-function makeTracker(db: Database.Database, logger?: Logger, drainTimeoutMs?: number): CodexProcessUsageTracker {
+function makeTracker(
+  db: Database.Database,
+  logger?: Logger,
+  drainTimeoutMs?: number,
+  roleModels?: Record<string, string | null>,
+): CodexProcessUsageTracker {
   const tracker = new CodexProcessUsageTracker({
     runId: 'run-1',
     writer: new CodexUsageRowWriter(db, logger),
     logger,
     drainTimeoutMs,
+    roleModels,
   });
   tracker.setRootThread('root');
   return tracker;
@@ -238,6 +253,86 @@ describe('CodexProcessUsageTracker raw-events source switch (update-sourced thre
       tracker.settle();
       expect(owner.accumulator.rootSnapshot()).toEqual(expected(A));
       expect(rowUsage(db, 'codex-usage-topup:run-1:root')).toEqual(expected(A));
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('CodexProcessUsageTracker child model from a 0.156.1 spawn_agent call', () => {
+  const ROLES = { 'cyboflow-architecture': 'gpt-sol', 'cyboflow-context': null };
+
+  function spawnOne(
+    db: Database.Database,
+    call: { agent_type?: string; model?: string } | null,
+    roleModels: Record<string, string | null> | undefined = ROLES,
+  ): void {
+    const tracker = makeTracker(db, undefined, undefined, roleModels);
+    tracker.bindOwner(createCodexUsageOwner({ invocationId: 'inv-1', runId: 'run-1', model: 'gpt-root', rootThreadId: 'root' }));
+    if (call !== null) tracker.observe(n.spawnAgentCall('root', 'turn-1', 'call-1', call));
+    tracker.observe(n.subAgentStarted('root', 'turn-1', 'child', 'call-1'));
+    tracker.observe(n.rawResponse('child', 'c', 'c1', A));
+  }
+
+  it('takes the model the role file pins', () => {
+    const db = createDb();
+    try {
+      spawnOne(db, { agent_type: 'cyboflow-architecture' });
+      expect(rowModel(db, 'codex-subagent:inv-1:child')).toEqual({ model: 'gpt-sol', inferred: false });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('gives a role that pins no model, or no role at all, the spawner\'s model', () => {
+    for (const call of [{ agent_type: 'cyboflow-context' }, {}]) {
+      const db = createDb();
+      try {
+        spawnOne(db, call);
+        expect(rowModel(db, 'codex-subagent:inv-1:child')).toEqual({ model: 'gpt-root', inferred: false });
+      } finally {
+        db.close();
+      }
+    }
+  });
+
+  it('prefers an explicit model argument over the role', () => {
+    const db = createDb();
+    try {
+      spawnOne(db, { agent_type: 'cyboflow-architecture', model: 'gpt-explicit' });
+      expect(rowModel(db, 'codex-subagent:inv-1:child')).toEqual({ model: 'gpt-explicit', inferred: false });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('flags the model inferred when the call is unseen or names a role this process did not register', () => {
+    for (const [call, roles] of [
+      [null, ROLES],
+      [{ agent_type: 'explorer' }, ROLES],
+      [{ agent_type: 'cyboflow-architecture' }, {}],
+    ] as const) {
+      const db = createDb();
+      try {
+        spawnOne(db, call, roles);
+        expect(rowModel(db, 'codex-subagent:inv-1:child')).toEqual({ model: 'gpt-root', inferred: true });
+      } finally {
+        db.close();
+      }
+    }
+  });
+
+  it('resolves a grandchild of an unpinned role through its parent\'s exact model', () => {
+    const db = createDb();
+    try {
+      const tracker = makeTracker(db, undefined, undefined, ROLES);
+      tracker.bindOwner(createCodexUsageOwner({ invocationId: 'inv-1', runId: 'run-1', model: 'gpt-root', rootThreadId: 'root' }));
+      tracker.observe(n.spawnAgentCall('root', 'turn-1', 'call-1', { agent_type: 'cyboflow-architecture' }));
+      tracker.observe(n.subAgentStarted('root', 'turn-1', 'child', 'call-1'));
+      tracker.observe(n.spawnAgentCall('child', 'c', 'call-2', { agent_type: 'cyboflow-context' }));
+      tracker.observe(n.subAgentStarted('child', 'c', 'grandchild', 'call-2'));
+      tracker.observe(n.rawResponse('grandchild', 'g', 'g1', A));
+      expect(rowModel(db, 'codex-subagent:inv-1:grandchild')).toEqual({ model: 'gpt-sol', inferred: false });
     } finally {
       db.close();
     }

@@ -198,6 +198,12 @@ export interface CodexProcessUsageTrackerOptions {
    * have missed, because a drain can outlive the run's last step.
    */
   onLateRows?: (runId: string) => void;
+  /**
+   * `config.agents` role name → the model its role file pins, or null when the
+   * role inherits its spawner's model. Names the model of a child whose spawn
+   * item carries none (0.156.1 `subAgentActivity`).
+   */
+  roleModels?: Readonly<Record<string, string | null>>;
 }
 
 /**
@@ -254,6 +260,8 @@ export class CodexProcessUsageTracker {
   /** Per update-sourced thread, the last request counted from an update. */
   private readonly lastUpdateCounted = new Map<string, TokenUsageBreakdown>();
   private updateSequence = 0;
+  /** `spawn_agent` calls by call id, until their child's started item arrives. */
+  private readonly spawnCalls = new Map<string, { agentType: string | null; model: string | null }>();
 
   constructor(private readonly options: CodexProcessUsageTrackerOptions) {
     this.registry = new CodexDescendantRegistry<CodexUsageOwner>((threadId) => {
@@ -408,8 +416,13 @@ export class CodexProcessUsageTracker {
           signal.receiverThreadIds.map((threadId) => ({ threadId, model: signal.model })),
         );
         return;
+      case 'spawnCall':
+        this.spawnCalls.set(signal.callId, { agentType: signal.agentType, model: signal.model });
+        return;
       case 'subAgentStarted':
-        this.registerChildren(signal.threadId, signal.turnId, [{ threadId: signal.agentThreadId, model: null }]);
+        this.registerChildren(signal.threadId, signal.turnId, [
+          { threadId: signal.agentThreadId, model: this.spawnCallModel(signal.threadId, signal.callId) },
+        ]);
         return;
       case 'agentStates':
         for (const state of signal.states) {
@@ -428,6 +441,29 @@ export class CodexProcessUsageTracker {
         this.ledger.observeCompaction(signal.threadId);
         return;
     }
+  }
+
+  /**
+   * The model a `spawn_agent` call runs its child on: an explicit `model`
+   * argument, else the role file's pinned model, else — for a role that pins
+   * none, or no role at all — the spawner's own model, which Codex children
+   * inherit. Null (the child is then flagged model-inferred) when the call was
+   * not seen (a resumed thread emits no raw items), names a role this process
+   * did not register, or the spawner's own model is only inferred.
+   */
+  private spawnCallModel(senderThreadId: string, callId: string | null): string | null {
+    const call = callId === null ? undefined : this.spawnCalls.get(callId);
+    if (call === undefined) return null;
+    if (call.model !== null) return call.model;
+    if (call.agentType !== null) {
+      const roleModels = this.options.roleModels;
+      if (roleModels === undefined || !Object.hasOwn(roleModels, call.agentType)) return null;
+      const pinned = roleModels[call.agentType];
+      if (pinned !== null) return pinned;
+    }
+    if (senderThreadId === this.rootThreadId) return this.activeOwner?.model ?? this.rootModel;
+    const sender = this.registry.resolveModel(senderThreadId, '');
+    return sender.inferred ? null : sender.model;
   }
 
   private registerChildren(

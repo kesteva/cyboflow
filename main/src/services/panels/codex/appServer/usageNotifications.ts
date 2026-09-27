@@ -23,7 +23,8 @@ export type CodexUsageSignal =
       receiverThreadIds: string[];
       model: string | null;
     }
-  | { kind: 'subAgentStarted'; threadId: string; turnId: string; agentThreadId: string }
+  | { kind: 'spawnCall'; callId: string; agentType: string | null; model: string | null }
+  | { kind: 'subAgentStarted'; threadId: string; turnId: string; agentThreadId: string; callId: string | null }
   | { kind: 'agentStates'; states: Array<{ threadId: string; terminal: boolean }> }
   | { kind: 'turnStarted'; threadId: string; turnId: string }
   | { kind: 'turnCompleted'; threadId: string; turnId: string }
@@ -112,7 +113,12 @@ function parseItemSignals(params: unknown): CodexUsageSignal[] {
     }
   } else if (item.type === 'subAgentActivity' && typeof item.agentThreadId === 'string') {
     if (item.kind === 'started') {
-      signals.push({ kind: 'subAgentStarted', ...scope, agentThreadId: item.agentThreadId });
+      signals.push({
+        kind: 'subAgentStarted',
+        ...scope,
+        agentThreadId: item.agentThreadId,
+        callId: typeof item.id === 'string' && item.id !== '' ? item.id : null,
+      });
     } else if (typeof item.kind === 'string' && TERMINAL_ACTIVITY_KINDS.has(item.kind as SubAgentActivityKind)) {
       signals.push({ kind: 'agentStates', states: [{ threadId: item.agentThreadId, terminal: true }] });
     }
@@ -120,6 +126,32 @@ function parseItemSignals(params: unknown): CodexUsageSignal[] {
     signals.push({ kind: 'compaction', threadId: scope.threadId });
   }
   return signals;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
+ * A `spawn_agent` function call (0.156.1 native roles). Its `call_id` is the id
+ * of the `subAgentActivity` started item that announces the child, and its
+ * arguments name the role (`agent_type`) and any explicit `model` — the only
+ * place the child's model is visible, since that item carries none.
+ */
+function parseSpawnCall(params: unknown): CodexUsageSignal[] {
+  if (!isRecord(params) || !isRecord(params.item)) return [];
+  const item = params.item;
+  if (item.type !== 'function_call' || item.name !== 'spawn_agent') return [];
+  const callId = nonEmptyString(item.call_id);
+  if (callId === null || typeof item.arguments !== 'string') return [];
+  let args: unknown;
+  try {
+    args = JSON.parse(item.arguments);
+  } catch {
+    return [];
+  }
+  if (!isRecord(args)) return [];
+  return [{ kind: 'spawnCall', callId, agentType: nonEmptyString(args.agent_type), model: nonEmptyString(args.model) }];
 }
 
 function parseTurnScope(params: unknown): { threadId: string; turnId: string } | null {
@@ -142,6 +174,8 @@ export function parseCodexUsageSignals(notification: AppServerNotification): Cod
     case 'item/started':
     case 'item/completed':
       return parseItemSignals(params);
+    case 'rawResponseItem/completed':
+      return parseSpawnCall(params);
     case 'turn/started': {
       const scope = parseTurnScope(params);
       return scope ? [{ kind: 'turnStarted', ...scope }] : [];

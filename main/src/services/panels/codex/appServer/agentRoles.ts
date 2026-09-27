@@ -306,3 +306,21 @@ export function materializeCodexAgentRoles(
   }
   return roles;
 }
+
+/**
+ * The model each REGISTERED role runs its child on — the model its role file
+ * pins, or null when it inherits the spawner's (see codexRoleModel). Keyed like
+ * `roles`; an agent that did not land there is absent. Usage accounting reads it
+ * to price a child whose spawn notification names no model.
+ */
+export function codexAgentRoleModels(
+  agents: readonly EffectiveAgent[],
+  roles: CodexAgentRoles,
+): Record<string, string | null> {
+  const models: Record<string, string | null> = {};
+  for (const agent of agents) {
+    const role = `${ROLE_PREFIX}${agent.agentKey}`;
+    if (Object.hasOwn(roles, role)) models[role] = codexRoleModel(agent);
+  }
+  return models;
+}

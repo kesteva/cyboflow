@@ -210,6 +210,47 @@ export const codexNotification = {
     };
   },
 
+  /**
+   * A 0.156.1 `spawn_agent` function call, as its `rawResponseItem/completed`
+   * notification carries it. Its `callId` is the id of the child's
+   * `subAgentActivity` started item (see `subAgentStarted`).
+   */
+  spawnAgentCall(
+    senderThreadId: string,
+    turnId: string,
+    callId: string,
+    args: { agent_type?: string; model?: string; task_name?: string },
+  ): AppServerNotification {
+    return {
+      method: 'rawResponseItem/completed',
+      params: toJson({
+        threadId: senderThreadId,
+        turnId,
+        item: {
+          type: 'function_call',
+          id: `fc-${callId}`,
+          name: 'spawn_agent',
+          namespace: 'collaboration',
+          arguments: JSON.stringify({ task_name: 'child', ...args }),
+          call_id: callId,
+        },
+      }),
+    };
+  },
+
+  /** A 0.156.1 `subAgentActivity` started item — the child announcement, which names no model. */
+  subAgentStarted(senderThreadId: string, turnId: string, agentThreadId: string, callId: string): AppServerNotification {
+    return {
+      method: 'item/started',
+      params: toJson({
+        threadId: senderThreadId,
+        turnId,
+        startedAtMs: 1,
+        item: { type: 'subAgentActivity', id: callId, kind: 'started', agentThreadId, agentPath: '/root/child' },
+      }),
+    };
+  },
+
   turnStarted(threadId: string, turnId: string): AppServerNotification {
     return { method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress' } } };
   },

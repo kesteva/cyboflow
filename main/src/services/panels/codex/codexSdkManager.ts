@@ -34,6 +34,7 @@ import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import { rollupRunUsage } from '../../../orchestrator/runUsageRollup';
 import { resolveRunDeployableAgents } from '../claude/agentOverlayWriter';
 import {
+  codexAgentRoleModels,
   defaultCodexAgentRolesDir,
   materializeCodexAgentRoles,
   type CodexAgentRoles,
@@ -671,7 +672,7 @@ export class CodexSdkManager extends AbstractCliManager {
     // Resolved BEFORE the fingerprint so the roles are part of the fingerprinted
     // thread configuration: role files are content-addressed, so a changed role
     // prompt changes a `config_file` path and busts a parked entry by itself.
-    const agentRoles = this.resolveAgentRoles(runId, options);
+    const { roles: agentRoles, roleModels } = this.resolveAgentRoles(runId, options);
     const fingerprint = this.computeWarmFingerprint(
       runId,
       options,
@@ -706,6 +707,7 @@ export class CodexSdkManager extends AbstractCliManager {
       warmEligible,
       isolationConfig,
       agentRoles,
+      roleModels,
     );
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     return await this.runOneTurnGuarded(entry, options, spawnKey, true);
@@ -752,22 +754,29 @@ export class CodexSdkManager extends AbstractCliManager {
    * Fail-soft end to end: a failure here must never block a spawn — it degrades
    * to "no native roles", which only means the orchestrator does each role's
    * work itself (the runtime-adapter prompt's fallback) instead of delegating.
+   *
+   * `roleModels` rides alongside for usage accounting (codexAgentRoleModels).
    */
-  private resolveAgentRoles(runId: string, options: ClaudeSpawnerOptions): CodexAgentRoles {
-    if (options.isolation === 'agent') return {};
+  private resolveAgentRoles(
+    runId: string,
+    options: ClaudeSpawnerOptions,
+  ): { roles: CodexAgentRoles; roleModels: Record<string, string | null> } {
+    const none = { roles: {}, roleModels: {} };
+    if (options.isolation === 'agent') return none;
     // Adapt only a REAL logger: a logger-less manager stays silent, as every
     // `this.logger?.` call in this file does, instead of falling back to the
     // console shim makeLoggerLike builds for an absent one.
     const logger = this.logger ? makeLoggerLike(this.logger) : undefined;
     try {
       const agents = resolveRunDeployableAgents(this.db, runId, logger);
-      if (agents.length === 0) return {};
-      return materializeCodexAgentRoles(agents, this.resolveAgentRolesDir(), logger);
+      if (agents.length === 0) return none;
+      const roles = materializeCodexAgentRoles(agents, this.resolveAgentRolesDir(), logger);
+      return { roles, roleModels: codexAgentRoleModels(agents, roles) };
     } catch (error) {
       this.logger?.warn(
         `[CodexSdkManager] native agent-role registration failed for run ${runId}; spawning without roles: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return {};
+      return none;
     }
   }
 
@@ -832,6 +841,7 @@ export class CodexSdkManager extends AbstractCliManager {
     warmEligible: boolean,
     isolationConfig: CodexIsolationConfig | undefined,
     agentRoles: CodexAgentRoles,
+    roleModels: Record<string, string | null>,
   ): WarmCodexEntry {
     // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
     // never an `agent:` id-prefix sniff. The client callbacks below are baked once
@@ -848,6 +858,7 @@ export class CodexSdkManager extends AbstractCliManager {
         writer: isolationSpawn ? null : new CodexUsageRowWriter(this.db, this.logger),
         logger: this.logger,
         onLateRows: (lateRunId) => this.rerollRunUsageAfterLateRows(lateRunId),
+        roleModels,
       }),
       persistRawNotifications: !isolationSpawn,
       isolationConfig,
