@@ -502,6 +502,7 @@ It exports `JAVA_HOME` for the probe and for the agent env.
   - The `--always` command is returned only for a packaged (signed) build, and the panel hides it behind an explicit "show the durable command" click.
   - The scaffold is a minimal target-less `project.pbxproj`; whether Xcode opens it cleanly is for the live smoke to confirm.
   - Concurrent clicks share one attempt, so a double click cannot raise two prompts.
+  - The scaffold path stays fixed, but every component under `<dataDir>/` is refused when it is a symlink or not ours, `project.pbxproj` is written through an `O_EXCL|O_NOFOLLOW` temp file renamed into place, and the project's realpath must equal `<realpath(dataDir)>/xcode-approval/CyboflowApproval.xcodeproj` right before `XcodeOpenWorkspace` (post-review).
 
 ### B9. Docs
 - Correct `mobile-verification-tier.md` §3, §11 and §16 against the Xcode 27 dump. §16's Stage 3 becomes "drive/observe rung shipped; Xcode-built 3b rejected with evidence".
