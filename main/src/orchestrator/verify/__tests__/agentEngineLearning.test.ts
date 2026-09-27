@@ -356,6 +356,22 @@ describe('AgentEngine — §A5 promotion via a learned pin', () => {
     expect(h.findings[0].body).toContain('r1');
   });
 
+  it('KILL SWITCH flipped on mid-run: the pass is delivered, but the draft is NOT promoted and no finding is filed (review F4)', async () => {
+    h = harness();
+    const pin = await pinToLearnedDraft(h);
+    h.run.mockImplementation(async () => {
+      h.live.requireProvenRunbook = true;
+      return { status: 'passed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report() };
+    });
+    await drain(h);
+
+    expect(h.run.mock.calls[0][0]).toMatchObject({ executionMode: 'pinned', runbookHash: pin.hash });
+    expect(requestRow(h.db).status).toBe('passed');
+    expect(h.onVerdict).toHaveBeenCalledTimes(1);
+    expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned', version: pin.version });
+    expect(h.findings).toEqual([]);
+  });
+
   it('a HARNESS-verified stood-up surface with a FAILING behaviour delivers normally and KEEPS the draft', async () => {
     h = harness();
     await pinToLearnedDraft(h);

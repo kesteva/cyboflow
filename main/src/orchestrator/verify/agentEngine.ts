@@ -1361,8 +1361,19 @@ export class AgentEngine {
     // been decided", which is what every reader assumed it meant.
     // §A5 — a LEARNED PIN's pass is the second (and only other) way in: the
     // lane's ordinary request executed the learned draft verbatim and passed.
+    // The kill switch is re-read LIVE for it (Codex A5 review F4): flipped on
+    // mid-run, the verdict still lands but the draft stays unproven and no
+    // promotion finding is filed. Setup/bootstrap proofs are unaffected.
     let promoted = false;
-    if ((setupProof || bootstrapProof || learnedPin) && status === 'passed') {
+    let learnedPromotes = learnedPin;
+    if (learnedPin && status === 'passed' && requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)) {
+      learnedPromotes = false;
+      this.logger?.info('[VerificationScheduler] kill switch engaged mid-run; learned draft NOT promoted (verdict unaffected)', {
+        requestId: row.id,
+        modality,
+      });
+    }
+    if ((setupProof || bootstrapProof || learnedPromotes) && status === 'passed') {
       try {
         promoted = await this.recordRunbookProof(row, modality, result, snapshotSha);
       } catch (err) {
