@@ -262,6 +262,7 @@ A rejection means nothing is learned. The verdict is unaffected.
 - **Learned-record drift:** a committed file that declares the modality is `content-drifted` only when its hash differs from the learned record's. A byte-identical file is the learned runbook itself.
 - **Learned-pin exits:**
   - A pre-deploy harness skip (preflight, provisioning, no resolvable agent) keeps the draft and delivers normally, because the recipe never ran. It is not treated as "anything else".
+  - "Surface stood up" is a harness fact, not the report's word: on a learned pin's `fail` the runner runs the attestation floor's identity/binding probe off the verdict path and carries `surfaceVerified`; only `true` keeps the draft (`file-identity` counts only on a bare `target.htmlPath`), anything else discards.
   - The "anything else" re-dispatch keeps the row's modality and its (merged) task, so the learned commands ride along as explore hints. This includes a learned pin's `wrong_environment`.
 - **Provenance:** the learned entry's `notes` records the source request, and the promotion finding reads it back. Because `notes` is part of the portable hash, two runs reporting the same recipe learn distinct hashes (first writer wins anyway).
 - **`readRow`** selects `origin` through a widen-then-fall-back ladder, so a pre-107 DB still reads its records.

@@ -20,6 +20,7 @@ import { ResourceLeasePool } from '../verificationLeases';
 import type { OnVerdict } from '../verificationSchedulerContracts';
 import type { VerificationRequestRow } from '../verificationRequestRows';
 import { VerifyRunbookStore } from '../runbookStore';
+import { probeLearnedPinSurface } from '../learnedRunbook';
 import type { RunbookLearningFinding } from '../learnedRunbook';
 import type { VerificationAgentRequest, VerificationAgentRunResult } from '../verificationAgentRunner';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
@@ -355,10 +356,17 @@ describe('AgentEngine — §A5 promotion via a learned pin', () => {
     expect(h.findings[0].body).toContain('r1');
   });
 
-  it('a stood-up surface with a FAILING behaviour delivers normally and KEEPS the draft', async () => {
+  it('a HARNESS-verified stood-up surface with a FAILING behaviour delivers normally and KEEPS the draft', async () => {
     h = harness();
     await pinToLearnedDraft(h);
-    h.run.mockResolvedValue({ status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: failedBehaviourReport() });
+    h.run.mockResolvedValue({
+      status: 'failed',
+      fileNames: ['s.png'],
+      deployed: true,
+      provisionMode: 'snapshot',
+      report: failedBehaviourReport(),
+      surfaceVerified: true,
+    });
     await drain(h);
     expect(requestRow(h.db).status).toBe('failed');
     expect(record(h.db)).toMatchObject({ status: 'unproven-draft', origin: 'learned' });
@@ -389,6 +397,15 @@ describe('AgentEngine — §A5 promotion via a learned pin', () => {
     ],
     ['low_confidence', { status: 'low_confidence', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report() }],
     ['an identity failure', { status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: report(), foreignSurface: true }],
+    // Codex A5 review F3: a behaviour fail the harness never saw stand up is not a "kept" fail.
+    [
+      'a behaviour fail on an UNVERIFIED surface',
+      { status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: failedBehaviourReport(), surfaceVerified: false },
+    ],
+    [
+      'a behaviour fail with NO surface fact',
+      { status: 'failed', fileNames: ['s.png'], deployed: true, provisionMode: 'snapshot', report: failedBehaviourReport() },
+    ],
     ['a runbook mismatch', { status: 'skipped', fileNames: [], deployed: false, runbookMismatch: true, errorMessage: 'runbook/sha mismatch' }],
     [
       'wrong_environment',
@@ -491,5 +508,34 @@ describe('AgentEngine — §A5 promotion via a learned pin', () => {
     h.db.prepare('UPDATE verification_requests SET runbook_hash = ?, runbook_local_version = ?').run(reg.hash, reg.version);
     await drain(h);
     expect(h.run.mock.calls[0][0].executionMode).toBe('explore');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex A5 review F3 — the harness-owned "surface stood up" fact
+// ---------------------------------------------------------------------------
+
+describe('probeLearnedPinSurface', () => {
+  const base = { requestId: 'r1', degenerateFileTarget: false };
+
+  it('true only for a verified floor', async () => {
+    const verified = async () => ({ kind: 'verified' as const, channel: 'http-endpoint' as const, detail: 'nonce' });
+    expect(await probeLearnedPinSurface({ ...base, probe: verified })).toBe(true);
+    for (const kind of ['missing', 'uncapped', 'foreign'] as const) {
+      expect(await probeLearnedPinSurface({ ...base, probe: async () => ({ kind, detail: 'x' }) })).toBe(false);
+    }
+  });
+
+  it('file-identity counts only on the bare htmlPath shape it holds by construction for', async () => {
+    const fileIdentity = async () => ({ kind: 'verified' as const, channel: 'file-identity' as const, detail: 'by construction' });
+    expect(await probeLearnedPinSurface({ ...base, probe: fileIdentity })).toBe(false);
+    expect(await probeLearnedPinSurface({ ...base, degenerateFileTarget: true, probe: fileIdentity })).toBe(true);
+  });
+
+  it('a throwing probe reads as unverified', async () => {
+    const probe = async (): Promise<never> => {
+      throw new Error('boom');
+    };
+    expect(await probeLearnedPinSurface({ ...base, probe })).toBe(false);
   });
 });

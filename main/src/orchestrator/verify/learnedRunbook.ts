@@ -25,7 +25,7 @@ import {
   type VerifyRunbookStore,
 } from './runbookStore';
 import { learnedRecipeCommands } from './learnedRecipe';
-import type { VerificationAgentRunResult } from './verificationAgentRunner';
+import type { AttestationFloorOutcome, VerificationAgentRunResult } from './verificationAgentRunner';
 import type { ProvenRunbookRevision } from './verificationSchedulerContracts';
 
 /** One §A5 review-surface notice — the shape the injected sink files as a non-blocking finding. */
@@ -185,6 +185,10 @@ export async function learnFromExploreSuccess(args: {
  *   - `'promote'` — `passed`: the engine flips the draft proven, then delivers.
  *   - `'keep'` — the surface stood up and ≥1 behaviour genuinely FAILED: the
  *     recipe worked and the change did not; deliver normally, keep the draft.
+ *     "Stood up" is the HARNESS's `surfaceVerified` fact
+ *     ({@link probeLearnedPinSurface}), never the agent's report — without it
+ *     a recipe that never launched could fail a behaviour against an error
+ *     page and stay pinned forever (Codex A5 review F3).
  *   - `'deliver'` — a PRE-DEPLOY harness skip (preflight, provisioning, no
  *     resolvable agent): the recipe never ran, so it proved nothing either
  *     way; deliver normally and keep the draft.
@@ -201,6 +205,7 @@ export function classifyLearnedPinExit(result: VerificationAgentRunResult): Lear
   if (result.status === 'passed') return 'promote';
   if (
     result.status === 'failed' &&
+    result.surfaceVerified === true &&
     result.foreignSurface !== true &&
     result.report?.outcome === 'fail' &&
     result.report.behaviors.some((b) => b.result === 'fail')
@@ -209,6 +214,44 @@ export function classifyLearnedPinExit(result: VerificationAgentRunResult): Lear
   }
   if (result.status === 'skipped' && !result.deployed && result.runbookMismatch !== true) return 'deliver';
   return 'discard';
+}
+
+/**
+ * §A5 (Codex A5 review F3) — did the harness see a LEARNED PIN's surface stand
+ * up? Asked only on a `fail` report, whose pinned verdict never runs the
+ * attestation floor; `probe` is the floor's own identity/binding probe plus
+ * its evaluation, supplied by the runner while the surface is still alive.
+ *
+ * `true` only for a `verified` floor. `file-identity` counts only on the bare
+ * `target.htmlPath` shape it holds by construction for — on anything that
+ * builds or serves it is a declaration, not an observation. Every other answer
+ * (missing, capped, foreign, a throw) is `false`: the recipe could not be shown
+ * to stand the deliverable up, so the draft takes the discard exit.
+ */
+export async function probeLearnedPinSurface(args: {
+  probe: () => Promise<AttestationFloorOutcome>;
+  degenerateFileTarget: boolean;
+  requestId: string;
+  logger?: LoggerLike;
+}): Promise<boolean> {
+  try {
+    const floor = await args.probe();
+    const verified = floor.kind === 'verified' && (floor.channel !== 'file-identity' || args.degenerateFileTarget);
+    if (!verified) {
+      args.logger?.info('[learnedRunbook] learned-pin fail: the harness did not see the surface stand up; draft will be discarded', {
+        requestId: args.requestId,
+        floor: floor.kind,
+        detail: floor.detail,
+      });
+    }
+    return verified;
+  } catch (err) {
+    args.logger?.warn('[learnedRunbook] learned-pin surface probe threw; treating the surface as unverified', {
+      requestId: args.requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 /** The non-blocking "learned recipe promoted" notice (§A5 review surface). */

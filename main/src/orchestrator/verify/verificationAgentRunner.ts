@@ -73,6 +73,7 @@ import {
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
 import { isLearnedPinRecord, type PinnedRunbookRecord } from './runbookStore';
 import { validateLearnedRecipe, type LearnedRecipeValidation } from './learnedRecipe';
+import { probeLearnedPinSurface } from './learnedRunbook';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
@@ -490,6 +491,13 @@ export interface VerificationAgentRunResult {
    * learned, and neither answer changes this result's verdict.
    */
   learnedRecipe?: LearnedRecipeValidation;
+  /**
+   * §A5 (Codex A5 review F3) — on a LEARNED PIN whose report is `fail` only:
+   * whether the harness's own identity/binding probe saw the surface stand up
+   * (see `probeLearnedPinSurface`). Harness-owned and off the verdict path;
+   * `classifyLearnedPinExit` keeps the draft only when it is `true`.
+   */
+  surfaceVerified?: boolean;
 }
 
 /**
@@ -1259,7 +1267,7 @@ export function effectiveAttestationSpec(
  * word for `file-identity` on any other shape (§A1.2 — see
  * {@link evaluateAttestationFloorForMode}).
  */
-function isDegenerateFileTarget(task: VerificationTaskV1): boolean {
+export function isDegenerateFileTarget(task: VerificationTaskV1): boolean {
   const htmlPath = task.target?.htmlPath;
   return (
     typeof htmlPath === 'string' &&
@@ -3197,6 +3205,8 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     // that PASSED the pin check is kept — executing a rejected revision's levers
     // would bind values from a runbook this request already refused to run.
     let pinnedLevers: VerifyRunbookV1['levers'];
+    // §A5 — the pin accepted below names an unproven LEARNED draft (read for F3's surface probe).
+    let learnedPinRun = false;
     const resolveRunbookByHash = this.deps.resolveRunbookByHash;
     if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
       const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
@@ -3228,6 +3238,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         };
       }
       pinnedLevers = record?.runbook.levers;
+      learnedPinRun = isLearnedPinRecord(record);
     }
     // §A1.3 — WHICH record's levers bind the env. Pinned: the record the pin
     // check just accepted (above). Explore: the best registered record for
@@ -3937,6 +3948,23 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
       }
 
+      // (d2b) §A5 (Codex A5 review F3) — a LEARNED PIN's `fail` keeps its draft
+      // only if the harness saw the surface stand up, so it is probed here with
+      // the floor's own probe. Off the verdict path: `floor` stays null, so the
+      // ordinary pinned-fail verdict is unchanged; only the fact rides along.
+      const surfaceVerified =
+        learnedPinRun && report.outcome === 'fail'
+          ? await probeLearnedPinSurface({
+              probe: async () => {
+                const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
+                return evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding);
+              },
+              degenerateFileTarget: isDegenerateFileTarget(req.task),
+              requestId: req.requestId,
+              logger,
+            })
+          : undefined;
+
       // (e) Post-run mutation check — snapshot mode only (the fallback worktree is
       // expected to be dirty). A tracked-source mutation demotes to low_confidence.
       let mutated = false;
@@ -4016,7 +4044,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           reason: learnedRecipe.reason,
         });
       }
-      return { ...mapped, preflight, ...(learnedRecipe !== undefined ? { learnedRecipe } : {}) };
+      return {
+        ...mapped,
+        preflight,
+        ...(learnedRecipe !== undefined ? { learnedRecipe } : {}),
+        ...(surfaceVerified !== undefined ? { surfaceVerified } : {}),
+      };
     } catch (err) {
       // The outer catch can fire before OR after the deploy; `deployedProvenance`
       // is not in scope here, so budget attribution falls back to the honest
