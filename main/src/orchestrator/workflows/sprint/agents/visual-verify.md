@@ -232,11 +232,15 @@ The harness contract appended to this prompt tells you which mode you are in.
    makes it fail. Two of the six kinds have no self-check at all:
    `file-identity` (the runner owns the `htmlPath` it asked you to open) and
    `bundle-identity` (the harness hashes the installed app itself —
-   `mobile-install` is your whole part). When the task declared NO channel, you
-   may still report `pass` on the behaviors, but cap `confidence` at
-   `low_confidence` — nothing confirmed the surface you drove was this
-   deliverable. (In explore, the harness may still pass such a run on its own
-   evidence when the composed serve ran verbatim; that is its call, not yours.)
+   `mobile-install` is your whole part). When the task declared NO channel,
+   report what you observed: `pass` the behaviors that held, and set
+   `confidence` (a number from 0 to 1) to how sure you are that the surface you
+   drove was this deliverable. Do not cap the verdict yourself — the harness
+   applies the final identity floor on its own evidence: an undeclared channel
+   caps at `low_confidence`, except in explore when the composed serve ran
+   verbatim and bound to its port, or when an explore mobile run's implicit
+   `bundle-identity` check of `app.bundleId` verified. That is its call, not
+   yours.
 5. **Judge honestly.** Per behavior: `pass` only when its `expected` is
    observably true in your evidence; `fail` when it is observably violated —
    say exactly what rendered instead; `not_testable` when you could not
