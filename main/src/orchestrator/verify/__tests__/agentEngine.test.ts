@@ -785,6 +785,50 @@ describe('AgentEngine — gate (3) is an execution-mode selector (§A1)', () => 
     expect(req.exploreRecord).toEqual(LEARNED_DRAFT);
   });
 
+  it('a stale pin neither reads nor feeds its dead revision’s breaker: it explores past a suppressed pin bucket and settles into the shared unpinned bucket', async () => {
+    const readKeys: string[] = [];
+    const recordHealthyOutcome = vi.fn();
+    const store = {
+      markUnsupported: vi.fn(),
+      getActiveSuppression: (_p: number, _m: string, key: string) => {
+        readKeys.push(key);
+        return key === PIN.hash ? { reason: 'old revision tripped 3x' } : null;
+      },
+      recordEnvFailure: vi.fn(() => ({ tripped: false })),
+      recordHealthyOutcome,
+    } as unknown as VerifyCapabilityStore;
+    h = harness(
+      { capabilityStore: store, runbookStatus: async () => DRIFTED_STATUS },
+      { task: SERVE_TASK, pin: PIN, records: { web: LEARNED_DRAFT } },
+    );
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    expect(onlyRequest(h).executionMode).toBe('explore');
+    expect(readKeys).toEqual(['']);
+    expect(terminal(h.db).status).toBe('passed');
+    expect(recordHealthyOutcome).toHaveBeenCalledWith(1, 'web', '');
+  });
+
+  it('a pin still reading proven keeps its own bucket on both sides', async () => {
+    const readKeys: string[] = [];
+    const recordHealthyOutcome = vi.fn();
+    const store = {
+      markUnsupported: vi.fn(),
+      getActiveSuppression: (_p: number, _m: string, key: string) => {
+        readKeys.push(key);
+        return null;
+      },
+      recordEnvFailure: vi.fn(() => ({ tripped: false })),
+      recordHealthyOutcome,
+    } as unknown as VerifyCapabilityStore;
+    h = harness({ capabilityStore: store, runbookStatus: async () => PROVEN_STATUS }, { task: SERVE_TASK, pin: PIN });
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    expect(onlyRequest(h).executionMode).toBe('pinned');
+    expect(readKeys).toEqual([PIN.hash]);
+    expect(recordHealthyOutcome).toHaveBeenCalledWith(1, 'web', PIN.hash);
+  });
+
   it('…and SKIPS with the drift reason with the switch on', async () => {
     h = harness({ runbookStatus: async () => DRIFTED_STATUS }, { task: SERVE_TASK, pin: PIN, killSwitch: true });
     await (await h.engine.processAgentRow(row(), INPUT)).work;

@@ -311,7 +311,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
 
 ### A11. Breaker reset (T-F6)
 - Extend the `recordHealthyOutcome` condition (`agentEngine.ts:~1299`) to cover a deployed `low_confidence` that has at least one behaviour `pass`/`fail`. An `unverifiable` with no exercised behaviour does not reset it.
-- Update the `capabilityRunbookKey` doc: unpinned rows, explore runs included, share the `''` bucket.
+- Update the `capabilityRunbookKey` doc: unpinned rows and every explore run share the `''` bucket. The key follows the EFFECTIVE mode, resolved before the capability gates: only a `pinned` run keys on its pin hash, so an explore run whose pin went stale (drifted/demoted) neither reads nor writes the dead revision's bucket.
 
 ### Report-contract widening (F6): one work item, touching
 - **`shared/types/visualVerification.ts`:** the outcome union plus a single exported `VERIFICATION_REPORT_OUTCOMES` constant; the normalizer validates `wrong_environment{neededModality, diagnosis, app?}`, `unverifiable{diagnosis}` and `recipeJson` (string only), and applies the A4 coercion with `coerced: true`.
