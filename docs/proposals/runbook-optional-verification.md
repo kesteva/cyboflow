@@ -439,6 +439,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    **As built (post-review):**
    - When the deadline or a cancel detaches a mobile row's runner mid-teardown, the scheduler keeps the row's simulator slot (and the `verify:xcode` lease riding it) until the runner settles, bounded at 5 min (`mobileTeardownHold.ts`); a same-id requeue is neither nudged nor re-leased until then. The runner also races its agent query against the abort, so a query that ignores the signal cannot keep it out of this `finally`.
    - A StartSession that fails WITHOUT a definitive refusal (timeout, lost or malformed answer, bridge death) may still have created the session, so `openXcodeDriveSession` ends it by the minted key — on a fresh bridge if the first died — before degrading. When that cannot be proven (EndSession neither succeeded nor said the key does not exist), the key is copied into a sibling `verify-mobile/<requestId>.xcode-<hash>/owner.json` that dispose leaves behind, so the boot sweep still ends it.
+   - The long-path socket fallback is a stable per-user root `/tmp/cfxd-<uid>/` (0700, ownership-checked, a symlink refused) instead of a per-request `mkdtemp`, and the boot sweep scans it alongside `<dataDir>/sockets`, removing only `xd-*` sockets no listener answers.
 
 **Threat model** (F11, B-2, B-7). The drive socket is an **ergonomics, audit and ledger boundary, not a security boundary.**
 - Xcode approval is keyed on the binary that spawns the bridge.
