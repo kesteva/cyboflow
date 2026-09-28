@@ -92,8 +92,20 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
  *     `Options.pluginDelivery`, `verbatimPrompts`, `omitClaudeMd` on agent defs,
  *     and new control requests (hooks listing, permission rules, MCP resource
  *     read, reload output styles).
+ *
+ * 0.3.280 → 0.3.284 re-verification (bumped to reach a bundled CLI, 2.1.284, new
+ * enough for `claude-sonnet-5-5`):
+ *   - `SDKMessage` union, `CanUseTool`, `PermissionResult` declarations: UNCHANGED,
+ *     so `EXPECTED_DISCRIMINANTS` needs no edit.
+ *   - `SDKMessageOrigin`'s task-notification `subkind` gained `'session-inbox'`;
+ *     cyboflow never reads `subkind`.
+ *   - Additive only, none of it used: `prewarm()` / `SpareProcess` / `ClaimOptions`
+ *     (alpha parked-spare API), `trigger` / `user_message_uuid` / `timestamp` on
+ *     `SDKConversationResetMessage`, `plugin_errors` + `view_mode` on the init
+ *     payload, and new settings keys (`availableModelsMatch`, `deniedModels`,
+ *     `allowClaudeInChromeWithManagedMcp`, `maxProseWidth`, boolean `attribution`).
  */
-const PINNED_SDK_VERSION = '0.3.280';
+const PINNED_SDK_VERSION = '0.3.284';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.
