@@ -81,3 +81,43 @@ export function resolveSessionRunHandler(
   const named = row.flowName && row.flowName !== QUICK_WORKFLOW_SENTINEL_NAME;
   return { runId: row.runId, flowName: named ? row.flowName : null };
 }
+
+/**
+ * Event-type values that mark a turn as having ENDED (TASK-300 attempt 3).
+ * Mirrors the pairing `insightsQueries.ts` / `runContextUsageListing.ts` already
+ * use for "is this raw_events row a turn-result" — a native Claude SDK result
+ * message is stored as event_type='result'; the provider-neutral agent stream
+ * (Codex/OMP) stores the same moment as 'agent_result'. See
+ * `shared/streamParser/derivers.ts`'s `derivePersistedEventType`.
+ */
+const TURN_RESULT_EVENT_TYPES = ['result', 'agent_result'] as const;
+
+/**
+ * True when the LATEST raw_events row for a run is a turn-result event —
+ * i.e. the run's last SDK turn has already ended, whatever a real-time
+ * "is a process still attached" signal (RunExecutor.hasActiveExecution /
+ * ClaudeManagerLike.hasActiveRunForId) reports.
+ *
+ * That real-time signal answers "has execute()'s await returned", not "did
+ * the model actually keep talking" — a detached child the agent spawned
+ * (e.g. a left-running dev server that inherited stdio) can keep it true
+ * forever after the turn itself finished, because the query() iterator's
+ * stdout pipe never drains. Reading the last persisted event instead is
+ * immune to that: a completed turn's last row is always its `result` event,
+ * appended synchronously by RawEventsSink before anything downstream (a dev
+ * server, a lingering tool) gets a chance to hang around.
+ *
+ * A run with ZERO raw_events rows (nothing has happened yet) reads as NOT
+ * completed — there is no turn to have ended.
+ *
+ * Used by `runs.ts`'s `queueInput` 'parked' check and `StuckDetector`'s
+ * `parked_no_gate` rung so both agree on one turn-ended signal instead of
+ * each layering its own staleness heuristic on top of the same ambiguity.
+ */
+export function isLatestRunTurnCompleted(db: DatabaseLike, runId: string): boolean {
+  const row = db
+    .prepare(`SELECT event_type FROM raw_events WHERE run_id = ? ORDER BY id DESC LIMIT 1`)
+    .get(runId) as { event_type: string } | undefined;
+  if (!row) return false;
+  return (TURN_RESULT_EVENT_TYPES as readonly string[]).includes(row.event_type);
+}

@@ -23,7 +23,7 @@ import {
 } from '../../../../../shared/workflows/runStateMachine';
 import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
-import { listRunsHandler } from '../../runQueries';
+import { listRunsHandler, isLatestRunTurnCompleted } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
@@ -58,7 +58,6 @@ import { isEvalSourcedFinding } from '../../../../../shared/types/reviews';
 import { ADDRESS_REVIEW_FINDINGS_CONTRACT } from '../../programmatic/stepPrompt';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { StepResultStore } from '../../stepResultStore';
-import { STALE_THRESHOLD_MS } from '../../stuckDetector';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { TaskChangeRouter } from '../../taskChangeRouter';
@@ -2958,12 +2957,16 @@ export const runsRouter = router({
    *     StuckDetector's 45-minute staleness grace period — that period exists
    *     to avoid escalating a run merely mid-step, but a message submitted
    *     THIS SECOND has nothing to wait for; there is no drain seam coming);
-   *     ALSO returned (TASK-300 attempt 3) when execution IS reported live but
-   *     raw_events for the run have been stale past that same 45-minute
-   *     threshold — hasActiveExecution() only proves execute() has not
-   *     returned, not that a turn is still producing anything; a detached
-   *     background child the agent spawned can keep that promise pending
-   *     forever after the turn has actually ended;
+   *     ALSO returned (TASK-300 attempt 4) when execution IS reported live but
+   *     the run's LATEST raw_events row is already a turn-result event —
+   *     hasActiveExecution() only proves execute() has not returned, not that
+   *     a turn is still producing anything; a detached background child the
+   *     agent spawned (e.g. a left-running dev server inheriting stdio) can
+   *     keep that promise pending forever after the turn has actually ended.
+   *     `isLatestRunTurnCompleted()` (runQueries.ts) answers this from the
+   *     persisted event log itself rather than from event-recency staleness —
+   *     no 45-minute grace period, since a `result` row proves the turn is
+   *     over the instant it lands, however fresh;
    *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
    *     (those rested states use runs.nudge / runs.resume / the question gate,
    *     not this queue path);
@@ -3029,10 +3032,7 @@ export const runsRouter = router({
           .get(input.runId, input.runId) as { hasGate: number };
         if (!hasGate.hasGate) {
           const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
-          if (!hasLiveTurn) {
-            return { noOp: true, reason: 'parked' };
-          }
-          // (visual-verify fix, TASK-300 attempt 3): hasActiveExecution() is
+          // (visual-verify fix, TASK-300 attempt 4): hasActiveExecution() is
           // "execute()/executeProgrammatic has not returned yet" — NOT "a
           // turn is actively generating". The observed run reproduced this
           // gap exactly: the agent's turn ended (its final SDK message is
@@ -3041,27 +3041,16 @@ export const runsRouter = router({
           // SDK subprocess's stdout pipe open, so the query() iterator never
           // drained and execute()'s await never returned — hasActiveExecution
           // reports true FOREVER even though nothing further will ever be
-          // produced. There is no reliable way to tell that shape apart from
-          // a run legitimately mid-step from this signal alone in real time,
-          // so fall back to the SAME staleness measure (and the SAME 45-
-          // minute threshold) the StuckDetector's parked_no_gate rung already
-          // uses for exactly this ambiguity — reused here so a message
-          // submitted in the up-to-60s gap between crossing that threshold
-          // and the detector's next scan tick is refused immediately rather
-          // than accepted into a buffer nothing will ever drain.
-          // No raw_events yet falls back to the run's own created_at (mirrors
-          // the StuckDetector's parked_no_gate COALESCE) rather than reading
-          // as instantly maximally-stale.
-          const lastActivity = ctx.db
-            .prepare(
-              `SELECT COALESCE(
-                 (SELECT MAX(unixepoch(re.created_at)) FROM raw_events re WHERE re.run_id = wr.id),
-                 unixepoch(wr.created_at)
-               ) AS ts
-               FROM workflow_runs wr WHERE wr.id = ?`,
-            )
-            .get(input.runId) as { ts: number | null };
-          if (lastActivity.ts !== null && lastActivity.ts * 1000 < Date.now() - STALE_THRESHOLD_MS) {
+          // produced. Event-recency staleness (attempts 2/3's fallback) is
+          // the wrong tool for this: it conflates "the turn ended" with "no
+          // events for N minutes", which is ALSO true of a run that is
+          // merely mid-step on a slow tool call. Read the completed-turn
+          // signal directly off the persisted event log instead — a `result`
+          // row proves the turn is over the moment it lands, at any age —
+          // so a message is only genuinely queueable when the executor is
+          // live AND the last event is NOT a turn-result.
+          const turnCompleted = isLatestRunTurnCompleted(ctx.db, input.runId);
+          if (!hasLiveTurn || turnCompleted) {
             return { noOp: true, reason: 'parked' };
           }
         }

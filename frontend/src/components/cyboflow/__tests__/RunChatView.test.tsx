@@ -647,4 +647,64 @@ describe('RunChatView — stranded queued pending-send on run failure/cancellati
 
     expect(usePendingSendStore.getState().byHost['run-live']?.[0].status).toBe('queued');
   });
+
+  // TASK-300 attempt 4: a queued entry accepted BEFORE the StuckDetector caught
+  // up can still be stranded once it does — status flips to 'stuck' (never a
+  // terminal status), so the terminal-only check above would leave it lying
+  // 'queued' forever. Key off stuck_reason === 'parked_no_gate' as well.
+  it('flips a queued entry to failed once the run is classified parked_no_gate', async () => {
+    seedRun('run-stuck', 'sdk');
+    act(() => {
+      usePendingSendStore.getState().addPending('run-stuck', 'still there?', 'queued');
+    });
+
+    render(<RunChatView runId="run-stuck" />);
+    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalled());
+
+    expect(usePendingSendStore.getState().byHost['run-stuck']?.[0].status).toBe('queued');
+
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: {
+          7: [makeRunRow('run-stuck', 'sdk')].map((r) => ({
+            ...r,
+            status: 'stuck',
+            stuck_reason: 'parked_no_gate',
+          })),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      const entry = usePendingSendStore.getState().byHost['run-stuck']?.[0];
+      expect(entry?.status).toBe('failed');
+      expect(entry?.error).toBe(
+        'This run is parked awaiting you — reopen or cancel it from the review queue, then try again.',
+      );
+    });
+  });
+
+  it('leaves a queued entry alone when the run is stuck for a different reason', async () => {
+    seedRun('run-stuck-other', 'sdk');
+    act(() => {
+      usePendingSendStore.getState().addPending('run-stuck-other', 'still there?', 'queued');
+    });
+
+    render(<RunChatView runId="run-stuck-other" />);
+    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalled());
+
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: {
+          7: [makeRunRow('run-stuck-other', 'sdk')].map((r) => ({
+            ...r,
+            status: 'stuck',
+            stuck_reason: 'orphan_pty',
+          })),
+        },
+      });
+    });
+
+    expect(usePendingSendStore.getState().byHost['run-stuck-other']?.[0].status).toBe('queued');
+  });
 });

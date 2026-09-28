@@ -174,16 +174,31 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // still-'queued' entries for it can no longer be delivered — flip them to
   // 'failed' so PendingSendRow surfaces the loss and offers click-to-reopen
   // (the text itself survives in the entry, so nothing is actually lost).
+  //
+  // TASK-300 attempt 4: a terminal status is not the only way a queued entry
+  // becomes undeliverable. A message accepted as `{ queued: true }` before
+  // the run's turn ended (a legitimate accept at the time) can still be
+  // stranded if the StuckDetector's `parked_no_gate` rung later classifies
+  // the SAME run as parked — status flips to 'stuck', never a terminal
+  // status, and the server buffer it was queued into will never drain either.
+  // Key off `stuck_reason` (not just terminal status) so that shape also
+  // flips its queued rows to 'failed' instead of lying about them forever.
   const runStatus = run?.status;
+  const runStuckReason = run?.stuck_reason ?? null;
   useEffect(() => {
     if (runId == null || pendingSends == null) return;
-    if (runStatus !== 'completed' && runStatus !== 'failed' && runStatus !== 'canceled') return;
+    const isTerminal = runStatus === 'completed' || runStatus === 'failed' || runStatus === 'canceled';
+    const isParked = runStatus === 'stuck' && runStuckReason === 'parked_no_gate';
+    if (!isTerminal && !isParked) return;
+    const message = isParked
+      ? 'This run is parked awaiting you — reopen or cancel it from the review queue, then try again.'
+      : 'Run ended before this message could be delivered.';
     for (const entry of pendingSends) {
       if (entry.status === 'queued') {
-        setPendingStatus(runId, entry.id, 'failed', 'Run ended before this message could be delivered.');
+        setPendingStatus(runId, entry.id, 'failed', message);
       }
     }
-  }, [runId, runStatus, pendingSends, setPendingStatus]);
+  }, [runId, runStatus, runStuckReason, pendingSends, setPendingStatus]);
 
   // -------------------------------------------------------------------------
   // Run artifacts → question-card "open in pane" affordances (#8 / #9).

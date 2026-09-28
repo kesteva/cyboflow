@@ -15,6 +15,7 @@ import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { StuckReason, StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import { emitSeamError } from './telemetrySink';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
+import { isLatestRunTurnCompleted } from './runQueries';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -306,12 +307,24 @@ export class StuckDetector {
         // genuinely parked run by that measure alone. `hasActiveRunForId` is
         // the same real-time "is execute()/executeProgrammatic still holding
         // this run" signal rung 1 (orphan_pty) below uses in the inverse
-        // direction; skip the transition entirely when it reports the run
-        // still alive; TASK-311 covers the one case this deliberately leaves
-        // uncaught — a hung spawn (a detached child keeping a run's SDK
-        // process from ever resolving) that keeps this signal wedged true
-        // forever even though nothing is actually progressing.
-        if (this.claudeManager.hasActiveRunForId(row.id)) {
+        // direction.
+        //
+        // FIX (TASK-300 attempt 4): skipping on `hasActiveRunForId` alone used
+        // to leave the hung-spawn shape uncaught FOREVER — a detached child
+        // the agent spawned (e.g. a left-running dev server) keeps that flag
+        // wedged true even after the turn itself has actually ended, so a run
+        // in exactly that shape never got a `stuck_reason` no matter how
+        // stale it went. `isLatestRunTurnCompleted` answers the ambiguity
+        // `hasActiveRunForId` cannot: a `result` row as the run's LAST event
+        // proves the turn is over regardless of what the process-liveness
+        // flag still claims. Skip (leave unclassified) only when the run is
+        // reported active AND its last event is NOT a turn-result — that is
+        // the genuinely-quiet-long-turn case this guard exists to protect.
+        // A hung spawn (active, but last event IS a result) now falls through
+        // and gets stamped `parked_no_gate` like any other parked run;
+        // actually settling or killing the surviving child process itself
+        // stays out of scope for TASK-311.
+        if (this.claudeManager.hasActiveRunForId(row.id) && !isLatestRunTurnCompleted(this.db, row.id)) {
           continue;
         }
         this.transitionRunningToStuck(row.id, { kind: 'parked_no_gate' });

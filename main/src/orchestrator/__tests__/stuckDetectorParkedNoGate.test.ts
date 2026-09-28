@@ -31,10 +31,10 @@ function makeClaudeManager(active: Set<string> = new Set()): ClaudeManagerLike {
   return { hasActiveRunForId: (runId) => active.has(runId) };
 }
 
-function seedRawEvent(db: Database.Database, runId: string, createdAt: string): void {
+function seedRawEvent(db: Database.Database, runId: string, createdAt: string, eventType = 'sdk_message'): void {
   db.prepare(
-    `INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES (?, 'sdk_message', '{}', ?)`,
-  ).run(runId, createdAt);
+    `INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES (?, ?, '{}', ?)`,
+  ).run(runId, eventType, createdAt);
 }
 
 describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
@@ -203,6 +203,67 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
     await detector.scan();
 
     expect(runStatus(db, 'run-brand-new')).toBe('running');
+    expect(events).toHaveLength(0);
+  });
+
+  // TASK-300 attempt 4: `hasActiveRunForId` alone left the hung-detached-child
+  // shape uncaught FOREVER — a background process the agent spawned (e.g. a
+  // left-running dev server) keeps that flag wedged true even after the
+  // turn itself has actually ended. isLatestRunTurnCompleted resolves the
+  // ambiguity from the persisted event log: a `result` row as the LAST event
+  // proves the turn is over regardless of what the liveness flag still
+  // claims, so this shape now gets classified instead of silently parked
+  // forever with no stuck_reason.
+  it('transitions a hung-spawn run: hasActiveRunForId reports true but the last event is a result (TASK-300 attempt 4)', async () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-hung-child', 'running');
+    seedRawEvent(db, 'run-hung-child', STALE_AGO, 'result');
+
+    const emitter = new EventEmitter();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e) => events.push(e as StuckDetectedEvent));
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      // Exactly the observed bug: a detached background child keeps the
+      // process-liveness signal wedged true even though the turn is done.
+      claudeManager: makeClaudeManager(new Set(['run-hung-child'])),
+      emitter,
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(runStatus(db, 'run-hung-child')).toBe('stuck');
+    const row = db
+      .prepare('SELECT stuck_reason FROM workflow_runs WHERE id = ?')
+      .get('run-hung-child') as { stuck_reason: string | null };
+    expect(row.stuck_reason).toBe('parked_no_gate');
+    expect(events).toHaveLength(1);
+  });
+
+  // Negative control for the same fix: a genuinely live long turn (active,
+  // last row is a real mid-turn event, not a result) must stay skipped even
+  // though it is just as stale by raw_events recency alone.
+  it('does NOT fire on a genuinely live long turn: active, last row is an assistant event, stale', async () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-live-long-turn', 'running');
+    seedRawEvent(db, 'run-live-long-turn', STALE_AGO, 'assistant');
+
+    const emitter = new EventEmitter();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e) => events.push(e as StuckDetectedEvent));
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(new Set(['run-live-long-turn'])),
+      emitter,
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(runStatus(db, 'run-live-long-turn')).toBe('running');
     expect(events).toHaveLength(0);
   });
 
