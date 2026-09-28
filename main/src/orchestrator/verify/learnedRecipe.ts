@@ -288,11 +288,16 @@ function leakedLeaseViolation(command: string, leased: LearnedRecipeLeases): str
  * filled in with `{ kind: 'serve-binding' }`: the harness knows what it
  * verified, and a recipe written under the older "omit it without a channel"
  * instruction should not be lost for the want of a field the harness can supply.
+ *
+ * `harnessAttestation` is set when the verified channel was the HARNESS's own
+ * nonce marker (`webNonceMarker.ts`): the recipe records exactly that spec,
+ * replacing whatever the agent wrote, because it is the one the harness asked.
  */
 export function validateLearnedRecipe(args: {
   recipeJson: string;
   modality: VerificationModality;
   verifiedChannel: AttestationSpec['kind'] | null;
+  harnessAttestation?: AttestationSpec;
   composed: Pick<VerificationTaskV1, 'serve' | 'app'>;
   /** The snapshot root's `package.json` text (web/cdp-app), `null` when absent or unreadable. */
   packageJsonRaw: string | null;
@@ -316,9 +321,11 @@ export function validateLearnedRecipe(args: {
   const { levers: rawLevers, ...rawEntry } = decoded;
   const levers = rawLevers !== undefined ? rawLevers : args.fallbackLevers;
   const filledEntry =
-    args.verifiedChannel === 'serve-binding' && rawEntry.attestation === undefined
-      ? { ...rawEntry, attestation: { kind: 'serve-binding' } }
-      : rawEntry;
+    args.harnessAttestation !== undefined
+      ? { ...rawEntry, attestation: args.harnessAttestation }
+      : args.verifiedChannel === 'serve-binding' && rawEntry.attestation === undefined
+        ? { ...rawEntry, attestation: { kind: 'serve-binding' } }
+        : rawEntry;
   const parsed = parseVerifyRunbookV1({
     version: 1,
     modalities: { [runbookModality]: filledEntry },

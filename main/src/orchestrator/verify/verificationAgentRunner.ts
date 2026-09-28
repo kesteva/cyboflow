@@ -35,7 +35,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access, readFile, realpath, rm, lstat } from 'node:fs/promises';
 import { createReadStream, readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, delimiter, join } from 'node:path';
@@ -73,6 +73,13 @@ import {
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
 import { isLearnedPinRecord, type PinnedRunbookRecord } from './runbookStore';
 import { validateLearnedRecipe, type LearnedRecipeValidation } from './learnedRecipe';
+import {
+  HARNESS_NONCE_MARKER_SPEC,
+  injectNonceMarker,
+  isHarnessNonceMarkerSpec,
+  type NonceMarkerFs,
+  type NonceMarkerInjection,
+} from './webNonceMarker';
 import { probeLearnedPinSurface } from './learnedRunbook';
 import type {
   VerifyRunbookModality,
@@ -782,8 +789,15 @@ export interface VerificationAgentRunnerDeps {
     hash: string,
   ) => PinnedRunbookRecord | null;
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
-  /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
-  checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
+  /**
+   * `git diff --quiet HEAD` on the snapshot — true when the verifier mutated
+   * tracked sources. `exempt` is the harness's own nonce-marker edit
+   * (`webNonceMarker.ts`): that one file is unmutated while it still holds the
+   * injected content (or was put back to HEAD).
+   */
+  checkSnapshotMutated?: (worktreePath: string, exempt?: SnapshotMutationExemption) => Promise<boolean>;
+  /** The fs seam the web nonce-marker injection reads and writes through; defaults to node:fs. */
+  nonceMarkerFs?: NonceMarkerFs;
   /**
    * §A5 — read one file's text, `null` when it is absent or unreadable. Used
    * for the snapshot root's `package.json` a learned web/cdp-app recipe is
@@ -1263,11 +1277,19 @@ export type AttestationFloorOutcome =
  * channel needs no composer's declaration (an inferred or undeclared app never
  * carries one — without this, explore mobile could never reach `passed`).
  * Pinned rows keep reading the declaration only; their runbook supplies it.
+ *
+ * An EXPLORE web run whose snapshot the harness stamped with its nonce marker
+ * (`webNonceMarker.ts`, `implicit.harnessMarker` — set only when the task
+ * declared nothing or `serve-binding`, see {@link markerUpgradesDeclaration})
+ * gets that marker's `dom-marker` spec — the floor then falls back to the
+ * binding-only verdict when it does not verify (see
+ * {@link evaluateAttestationFloorForMode}).
  */
 export function effectiveAttestationSpec(
   task: VerificationTaskV1,
-  implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean },
+  implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean; harnessMarker?: boolean },
 ): AttestationSpec | null {
+  if (implicit?.harnessMarker === true) return HARNESS_NONCE_MARKER_SPEC;
   if (task.attestation !== undefined) return task.attestation;
   if (isDegenerateFileTarget(task)) return { kind: 'file-identity' };
   if (implicit?.executionMode === 'explore' && implicit.mobileLeased && task.app !== undefined) {
@@ -1427,6 +1449,34 @@ export function serveBindingOnlyTarget(
 export function hasComposedServeCmd(task: VerificationTaskV1): boolean {
   const serveCmd = task.serve?.cmd;
   return typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+}
+
+/**
+ * Should the harness stamp its nonce marker into this request's snapshot
+ * (`webNonceMarker.ts`)? Web only, on a composed classic serve (an attach-mode
+ * or serve-less task has no page served from the snapshot's entry HTML), and
+ * either an EXPLORE task that declared nothing or `serve-binding` — where it is an upgrade — or any
+ * task whose declaration IS the harness marker, which cannot verify without it.
+ * A legacy/pinned task declaring anything else is left exactly as it was.
+ */
+export function wantsNonceMarker(
+  task: VerificationTaskV1,
+  modality: VerificationModality,
+  executionMode: VerificationExecutionMode,
+): boolean {
+  if (modality !== 'web' || !hasComposedServeCmd(task) || task.serve?.attach === 'cdp') return false;
+  if (isHarnessNonceMarkerSpec(task.attestation)) return true;
+  return executionMode === 'explore' && markerUpgradesDeclaration(task.attestation);
+}
+
+/**
+ * The declarations the harness marker UPGRADES rather than overrides: none, or
+ * `serve-binding` — the channel task-verify composes for a web serve whose repo
+ * renders no nonce, i.e. exactly the tasks the marker exists for. Any other
+ * declared channel is the composer's own proof and is left alone.
+ */
+export function markerUpgradesDeclaration(attestation: AttestationSpec | undefined): boolean {
+  return attestation === undefined || attestation.kind === 'serve-binding';
 }
 
 /** The verified detail of a held serve binding — one spelling for the declared and the undeclared case. */
@@ -1692,6 +1742,10 @@ export function evaluateAttestationFloor(
  * request (`null` when it did not apply or never ran). The binding still RUNS in
  * explore whenever it applies: its result is recorded as evidence even when it
  * cannot change a capped verdict.
+ *
+ * `opts.harnessSuppliedMarker` — `spec` is the harness-injected nonce marker
+ * (`webNonceMarker.ts`), not a declaration: a verified marker wins, anything else
+ * falls back to the no-spec verdict.
  */
 export function evaluateAttestationFloorForMode(
   mode: VerificationExecutionMode,
@@ -1699,7 +1753,20 @@ export function evaluateAttestationFloorForMode(
   spec: AttestationSpec | null,
   probe: HarnessAttestationResult | null,
   binding: ServeBindingResult | null,
+  opts: { harnessSuppliedMarker?: boolean } = {},
 ): AttestationFloorOutcome {
+  // The harness's OWN nonce marker (explore, nothing or serve-binding declared) is an upgrade,
+  // never a new way to fail: unless it verified (or the binding found a foreign
+  // listener), the request gets exactly the verdict it would have had without
+  // the marker — the binding-only one below.
+  if (opts.harnessSuppliedMarker === true && markerUpgradesDeclaration(task.attestation)) {
+    const undeclared = { ...task, attestation: undefined };
+    const marker = evaluateAttestationFloorForMode(mode, undeclared, spec, probe, binding);
+    if (marker.kind === 'verified' || marker.kind === 'foreign') return marker;
+    // Explore gives a declared `serve-binding` the undeclared binding-only
+    // verdict (§A1.2), so one fallback serves both.
+    return evaluateAttestationFloorForMode(mode, undeclared, null, null, binding);
+  }
   // A declared `serve-binding` (§A1.2) with no composed serve.cmd can never
   // verify — there is no serve to bind — in ANY mode. It caps rather than
   // fails: like an undeclared channel, it never had an identity to prove.
@@ -2316,12 +2383,16 @@ export function mapReportToResult(report: VerificationReportV1, ctx: ReportMappi
 // Default seam implementations (node builtins only; never used by tests)
 // ---------------------------------------------------------------------------
 
-const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolean> => {
-  // `git diff --quiet HEAD` exits 1 when tracked files differ from HEAD (the
-  // snapshot commit) — untracked build output is ignored, so only a mutation of a
-  // TRACKED source trips this.
+/** The one harness-made edit the mutation check must not count (see {@link VerificationAgentRunnerDeps.checkSnapshotMutated}). */
+export interface SnapshotMutationExemption {
+  relPath: string;
+  content: string;
+}
+
+/** `git diff --quiet HEAD [-- pathspec…]` in the snapshot: true on a diff, false on none OR a git failure. */
+const gitDiffFound = async (worktreePath: string, pathspec: string[]): Promise<boolean> => {
   try {
-    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD'], {
+    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD', ...(pathspec.length > 0 ? ['--', ...pathspec] : [])], {
       cwd: worktreePath,
       timeout: 30_000,
       windowsHide: true,
@@ -2333,6 +2404,34 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
     // NOT mutated — never turn an infra hiccup into a false low_confidence.
     return false;
   }
+};
+
+const defaultCheckSnapshotMutated = async (
+  worktreePath: string,
+  exempt?: SnapshotMutationExemption,
+): Promise<boolean> => {
+  // `git diff --quiet HEAD` exits 1 when tracked files differ from HEAD (the
+  // snapshot commit) — untracked build output is ignored, so only a mutation of a
+  // TRACKED source trips this.
+  if (exempt === undefined) return gitDiffFound(worktreePath, []);
+  if (await gitDiffFound(worktreePath, ['.', `:(exclude)${exempt.relPath}`])) return true;
+  // The marked file itself: unmutated while it holds exactly what the harness
+  // wrote, or was put back to HEAD; any other content is the agent's edit.
+  if ((await defaultReadTextFile(join(worktreePath, exempt.relPath))) === exempt.content) return false;
+  return gitDiffFound(worktreePath, [exempt.relPath]);
+};
+
+/** node:fs for {@link injectNonceMarker}: a symlinked entry file reads as absent, so the write never leaves the snapshot. */
+const defaultNonceMarkerFs: NonceMarkerFs = {
+  readRegularFile: async (absPath) => {
+    try {
+      if (!(await lstat(absPath)).isFile()) return null;
+      return await readFile(absPath, 'utf8');
+    } catch {
+      return null;
+    }
+  },
+  writeFile: (absPath, content) => writeFile(absPath, content, 'utf8'),
 };
 
 /**
@@ -3448,6 +3547,31 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         mode = 'fallback';
       }
 
+      // (b0) WEB NONCE MARKER (webNonceMarker.ts) — stamped into the SNAPSHOT's
+      // entry HTML before the agent starts, never into the live worktree: an
+      // explore web task with nothing declared gets it as an upgrade over the
+      // binding-only verdict, and a task whose (learned) runbook declared the
+      // harness marker needs it to verify at all. A skip is logged and costs only
+      // the stronger channel.
+      let nonceMarker: NonceMarkerInjection | null = null;
+      if (snapshot !== null && wantsNonceMarker(req.task, modality, executionMode)) {
+        nonceMarker = await injectNonceMarker({
+          snapshotRoot: snapshot.worktreePath,
+          nonce: attestNonce,
+          fs: this.deps.nonceMarkerFs ?? defaultNonceMarkerFs,
+        });
+        logger?.info('[VerificationAgentRunner] web nonce marker', {
+          runId: req.runId,
+          requestId: req.requestId,
+          executionMode,
+          ...(nonceMarker.injected ? { injected: nonceMarker.relPath } : { skipped: nonceMarker.reason }),
+        });
+      }
+      const markerExemption = nonceMarker?.injected === true ? nonceMarker : undefined;
+      // Harness-SUPPLIED (vs declared by a runbook): only then does the floor
+      // fall back to the binding-only verdict when the marker does not verify.
+      const harnessSuppliedMarker = markerExemption !== undefined && markerUpgradesDeclaration(req.task.attestation);
+
       // (b cont.) Env + the driver wrapper script. VERIFY_PORT rides whenever the
       // engine passed a port: a task that implies a server, and every web /
       // cdp-app explore request (§A1.1 — the engine decided when it leased it).
@@ -3760,7 +3884,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       let raw: unknown;
       try {
         const outcome = await queryFn({
-          prompt: composeVerifyUserPrompt(req.task, exploreHints),
+          prompt: composeVerifyUserPrompt(
+            req.task,
+            exploreHints,
+            markerExemption !== undefined ? { relPath: markerExemption.relPath } : undefined,
+          ),
           systemPrompt,
           cwd,
           model,
@@ -4012,7 +4140,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // ended but before the `finally` tears the surface down: an attestation is
       // a question you can only ask something that is still alive, which is also
       // why the harness contract forbids the agent from stopping its own serve.
-      const spec = effectiveAttestationSpec(req.task, { executionMode, mobileLeased: mobileHandle !== null });
+      const spec = effectiveAttestationSpec(req.task, {
+        executionMode,
+        mobileLeased: mobileHandle !== null,
+        harnessMarker: harnessSuppliedMarker,
+      });
       const declaredChannel = req.task.attestation !== undefined || spec?.kind === 'bundle-identity';
       const runsFloor =
         report.outcome === 'pass' ||
@@ -4025,7 +4157,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       if (runsFloor) {
         const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
         probe = identity.probe;
-        floor = evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding);
+        floor = evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding, {
+          harnessSuppliedMarker,
+        });
         if (floor.kind === 'foreign' || floor.kind === 'missing' || floor.kind === 'capped') {
           logger?.warn('[VerificationAgentRunner] attestation floor did not vouch for the surface', {
             runId: req.runId,
@@ -4048,7 +4182,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           ? await probeLearnedPinSurface({
               probe: async () => {
                 const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
-                return evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding);
+                return evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding, {
+                  harnessSuppliedMarker,
+                });
               },
               degenerateFileTarget: isDegenerateFileTarget(req.task),
               requestId: req.requestId,
@@ -4061,7 +4197,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       let mutated = false;
       if (mode === 'snapshot' && snapshot) {
         const checkMutated = this.deps.checkSnapshotMutated ?? defaultCheckSnapshotMutated;
-        mutated = await checkMutated(snapshot.worktreePath);
+        mutated = await checkMutated(
+          snapshot.worktreePath,
+          markerExemption !== undefined
+            ? { relPath: markerExemption.relPath, content: markerExemption.content }
+            : undefined,
+        );
       }
 
       // mapReportToResult already stamps deployed:true + provisionMode; the
@@ -4115,6 +4256,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
               recipeJson: report.recipeJson,
               modality,
               verifiedChannel: floor?.kind === 'verified' ? floor.channel : null,
+              // The harness verified ITS marker, so that — not whatever selector
+              // the agent wrote — is what the learned runbook records.
+              ...(harnessSuppliedMarker && floor?.kind === 'verified' && floor.channel === 'dom-marker'
+                ? { harnessAttestation: HARNESS_NONCE_MARKER_SPEC }
+                : {}),
               composed: req.task,
               packageJsonRaw:
                 modality === 'web' || modality === 'cdp-app'

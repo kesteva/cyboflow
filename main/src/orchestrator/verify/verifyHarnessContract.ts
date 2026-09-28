@@ -25,6 +25,7 @@ import type {
   VerificationTaskV1,
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../shared/types/verifyRunbook';
+import { HARNESS_NONCE_MARKER_SELECTOR } from './webNonceMarker';
 
 // ---------------------------------------------------------------------------
 // The contract head, in pieces. Concatenated in order, the PINNED pieces are
@@ -292,6 +293,8 @@ EXPLORE MODE — this project has no proven verification runbook for this modali
       app.bundleId). A web / cdp-app pass with no channel declared rested on the serve
       binding alone, so record { "kind": "serve-binding" } — never a channel the task
       did not declare (the harness refuses a recipe naming one it did not verify).
+      When the task prompt carries a HARNESS NONCE MARKER note, the harness records
+      its own marker channel instead, whatever you write here.
     - "levers" (optional) names the env vars the app reads, e.g.
       { "dataDirEnv": "CYBOFLOW_DIR" }; without it, the levers bound for this run apply.
 `;
@@ -538,10 +541,31 @@ function composeExploreHints(hints: VerifyExploreHints): string {
 }
 
 /**
- * Compose the agent's user prompt from the task: the JSON payload plus a short
- * framing, and — explore only (§A1.3) — the EXPLORE HINTS block after it.
+ * The note for a snapshot the harness stamped with its nonce marker
+ * (`webNonceMarker.ts`). The agent sees a modified tracked file in `git status`;
+ * without this it might "clean up" the one edit the attestation reads.
  */
-export function composeVerifyUserPrompt(task: VerificationTaskV1, explore?: VerifyExploreHints): string {
+function composeNonceMarkerNote(marker: { relPath: string }): string {
+  return [
+    `HARNESS NONCE MARKER — the harness added one line to ${marker.relPath} in this snapshot:`,
+    `<meta name="cyboflow-verify-nonce" …> carrying this request's nonce. After you finish, it reads that marker`,
+    `from the page in your driver browser (dom-marker ${HARNESS_NONCE_MARKER_SELECTOR}) to confirm the page was`,
+    'built from this snapshot. Leave the edit in place (do not revert, reformat or commit it; it is exempt from',
+    'the mutation check), serve the composed command so the page comes from this entry file, and leave the',
+    'browser on a page of the app. In a recipe, the harness records this channel itself.',
+  ].join('\n');
+}
+
+/**
+ * Compose the agent's user prompt from the task: the JSON payload plus a short
+ * framing, and — explore only (§A1.3) — the EXPLORE HINTS block after it, and
+ * the HARNESS NONCE MARKER note when the harness stamped the snapshot.
+ */
+export function composeVerifyUserPrompt(
+  task: VerificationTaskV1,
+  explore?: VerifyExploreHints,
+  nonceMarker?: { relPath: string },
+): string {
   const lines = [
     'Verify the following composed task. Build/serve/drive/screenshot/judge it, then',
     'return the structured VerificationReportV1 (see the harness contract).',
@@ -552,6 +576,7 @@ export function composeVerifyUserPrompt(task: VerificationTaskV1, explore?: Veri
     '```',
   ];
   if (explore !== undefined) lines.push('', composeExploreHints(explore));
+  if (nonceMarker !== undefined) lines.push('', composeNonceMarkerNote(nonceMarker));
   return lines.join('\n');
 }
 
