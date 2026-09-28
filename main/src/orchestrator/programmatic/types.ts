@@ -522,9 +522,19 @@ export interface LaneTriageFailure {
    * the supervisor attests the lane is converging (see MONITOR_LANE_RESCUE_CAP).
    */
   priorRescues?: LanePriorRescue[];
+  /**
+   * 'exhausted' (the default) — the lane spent its automatic budget and settles
+   * 'failed' unless the supervisor intervenes. 'early' — the lane is about to
+   * start its FINAL automatic attempt; the supervisor may steer or accept it, and
+   * a give_up there means "loop back as usual", never "fail the lane".
+   */
+  stage?: LaneTriageStage;
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
 }
+
+/** When a lane-triage consult happens — see `LaneTriageFailure.stage`. */
+export type LaneTriageStage = 'early' | 'exhausted';
 
 /** One failure an earlier monitor rescue of the same lane answered. */
 export interface LanePriorRescue {

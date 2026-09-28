@@ -1531,6 +1531,7 @@ export class ProgrammaticRunHost implements ControllerHost {
           ...(req.priorRescues !== undefined && req.priorRescues.length > 0
             ? { priorRescues: [...req.priorRescues] }
             : {}),
+          ...(req.stage !== undefined ? { stage: req.stage } : {}),
         },
         req.signal,
       );
@@ -1874,7 +1875,9 @@ export class ProgrammaticRunHost implements ControllerHost {
     if (!this.args.fileLaneTriageFinding) return;
     try {
       const lines = [
-        `The run supervisor rescued task **${args.taskRef}** after its lane exhausted an automatic budget.`,
+        args.req.stage === 'early'
+          ? `The run supervisor steered task **${args.taskRef}**'s FINAL automatic attempt before it ran, changing its approach.`
+          : `The run supervisor rescued task **${args.taskRef}** after its lane exhausted an automatic budget.`,
         '',
         `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
         `- Verdict: ${args.adjusted ? 'adjust_and_retry (task body REPLACED)' : 'retry'} — re-driving from \`${args.targetStepId}\``,
@@ -1912,7 +1915,7 @@ export class ProgrammaticRunHost implements ControllerHost {
         }
       }
       await this.args.fileLaneTriageFinding({
-        title: `Monitor rescued ${args.taskRef} (${args.req.failureKind})`,
+        title: `Monitor ${args.req.stage === 'early' ? 'steered' : 'rescued'} ${args.taskRef} (${args.req.failureKind})`,
         body: lines.join('\n'),
       });
     } catch (err) {

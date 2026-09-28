@@ -169,7 +169,10 @@ function rescue(targetStepId: string, guidance = 'do it the other way'): LaneRes
 interface TriageHost {
   host: ControllerHost;
   driver: ReturnType<typeof makeDriver>;
+  /** EXHAUSTED-stage consults only (the pre-existing seam). */
   consults: LaneTriageFailure[];
+  /** EARLY-stage consults (before a lane's final automatic attempt). */
+  earlyConsults: LaneTriageFailure[];
   /** The `attempt` of every visual-verification enqueue, in call order. */
   enqueueAttempts: number[];
   /** Every systemic-park consult, in call order (empty unless `pauses` is set). */
@@ -184,6 +187,8 @@ interface TriageHost {
 function makeTriageHost(opts: {
   items: string[];
   outcomes?: LaneRescueOutcome[];
+  /** Replayed for EARLY consults, defaulting to give_up ("no steering"). */
+  earlyOutcomes?: LaneRescueOutcome[];
   triage?: boolean;
   visualGate?: VisualVerifyGate;
   deps?: Map<string, string[]>;
@@ -194,6 +199,8 @@ function makeTriageHost(opts: {
   const driver = makeDriver(opts.items, opts.deps);
   const queue = [...(opts.outcomes ?? [])];
   const consults: LaneTriageFailure[] = [];
+  const earlyConsults: LaneTriageFailure[] = [];
+  const earlyQueue = [...(opts.earlyOutcomes ?? [])];
   const enqueueAttempts: number[] = [];
   const pauseQueue = [...(opts.pauses ?? [])];
   const pauseCalls: Array<{ stepId: string; error: string | undefined }> = [];
@@ -230,12 +237,16 @@ function makeTriageHost(opts: {
       ? {}
       : {
           async triageLaneFailure(req: LaneTriageFailure): Promise<LaneRescueOutcome> {
+            if (req.stage === 'early') {
+              earlyConsults.push(req);
+              return earlyQueue.shift() ?? { kind: 'give_up' };
+            }
             consults.push(req);
             return queue.shift() ?? { kind: 'give_up' };
           },
         }),
   };
-  return { host, driver, consults, enqueueAttempts, pauseCalls };
+  return { host, driver, consults, earlyConsults, enqueueAttempts, pauseCalls };
 }
 
 /** A visual gate that replays scripted verdicts (default 'advance'). */
@@ -1073,5 +1084,72 @@ describe('WorkflowController — accept verdict at every exhaustion site', () =>
 
     expect(consults.map((c) => c.stepId)).toEqual(['s1', 's2', 's3', 's4']);
     expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+});
+
+// ── EARLY consult: steer a lane BEFORE its final automatic attempt ───────────
+//    Observed 2026-09-28: concurrency lanes fixed one real race per round and
+//    spent the whole budget before the monitor ever saw them.
+describe('WorkflowController — early consult before the final attempt', () => {
+  const reviewChain = (): WorkflowStep =>
+    fanStep('execute', [{ id: 'implement' }, { id: 'code-review', loopback: 'implement' }]);
+  const blocking: StepRunResult = { status: 'ok', resultText: '## Blocking\n\n- race N\n\nREVIEW: BLOCKING' };
+
+  it('consults once, at the loopback into the FINAL attempt, and loops back as usual on give_up', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking] });
+    const { host, driver, consults, earlyConsults } = makeTriageHost({ items: ['t1'] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(earlyConsults).toHaveLength(1);
+    // Lane attempt 2 failed; the loopback about to run is attempt 3.
+    expect(earlyConsults[0]).toMatchObject({ stage: 'early', failureKind: 'code-review', attempt: 2 });
+    expect(consults).toHaveLength(0);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(3);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('threads the steering guidance into the final attempt and spends no rescue budget', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking, blocking] });
+    const { host, consults } = makeTriageHost({
+      items: ['t1'],
+      earlyOutcomes: [rescue('implement', 'use a turn-completed signal, not staleness')],
+      outcomes: [rescue('implement')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    const implementCalls = runner.calls.filter((c) => c.id === 'implement');
+    expect(implementCalls[2].laneGuidance).toContain('turn-completed signal');
+    // The later exhaustion is still consulted as a FIRST rescue: no history,
+    // because the early steer spent nothing.
+    expect(consults).toHaveLength(1);
+    expect(consults[0].priorRescues).toBeUndefined();
+  });
+
+  it('skips the final attempt entirely on an early accept', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking] });
+    const { host, driver } = makeTriageHost({
+      items: ['t1'],
+      earlyOutcomes: [{ kind: 'accept', reason: 'remaining entry is cosmetic' }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('does not consult early on the FIRST loopback', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking] });
+    const { host, earlyConsults } = makeTriageHost({ items: ['t1'] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(earlyConsults).toHaveLength(0);
   });
 });

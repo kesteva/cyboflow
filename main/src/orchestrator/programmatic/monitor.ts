@@ -36,6 +36,7 @@ import type {
   EscalationReviewItemSummary,
   LaneFailureKind,
   LanePriorRescue,
+  LaneTriageStage,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
   ReviewLoopRequest,
@@ -383,7 +384,7 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
  * must stay free of this file's heavier import graph) and re-exported here so the
  * brain, the host seam, and the controller can never drift apart on the union.
  */
-export type { LaneFailureKind, LanePriorRescue };
+export type { LaneFailureKind, LanePriorRescue, LaneTriageStage };
 
 /**
  * Everything the monitor needs to triage ONE failing sprint fan-out lane. Assembled
@@ -412,6 +413,12 @@ export interface LaneTriageRequest {
   taskBody: string;
   /** Failures earlier rescues of this lane answered, oldest first (absent on the first consult). */
   priorRescues?: LanePriorRescue[];
+  /**
+   * 'early' — the lane is about to START its final automatic attempt (it has not
+   * failed for good); 'exhausted' / absent — the budget is spent. Changes the
+   * framing and what give_up means (see `buildLaneTriagePrompt`).
+   */
+  stage?: LaneTriageStage;
 }
 
 /**
@@ -1351,7 +1358,11 @@ export function buildLaneTriagePrompt(
   const defaultTarget = req.innerStepIds[0] ?? '(none)';
   return `${monitorCharter(ctx)}
 
-One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.
+${
+    req.stage === 'early'
+      ? `One TASK LANE of this run's fan-out has failed ${req.attempt} time(s) and is about to start its FINAL automatic attempt. You are consulted NOW, before that attempt, so you can change its course while it still has one: the default is that it loops back exactly as before, with the failure below as its feedback.`
+      : `One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.`
+  }
 
 Failing lane: **${req.taskRef}** — ${req.taskTitle}
 Failure kind: \`${req.failureKind}\` — ${LANE_FAILURE_KIND_LABELS[req.failureKind]}
@@ -1377,7 +1388,12 @@ Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE decid
 - "adjust_and_retry" — the task body CONFLICTS with repo reality and you have the file:line evidence (cite it in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
 - "accept"           — the task's SUBSTANCE is done and verified, and what is left is WAIVABLE: cosmetic or polish residue, or checks this environment could not run (a toolchain that is missing from the worktree, UI-only criteria such as fidelity/reachability applied to a backend task, a simulator that cannot grant a permission the behavior needs). The lane proceeds as if the failing step had passed. \`followUps\` is REQUIRED: one entry per waived item, each filed for the human (e.g. "verify on a real device: the shield subtitle appears"). NEVER waive a correctness, data-loss or security defect — those need "retry".
 - "append_correction" — you worked out something worth KEEPING (a real cause, a cross-lane interaction, a wrong assumption in the task) but re-driving this lane would not fix it. Put the diagnosis in \`reason\`; add the corrective note in \`guidance\` if you have one. This costs NO rescue budget and the lane still settles failed — it exists so a diagnosis you actually made does not die with this consult.
-- "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.
+${
+    req.stage === 'early'
+      ? `- "give_up"          — AT THIS STAGE it means "no steering": the lane loops back for its final attempt exactly as it would have without you. Use it when the plain loopback feedback is already enough.
+If the lane's rounds keep surfacing NEW defects in the same area (whack-a-mole), that is the signal to "retry" with a STRUCTURAL approach — name the design change that closes the whole class, not the next instance.`
+      : `- "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.`
+  }
 
 RESOLVE IT YOURSELF WHERE YOU CAN. Between these verdicts, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "accept" when the work is done and only waivable residue is failing it, "append_correction" when none of those will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
 
@@ -2623,6 +2639,9 @@ const LANE_TRIAGE_FAILED = 'lane triage failed; letting the lane fail';
  * rather than only once the monitor has made up its mind.
  */
 function laneFailureAnnouncement(req: LaneTriageRequest): string {
+  if (req.stage === 'early') {
+    return `⚠ **${req.taskRef}** (${req.taskTitle}) failed at \`${req.stepId}\` again (${req.failureKind}, attempt ${req.attempt}) and is about to start its final attempt. Checking whether to steer it…`;
+  }
   return `⚠ **${req.taskRef}** (${req.taskTitle}) failed at \`${req.stepId}\` — ${req.failureKind}, attempt ${req.attempt}. Triaging the lane…`;
 }
 
@@ -2634,7 +2653,9 @@ function laneFailureAnnouncement(req: LaneTriageRequest): string {
 function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecision): string {
   switch (decision.verdict) {
     case 'give_up':
-      return `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}`;
+      return req.stage === 'early'
+        ? `↻ **${req.taskRef}**: no steering — the lane loops back for its final attempt as usual.${decision.reason ? ` ${decision.reason}` : ''}`
+        : `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}`;
     case 'retry':
       return `▶ **${req.taskRef}**: rescue — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
     case 'adjust_and_retry':

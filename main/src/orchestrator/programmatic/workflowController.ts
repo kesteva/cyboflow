@@ -59,6 +59,7 @@ import type {
   HumanGateDecision,
   LaneFailureKind,
   LanePriorRescue,
+  LaneTriageStage,
   LaneRescueOutcome,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
@@ -1625,6 +1626,8 @@ export class WorkflowController {
      * serializing here costs no wall-clock.
      */
     let triageConsultChain: Promise<unknown> = Promise.resolve();
+    /** Lanes that already had their one EARLY consult (see `consultEarly`). */
+    const earlyConsulted = new Set<string>();
 
     /**
      * SHARED-WORKTREE OWNERSHIP for the commit-integrity probe. Every lane of this
@@ -1747,8 +1750,10 @@ export class WorkflowController {
       attempt: number,
       failureKind: LaneFailureKind,
       errorExcerpt: string,
+      stage: LaneTriageStage = 'exhausted',
     ): Promise<LaneTriageVerdict> => {
       if (!this.host.triageLaneFailure) return { kind: 'unconsulted' };
+      if (stage === 'early') return consultEarly(itemId, failingStepId, attempt, failureKind, errorExcerpt);
       const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
       const runCap = monitorRunRescueCap(laneRescues.knownItems.size);
       if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= runCap) {
@@ -1830,6 +1835,66 @@ export class WorkflowController {
       this.host.log?.(
         'warn',
         `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,
+      );
+      return { kind: 'rescue', targetIndex };
+    };
+
+    /**
+     * EARLY consult: a lane is about to start its FINAL automatic attempt (a
+     * code-review / task-verify / inner-step loopback into attempt
+     * FAN_OUT_LANE_ATTEMPT_CAP). Instead of waiting for that attempt to fail too,
+     * the supervisor may steer it now — switch approach (a 'rescue' whose target
+     * and guidance replace the plain loopback), accept the lane (the residue is
+     * waivable), or let the loopback run unchanged (give_up / no verdict). Observed
+     * 2026-09-28: three concurrency lanes each fixed one real race per round and
+     * burned the whole budget before the monitor saw them.
+     *
+     * Spends NO rescue budget and records no rescue history — the loopback
+     * happens either way; this only shapes it. ONE per lane (`earlyConsulted`).
+     */
+    const consultEarly = async (
+      itemId: string,
+      failingStepId: string,
+      attempt: number,
+      failureKind: LaneFailureKind,
+      errorExcerpt: string,
+    ): Promise<LaneTriageVerdict> => {
+      if (!this.host.triageLaneFailure || earlyConsulted.has(itemId)) return { kind: 'unconsulted' };
+      earlyConsulted.add(itemId);
+      let outcome: LaneRescueOutcome;
+      try {
+        outcome = await this.host.triageLaneFailure({
+          itemId,
+          stepId: failingStepId,
+          attempt,
+          failureKind,
+          errorExcerpt,
+          innerStepIds: allowedStepIds,
+          stage: 'early',
+          ...(signal ? { signal } : {}),
+        });
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': early lane triage threw (${err instanceof Error ? err.message : String(err)}); looping back as usual`,
+        );
+        return { kind: 'unconsulted' };
+      }
+      if (outcome.kind === 'systemic') return { kind: 'systemic', error: outcome.error };
+      if (outcome.kind === 'accept') {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': ${failureKind} at '${failingStepId}' — monitor ACCEPTED the lane before its final attempt (${outcome.reason})`,
+        );
+        return { kind: 'accept', reason: outcome.reason };
+      }
+      if (outcome.kind !== 'rescue') return { kind: 'give_up' };
+      const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
+      if (targetIndex < 0) return { kind: 'give_up' };
+      laneRescues.guidance.set(itemId, outcome.guidance);
+      this.host.log?.(
+        'info',
+        `fan-out item '${itemId}': monitor STEERED the final attempt → '${inner[targetIndex].id}'`,
       );
       return { kind: 'rescue', targetIndex };
     };
@@ -1975,6 +2040,7 @@ export class WorkflowController {
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
+        stage: LaneTriageStage = 'exhausted',
       ): Promise<LaneTriageVerdict> => {
         const consult = async (): Promise<LaneTriageVerdict> => {
           // The wave already learned the environment is down (see the latch's
@@ -1994,6 +2060,7 @@ export class WorkflowController {
             laneAttempt,
             failureKind,
             errorExcerpt,
+            stage,
           );
           if (verdict.kind === 'systemic') systemicTriageLatch = verdict.error;
           return verdict;
@@ -2031,6 +2098,27 @@ export class WorkflowController {
         if (verdict.kind === 'rescue') return verdict.targetIndex;
         if (verdict.kind === 'accept') return 'accept';
         if (verdict.kind === 'systemic') return { systemic: verdict.error };
+        return null;
+      };
+
+      /**
+       * The loopback sites' EARLY consult (see `consultEarly`), made only when the
+       * loopback about to run is the lane's FINAL automatic attempt. Returns the
+       * inner index the final attempt should re-drive from (the supervisor's, in
+       * place of the declared loopback target — its guidance is already stored),
+       * `'accept'`, or null to loop back exactly as before. A systemic consult is
+       * also null: the loopback still runs, and the latch it set parks the next
+       * exhaustion instead.
+       */
+      const steerFinalAttempt = async (
+        failingStepId: string,
+        failureKind: LaneFailureKind,
+        errorExcerpt: string,
+      ): Promise<number | 'accept' | null> => {
+        if (laneAttempt !== FAN_OUT_LANE_ATTEMPT_CAP - 1) return null;
+        const verdict = await triageLane(failingStepId, failureKind, errorExcerpt, false, 'early');
+        if (verdict.kind === 'rescue') return verdict.targetIndex;
+        if (verdict.kind === 'accept') return 'accept';
         return null;
       };
 
@@ -2468,13 +2556,16 @@ export class WorkflowController {
           }
           const targetIndex = loopbackIndex(innerStep);
           if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+            const steer = await steerFinalAttempt(innerStep.id, 'inner-step', result.error ?? '(no error text)');
+            if (steer === 'accept') continue;
+            const loopTarget = steer ?? targetIndex;
             laneAttempt += 1;
-            loopbackAttemptStepIndex = targetIndex;
+            loopbackAttemptStepIndex = loopTarget;
             this.host.log?.(
               'info',
-              `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+              `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
             );
-            k = targetIndex - 1; // The loop's k++ lands on the target next.
+            k = loopTarget - 1; // The loop's k++ lands on the target next.
             continue;
           }
           // The lane's loopback budget is spent (or it declares no target) — the
@@ -2551,14 +2642,21 @@ export class WorkflowController {
               const signal = verdict === 'blocking' ? 'REVIEW: BLOCKING' : '## Blocking (no trailer)';
               const targetIndex = loopbackIndex(innerStep);
               if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                const steer = await steerFinalAttempt(
+                  innerStep.id,
+                  'code-review',
+                  extractBlockingSection(resultText) ?? resultText,
+                );
+                if (steer === 'accept') continue; // Waived; task-verify still runs.
+                const loopTarget = steer ?? targetIndex;
                 laneAttempt += 1;
-                loopbackAttemptStepIndex = targetIndex;
+                loopbackAttemptStepIndex = loopTarget;
                 pendingLoopbackFeedback = extractBlockingSection(resultText) ?? resultText;
                 this.host.log?.(
                   'info',
-                  `fan-out item '${itemId}': code-review ${signal}; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                  `fan-out item '${itemId}': code-review ${signal}; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
                 );
-                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                k = loopTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }
               // Code-review keeps reporting blocking defects and the loopback
@@ -2639,13 +2737,19 @@ export class WorkflowController {
               // result takes (declared loopback → laneAttempt bump → 3× cap → fail).
               const targetIndex = loopbackIndex(innerStep);
               if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                const steer = await steerFinalAttempt(innerStep.id, 'task-verify', resultText);
+                if (steer === 'accept') {
+                  visualVerifyTask = undefined; // See the exhausted arm below.
+                  continue;
+                }
+                const loopTarget = steer ?? targetIndex;
                 laneAttempt += 1;
-                loopbackAttemptStepIndex = targetIndex;
+                loopbackAttemptStepIndex = loopTarget;
                 this.host.log?.(
                   'info',
-                  `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                  `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
                 );
-                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                k = loopTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }
               // task-verify keeps returning FAIL and the loopback budget is spent

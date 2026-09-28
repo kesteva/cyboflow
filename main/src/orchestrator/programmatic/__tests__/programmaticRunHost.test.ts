@@ -832,6 +832,24 @@ describe('ProgrammaticRunHost', () => {
       expect(audit.body).toContain('## Waived');
     });
 
+    it('passes the EARLY stage to the monitor and files a "steered" finding for its rescue', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const monitor = makeLaneMonitor({ verdict: 'retry', targetStepId: 'implement', guidance: 'restructure', reason: 'r' });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor,
+        readLaneTask: () => ({ taskRef: 'TASK-297', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      await host.triageLaneFailure({ ...failure, stage: 'early' });
+
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({ stage: 'early' });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor steered TASK-297 (inner-step)');
+      expect(finding.body).toContain('FINAL automatic attempt');
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {

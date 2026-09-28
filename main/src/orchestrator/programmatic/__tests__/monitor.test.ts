@@ -2075,6 +2075,17 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('`implement` → `write-tests` → `code-review` → `task-verify`');
   });
 
+  it('frames an EARLY consult as steering the final attempt, where give_up means "no steering"', () => {
+    const early = buildLaneTriagePrompt(sprintCtx, history, laneReq({ stage: 'early', attempt: 2 }));
+    expect(early).toContain('about to start its FINAL automatic attempt');
+    expect(early).toContain('AT THIS STAGE it means "no steering"');
+    expect(early).toContain('STRUCTURAL approach');
+    expect(early).not.toContain('has exhausted its automatic budget');
+    const late = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(late).toContain('has exhausted its automatic budget');
+    expect(late).not.toContain('no steering');
+  });
+
   it('asks the ownership question ONLY for a commit-integrity failure', () => {
     const ci = buildLaneTriagePrompt(sprintCtx, history, laneReq({ failureKind: 'commit-integrity' }));
     expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
