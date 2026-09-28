@@ -21,6 +21,7 @@ import type {
   ExperimentArmView,
   PairwiseSample,
 } from '../../../../../shared/types/experiments';
+import type { RunUsageRollup } from '../../../../../shared/types/insights';
 
 const getQuery = vi.fn();
 const getComparisonQuery = vi.fn();
@@ -132,6 +133,27 @@ function makeArm(over: Partial<ExperimentArmView> = {}): ExperimentArmView {
     evalSummary: null,
     findings: [],
     entitySummary: { ideas: 0, epics: 0, tasks: 0 },
+    ...over,
+  };
+}
+
+function makeUsage(over: Partial<RunUsageRollup> = {}): RunUsageRollup {
+  return {
+    runId: 'run-a',
+    model: 'claude-opus-4-5',
+    multiModel: false,
+    perModelUsage: [],
+    inputTokens: 1000,
+    outputTokens: 500,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 1500,
+    costUsd: 0.5,
+    numTurns: 10,
+    assistantMessageCount: 10,
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: null,
+    gateReachedAt: null,
     ...over,
   };
 }
@@ -1120,5 +1142,109 @@ describe('ExperimentComparisonView', () => {
     // The side-by-side verdict/arm/file-list/footer surfaces do not render for a rotation.
     expect(screen.queryByTestId('experiment-verdict-card')).not.toBeInTheDocument();
     expect(screen.queryByTestId('experiment-accept-a')).not.toBeInTheDocument();
+  });
+
+  it('prefers gateReachedAt over endedAt for the runtime display and labels it "to review"', async () => {
+    getQuery.mockResolvedValue(makeExp());
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        armA: makeArm({
+          runId: 'run-a',
+          arm: 'A',
+          usage: makeUsage({
+            startedAt: '2026-07-01T00:00:00.000Z',
+            gateReachedAt: '2026-07-01T00:10:00.000Z',
+            endedAt: '2026-07-01T02:00:00.000Z',
+          }),
+        }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    const meta = await screen.findByTestId('experiment-arm-a-meta');
+    // gateReachedAt (10m after start) wins over endedAt (2h after start).
+    expect(meta).toHaveTextContent('10m 0s to review');
+    expect(meta.querySelector('[title="time to final human gate — excludes review wait"]')).not.toBeNull();
+  });
+
+  it('falls back to endedAt-based runtime with no "to review" label when gateReachedAt is null', async () => {
+    getQuery.mockResolvedValue(makeExp());
+    getComparisonQuery.mockResolvedValue(
+      makePayload({
+        armA: makeArm({
+          runId: 'run-a',
+          arm: 'A',
+          usage: makeUsage({
+            startedAt: '2026-07-01T00:00:00.000Z',
+            gateReachedAt: null,
+            endedAt: '2026-07-01T01:00:00.000Z',
+          }),
+        }),
+      }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    const meta = await screen.findByTestId('experiment-arm-a-meta');
+    expect(meta).toHaveTextContent('60m 0s');
+    expect(meta).not.toHaveTextContent('to review');
+    expect(meta.querySelector('[title="time to final human gate — excludes review wait"]')).toBeNull();
+  });
+
+  it('freezes the runtime at gateReachedAt across a poll tick even once the run later completes with a much-later endedAt', async () => {
+    vi.useFakeTimers();
+    try {
+      getQuery.mockResolvedValue(makeExp({ status: 'grading' }));
+      getComparisonQuery
+        .mockResolvedValueOnce(
+          makePayload({
+            comparisonStatus: 'pending',
+            verdict: null,
+            armA: makeArm({
+              runId: 'run-a',
+              arm: 'A',
+              status: 'awaiting_review',
+              usage: makeUsage({
+                startedAt: '2026-07-01T00:00:00.000Z',
+                gateReachedAt: '2026-07-01T00:10:00.000Z',
+                endedAt: null,
+              }),
+            }),
+            armB: makeArm({ runId: 'run-b', arm: 'B', status: 'awaiting_review' }),
+          }),
+        )
+        .mockResolvedValueOnce(
+          makePayload({
+            comparisonStatus: 'complete',
+            armA: makeArm({
+              runId: 'run-a',
+              arm: 'A',
+              status: 'decided',
+              usage: makeUsage({
+                startedAt: '2026-07-01T00:00:00.000Z',
+                gateReachedAt: '2026-07-01T00:10:00.000Z',
+                endedAt: '2026-07-01T05:00:00.000Z',
+              }),
+            }),
+            armB: makeArm({ runId: 'run-b', arm: 'B', status: 'awaiting_review' }),
+          }),
+        );
+      getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+      render(<ExperimentComparisonView experimentId="exp_1" />);
+      await vi.advanceTimersByTimeAsync(0);
+      const before = screen.getByTestId('experiment-arm-a-meta').textContent;
+      expect(before).toContain('10m 0s to review');
+
+      // Drive the poll tick to fetch the second (completed, endedAt-much-later) response.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const after = screen.getByTestId('experiment-arm-a-meta').textContent;
+      expect(after).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
