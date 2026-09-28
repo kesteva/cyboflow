@@ -337,7 +337,7 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
       type: 'string',
       enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept'],
       description:
-        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); accept = commit-integrity failures ONLY: the lane\'s own work is committed or needed no change, and the uncommitted changes are not this lane\'s — integrate it as is; give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
+        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); accept = the task\'s substance is done and what is left is waivable (cosmetic residue, or checks the environment could not run) — the lane proceeds as if the step had passed and each waived item is filed as a follow-up; for a commit-integrity failure, the uncommitted changes are not this lane\'s; give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
     },
     reason: {
       type: 'string',
@@ -358,6 +358,12 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
       type: 'string',
       description:
         'adjust_and_retry only (REQUIRED there): the FULL replacement task body, minimally edited — never silently drop a security- or correctness-relevant criterion.',
+    },
+    followUps: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'accept (REQUIRED except for commit-integrity): one entry per thing you are WAIVING — a residual defect, or a criterion the environment could not verify ("verify on a real device: …"). Each becomes a follow-up item for the human. Never waive a correctness or security defect.',
     },
     progress: {
       type: 'string',
@@ -469,17 +475,24 @@ export interface LaneAppendCorrectionDecision {
 }
 
 /**
- * COMMIT-INTEGRITY ONLY: integrate the lane as it stands. The supervisor judged
- * that the lane's own work is committed (or the task needed no change) and that
- * the uncommitted paths the probe saw belong to something else — a sibling lane
- * sharing the worktree, generated output. Re-drives nothing and costs no rescue
- * budget; the host audits it with a finding. On any other failure kind the
- * parser downgrades it to give_up.
+ * Proceed past the failing step as if it had passed. The supervisor judged the
+ * task's substance done and the rest waivable — cosmetic residue, or checks the
+ * environment could not run (a missing toolchain, UI-only criteria on a backend
+ * task, a simulator that cannot grant a permission) — and names each waived item
+ * in `followUps`, which the host files for the human. For a commit-integrity
+ * failure it means the uncommitted paths belong to something else (a sibling
+ * lane, generated output). Re-drives nothing and costs no rescue budget.
  */
 export interface LaneAcceptDecision {
   verdict: 'accept';
-  /** Why the dirt is not this lane's. REQUIRED — a blank one downgrades to give_up. */
+  /** Why the lane may proceed. REQUIRED — a blank one downgrades to give_up. */
   reason: string;
+  /**
+   * What is being waived, one item each; the host files each as a follow-up
+   * finding. REQUIRED (non-empty) for every failure kind except commit-integrity,
+   * where the lane waives nothing of its own.
+   */
+  followUps?: string[];
 }
 
 /** The parsed, host-safe lane-triage verdict (every field a rescue needs is present). */
@@ -529,9 +542,10 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *      nothing to record); otherwise it is VALID AS GIVEN and never downgraded
  *      further — it names no step and re-drives nothing, so none of the rescue
  *      constraints below apply to it
- *   1c. `accept` on a failure kind other than `commit-integrity`, or with a
- *      blank `reason`                                    ⇒ give_up; otherwise VALID
- *      AS GIVEN (it re-drives nothing, like append_correction)
+ *   1c. `accept` with a blank `reason`, or — on any failure kind other than
+ *      `commit-integrity` — with no non-blank `followUps` ⇒ give_up (a waiver
+ *      that names nothing it waives is not auditable); otherwise VALID AS GIVEN
+ *      (it re-drives nothing, like append_correction)
  *   2. `give_up`                                        ⇒ give_up (reason kept when present)
  *   3. `retry`/`adjust_and_retry` with blank `guidance` ⇒ give_up (a rescue with
  *      nothing to do differently is just a wasted attempt)
@@ -566,13 +580,14 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
     };
   }
   if (o.verdict === 'accept') {
-    if (req.failureKind !== 'commit-integrity') {
-      return laneGiveUp('lane triage tried to accept a lane that did not fail its commit-integrity check — letting the lane fail');
-    }
     if (!isNonEmptyString(o.reason)) {
       return laneGiveUp('lane triage accepted the lane without saying why — letting the lane fail');
     }
-    return { verdict: 'accept', reason: o.reason };
+    const followUps = Array.isArray(o.followUps) ? o.followUps.filter(isNonEmptyString).map((f) => f.trim()) : [];
+    if (followUps.length === 0 && req.failureKind !== 'commit-integrity') {
+      return laneGiveUp('lane triage accepted the lane without naming what it waived — letting the lane fail');
+    }
+    return { verdict: 'accept', reason: o.reason, ...(followUps.length > 0 ? { followUps } : {}) };
   }
   if (o.verdict !== 'retry' && o.verdict !== 'adjust_and_retry') {
     return laneGiveUp('unrecognized lane triage verdict — letting the lane fail');
@@ -1298,8 +1313,8 @@ function commitIntegrityTriageSection(req: LaneTriageRequest): string {
   if (req.failureKind !== 'commit-integrity') return '';
   return `
 
-THIS IS A COMMIT-INTEGRITY FAILURE, not a code defect. Every inner step of the lane passed; the question is only whether the lane left ITS OWN work uncommitted. Lanes of a sprint share ONE worktree, so uncommitted paths can belong to a sibling lane that is still working. Compare the uncommitted paths in the excerpt with what THIS task is about (its body, the lane's step outputs in the conversation, the files it names) and read the files if you need to. The extra verdict for this failure kind:
-- "accept" — the lane's own work is already committed, or the task needed no change (e.g. it was already implemented), and the uncommitted paths belong to other work. The host integrates the lane as it stands. \`reason\` is REQUIRED: say whose the paths are and why.
+THIS IS A COMMIT-INTEGRITY FAILURE, not a code defect. Every inner step of the lane passed; the question is only whether the lane left ITS OWN work uncommitted. Lanes of a sprint share ONE worktree, so uncommitted paths can belong to a sibling lane that is still working. Compare the uncommitted paths in the excerpt with what THIS task is about (its body, the lane's step outputs in the conversation, the files it names) and read the files if you need to. For this failure kind:
+- "accept" — the lane's own work is already committed, or the task needed no change (e.g. it was already implemented), and the uncommitted paths belong to other work. The host integrates the lane as it stands. \`reason\` is REQUIRED: say whose the paths are and why; \`followUps\` is not needed.
 Use "retry" (usually from the first inner step, with guidance naming the files to commit) when the uncommitted paths ARE this task's work.`;
 }
 
@@ -1360,16 +1375,17 @@ ${digestConversation(history.conversation)}
 Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the code, the tests, and repo reality actually match what this task asks for. Then decide ONE verdict and return it as structured output:
 - "retry"            — a concrete, DIFFERENT approach is likely to succeed. \`guidance\` is REQUIRED and must say what to do DIFFERENTLY; "try again" is not guidance and the host will reject it (downgrading your verdict to give_up).
 - "adjust_and_retry" — the task body CONFLICTS with repo reality and you have the file:line evidence (cite it in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
+- "accept"           — the task's SUBSTANCE is done and verified, and what is left is WAIVABLE: cosmetic or polish residue, or checks this environment could not run (a toolchain that is missing from the worktree, UI-only criteria such as fidelity/reachability applied to a backend task, a simulator that cannot grant a permission the behavior needs). The lane proceeds as if the failing step had passed. \`followUps\` is REQUIRED: one entry per waived item, each filed for the human (e.g. "verify on a real device: the shield subtitle appears"). NEVER waive a correctness, data-loss or security defect — those need "retry".
 - "append_correction" — you worked out something worth KEEPING (a real cause, a cross-lane interaction, a wrong assumption in the task) but re-driving this lane would not fix it. Put the diagnosis in \`reason\`; add the corrective note in \`guidance\` if you have one. This costs NO rescue budget and the lane still settles failed — it exists so a diagnosis you actually made does not die with this consult.
 - "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.
 
-RESOLVE IT YOURSELF WHERE YOU CAN. Between those four, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "append_correction" when neither will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
+RESOLVE IT YOURSELF WHERE YOU CAN. Between these verdicts, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "accept" when the work is done and only waivable residue is failing it, "append_correction" when none of those will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
 
 AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane gets one rescue, and more only while it is converging; the whole run has a fixed pool), so spend it only where it will genuinely change the outcome.
 
 \`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry" (and is IGNORED for "append_correction", which re-drives nothing). It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
 
-Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
+Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody?, followUps?, progress? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
 }
 
 /** Render the prior-round ledger: one line per round, `AR-n` ids with their titles. */
@@ -2628,7 +2644,9 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
       // assumes the lane got another attempt.
       return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
     case 'accept':
-      return `✔ **${req.taskRef}**: accept — the uncommitted changes are not this lane's, so integrate it as it stands. ${decision.reason}`;
+      return req.failureKind === 'commit-integrity'
+        ? `✔ **${req.taskRef}**: accept — the uncommitted changes are not this lane's, so integrate it as it stands. ${decision.reason}`
+        : `✔ **${req.taskRef}**: accept — the task's substance is done; continuing past \`${req.stepId}\` and filing ${decision.followUps?.length ?? 0} follow-up(s). ${decision.reason}`;
   }
 }
 

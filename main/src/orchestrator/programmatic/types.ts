@@ -563,10 +563,12 @@ export type LaneRescueOutcome =
   | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean }
   /**
-   * 'accept' — COMMIT-INTEGRITY ONLY: the supervisor judged that the lane's own
-   * work is committed (or needed no change) and the uncommitted paths the probe
-   * saw belong to something else (a sibling lane, generated output). The
-   * controller integrates the lane. Any other failure kind treats it as give_up.
+   * 'accept' — proceed past the failing step as if it had passed. The supervisor
+   * judged the task's substance done and what is left waivable: cosmetic
+   * residue, or checks the environment could not run (a missing toolchain, UI
+   * criteria on a backend task, a simulator that cannot grant a permission). The
+   * host files each waived item as a follow-up finding. For a commit-integrity
+   * failure it means the uncommitted paths are not this lane's work.
    */
   | { kind: 'accept'; reason: string };
 

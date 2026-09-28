@@ -2075,14 +2075,19 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('`implement` → `write-tests` → `code-review` → `task-verify`');
   });
 
-  it('offers the accept verdict and the ownership question ONLY for a commit-integrity failure', () => {
+  it('asks the ownership question ONLY for a commit-integrity failure', () => {
     const ci = buildLaneTriagePrompt(sprintCtx, history, laneReq({ failureKind: 'commit-integrity' }));
     expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
     expect(ci).toContain('THIS IS A COMMIT-INTEGRITY FAILURE');
-    expect(ci).toContain('"accept"');
     const other = buildLaneTriagePrompt(sprintCtx, history, laneReq());
     expect(other).not.toContain('COMMIT-INTEGRITY FAILURE');
-    expect(other).not.toContain('"accept"');
+  });
+
+  it('offers accept for every failure kind, with waived items required and defects excluded', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('"accept"');
+    expect(p).toContain('`followUps` is REQUIRED');
+    expect(p).toContain('NEVER waive a correctness, data-loss or security defect');
   });
 
   it('reuses the shared digests (step timeline, lane section, recent conversation)', () => {
@@ -2183,8 +2188,17 @@ describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
     ).toEqual({ verdict: 'accept', reason: 'src/draft.ts belongs to TASK-266' });
   });
 
-  it('downgrades accept to give_up on any other failure kind', () => {
+  it('requires named waived items for an accept outside commit-integrity', () => {
     expect(parseLaneTriageOutput({ verdict: 'accept', reason: 'fine' }, laneReq()).verdict).toBe('give_up');
+    expect(parseLaneTriageOutput({ verdict: 'accept', reason: 'fine', followUps: ['  '] }, laneReq()).verdict).toBe(
+      'give_up',
+    );
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'accept', reason: 'functional criteria met', followUps: [' restyle the disabled button '] },
+        laneReq(),
+      ),
+    ).toEqual({ verdict: 'accept', reason: 'functional criteria met', followUps: ['restyle the disabled button'] });
   });
 
   it('downgrades accept with a blank reason to give_up', () => {

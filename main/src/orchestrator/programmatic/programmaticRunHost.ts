@@ -1572,12 +1572,17 @@ export class ProgrammaticRunHost implements ControllerHost {
       }
 
       if (decision.verdict === 'accept') {
-        // COMMIT-INTEGRITY ONLY (the parser refuses it elsewhere): the brain
-        // judged the uncommitted paths are not this lane's, so the lane
-        // integrates as it stands. Audited like a rescue — it overrides a
-        // backstop — and, like append_correction, it re-drives nothing and so
-        // costs no rescue budget.
-        await this.fileLaneAcceptFinding({ taskRef, req, reason: decision.reason });
+        // The brain judged the task's substance done and waived the rest (for a
+        // commit-integrity flag: the uncommitted paths are not this lane's). The
+        // lane proceeds past the failing step. Audited like a rescue — it
+        // overrides a gate — and every waived item becomes its own follow-up so
+        // nothing waived is lost. Re-drives nothing, so it costs no rescue budget.
+        await this.fileLaneAcceptFinding({
+          taskRef,
+          req,
+          reason: decision.reason,
+          followUps: decision.followUps ?? [],
+        });
         return { kind: 'accept', reason: decision.reason };
       }
 
@@ -1965,31 +1970,54 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   /**
-   * Audit a commit-integrity ACCEPT: the supervisor overrode the backstop that
-   * refuses to integrate a lane with uncommitted work. Fail-soft — a broken
-   * review queue must never cost the lane its verdict.
+   * Audit an ACCEPT: the supervisor let a lane past a gate that failed it (or,
+   * for commit-integrity, past the backstop that refuses to integrate a lane with
+   * uncommitted work). One audit finding, then ONE follow-up finding per waived
+   * item so each can be triaged on its own. Fail-soft — a broken review queue
+   * must never cost the lane its verdict.
    */
-  private async fileLaneAcceptFinding(args: { taskRef: string; req: LaneTriageFailure; reason: string }): Promise<void> {
+  private async fileLaneAcceptFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+    followUps: string[];
+  }): Promise<void> {
     if (!this.args.fileLaneTriageFinding) return;
+    const commitIntegrity = args.req.failureKind === 'commit-integrity';
     try {
-      const body = [
-        `The run supervisor let task **${args.taskRef}** integrate although its lane made no git commit while the shared worktree held uncommitted changes.`,
+      const lines = [
+        commitIntegrity
+          ? `The run supervisor let task **${args.taskRef}** integrate although its lane made no git commit while the shared worktree held uncommitted changes.`
+          : `The run supervisor let task **${args.taskRef}** proceed past \`${args.req.stepId}\`, which had failed it, judging the task's substance done and the rest waivable.`,
         '',
-        `- Failure: \`${args.req.failureKind}\` after step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
-        '- Verdict: accept — the supervisor judged the uncommitted changes are not this lane\'s work. Check the worktree before merging if that looks wrong.',
+        `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        commitIntegrity
+          ? '- Verdict: accept — the supervisor judged the uncommitted changes are not this lane\'s work. Check the worktree before merging if that looks wrong.'
+          : `- Verdict: accept — ${args.followUps.length} waived item(s), each filed as its own follow-up.`,
         '',
         '## Reason',
         '',
         args.reason.trim(),
-        '',
-        '## Probe evidence',
-        '',
-        args.req.errorExcerpt.trim(),
-      ].join('\n');
+      ];
+      if (args.followUps.length > 0) {
+        lines.push('', '## Waived', '', ...args.followUps.map((f) => `- ${f}`));
+      }
+      lines.push('', commitIntegrity ? '## Probe evidence' : '## Failure excerpt', '', args.req.errorExcerpt.trim());
       await this.args.fileLaneTriageFinding({
-        title: `Monitor accepted ${args.taskRef} (commit-integrity)`,
-        body,
+        title: `Monitor accepted ${args.taskRef} (${args.req.failureKind})`,
+        body: lines.join('\n'),
       });
+      for (const followUp of args.followUps) {
+        const headline = followUp.split('\n')[0].trim();
+        await this.args.fileLaneTriageFinding({
+          title: `Follow-up for ${args.taskRef}: ${headline.length > 90 ? `${headline.slice(0, 89)}…` : headline}`,
+          body: [
+            `Waived by the run supervisor when it accepted **${args.taskRef}** past a failing \`${args.req.stepId}\` (${args.req.failureKind}). It still needs doing or checking:`,
+            '',
+            followUp,
+          ].join('\n'),
+        });
+      }
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] lane-accept finding failed (fail-soft)', {
         runId: this.args.runId,

@@ -974,16 +974,104 @@ describe('WorkflowController — commit-integrity lane triage', () => {
     expect(laneStatus(driver.lanes, 't2')).toBe('failed');
   });
 
-  it("treats an 'accept' at any OTHER failure site as give_up", async () => {
-    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
-    const runner = makeRunner({ implement: [{ status: 'failed', error: 'tsc: 4 errors' }] });
+  it('continues the chain on an accept at the generic inner-step site', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const runner = makeRunner({ implement: [{ status: 'failed', error: 'tsc: command not found' }] });
     const { host, driver } = makeTriageHost({
       items: ['t1'],
-      outcomes: [{ kind: 'accept', reason: 'looks fine' }],
+      outcomes: [{ kind: 'accept', reason: 'toolchain missing, code done' }],
     });
 
     await new WorkflowController(runner, host).run('r', d);
 
-    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(runner.calls.map((c) => c.id)).toEqual(['implement', 'verify']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+});
+
+// ── ACCEPT: proceed past a failing gate with the residue waived ──────────────
+//    Observed 2026-09-28: lanes failed on a cosmetic a11y nit, on UI-only
+//    criteria applied to a backend task, on a missing toolchain, and on a
+//    simulator that cannot grant Screen Time — all with the substance done.
+describe('WorkflowController — accept verdict at every exhaustion site', () => {
+  const accept: LaneRescueOutcome = { kind: 'accept', reason: 'substance done' };
+
+  it('code-review: continues to task-verify, spending no rescue budget', async () => {
+    const d = def([
+      phase('p', [
+        fanStep('execute', [
+          { id: 'implement' },
+          { id: 'code-review', loopback: 'implement' },
+          { id: 'task-verify', loopback: 'implement' },
+        ]),
+      ]),
+    ]);
+    const blocking: StepRunResult = { status: 'ok', resultText: '## Blocking\n\n- nit\n\nREVIEW: BLOCKING' };
+    const runner = makeRunner({
+      'code-review': [blocking, blocking, blocking],
+      'task-verify': [{ status: 'ok', resultText: verifyText('PASS') }],
+    });
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(runner.calls.filter((c) => c.id === 'task-verify')).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('task-verify: integrates the lane past a FAIL', async () => {
+    const d = def([
+      phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'task-verify', loopback: 'implement' }])]),
+    ]);
+    const fail: StepRunResult = { status: 'ok', resultText: verifyText('FAIL') };
+    const runner = makeRunner({ 'task-verify': [fail, fail, fail] });
+    const { host, driver } = makeTriageHost({ items: ['t1'], outcomes: [accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(3);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('merge-gate: REVIVES the failed row and integrates without re-driving', async () => {
+    const d = def([
+      phase('p', [
+        fanStep('execute', [
+          { id: 'implement' },
+          { id: 'task-verify' },
+          { id: 'visual-verify', loopback: 'implement' },
+        ]),
+      ]),
+    ]);
+    const runner = makeRunner({ 'task-verify': [{ status: 'ok', resultText: verifyWithFence() }] });
+    const { host, driver } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [accept],
+      visualGate: makeVisualGate([{ kind: 'failed' }]),
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(driver.revived).toEqual(['t1']);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('an accept does not consume the rescue budget', async () => {
+    // One lane ⇒ run pool floor(3 + 1/2) = 3 and lane cap 3. Four steps each fail
+    // once with no loopback (each failure IS an exhaustion) and each is accepted:
+    // all four must be consulted, which only holds if accepts spend nothing.
+    const d = def([
+      phase('p', [fanStep('execute', [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }])]),
+    ]);
+    const boom: StepRunResult = { status: 'failed', error: 'boom' };
+    const runner = makeRunner({ s1: [boom], s2: [boom], s3: [boom], s4: [boom] });
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [accept, accept, accept, accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults.map((c) => c.stepId)).toEqual(['s1', 's2', 's3', 's4']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
   });
 });

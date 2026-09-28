@@ -383,7 +383,7 @@ type LaneWalkOutcome =
 /**
  * What one lane-triage consult resolved to, inside `runFanOut`:
  *   - 'rescue'      — re-drive from `targetIndex` (state already reset);
- *   - 'accept'      — commit-integrity only: integrate the lane as it stands;
+ *   - 'accept'      — proceed past the failing step as if it had passed;
  *   - 'systemic'    — the consult died on the environment; park, do not fail;
  *   - 'give_up'     — the supervisor judged the failure genuine;
  *   - 'unconsulted' — no verdict at all (no seam, caps spent, a throwing consult).
@@ -1799,17 +1799,14 @@ export class WorkflowController {
         return { kind: 'systemic', error: outcome.error };
       }
       if (outcome.kind === 'accept') {
-        // An ACCEPT re-drives nothing, so it spends no rescue budget. It is only
-        // meaningful for a commit-integrity consult; anywhere else it is a
-        // host/brain drift and settles like a give_up.
+        // An ACCEPT re-drives nothing, so it spends no rescue budget: the lane
+        // proceeds past the failing step as if it had passed, and the host has
+        // already filed the waived residue as follow-up findings.
         releaseReservation();
-        if (failureKind !== 'commit-integrity') {
-          this.host.log?.(
-            'warn',
-            `fan-out item '${itemId}': lane triage returned 'accept' for a ${failureKind} failure; treating it as give_up`,
-          );
-          return { kind: 'give_up' };
-        }
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': ${failureKind} at '${failingStepId}' — monitor ACCEPTED the lane past it (${outcome.reason})`,
+        );
         return { kind: 'accept', reason: outcome.reason };
       }
       if (outcome.kind !== 'rescue') {
@@ -2007,6 +2004,10 @@ export class WorkflowController {
           () => undefined,
         );
         const verdict = await turn;
+        if (verdict.kind === 'accept') {
+          if (needsRevive) driver.reviveLane?.({ runId, itemId });
+          return verdict;
+        }
         if (verdict.kind !== 'rescue') return verdict;
         clearStateForRewind(verdict.targetIndex);
         if (needsRevive) driver.reviveLane?.({ runId, itemId });
@@ -2015,18 +2016,20 @@ export class WorkflowController {
 
       /**
        * The budget-exhaustion sites' view of `triageLane`: the inner index to
-       * re-drive from, `{ systemic }` when the consult died on the environment,
-       * or null ("settle this lane 'failed'") for every other verdict — give_up,
-       * no consult, and an 'accept', which only the commit-integrity site honors.
+       * re-drive from, `'accept'` (proceed past the failing step as if it had
+       * passed — the supervisor waived what is left and filed it as follow-ups),
+       * `{ systemic }` when the consult died on the environment, or null ("settle
+       * this lane 'failed'") for a give_up or no consult at all.
        */
       const rescueLaneOrNull = async (
         failingStepId: string,
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
-      ): Promise<number | null | { systemic: string }> => {
+      ): Promise<number | 'accept' | null | { systemic: string }> => {
         const verdict = await triageLane(failingStepId, failureKind, errorExcerpt, needsRevive);
         if (verdict.kind === 'rescue') return verdict.targetIndex;
+        if (verdict.kind === 'accept') return 'accept';
         if (verdict.kind === 'systemic') return { systemic: verdict.error };
         return null;
       };
@@ -2290,6 +2293,12 @@ export class WorkflowController {
             // so re-driving it as a parked lane would restart at attempt 1 and
             // dedup onto that terminal request. The lane settles failed; a
             // sibling's inner-step systemic still parks the wave.
+            if (rescueTarget === 'accept') {
+              // The supervisor accepted the deliverable despite the gate (e.g. a
+              // behavior the verification environment cannot exercise). The row
+              // was revived; advance exactly as an 'advance' verdict would.
+              continue;
+            }
             if (typeof rescueTarget === 'number') {
               // A MERGE-GATE rescue must advance the verification attempt: the
               // scheduler's enqueue key is `${runId}:${ref}:${attempt}`, and the
@@ -2341,6 +2350,7 @@ export class WorkflowController {
               );
               // 'systemic' is treated like `null` for the same reason as the
               // 'failed' arm above (persisted row + attempt identity).
+              if (rescueTarget === 'accept') continue; // Same as the 'failed' arm above.
               if (typeof rescueTarget === 'number') {
                 // Same verification-attempt advance as the 'failed' arm above —
                 // the refused verdict's request owns the current enqueue key, so
@@ -2482,6 +2492,8 @@ export class WorkflowController {
           if (rescueTarget !== null && typeof rescueTarget === 'object') {
             return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
           }
+          // Accepted: treat the step as passed and continue the chain.
+          if (rescueTarget === 'accept') continue;
           if (rescueTarget !== null) {
             k = rescueTarget - 1; // The loop's k++ lands on the target next.
             continue;
@@ -2562,6 +2574,9 @@ export class WorkflowController {
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
                 return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
               }
+              // Accepted: the remaining blocking entries were waived as
+              // follow-ups; the chain continues (task-verify still runs).
+              if (rescueTarget === 'accept') continue;
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -2640,6 +2655,13 @@ export class WorkflowController {
               // Nothing is persisted at this arm yet — park, don't fail.
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
                 return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
+              }
+              if (rescueTarget === 'accept') {
+                // Accepted past a FAIL: this verdict composed no visual task, so
+                // drop any task a superseded PASS left behind — visual
+                // verification of the accepted lane is one of the waived items.
+                visualVerifyTask = undefined;
+                continue;
               }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.

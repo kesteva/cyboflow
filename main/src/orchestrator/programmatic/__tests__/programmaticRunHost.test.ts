@@ -806,6 +806,32 @@ describe('ProgrammaticRunHost', () => {
       expect(finding.body).toContain('src/draft.ts');
     });
 
+    it('files the audit finding plus one follow-up per waived item for a gate accept', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({
+          verdict: 'accept',
+          reason: 'all functional criteria met',
+          followUps: ['restyle the disabled Address button', 'verify on a real device: shield subtitle'],
+        }),
+        readLaneTask: () => ({ taskRef: 'TASK-299', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({ ...failure, failureKind: 'task-verify', stepId: 'task-verify' });
+
+      expect(outcome).toEqual({ kind: 'accept', reason: 'all functional criteria met' });
+      const titles = fileLaneTriageFinding.mock.calls.map((c) => (c[0] as { title: string }).title);
+      expect(titles).toEqual([
+        'Monitor accepted TASK-299 (task-verify)',
+        'Follow-up for TASK-299: restyle the disabled Address button',
+        'Follow-up for TASK-299: verify on a real device: shield subtitle',
+      ]);
+      const audit = fileLaneTriageFinding.mock.calls[0][0] as { body: string };
+      expect(audit.body).toContain('## Waived');
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {
