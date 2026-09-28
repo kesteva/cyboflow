@@ -163,22 +163,72 @@ function seedHandedOverRun(db: Database.Database): { runId: string; workflowId: 
 
 function makeFakeNudgeExecutor(opts?: {
   hasActiveExecution?: boolean;
-}): NudgeRunDeps['runExecutor'] & { setPendingNudgeCalls: Array<[string, string]>; executeCalls: string[] } {
+}): NudgeRunDeps['runExecutor'] & {
+  setPendingNudgeCalls: Array<[string, string]>;
+  executeCalls: string[];
+  queueInputCalls: Array<[string, string]>;
+} {
   const setPendingNudgeCalls: Array<[string, string]> = [];
   const executeCalls: string[] = [];
+  const queueInputCalls: Array<[string, string]> = [];
   return {
     setPendingNudgeCalls,
     executeCalls,
+    queueInputCalls,
     setPendingNudge: (runId: string, text: string) => {
       setPendingNudgeCalls.push([runId, text]);
     },
     execute: async (runId: string) => {
       executeCalls.push(runId);
     },
+    // TASK-299 attempt 3: deliverAddressReviewFindingsViaChat's live-turn arm
+    // buffers via this SAME dependency bag's queueInput slice rather than
+    // wiring a second one — see nudgeRunHandler.ts's NudgeRunExecutorLike.
+    queueInput: (runId: string, text: string) => {
+      queueInputCalls.push([runId, text]);
+    },
     ...(opts?.hasActiveExecution !== undefined
       ? { hasActiveExecution: () => opts.hasActiveExecution as boolean }
       : {}),
   };
+}
+
+/**
+ * Insert a `raw_events` row for `runId` whose `event_type` is a turn-result
+ * event (`isLatestRunTurnCompleted`'s signal) — TASK-299 attempt 3's `'parked'`
+ * arm fires exactly when this is the run's LATEST row while `hasActiveExecution`
+ * still reports true (the TASK-300 held-execution shape).
+ */
+function seedCompletedTurnEvent(db: Database.Database, runId: string): void {
+  db.prepare(
+    `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
+     VALUES (?, 'result', '{"is_error":false}', ?)`,
+  ).run(runId, new Date().toISOString());
+}
+
+/** Minimal migration-065-shaped `agent_invocations` table (provider-neutral resume ledger). */
+function addAgentInvocationsTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_invocations (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_invocation_id   TEXT NOT NULL UNIQUE,
+      run_id                TEXT NOT NULL,
+      step_id               TEXT,
+      agent_provider        TEXT NOT NULL,
+      agent_runtime         TEXT NOT NULL,
+      model                 TEXT,
+      external_session_id   TEXT,
+      created_at            TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    )
+  `);
+}
+
+/** Seed a top-level (step_id NULL) Codex resume target — nudgeRunHandler's no_session guard reads this for a non-Claude runtime. */
+function seedCodexResumeInvocation(db: Database.Database, runId: string): void {
+  db.prepare(
+    `INSERT INTO agent_invocations (agent_invocation_id, run_id, step_id, agent_provider, agent_runtime, external_session_id)
+     VALUES (?, ?, NULL, 'codex', 'codex-sdk', 'codex-thread-1')`,
+  ).run(`inv-${runId}`, runId);
 }
 
 /**
@@ -542,10 +592,47 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       // handed-over run once the findings are addressed.
       expect(nudgedText).toContain('re-open the final sign-off gate');
       expect(nudgedText).toContain('AskUserQuestion');
+      expect(nudgedText).not.toContain('cyboflow_request_user_input');
       // The rewind path (not_programmatic) was never reached.
       expect(rewindExecutor.executeCalls).toEqual([]);
       const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
       expect(row.status).toBe('running');
+    });
+
+    it("names cyboflow_request_user_input, NOT AskUserQuestion, for a handed-over CODEX run (TASK-299 attempt 3)", async () => {
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET agent_runtime = 'codex-sdk' WHERE id = ?").run(runId);
+      // nudgeRunHandler's no_session guard needs a resolvable resume target for
+      // a non-programmatic run; the legacy claude_session_id fallback only
+      // accepts claude-sdk/claude-interactive, so a genuinely Codex-routed run
+      // needs its own top-level agent_invocations row (migration 065).
+      addAgentInvocationsTable(db);
+      seedCodexResumeInvocation(db, runId);
+
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: makeFakeExecutor(),
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor();
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      expect(result).toEqual({ delivered: true, viaChat: true });
+      const [, nudgedText] = nudgeExecutor.setPendingNudgeCalls[0];
+      expect(nudgedText).toContain('cyboflow_request_user_input');
+      expect(nudgedText).not.toContain('AskUserQuestion');
     });
 
     it('delivers to a PARKED handed-over run resting in status=running (no live turn) — the exact shape reproduced against the real run', async () => {
@@ -583,7 +670,11 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       expect(row.status).toBe('running');
     });
 
-    it('refuses (not_idle) a handed-over run in status=running whose turn IS actually live', async () => {
+    it('buffers via queueInput (never calling nudgeRunHandler) for a handed-over run in status=running whose turn genuinely IS live', async () => {
+      // TASK-299 attempt 3: hasActiveExecution() true with NO turn-result row
+      // yet means a real turn is in flight — nudgeRunHandler must never be
+      // called (it would enqueue behind execute()'s held queue slot), so the
+      // message is buffered exactly as a typed chat message would be.
       db = makeDb();
       addReviewItemsTable(db);
       const { runId } = seedHandedOverRun(db);
@@ -607,8 +698,59 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
 
       const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
 
-      expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+      expect(result).toEqual({ delivered: true, viaChat: true, queued: true });
       expect(nudgeExecutor.executeCalls).toEqual([]);
+      expect(nudgeExecutor.queueInputCalls).toHaveLength(1);
+      const [queuedRunId, queuedText] = nudgeExecutor.queueInputCalls[0];
+      expect(queuedRunId).toBe(runId);
+      expect(queuedText).toContain('cyboflow_list_run_findings');
+    });
+
+    it("refuses honestly ('parked'), WITHOUT ever calling nudgeRunHandler, when the run's queue is genuinely held open past its last completed turn", async () => {
+      // TASK-299 attempt 3 (the reviewer's flagged case): hasActiveExecution()
+      // reports true, but the run's LATEST raw_events row is already a
+      // turn-result — the TASK-300 held-execution shape. Prove the mutation
+      // does NOT hang by genuinely occupying the run's queue slot the way
+      // handoverRunHandler's own execute() does (a never-resolving task) —
+      // if deliverAddressReviewFindingsViaChat called nudgeRunHandler here,
+      // its guard would enqueue behind this and never run.
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET status = 'running' WHERE id = ?").run(runId);
+      seedCompletedTurnEvent(db, runId);
+
+      const sharedRunQueues = new RunQueueRegistry();
+      void sharedRunQueues.getOrCreate(runId).add(() => new Promise<void>(() => {}));
+
+      const rewindExecutor = makeFakeExecutor();
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: sharedRunQueues,
+        runExecutor: rewindExecutor,
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor({ hasActiveExecution: true });
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: sharedRunQueues,
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await Promise.race([
+        caller.cyboflow.runs.addressReviewFindings({ runId }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('addressReviewFindings hung behind the held run queue')), 1000);
+        }),
+      ]);
+
+      expect(result).toEqual({ noOp: true, reason: 'parked' });
+      expect(nudgeExecutor.executeCalls).toEqual([]);
+      expect(nudgeExecutor.queueInputCalls).toEqual([]);
+      expect(rewindExecutor.executeCalls).toEqual([]);
     });
 
     it('still refuses (blocked) when a DIFFERENT, non-eval blocking item is pending', async () => {

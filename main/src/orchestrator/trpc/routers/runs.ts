@@ -35,9 +35,11 @@ import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
   AGENT_PROVIDERS,
+  DEFAULT_WORKFLOW_AGENT_RUNTIME,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   formatProviderRuntimeConflict,
   isWorkflowLaunchableRuntime,
+  isWorkflowRunStorableRuntime,
   providerForRuntime,
   providerRuntimeConflict,
   type AgentProvider,
@@ -401,6 +403,22 @@ export function setRetryRunDeps(deps: RetryRunDeps): void {
 export const ADDRESS_REVIEW_STEP_ID = 'address-review';
 
 /**
+ * The gate tool name a runtime's own MCP surface actually offers, mirroring
+ * `workflowPromptRenderer.ts`'s per-provider adapter envelopes: Claude keeps
+ * the raw "AskUserQuestion" wording the workflow bodies are authored with,
+ * while Codex/OMP/pi are all told to redirect that instruction to
+ * `cyboflow_request_user_input` instead. A stock chat message composed
+ * without this (TASK-299 attempt 2) told every runtime to call a tool named
+ * "AskUserQuestion" — a tool Codex (and every other non-Claude MCP runtime)
+ * does not have, so the agent would silently ask in plain chat instead of
+ * opening a real host gate, exactly the failure `renderWorkflowPromptForRuntime`
+ * exists to prevent for the workflow body itself.
+ */
+function addressReviewGateToolName(runtime: WorkflowRunStorableRuntime): string {
+  return providerForRuntime(runtime) === 'claude' ? 'AskUserQuestion' : 'cyboflow_request_user_input';
+}
+
+/**
  * TASK-299: the stock chat message delivered to a HANDED-OVER run's agent when
  * the review queue's "Address review findings" CTA is clicked — that run has
  * no DAG left for a rewind to re-enter, but it DOES have a live agent sitting
@@ -419,13 +437,19 @@ export const ADDRESS_REVIEW_STEP_ID = 'address-review';
  * AskUserQuestion... do NOT self-approve, and do NOT merge to main
  * yourself") — repeated here rather than assumed-recalled, since this message
  * may land long after that original brief scrolled out of the agent's
- * effective context.
+ * effective context. `runtime` (TASK-299 attempt 3) picks the gate tool name
+ * via {@link addressReviewGateToolName} so a Codex/OMP/pi agent is told to
+ * call a tool it actually has.
  */
-const ADDRESS_REVIEW_CHAT_MESSAGE =
-  `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}` +
-  `\n\nOnce you have worked through every finding above, re-open the final sign-off gate yourself via ` +
-  `AskUserQuestion, exactly as this workflow's instructions describe for that gate. Do NOT self-approve, ` +
-  `and do NOT merge to main yourself.`;
+function buildAddressReviewChatMessage(runtime: WorkflowRunStorableRuntime): string {
+  const gateTool = addressReviewGateToolName(runtime);
+  return (
+    `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}` +
+    `\n\nOnce you have worked through every finding above, re-open the final sign-off gate yourself via ` +
+    `${gateTool}, exactly as this workflow's instructions describe for that gate. Do NOT self-approve, ` +
+    `and do NOT merge to main yourself.`
+  );
+}
 
 let rewindRunDeps: RewindRunDeps | null = null;
 
@@ -464,19 +488,24 @@ export type AddressReviewIneligibleReason =
 
 /**
  * `addressReviewFindings`'s result: rewindRunHandler's own shape, PLUS the
- * mutation's own `noOp` reason (`'in_progress'` — address-review is already
+ * mutation's own `noOp` reasons (`'in_progress'` — address-review is already
  * the live current step, so the request is refused rather than restarting
- * in-flight repair work), PLUS the handed-over-run chat-delivery outcomes
- * (TASK-299): `{ delivered: true; viaChat: true }` on success, or a `noOp`
- * carrying `nudgeRunHandler`'s own refusal reasons verbatim (its `'empty'`
- * reason is unreachable here — the stock message is a non-empty constant —
+ * in-flight repair work; `'parked'` — TASK-299 attempt 3, a handed-over run
+ * whose execute() call is still holding its per-run queue slot open past its
+ * last completed turn, so nothing can be delivered OR safely queued right
+ * now), PLUS the handed-over-run chat-delivery outcomes (TASK-299):
+ * `{ delivered: true; viaChat: true }` on an immediate delivery, the same
+ * shape plus `queued: true` when a genuinely live turn absorbed the message
+ * into its buffer instead (delivered at that turn's own next drain), or a
+ * `noOp` carrying `nudgeRunHandler`'s own refusal reasons verbatim (its
+ * `'empty'` reason is unreachable here — the stock message is never blank —
  * but is kept in the type rather than narrowed, since it is `NudgeRunResult`
  * passed straight through).
  */
 export type AddressReviewFindingsResult =
   | RewindRunResult
-  | { noOp: true; reason: 'in_progress' }
-  | { delivered: true; viaChat: true }
+  | { noOp: true; reason: 'in_progress' | 'parked' }
+  | { delivered: true; viaChat: true; queued?: true }
   | { noOp: true; reason: NudgeNoOpReason };
 
 interface AddressReviewRunRow {
@@ -484,12 +513,15 @@ interface AddressReviewRunRow {
   execution_model: string | null;
   current_step_id: string | null;
   handed_over_at: string | null;
+  agent_runtime: string | null;
 }
 
 /** The pre-flight columns both address-review procedures read (never `any`). */
 function readAddressReviewRunRow(db: DatabaseLike, runId: string): AddressReviewRunRow | undefined {
   return db
-    .prepare('SELECT status, execution_model, current_step_id, handed_over_at FROM workflow_runs WHERE id = ?')
+    .prepare(
+      'SELECT status, execution_model, current_step_id, handed_over_at, agent_runtime FROM workflow_runs WHERE id = ?',
+    )
     .get(runId) as AddressReviewRunRow | undefined;
 }
 
@@ -527,6 +559,30 @@ function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
  * `monitor.send` would resolve `{ delivered: false }` and silently drop the
  * request — the exact "dead CTA" failure mode this task exists to fix.
  *
+ * Attempt 3's fix: `row`'s live-turn state is read BEFORE `nudgeRunHandler` is
+ * ever called. `nudgeRunHandler`'s own guard runs INSIDE the per-run queue
+ * (`runQueues.getOrCreate(runId).add(...)`), and `RunExecutor.execute()` HOLDS
+ * that exact queue slot for the run's ENTIRE programmatic walk — including
+ * while parked at a human gate (see handoverRunHandler.ts's header note). So
+ * calling `nudgeRunHandler` while the run's own `execute()` call has not
+ * returned (`hasActiveExecution()` true) would enqueue this delivery BEHIND
+ * that still-held slot; for a run whose last turn already completed
+ * (`isLatestRunTurnCompleted`), nothing will EVER free that slot again, so the
+ * call would hang forever instead of delivering or refusing. Branch on the
+ * SAME two signals `runs.queueInput` already uses for its own `'parked'`
+ * refusal, entirely OUTSIDE the run queue:
+ *   - `row.status !== 'running'` (i.e. `awaiting_review`), or `'running'` with
+ *     `hasActiveExecution()` false — the queue slot is free (either never
+ *     held, or already released) — fall through to `nudgeRunHandler` below.
+ *   - `'running'` with `hasActiveExecution()` true and the last turn NOT
+ *     completed — a turn genuinely is in flight: buffer the message exactly
+ *     as a typed chat message would (`runs.queueInput`'s own mechanism),
+ *     delivered at that turn's own next drain.
+ *   - `'running'` with `hasActiveExecution()` true but the last turn ALREADY
+ *     completed — execution is held open past the turn's own end (the
+ *     TASK-300 shape). Nothing will ever drain a buffered message here, so
+ *     refuse immediately and honestly instead of queueing into a black hole.
+ *
  * Every currently-pending BLOCKING eval-sourced finding for the run is passed
  * as `ignoreBlockingReviewItemId` so the nudge is never refused by the very
  * findings it is being sent to address — mirrors answerRecoveryGateHandler's
@@ -540,6 +596,7 @@ function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
 async function deliverAddressReviewFindingsViaChat(
   runId: string,
   db: DatabaseLike,
+  row: AddressReviewRunRow,
 ): Promise<AddressReviewFindingsResult> {
   if (!nudgeRunDeps) {
     throw new TRPCError({
@@ -547,10 +604,29 @@ async function deliverAddressReviewFindingsViaChat(
       message: 'nudge dependencies not wired yet. Call setNudgeRunDeps() at boot.',
     });
   }
+
+  const runtime: WorkflowRunStorableRuntime = isWorkflowRunStorableRuntime(row.agent_runtime)
+    ? row.agent_runtime
+    : DEFAULT_WORKFLOW_AGENT_RUNTIME;
+  const message = buildAddressReviewChatMessage(runtime);
+
+  if (row.status === 'running') {
+    const hasLiveTurn = nudgeRunDeps.runExecutor.hasActiveExecution?.(runId) ?? true;
+    if (hasLiveTurn) {
+      if (isLatestRunTurnCompleted(db, runId)) {
+        return { noOp: true, reason: 'parked' };
+      }
+      nudgeRunDeps.runExecutor.queueInput?.(runId, message);
+      return { delivered: true, viaChat: true, queued: true };
+    }
+    // hasActiveExecution() === false: the queue slot has already been
+    // released even though status stayed 'running' — safe to fall through.
+  }
+
   const ignoreBlockingReviewItemId = selectPendingBlockingItemRows(db, runId)
     .filter((r) => isEvalSourcedFinding(r.source))
     .map((r) => r.id);
-  const nudge = await nudgeRunHandler(runId, ADDRESS_REVIEW_CHAT_MESSAGE, nudgeRunDeps, {
+  const nudge = await nudgeRunHandler(runId, message, nudgeRunDeps, {
     ignoreBlockingReviewItemId,
     deliveredAt: 'turn-start',
   });
@@ -3311,7 +3387,7 @@ export const runsRouter = router({
       }
       const row = readAddressReviewRunRow(rewindRunDeps.db, input.runId);
       if (row && isHandedOverRun(row)) {
-        return deliverAddressReviewFindingsViaChat(input.runId, rewindRunDeps.db);
+        return deliverAddressReviewFindingsViaChat(input.runId, rewindRunDeps.db, row);
       }
       if (row && isAddressReviewInProgress(row)) {
         return { noOp: true, reason: 'in_progress' };

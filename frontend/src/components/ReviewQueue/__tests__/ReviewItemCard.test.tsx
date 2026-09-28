@@ -1401,6 +1401,40 @@ describe('ReviewItemCard', () => {
     expect(screen.getByText('Another blocking item is holding this run — resolve it first.')).toBeInTheDocument();
   });
 
+  it("a 'parked' chat delivery refusal (TASK-299 attempt 3) names the actual next step, not a silent no-op", async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ noOp: true, reason: 'parked' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    expect(
+      screen.getByText(
+        "This run's agent session is still open from its last turn and can't take a new message yet — " +
+          'open the run and use Cancel/Reopen to recover it, then try again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('clicking Address on a handed-over run whose turn IS live buffers via queueInput (queued result) and still disables with the "sent" tooltip', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ delivered: true, viaChat: true, queued: true });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalledWith({ runId: 'run-1' }));
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      "Request sent to this run's chat — check there for progress",
+    );
+  });
+
   it('Log as findings resolves with triaged:logged and does not promote to a task', async () => {
     const onResolved = vi.fn();
     render(<ReviewItemCard item={makeEvalFinding()} onResolved={onResolved} />);

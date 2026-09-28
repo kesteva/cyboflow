@@ -461,6 +461,12 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<AddressReviewNoOpReason, string> = {
   blocked: 'Another blocking item is holding this run — resolve it first.',
   no_session: 'This run has no resumable chat session.',
   execute_failed: 'The agent could not be re-driven — check the run logs.',
+  // TASK-299 attempt 3: the run's execution is held open past its last
+  // turn's own end (the TASK-300 shape) — nothing can be delivered OR safely
+  // queued right now. Names the actual next step rather than a bare no-op.
+  parked:
+    "This run's agent session is still open from its last turn and can't take a new message yet — " +
+    'open the run and use Cancel/Reopen to recover it, then try again.',
 };
 
 /**

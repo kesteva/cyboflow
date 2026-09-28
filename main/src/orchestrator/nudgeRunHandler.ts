@@ -55,6 +55,17 @@ export interface NudgeRunExecutorLike {
    * today's behavior: `'running'` is refused `not_idle`.
    */
   hasActiveExecution?(runId: string): boolean;
+  /**
+   * Optional buffer-append for a message that must be DELIVERED LATER rather
+   * than driven now — the SAME mechanism `runs.queueInput` uses. This handler
+   * never calls it itself; it exists so a caller sharing this dependency bag
+   * (`runs.ts`'s `deliverAddressReviewFindingsViaChat`, TASK-299) can buffer a
+   * message for a run it has determined has a genuinely live turn, without
+   * wiring a second dependency bag for the same singleton RunExecutor. Present
+   * for free on the real RunExecutor (it satisfies `QueueInputRunExecutorLike`
+   * too); omitted on test fakes that never exercise that path.
+   */
+  queueInput?(runId: string, text: string): void;
 }
 
 /**
