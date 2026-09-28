@@ -428,7 +428,7 @@ describe('the xcode rung, end to end through run()', () => {
     expect(result.report?.provenance).toMatchObject({ driveEngineRequested: 'maestro', driveEngineUsed: 'maestro' });
   });
 
-  it('B6: the Maestro rung exports JAVA_HOME and puts its bin first on the agent PATH', async () => {
+  it.skipIf(process.platform === 'win32')('B6: the Maestro rung exports JAVA_HOME and puts its bin first on the agent PATH', async () => {
     const h = makeHarness({
       engine: 'maestro',
       maestro: true,

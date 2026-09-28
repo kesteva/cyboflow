@@ -178,7 +178,7 @@ function verb(session: XcodeDriveSession, name: string, args: Record<string, unk
   );
 }
 
-describe('openXcodeDriveSession — the §B4.2 order', () => {
+describe.skipIf(process.platform === 'win32')('openXcodeDriveSession — the §B4.2 order', () => {
   it('records the key in owner.json BEFORE StartSession, and starts on the leased udid', async () => {
     const world = makeWorld();
     const session = await open(world);
@@ -293,7 +293,7 @@ describe('openXcodeDriveSession — an indeterminate StartSession (X-2)', () => 
   });
 });
 
-describe('verbs over the socket (§B4.5)', () => {
+describe.skipIf(process.platform === 'win32')('verbs over the socket (§B4.5)', () => {
   it('mobile-capture synthesizes with NO command and NO activation, and records a hashed copy in the ledger', async () => {
     const world = makeWorld();
     const session = await open(world);
@@ -396,7 +396,7 @@ describe('verbs over the socket (§B4.5)', () => {
   });
 });
 
-describe('pid pinning (§B4.6)', () => {
+describe.skipIf(process.platform === 'win32')('pid pinning (§B4.6)', () => {
   it('a relaunched app (different pid in its block) is exit 4 with the log tail', async () => {
     const world = makeWorld();
     const session = await open(world);
@@ -449,7 +449,7 @@ describe('pid pinning (§B4.6)', () => {
   });
 });
 
-describe('close() — the §B4.8 teardown', () => {
+describe.skipIf(process.platform === 'win32')('close() — the §B4.8 teardown', () => {
   it('ends the session, then stops the bridge, then removes the socket', async () => {
     const world = makeWorld();
     const session = await open(world);
