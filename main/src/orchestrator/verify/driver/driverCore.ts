@@ -202,6 +202,7 @@ ${MOBILE_USAGE}
   attest cdp <expression> <expected>
   attest window <titlePattern> <app>
   attest bundle
+  attest binding
   stop`;
 
 // ---------------------------------------------------------------------------
@@ -227,7 +228,16 @@ export type AttestCommand =
    * subcommand only ECHOES that record, so there is nothing for the agent to
    * pass — and therefore nothing for it to pass wrong.
    */
-  | { kind: 'attest'; channel: 'bundle' };
+  | { kind: 'attest'; channel: 'bundle' }
+  /**
+   * `serve-binding` (runbook-optional-verification.md §A1.2), argument-free for
+   * the same reason as `bundle`: the channel has no probe the agent could run —
+   * the HARNESS binds the leased port's listener to the serve group the driver
+   * recorded after the session. The subcommand only reports whether a serve was
+   * started through the driver at all, so the agent never loops on a self-check
+   * it cannot pass or fail by itself.
+   */
+  | { kind: 'attest'; channel: 'binding' };
 
 export type DriverCommand =
   | { kind: 'serve'; command: string }
@@ -247,6 +257,7 @@ export const ATTEST_KIND_BY_CHANNEL: Record<AttestCommand['channel'], Attestatio
   cdp: 'cdp-token',
   window: 'window-identity',
   bundle: 'bundle-identity',
+  binding: 'serve-binding',
 };
 
 /**
@@ -430,12 +441,17 @@ function parseAttestArgv(rest: string[]): ParseArgvResult {
         return { ok: false, message: 'attest bundle takes no arguments' };
       }
       return { ok: true, command: { kind: 'attest', channel: 'bundle' } };
+    case 'binding':
+      if (args.length !== 0) {
+        return { ok: false, message: 'attest binding takes no arguments' };
+      }
+      return { ok: true, command: { kind: 'attest', channel: 'binding' } };
     default:
       return {
         ok: false,
         message: channel
-          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window|bundle)`
-          : 'attest requires a channel: http|dom|cdp|window|bundle',
+          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window|bundle|binding)`
+          : 'attest requires a channel: http|dom|cdp|window|bundle|binding',
       };
   }
 }
@@ -1261,7 +1277,38 @@ async function evaluateAttestation(
     }
     case 'bundle':
       return evaluateBundleAttestation(artifactsDir, deps);
+    case 'binding':
+      return evaluateServeBindingAttestation(artifactsDir, deps);
   }
+}
+
+/**
+ * `serve-binding` — HARNESS-VERIFIED, so there is nothing here to compare
+ * (runbook-optional-verification.md §A1.2). The harness, after the session,
+ * requires the leased port's listener to be in the process group `serve`
+ * recorded, running the task's VERBATIM composed `serve.cmd`. All this can
+ * usefully tell the agent is whether that precondition exists yet: a serve the
+ * driver started (`serve.pid` recorded) → ok, saying the rest is the harness's;
+ * none → not ok, pointing at the one road that can verify.
+ */
+async function evaluateServeBindingAttestation(artifactsDir: string, deps: DriverDeps): Promise<AttestOutcome> {
+  let pid: number | null = null;
+  try {
+    pid = await deps.readPidFile(servePidFilePath(artifactsDir));
+  } catch {
+    pid = null;
+  }
+  if (pid === null) {
+    return {
+      ok: false,
+      detail:
+        'serve-binding: no serve was started through "$VERIFY_DRIVER serve" in this request — the harness can only bind a serve the driver started; run the task\'s serve.cmd verbatim through it',
+    };
+  }
+  return {
+    ok: true,
+    detail: `serve-binding: harness-verified after your session (the leased port's listener must be the serve group ${pid} the driver recorded, running the task's verbatim serve.cmd) — nothing further to self-check; leave that serve running`,
+  };
 }
 
 /**

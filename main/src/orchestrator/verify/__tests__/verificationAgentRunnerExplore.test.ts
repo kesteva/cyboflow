@@ -605,6 +605,43 @@ describe('evaluateAttestationFloorForMode', () => {
   it('explore: no declared channel stays uncapped', () => {
     expect(evaluateAttestationFloorForMode('explore', unserved, null, null, null).kind).toBe('uncapped');
   });
+
+  describe('a DECLARED serve-binding (§A1.2): the binding is the probe, in every mode', () => {
+    const SB: AttestationSpec = { kind: 'serve-binding' };
+    const sbServed = makeTask({ attestation: SB, serve: { cmd: SERVE_CMD } });
+    const sbUnserved = makeTask({ attestation: SB });
+    const boundProbe: HarnessAttestationResult = { verified: true, kind: 'serve-binding', detail: 'serve-binding: bound' };
+    const unboundProbe = (b: Extract<ServeBindingResult, { bound: false }>): HarnessAttestationResult => ({
+      verified: false,
+      kind: 'serve-binding',
+      detail: `${SERVE_BINDING_FAILED_PREFIX} [${b.failure}]: ${b.detail}`,
+    });
+
+    it.each(['pinned', 'legacy', 'explore'] as const)('%s: a held binding verifies as serve-binding', (mode) => {
+      expect(evaluateAttestationFloorForMode(mode, sbServed, SB, boundProbe, bound)).toEqual({
+        kind: 'verified',
+        channel: 'serve-binding',
+        detail: 'serve-binding: bound',
+      });
+    });
+
+    it('pinned: a foreign listener or an unbound serve is missing — the declared-channel rule (a pass fails)', () => {
+      expect(evaluateAttestationFloorForMode('pinned', sbServed, SB, unboundProbe(foreign), foreign).kind).toBe('missing');
+      expect(evaluateAttestationFloorForMode('pinned', sbServed, SB, unboundProbe(noPid), noPid).kind).toBe('missing');
+    });
+
+    it('explore: a foreign listener is foreign; an unbound serve is missing (capped)', () => {
+      expect(evaluateAttestationFloorForMode('explore', sbServed, SB, unboundProbe(foreign), foreign).kind).toBe('foreign');
+      expect(evaluateAttestationFloorForMode('explore', sbServed, SB, unboundProbe(noPid), noPid).kind).toBe('missing');
+    });
+
+    it.each(['pinned', 'legacy', 'explore'] as const)('%s: no composed serve.cmd can never verify — capped with the reason', (mode) => {
+      // Even a (mis-wired) verified probe cannot lift it: there is nothing to bind.
+      const floor = evaluateAttestationFloorForMode(mode, sbUnserved, SB, boundProbe, bound);
+      expect(floor.kind).toBe('uncapped');
+      expect(floor.detail).toContain('composed no serve.cmd');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1558,6 +1595,60 @@ describe('VerificationAgentRunner.run — explore web with NO declared channel (
     const { runner } = makeRunner(servedBy(SERVE_CMD));
     const result = await runner.run(makeReq({ executionMode: 'pinned', task: noChannel() }));
     expect(result.status).toBe('low_confidence');
+  });
+});
+
+describe('VerificationAgentRunner.run — a DECLARED serve-binding channel (§A1.2)', () => {
+  const SB: AttestationSpec = { kind: 'serve-binding' };
+  const declared = (overrides: Partial<VerificationTaskV1> = {}) =>
+    makeTask({ attestation: SB, serve: { cmd: SERVE_CMD }, ...overrides });
+
+  it.each(['pinned', 'explore'] as const)('%s: a bound composed serve passes without probing any channel', async (executionMode) => {
+    const { runner, attest } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(makeReq({ executionMode, task: declared() }));
+    expect(attest).not.toHaveBeenCalled();
+    expect(result.status).toBe('passed');
+  });
+
+  it('pinned: a FOREIGN listener fails the pass as a missing attestation (the pinned rule)', async () => {
+    const { runner } = makeRunner(foreignListener);
+    const result = await runner.run(makeReq({ executionMode: 'pinned', task: declared() }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('[port-owner]');
+  });
+
+  it('pinned: an unbound serve (nothing recorded) fails the pass as a missing attestation', async () => {
+    const { runner } = makeRunner();
+    const result = await runner.run(makeReq({ executionMode: 'pinned', task: declared() }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('[serve-pid]');
+  });
+
+  it.each(['pinned', 'explore'] as const)('%s: no composed serve.cmd is capped at low_confidence with the reason', async (executionMode) => {
+    const { runner } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(
+      makeReq({ executionMode, task: makeTask({ attestation: SB, target: { url: 'http://127.0.0.1:1/' } }) }),
+    );
+    expect(result.status).toBe('low_confidence');
+    expect(result.errorMessage).toContain('composed no serve.cmd');
+  });
+
+  it('explore: behaves as the undeclared binding-only pass — bound passes, foreign fails, unbound caps', async () => {
+    const cases: Array<[Partial<VerificationAgentRunnerDeps>, string]> = [
+      [servedBy(SERVE_CMD), 'passed'],
+      [foreignListener, 'failed'],
+      [{}, 'low_confidence'],
+    ];
+    for (const [deps, status] of cases) {
+      const declaredRun = await makeRunner(deps).runner.run(makeReq({ executionMode: 'explore', task: declared() }));
+      const undeclaredRun = await makeRunner(deps).runner.run(
+        makeReq({ executionMode: 'explore', task: declared({ attestation: undefined }) }),
+      );
+      expect(declaredRun.status).toBe(status);
+      expect(undeclaredRun.status).toBe(status);
+      expect(declaredRun.foreignSurface).toBe(undeclaredRun.foreignSurface);
+    }
   });
 });
 

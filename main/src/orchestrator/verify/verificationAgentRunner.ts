@@ -1219,14 +1219,19 @@ export const ATTESTATION_EXPLORE_CAP_MESSAGE = 'explore mode — capped at low_c
 export type AttestationFloorOutcome =
   /** The declared channel was probed and matched (or is true by construction). */
   /**
-   * `serve-binding` is EXPLORE-only (§A1.2, relaxed 2026-09-25): no channel was
-   * declared, but the kernel-truth binding held — the port's listener is in the
-   * process group the driver started for the VERBATIM composed `serve.cmd`.
+   * `serve-binding` (§A1.2): the kernel-truth binding held — the port's listener
+   * is in the process group the driver started for the VERBATIM composed
+   * `serve.cmd`. Reached by a DECLARED `serve-binding` spec in any mode, and in
+   * explore also by an undeclared channel (relaxed 2026-09-25).
    */
-  | { kind: 'verified'; channel: AttestationSpec['kind'] | 'serve-binding'; detail: string }
+  | { kind: 'verified'; channel: AttestationSpec['kind']; detail: string }
   /** A channel WAS declared but the harness's own probe did not verify it. */
   | { kind: 'missing'; detail: string }
-  /** No channel was declared at all — the pass is advisory, capped at low_confidence. */
+  /**
+   * No channel was declared at all — or a declared `serve-binding` on a task
+   * that composed no `serve.cmd`, which has nothing to bind and so is no channel
+   * either (§A1.2). The pass is advisory, capped at low_confidence.
+   */
   | { kind: 'uncapped'; detail: string }
   /**
    * EXPLORE only (§A1.2): the harness's probe verified, but explore does not let
@@ -1416,6 +1421,17 @@ export function serveBindingOnlyTarget(
   const probedPort = task.serve?.attach === 'cdp' ? ports.driverPort : ports.verifyPort;
   if (probedPort === null) return null;
   return { serveCmd, probedPort, portLever: ports.verifyPort };
+}
+
+/** True when the task composed a non-blank `serve.cmd` — the one thing `serve-binding` can bind (§A1.2). */
+export function hasComposedServeCmd(task: VerificationTaskV1): boolean {
+  const serveCmd = task.serve?.cmd;
+  return typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+}
+
+/** The verified detail of a held serve binding — one spelling for the declared and the undeclared case. */
+function serveBindingVerifiedDetail(binding: ServeBindingResult): string {
+  return `serve-binding: ${binding.detail}`;
 }
 
 /**
@@ -1684,6 +1700,16 @@ export function evaluateAttestationFloorForMode(
   probe: HarnessAttestationResult | null,
   binding: ServeBindingResult | null,
 ): AttestationFloorOutcome {
+  // A declared `serve-binding` (§A1.2) with no composed serve.cmd can never
+  // verify — there is no serve to bind — in ANY mode. It caps rather than
+  // fails: like an undeclared channel, it never had an identity to prove.
+  if (spec?.kind === 'serve-binding' && !hasComposedServeCmd(task)) {
+    return {
+      kind: 'uncapped',
+      detail:
+        'the task declared "serve-binding" but composed no serve.cmd, so there is no serve for the harness to bind — this channel can never verify without one',
+    };
+  }
   const base = evaluateAttestationFloor(spec, probe);
   if (mode !== 'explore') return base;
   if (binding !== null && !binding.bound && binding.foreignListener !== undefined) {
@@ -1693,11 +1719,11 @@ export function evaluateAttestationFloorForMode(
   // against a composed serve.cmd. What it cannot rule out is a composed command
   // that deliberately fronts another server — accepted so a runbook-less web
   // deliverable can pass at all (runbooks accelerate, never gate).
+  // A task that DECLARES `serve-binding` reaches the same verdict through
+  // evaluateAttestationFloor: its probe IS this binding (probeSurfaceIdentity).
   if (spec === null) {
-    const serveCmd = task.serve?.cmd;
-    const composedServe = typeof serveCmd === 'string' && serveCmd.trim().length > 0;
-    if (composedServe && binding !== null && binding.bound) {
-      return { kind: 'verified', channel: 'serve-binding', detail: `serve-binding: ${binding.detail}` };
+    if (hasComposedServeCmd(task) && binding !== null && binding.bound) {
+      return { kind: 'verified', channel: 'serve-binding', detail: serveBindingVerifiedDetail(binding) };
     }
     return base;
   }
@@ -1719,8 +1745,7 @@ export function evaluateAttestationFloorForMode(
     case 'http-endpoint':
     case 'dom-marker':
     case 'cdp-token': {
-      const serveCmd = task.serve?.cmd;
-      const composedServe = typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+      const composedServe = hasComposedServeCmd(task);
       if (composedServe && binding !== null && binding.bound) return base;
       return {
         kind: 'capped',
@@ -2837,14 +2862,17 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
    */
   private async bindServeIdentity(
     req: VerificationAgentRequest,
-    /** `null` = the explore binding-only case: a composed serve on the leased port. */
+    /**
+     * `null` = the explore binding-only case; a declared `serve-binding` binds
+     * the same way. Both need a composed serve on the leased port.
+     */
     spec: AttestationSpec | null,
     executionMode: VerificationExecutionMode,
     logger: LoggerLike | undefined,
   ): Promise<{ binding: ServeBindingResult; composed: boolean } | null> {
     const ports = { verifyPort: req.verifyPort, driverPort: req.verifyDriverPort };
     const target =
-      spec === null
+      spec === null || spec.kind === 'serve-binding'
         ? serveBindingOnlyTarget(req.task, ports)
         : serveBindingTarget(req.task, spec, ports, { explore: executionMode === 'explore' });
     if (target === null) return null;
@@ -2900,6 +2928,35 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       return { probe: null, binding: bound?.binding ?? null };
     }
     if (spec.kind === 'file-identity') return { probe: null, binding: null };
+    if (spec.kind === 'serve-binding') {
+      // §A1.2 — a DECLARED serve-binding has no channel probe: the binding IS
+      // the proof, in every mode. Its result becomes the probe the floor reads,
+      // so a held binding verifies, a foreign listener fails exactly as a
+      // port-mediated channel's short-circuit does, and nothing to bind (no
+      // composed serve.cmd or no leased port) is unverified.
+      const bound = await this.bindServeIdentity(req, spec, executionMode, logger);
+      if (bound === null) {
+        return {
+          binding: null,
+          probe: {
+            verified: false,
+            kind: 'serve-binding',
+            detail: 'serve-binding: the task composed no serve.cmd or holds no leased port, so there is no serve to bind',
+          },
+        };
+      }
+      const binding = bound.binding;
+      return {
+        binding,
+        probe: binding.bound
+          ? { verified: true, kind: 'serve-binding', detail: serveBindingVerifiedDetail(binding) }
+          : {
+              verified: false,
+              kind: 'serve-binding',
+              detail: `${SERVE_BINDING_FAILED_PREFIX} [${binding.failure}]: ${binding.detail}`,
+            },
+      };
+    }
     // (d2a) SERVE-IDENTITY BINDING — a PRECONDITION of the channel probe, not a
     // second opinion on it. The nonce proves a surface knows this request's
     // secret; the agent knows that secret too and chooses what the driver

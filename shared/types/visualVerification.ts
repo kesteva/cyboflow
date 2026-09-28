@@ -803,6 +803,17 @@ export function parseMobileAppSpec(
  *   - `'file-identity'`   — the degenerate pre-live path (`target.htmlPath`):
  *     identity BY CONSTRUCTION, because the runner itself writes/owns the
  *     path being opened. No live process, no nonce, nothing to race.
+ *   - `'serve-binding'`   — `web` / `cdp-app` (runbook-optional-verification.md
+ *     §A1.2): no channel probe at all — the harness's own serve-identity
+ *     binding IS the proof. The probed port's listener must be in the process
+ *     group the driver started for the task's VERBATIM composed `serve.cmd`, so
+ *     a task declaring it without a `serve.cmd` can never verify. The WEAKEST
+ *     port-mediated channel (identity rests on the port binding alone; a
+ *     composed command that deliberately fronts another server is the accepted
+ *     gap), but no weaker than a nonce channel in practice: the agent holds the
+ *     nonce, so the binding is what ties any served surface to the deliverable.
+ *     Recordable in a runbook entry so a web project that renders no nonce can
+ *     learn (§A5) and be pinned.
  *
  * See {@link isAttestationSpec} for the runtime guard.
  */
@@ -812,10 +823,11 @@ export type AttestationSpec =
   | { kind: 'cdp-token'; expression: string; expected: string }
   | { kind: 'window-identity'; titlePattern: string; app: string }
   | { kind: 'bundle-identity'; bundleId: string }
-  | { kind: 'file-identity' };
+  | { kind: 'file-identity' }
+  | { kind: 'serve-binding' };
 
 /**
- * The six AttestationSpec `kind` literals, for iteration (tests, UI, the roster
+ * The seven AttestationSpec `kind` literals, for iteration (tests, UI, the roster
  * table) without re-listing the union by hand.
  */
 export const ATTESTATION_KINDS: readonly AttestationSpec['kind'][] = [
@@ -825,9 +837,10 @@ export const ATTESTATION_KINDS: readonly AttestationSpec['kind'][] = [
   'window-identity',
   'bundle-identity',
   'file-identity',
+  'serve-binding',
 ] as const;
 
-/** True for one of AttestationSpec's six `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
+/** True for one of AttestationSpec's seven `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
 function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
   return (
     value === 'http-endpoint' ||
@@ -835,7 +848,8 @@ function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
     value === 'cdp-token' ||
     value === 'window-identity' ||
     value === 'bundle-identity' ||
-    value === 'file-identity'
+    value === 'file-identity' ||
+    value === 'serve-binding'
   );
 }
 
@@ -863,6 +877,7 @@ export function isAttestationSpec(v: unknown): v is AttestationSpec {
     case 'bundle-identity':
       return isNonEmptyString(v.bundleId);
     case 'file-identity':
+    case 'serve-binding':
       return true;
   }
 }
