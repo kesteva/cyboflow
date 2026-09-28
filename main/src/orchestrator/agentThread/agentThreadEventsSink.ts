@@ -22,7 +22,12 @@
 import type { EventRouter } from '../../../../shared/streamParser/eventRouter';
 import { derivePersistedEventType } from '../../../../shared/streamParser/derivers';
 import type { SpawnEventsSink } from '../../services/panels/claude/claudeCodeManager';
-import type { ClaudeStreamEvent, ResultEvent, UserEvent } from '../../../../shared/types/claudeStream';
+import type {
+  ClaudeStreamEvent,
+  ResultEvent,
+  SystemAssistantInterruptedEvent,
+  UserEvent,
+} from '../../../../shared/types/claudeStream';
 import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
 import { buildUserTextEvent } from '../programmatic/syntheticEvents';
 import type { AgentThreadDbStore } from './agentThreadDbStore';
@@ -151,6 +156,25 @@ export class AgentThreadEventsSink implements SpawnEventsSink {
       duration_ms: 0,
       num_turns: 0,
       result: message,
+    };
+    this.handleEvent(threadId, event);
+    return event;
+  }
+
+  /**
+   * Persist a user-initiated Stop as a synthetic `system/assistant_interrupted`
+   * marker, and return the event so the caller can publish it on live-tail —
+   * the "clean" sibling of {@link recordAssistantError}: `MessageProjection`
+   * renders it as a muted "Stopped" divider rather than the red error card
+   * `recordAssistantError` produces. Shaped as `system`, not `result` — a
+   * Stop is not a terminal turn outcome the way a result event's five real
+   * subtypes are, and reusing `result` would have required teaching every
+   * `is_error` consumer about a sixth, always-false-is_error subtype.
+   */
+  recordAssistantInterrupted(threadId: string): SystemAssistantInterruptedEvent {
+    const event: SystemAssistantInterruptedEvent = {
+      type: 'system',
+      subtype: 'assistant_interrupted',
     };
     this.handleEvent(threadId, event);
     return event;

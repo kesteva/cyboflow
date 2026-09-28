@@ -7,6 +7,8 @@
  *   - listMessages     : query    → UnifiedMessage[] (projection over agent_thread_events)
  *   - sendMessage      : mutation → { ok: true }   (one agent turn; optional
  *                        prompt-only `contextHint`, never persisted to the transcript)
+ *   - interruptTurn    : mutation → { interrupted: boolean } (the rail's Stop
+ *                        control; false when the thread is idle)
  *   - listProposals    : query    → AgentProposal[]
  *   - confirmProposal  : mutation → ConfirmProposalResult (the user's Confirm click)
  *   - dismissProposal  : mutation → { ok: true; dismissed }
@@ -212,6 +214,14 @@ export const agentThreadRouter = router({
     .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
       await requireService(ctx).sendMessage(input.threadId, input.text, input.contextHint, input.images);
       return { ok: true };
+    }),
+
+  /** The rail's Stop control: abort whatever turn is in flight for this
+   *  thread. `{ interrupted: false }` when idle — never an error. */
+  interruptTurn: protectedProcedure
+    .input(z.object({ threadId: z.string() }))
+    .mutation(async ({ ctx, input }): Promise<{ interrupted: boolean }> => {
+      return requireService(ctx).interruptTurn(input.threadId);
     }),
 
   /** List a thread's proposals oldest-first (all statuses). */

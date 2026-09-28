@@ -97,6 +97,26 @@ describe('SystemCompactBoundaryEvent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// SystemAssistantInterruptedEvent (synthetic-only — TASK-297's Stop marker)
+// ---------------------------------------------------------------------------
+
+describe('SystemAssistantInterruptedEvent', () => {
+  it('narrows the synthetic assistant_interrupted marker instead of falling through to __unknown__', () => {
+    const raw = { type: 'system', subtype: 'assistant_interrupted' };
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    if (event.type !== 'system' || event.subtype !== 'assistant_interrupted') {
+      throw new Error('Expected SystemAssistantInterruptedEvent');
+    }
+    expect(event.type).toBe('system');
+    expect(event.subtype).toBe('assistant_interrupted');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AssistantEvent
 // ---------------------------------------------------------------------------
 

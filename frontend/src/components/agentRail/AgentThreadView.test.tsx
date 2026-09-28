@@ -51,6 +51,7 @@ vi.mock('./ProposalCardList', () => ({
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
+const mockInterrupt = vi.fn().mockResolvedValue(undefined);
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
@@ -60,6 +61,7 @@ interface FakeAgentThreadState {
   thread: AgentThread | null;
   sending: boolean;
   sendMessage: typeof mockSendMessage;
+  interrupt: typeof mockInterrupt;
   proposals: AgentProposal[];
   liveEvents: StreamEvent[];
 }
@@ -70,6 +72,7 @@ vi.mock('../../stores/agentThreadStore', () => ({
       thread: mockThread,
       sending: mockSending,
       sendMessage: mockSendMessage,
+      interrupt: mockInterrupt,
       proposals: mockProposals,
       liveEvents: mockLiveEvents,
     }),
@@ -106,6 +109,7 @@ async function loadAgentThreadView(): Promise<ComponentType> {
 beforeEach(() => {
   vi.resetModules();
   mockSendMessage.mockClear();
+  mockInterrupt.mockClear();
   mockThread = null;
   mockSending = false;
   mockProposals = [];
@@ -197,6 +201,39 @@ describe('AgentThreadView — composer + chips wiring', () => {
     render(<AgentThreadView />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
+  });
+
+  it('while sending, the composer stays enabled and shows Stop (TASK-297)', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.getByTestId('agent-composer-input')).not.toBeDisabled();
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-composer-send')).not.toBeInTheDocument();
+  });
+
+  it('clicking Stop while sending calls store.interrupt', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.click(screen.getByTestId('agent-composer-stop'));
+
+    expect(mockInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('Esc while sending calls store.interrupt', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Escape' });
+
+    expect(mockInterrupt).toHaveBeenCalledTimes(1);
   });
 });
 

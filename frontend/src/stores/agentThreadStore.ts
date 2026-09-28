@@ -239,6 +239,16 @@ export interface AgentThreadState {
     text: string,
     opts?: { contextHint?: string; images?: AgentThreadImageAttachment[] },
   ) => Promise<void>;
+  /**
+   * The rail's Stop control (TASK-297): abort whatever turn is in flight.
+   * `sending` flips false once the interrupted `sendMessage` call settles
+   * (see the store doc header) — this action does not touch `sending`
+   * itself, it only fires the abort. A no-op call (nothing in flight) is
+   * harmless: the server returns `{ interrupted: false }` and `sending` was
+   * already false. Swallows failures (console.error) — same posture as
+   * `sendMessage`.
+   */
+  interrupt: () => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -419,6 +429,16 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
         // the live tail alone — see "Subscription self-healing" above.
         set((s) => ({ sending: false, liveTailTick: s.liveTailTick + 1 }));
         void refreshProposals(threadId);
+      }
+    },
+
+    interrupt: async () => {
+      const threadId = get().thread?.id;
+      if (threadId === undefined) return;
+      try {
+        await trpc.cyboflow.agentThread.interruptTurn.mutate({ threadId });
+      } catch (err: unknown) {
+        console.error('[agentThreadStore] interrupt failed:', err);
       }
     },
 

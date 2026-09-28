@@ -30,7 +30,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from 'react';
-import { CornerDownLeft, Paperclip, X } from 'lucide-react';
+import { CornerDownLeft, Paperclip, Square, X } from 'lucide-react';
 import { kbdHint } from '../../utils/platform';
 import {
   AGENT_THREAD_IMAGE_LIMITS,
@@ -47,8 +47,19 @@ export interface AgentComposerProps {
    * (e.g. AgentSuggestionChips) can keep a one-argument handler.
    */
   onSend: (text: string, images?: AgentThreadImageAttachment[]) => void;
-  /** Disabled while a turn is in flight, or before the thread has loaded. */
+  /** Disabled before the thread has loaded (there is nothing to send to yet).
+   *  A turn IN FLIGHT is `sending`, not `disabled` — the composer stays
+   *  typeable/focusable then so Esc can reach it (see `sending`). */
   disabled: boolean;
+  /**
+   * True while a turn is in flight (TASK-297's Stop control). The send glyph
+   * becomes Stop; `Esc` while focused also stops. Omit (or `false`) for a
+   * host with no interrupt seam yet — the composer then behaves exactly as
+   * before `sending` existed.
+   */
+  sending?: boolean;
+  /** Called by the Stop button / Esc while `sending`. Required when `sending` can be true. */
+  onStop?: () => void;
   /** Overrides the default placeholder (e.g. the onboarding guided host's
    *  follow-up prompt). Defaults to {@link PLACEHOLDER}. */
   placeholder?: string;
@@ -80,6 +91,8 @@ const COMPOSER_MAX_PX = COMPOSER_MAX_LINES * COMPOSER_LINE_HEIGHT_PX;
 export function AgentComposer({
   onSend,
   disabled,
+  sending = false,
+  onStop,
   placeholder = PLACEHOLDER,
   prefill,
   onPrefillConsumed,
@@ -199,7 +212,7 @@ export function AgentComposer({
 
   const submit = useCallback(() => {
     const text = value.trim();
-    if (disabled) return;
+    if (disabled || sending) return;
     if (text.length === 0 && images.length === 0) return;
     // Every held image already passed `isSendableImage` at attach time, so this
     // narrowing cannot drop one; the filter is the type-level proof of that.
@@ -210,16 +223,21 @@ export function AgentComposer({
     setValue('');
     setImages([]);
     setAttachError(null);
-  }, [value, images, disabled, onSend]);
+  }, [value, images, disabled, sending, onSend]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape' && sending) {
+      e.preventDefault();
+      onStop?.();
+      return;
+    }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit();
     }
   };
 
-  const canSend = !disabled && (value.trim().length > 0 || images.length > 0);
+  const canSend = !disabled && !sending && (value.trim().length > 0 || images.length > 0);
 
   return (
     // The thumbnail strip and the inline error sit ABOVE the input row inside the
@@ -293,24 +311,37 @@ export function AgentComposer({
         >
           <Paperclip className="h-3 w-3" />
         </button>
-        <button
-          type="button"
-          onClick={submit}
-          disabled={!canSend}
-          data-testid="agent-composer-send"
-          aria-label="Send"
-          title={`Send (${kbdHint('mod', 'Enter')})`}
-          className={
-            // `self-stretch` makes the button's height track the composer's content
-            // box — i.e. the auto-growing textarea — so it grows line-for-line with
-            // the text while its width stays fixed (px-1.5). The icon is centered.
-            canSend
-              ? 'flex shrink-0 items-center justify-center self-stretch border border-interactive bg-interactive px-1.5 text-[color:var(--color-text-on-interactive)] transition-[filter] hover:brightness-110'
-              : 'flex shrink-0 cursor-not-allowed items-center justify-center self-stretch border border-border-primary px-1.5 text-text-disabled opacity-50'
-          }
-        >
-          <CornerDownLeft className="h-3 w-3" />
-        </button>
+        {sending ? (
+          <button
+            type="button"
+            onClick={() => onStop?.()}
+            data-testid="agent-composer-stop"
+            aria-label="Stop"
+            title="Stop (Esc)"
+            className="flex shrink-0 items-center justify-center self-stretch border border-status-error bg-status-error/10 px-1.5 text-status-error transition-colors hover:bg-status-error/20"
+          >
+            <Square className="h-3 w-3" fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!canSend}
+            data-testid="agent-composer-send"
+            aria-label="Send"
+            title={`Send (${kbdHint('mod', 'Enter')})`}
+            className={
+              // `self-stretch` makes the button's height track the composer's content
+              // box — i.e. the auto-growing textarea — so it grows line-for-line with
+              // the text while its width stays fixed (px-1.5). The icon is centered.
+              canSend
+                ? 'flex shrink-0 items-center justify-center self-stretch border border-interactive bg-interactive px-1.5 text-[color:var(--color-text-on-interactive)] transition-[filter] hover:brightness-110'
+                : 'flex shrink-0 cursor-not-allowed items-center justify-center self-stretch border border-border-primary px-1.5 text-text-disabled opacity-50'
+            }
+          >
+            <CornerDownLeft className="h-3 w-3" />
+          </button>
+        )}
       </div>
     </div>
   );

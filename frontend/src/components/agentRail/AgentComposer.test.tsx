@@ -276,4 +276,62 @@ describe('AgentComposer', () => {
     expect(input).toHaveValue('seed text edited');
     expect(onConsumed).toHaveBeenCalledTimes(1);
   });
+
+  // ---------------------------------------------------------------------
+  // Stop (TASK-297): while `sending`, the send glyph becomes Stop, and Esc
+  // in the focused composer also stops. The textarea stays FOCUSABLE while
+  // sending (unlike `disabled`) — a disabled element cannot receive Esc.
+  // ---------------------------------------------------------------------
+
+  it('renders a Stop button instead of Send while sending, and the textarea stays enabled', () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} />);
+
+    expect(screen.queryByTestId('agent-composer-send')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-composer-input')).not.toBeDisabled();
+  });
+
+  it('clicking Stop calls onStop', () => {
+    const onStop = vi.fn();
+    render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={onStop} />);
+
+    fireEvent.click(screen.getByTestId('agent-composer-stop'));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('Esc in the focused composer calls onStop while sending', () => {
+    const onStop = vi.fn();
+    render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={onStop} />);
+
+    fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Escape' });
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('Esc is a no-op when not sending', () => {
+    const onStop = vi.fn();
+    render(<AgentComposer onSend={vi.fn()} disabled={false} onStop={onStop} />);
+
+    fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Escape' });
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it('Cmd+Enter does not send while sending (Send is replaced by Stop)', () => {
+    const onSend = vi.fn();
+    render(<AgentComposer onSend={onSend} disabled={false} sending onStop={vi.fn()} />);
+
+    const input = screen.getByTestId('agent-composer-input');
+    fireEvent.change(input, { target: { value: 'typed mid-turn' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('reverts to the Send button once sending clears', () => {
+    const { rerender } = render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} />);
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+
+    rerender(<AgentComposer onSend={vi.fn()} disabled={false} sending={false} onStop={vi.fn()} />);
+    expect(screen.queryByTestId('agent-composer-stop')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-composer-send')).toBeInTheDocument();
+  });
 });

@@ -74,12 +74,25 @@ function buildDb(): Database.Database {
  * session id) synchronously then resolves; 'throw' rejects with a message. Default
  * (empty queue) emits an init with a generated id.
  */
-type Behavior = { kind: 'init'; sessionId: string } | { kind: 'throw'; message: string };
+type Behavior =
+  | { kind: 'init'; sessionId: string }
+  | { kind: 'throw'; message: string }
+  /** Emits an init, then hangs until `abortInFlightTurn` settles it — the
+   *  shape an interruptible in-flight turn needs (a real turn does not
+   *  resolve `spawnCliProcess` until abort/completion). */
+  | { kind: 'hang'; sessionId: string };
 
 class FakeManager implements AgentSpawnManagerLike {
   private readonly emitter = new EventEmitter();
   readonly calls: AgentSpawnOptions[] = [];
   private readonly behaviors: Behavior[] = [];
+  /** spawnKeys `abortInFlightTurn` was called with, in order. */
+  readonly abortCalls: string[] = [];
+  private pendingHang: { resolve: () => void; reject: (err: unknown) => void } | null = null;
+  /** When set, the NEXT `abortInFlightTurn` rejects the hung spawn with this
+   *  message instead of resolving it cleanly — both real managers currently
+   *  resolve cleanly on abort, but AgentThreadService must handle either. */
+  abortRejectMessage: string | null = null;
 
   queueInit(sessionId: string): void {
     this.behaviors.push({ kind: 'init', sessionId });
@@ -87,6 +100,10 @@ class FakeManager implements AgentSpawnManagerLike {
 
   queueThrow(message: string): void {
     this.behaviors.push({ kind: 'throw', message });
+  }
+
+  queueHang(sessionId: string): void {
+    this.behaviors.push({ kind: 'hang', sessionId });
   }
 
   async spawnCliProcess(options: AgentSpawnOptions): Promise<void> {
@@ -105,6 +122,12 @@ class FakeManager implements AgentSpawnManagerLike {
       data: { type: 'system', subtype: 'init', session_id: behavior.sessionId },
       timestamp: new Date(),
     });
+    if (behavior.kind === 'hang') {
+      await new Promise<void>((resolve, reject) => {
+        this.pendingHang = { resolve, reject };
+      });
+      return;
+    }
     // A follow-up non-init event to exercise the live-tail publish path.
     this.emitter.emit('output', {
       panelId: options.panelId,
@@ -113,6 +136,20 @@ class FakeManager implements AgentSpawnManagerLike {
       data: { type: 'assistant', message: { role: 'assistant', content: 'ok' } },
       timestamp: new Date(),
     });
+  }
+
+  async abortInFlightTurn(spawnKey: string): Promise<void> {
+    this.abortCalls.push(spawnKey);
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    if (pending === null) return;
+    if (this.abortRejectMessage !== null) {
+      const message = this.abortRejectMessage;
+      this.abortRejectMessage = null;
+      pending.reject(new Error(message));
+    } else {
+      pending.resolve();
+    }
   }
 
   /**
@@ -539,6 +576,82 @@ describe('AgentThreadService', () => {
       // Only the failed spawn — no fresh retry — and the id survives.
       expect(h.manager.calls).toHaveLength(2);
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
+    });
+  });
+
+  describe('interruptTurn', () => {
+    it('is a no-op when the thread is idle', async () => {
+      const thread = h.service.ensureGlobalThread();
+      await expect(h.service.interruptTurn(thread.id)).resolves.toEqual({ interrupted: false });
+      expect(h.manager.abortCalls).toHaveLength(0);
+    });
+
+    it('aborts an in-flight turn: sendMessage resolves cleanly, a "Stopped" marker is recorded, no error event', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      // Let the spawn actually start (and register itself in-flight) before interrupting.
+      await Promise.resolve();
+
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: true });
+      expect(h.manager.abortCalls).toEqual([`agent:${thread.id}`]);
+
+      // The abort resolves the manager's spawn cleanly (mirrors both real
+      // managers' current abort behaviour) — sendMessage must resolve, not reject.
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user', 'system']);
+      const persisted = JSON.parse(rows[1].payloadJson) as { type: string; subtype: string };
+      expect(persisted.type).toBe('system');
+      expect(persisted.subtype).toBe('assistant_interrupted');
+    });
+
+    it('an interrupt that surfaces as a resume-shaped rejection is still recorded as Stopped, never a stale-resume retry', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // Establish a stored resume id first.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      h.manager.queueHang('sess-2');
+      const sendPromise = h.service.sendMessage(thread.id, 'second');
+      await Promise.resolve();
+
+      // A hypothetical manager that rejects an aborted turn with a
+      // resume-shaped message must not be misread as a stale-resume failure.
+      h.manager.abortRejectMessage = 'No conversation found with session ID sess-1';
+      await h.service.interruptTurn(thread.id);
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // No third (retry) spawn call — the interrupt short-circuited before the
+      // stale-resume branch could fire.
+      expect(h.manager.calls).toHaveLength(2);
+      const rows = h.store.listEvents(thread.id);
+      // No 'result' row at all — a genuine error would have recorded one via
+      // recordSpawnFailure; the interrupt path never reaches it.
+      expect(rows.filter((r) => r.eventType === 'result')).toHaveLength(0);
+      const interrupted = rows.filter((r) => r.eventType === 'system');
+      expect(interrupted).toHaveLength(1);
+      expect(JSON.parse(interrupted[0].payloadJson).subtype).toBe('assistant_interrupted');
+    });
+
+    it('aborts the manager that actually hosts the turn, even after a runtime switch mid-turn', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'claude-sdk';
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'hello');
+      await Promise.resolve();
+
+      // Settings flips to Codex WHILE the Claude turn is still in flight.
+      h.runtime.value = 'codex-sdk';
+      await h.service.interruptTurn(thread.id);
+
+      expect(h.manager.abortCalls).toEqual([`agent:${thread.id}`]);
+      expect(h.codexManager.abortCalls).toHaveLength(0);
+      await expect(sendPromise).resolves.toBeUndefined();
     });
   });
 

@@ -231,6 +231,21 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 2b. system/assistant_interrupted (TASK-297: the rail's Stop control)
+  // -------------------------------------------------------------------------
+
+  it('projects system/assistant_interrupted to a muted "Stopped" system message, never the error card', () => {
+    const result = projection.project({ type: 'system', subtype: 'assistant_interrupted' });
+
+    expect(result).not.toBeNull();
+    const msg = result as UnifiedMessage;
+    expect(msg.role).toBe('system');
+    expect(msg.metadata?.systemSubtype).toBe('assistant_interrupted');
+    expect(msg.segments).toHaveLength(1);
+    expect(msg.segments[0]).toEqual({ type: 'text', content: 'Stopped' });
+  });
+
+  // -------------------------------------------------------------------------
   // 3. assistant with text
   // -------------------------------------------------------------------------
 

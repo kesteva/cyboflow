@@ -43,6 +43,7 @@ export function AgentThreadView({
   const thread = useAgentThreadStore((s) => s.thread);
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
+  const interrupt = useAgentThreadStore((s) => s.interrupt);
   const proposals = useAgentThreadStore((s) => s.proposals);
   const composerDraft = useAgentThreadStore((s) => s.composerDraft);
   const setComposerDraft = useAgentThreadStore((s) => s.setComposerDraft);
@@ -136,7 +137,9 @@ export function AgentThreadView({
           {variant === 'rail' && <AgentSuggestionChips onSend={handleSend} disabled={sending} />}
           <AgentComposer
             onSend={handleSend}
-            disabled={sending || thread === null}
+            disabled={thread === null}
+            sending={sending}
+            onStop={() => void interrupt()}
             placeholder={composerPlaceholder}
             prefill={composerDraft}
             onPrefillConsumed={() => setComposerDraft(null)}

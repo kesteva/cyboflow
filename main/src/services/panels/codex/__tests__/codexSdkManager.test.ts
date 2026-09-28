@@ -774,6 +774,83 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
+  it('abortInFlightTurn interrupts an active turn by run id (the global-assistant Stop control)', async () => {
+    const db = createDb();
+    try {
+      let markTurnStarted!: () => void;
+      const turnStarted = new Promise<void>((resolve) => {
+        markTurnStarted = resolve;
+      });
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(markTurnStarted, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        if (method === 'turn/interrupt') return {};
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const spawn = manager.spawnCliProcess({
+        panelId: 'panel:agent-thread-1',
+        sessionId: 'panel:agent-thread-1',
+        runId: 'agent:thread-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'wait',
+      });
+      await turnStarted;
+      await manager.abortInFlightTurn('agent:thread-1');
+      await spawn;
+
+      const client = getClient();
+      expect(client.requests).toContainEqual({
+        method: 'turn/interrupt',
+        params: { threadId: 'codex-thread-1', turnId: 'turn-1' },
+      });
+      expect(client.stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn is a no-op when nothing is in flight for that identity', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method) => {
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      // Idle — never spawned. Must not throw, and must not touch any client.
+      await expect(manager.abortInFlightTurn('nobody-home')).resolves.toBeUndefined();
+      expect(getClient).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn leaves a warm-parked entry (no turn in flight) untouched — a later resume still reuses it', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients[0].stop).not.toHaveBeenCalled(); // parked, not closed
+
+      await manager.abortInFlightTurn('run-1');
+      expect(clients[0].stop).not.toHaveBeenCalled(); // still parked — nothing was in flight
+
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(1); // reused the SAME parked client, no cold respawn
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('rejects API-key auth before creating a thread', async () => {
     const db = createDb();
     try {

@@ -15,6 +15,7 @@ import type { StreamEvent } from '../../utils/cyboflowApi';
 let mockGetThreadQuery: ReturnType<typeof vi.fn>;
 let mockListProposalsQuery: ReturnType<typeof vi.fn>;
 let mockSendMessageMutate: ReturnType<typeof vi.fn>;
+let mockInterruptTurnMutate: ReturnType<typeof vi.fn>;
 let mockConfirmProposalMutate: ReturnType<typeof vi.fn>;
 let mockDismissProposalMutate: ReturnType<typeof vi.fn>;
 let mockOnThreadEventSubscribe: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ vi.mock('../../trpc/client', () => ({
         getThread: { get query() { return mockGetThreadQuery; } },
         listProposals: { get query() { return mockListProposalsQuery; } },
         sendMessage: { get mutate() { return mockSendMessageMutate; } },
+        interruptTurn: { get mutate() { return mockInterruptTurnMutate; } },
         confirmProposal: { get mutate() { return mockConfirmProposalMutate; } },
         dismissProposal: { get mutate() { return mockDismissProposalMutate; } },
         onThreadEvent: { get subscribe() { return mockOnThreadEventSubscribe; } },
@@ -102,6 +104,7 @@ beforeEach(() => {
   mockGetThreadQuery = vi.fn().mockResolvedValue(makeThread());
   mockListProposalsQuery = vi.fn().mockResolvedValue([]);
   mockSendMessageMutate = vi.fn().mockResolvedValue({ ok: true });
+  mockInterruptTurnMutate = vi.fn().mockResolvedValue({ interrupted: true });
   mockConfirmProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: false });
   mockDismissProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: true });
   mockOnThreadEventUnsubscribe = vi.fn();
@@ -527,6 +530,55 @@ describe('sendMessage', () => {
 
     expect(useAgentThreadStore.getState().sending).toBe(false);
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interrupt — TASK-297's Stop control
+// ---------------------------------------------------------------------------
+
+describe('interrupt', () => {
+  it('calls interruptTurn.mutate with the current thread id', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+
+    await useAgentThreadStore.getState().interrupt();
+
+    expect(mockInterruptTurnMutate).toHaveBeenCalledWith({ threadId: 'thread-1' });
+  });
+
+  it('is a no-op (does not call the mutation) before the thread has loaded', async () => {
+    await useAgentThreadStore.getState().interrupt();
+    expect(mockInterruptTurnMutate).not.toHaveBeenCalled();
+  });
+
+  it('swallows a rejected mutation (console.error, does not throw)', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    mockInterruptTurnMutate = vi.fn().mockRejectedValue(new Error('no live turn'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(useAgentThreadStore.getState().interrupt()).resolves.toBeUndefined();
+
+    errSpy.mockRestore();
+  });
+
+  it('the resulting sendMessage settling is what actually clears `sending` — interrupt itself never touches it', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    let resolveSend: (() => void) | undefined;
+    mockSendMessageMutate = vi.fn().mockReturnValue(
+      new Promise<{ ok: true }>((resolve) => {
+        resolveSend = () => resolve({ ok: true });
+      }),
+    );
+
+    const sendPromise = useAgentThreadStore.getState().sendMessage('do something long');
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+
+    await useAgentThreadStore.getState().interrupt();
+    expect(useAgentThreadStore.getState().sending).toBe(true); // interrupt alone does not clear it
+
+    resolveSend?.(); // simulates the server settling the interrupted sendMessage call
+    await sendPromise;
+    expect(useAgentThreadStore.getState().sending).toBe(false);
   });
 });
 
