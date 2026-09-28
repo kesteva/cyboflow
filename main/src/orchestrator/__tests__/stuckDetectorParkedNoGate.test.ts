@@ -16,7 +16,7 @@ import { StuckDetector, type ClaudeManagerLike } from '../stuckDetector';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
-import { buildReviewInboxDb, seedInboxRun, runStatus } from '../__test_fixtures__/reviewInboxTestDb';
+import { buildReviewInboxDb as buildInboxFixtureDb, seedInboxRun, runStatus } from '../__test_fixtures__/reviewInboxTestDb';
 import type Database from 'better-sqlite3';
 
 afterEach(() => {
@@ -26,6 +26,17 @@ afterEach(() => {
 const STALE_THRESHOLD_MS = 45 * 60 * 1000;
 const STALE_AGO = new Date(Date.now() - (STALE_THRESHOLD_MS + 60 * 1000)).toISOString();
 const FRESH_AGO = new Date(Date.now() - 60 * 1000).toISOString();
+
+/**
+ * The inbox fixture's migration set predates execution_model (032), which
+ * isLatestRunTurnCompleted reads to exempt programmatic runs. Added locally,
+ * as runRecovery.test.ts does, rather than widening the shared fixture.
+ */
+function buildReviewInboxDb(): Database.Database {
+  const db = buildInboxFixtureDb();
+  db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
+  return db;
+}
 
 function makeClaudeManager(active: Set<string> = new Set()): ClaudeManagerLike {
   return { hasActiveRunForId: (runId) => active.has(runId) };
@@ -264,6 +275,33 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
     await detector.scan();
 
     expect(runStatus(db, 'run-live-long-turn')).toBe('running');
+    expect(events).toHaveLength(0);
+  });
+
+  // A programmatic walk is not one conversation: a step's (or a fan-out lane's)
+  // `result` row does not prove the walk ended — the next step, or a sibling
+  // lane in a quiet tool call, can still be live under the same run_id. While
+  // the executor holds the run, the rung must leave it alone.
+  it('does NOT fire on a live programmatic run whose last row is one step/lane result', async () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-programmatic', 'running');
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-programmatic');
+    seedRawEvent(db, 'run-programmatic', STALE_AGO, 'result');
+
+    const emitter = new EventEmitter();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e) => events.push(e as StuckDetectedEvent));
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(new Set(['run-programmatic'])),
+      emitter,
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(runStatus(db, 'run-programmatic')).toBe('running');
     expect(events).toHaveLength(0);
   });
 

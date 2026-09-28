@@ -407,12 +407,11 @@ export const ADDRESS_REVIEW_STEP_ID = 'address-review';
  * `workflowPromptRenderer.ts`'s per-provider adapter envelopes: Claude keeps
  * the raw "AskUserQuestion" wording the workflow bodies are authored with,
  * while Codex/OMP/pi are all told to redirect that instruction to
- * `cyboflow_request_user_input` instead. A stock chat message composed
- * without this (TASK-299 attempt 2) told every runtime to call a tool named
- * "AskUserQuestion" — a tool Codex (and every other non-Claude MCP runtime)
- * does not have, so the agent would silently ask in plain chat instead of
- * opening a real host gate, exactly the failure `renderWorkflowPromptForRuntime`
- * exists to prevent for the workflow body itself.
+ * `cyboflow_request_user_input` instead. Naming "AskUserQuestion" to a
+ * runtime that does not have it (Codex and every other non-Claude MCP
+ * runtime) makes the agent silently ask in plain chat instead of opening a
+ * real host gate — the failure `renderWorkflowPromptForRuntime` exists to
+ * prevent for the workflow body itself.
  */
 function addressReviewGateToolName(runtime: WorkflowRunStorableRuntime): string {
   return providerForRuntime(runtime) === 'claude' ? 'AskUserQuestion' : 'cyboflow_request_user_input';
@@ -437,7 +436,7 @@ function addressReviewGateToolName(runtime: WorkflowRunStorableRuntime): string 
  * AskUserQuestion... do NOT self-approve, and do NOT merge to main
  * yourself") — repeated here rather than assumed-recalled, since this message
  * may land long after that original brief scrolled out of the agent's
- * effective context. `runtime` (TASK-299 attempt 3) picks the gate tool name
+ * effective context. `runtime` picks the gate tool name
  * via {@link addressReviewGateToolName} so a Codex/OMP/pi agent is told to
  * call a tool it actually has.
  */
@@ -490,7 +489,7 @@ export type AddressReviewIneligibleReason =
  * `addressReviewFindings`'s result: rewindRunHandler's own shape, PLUS the
  * mutation's own `noOp` reasons (`'in_progress'` — address-review is already
  * the live current step, so the request is refused rather than restarting
- * in-flight repair work; `'parked'` — TASK-299 attempt 3, a handed-over run
+ * in-flight repair work; `'parked'` — a handed-over run
  * whose execute() call is still holding its per-run queue slot open past its
  * last completed turn, so nothing can be delivered OR safely queued right
  * now), PLUS the handed-over-run chat-delivery outcomes (TASK-299):
@@ -559,8 +558,7 @@ function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
  * `monitor.send` would resolve `{ delivered: false }` and silently drop the
  * request — the exact "dead CTA" failure mode this task exists to fix.
  *
- * Attempt 3's fix: `row`'s live-turn state is read BEFORE `nudgeRunHandler` is
- * ever called. `nudgeRunHandler`'s own guard runs INSIDE the per-run queue
+ * `row`'s live-turn state is read BEFORE `nudgeRunHandler` is ever called. `nudgeRunHandler`'s own guard runs INSIDE the per-run queue
  * (`runQueues.getOrCreate(runId).add(...)`), and `RunExecutor.execute()` HOLDS
  * that exact queue slot for the run's ENTIRE programmatic walk — including
  * while parked at a human gate (see handoverRunHandler.ts's header note). So
@@ -3052,21 +3050,17 @@ export const runsRouter = router({
    *     honestly refuse instead of silently swallowing it; reopen/cancel it
    *     via the review queue, then send again);
    *   - running with no live execution AND no pending approval/question →
-   *     { noOp: 'parked' } (TASK-300 attempt 2: the SAME shape 'stuck' answers,
-   *     caught the INSTANT it is submitted rather than waiting on the
-   *     StuckDetector's 45-minute staleness grace period — that period exists
-   *     to avoid escalating a run merely mid-step, but a message submitted
-   *     THIS SECOND has nothing to wait for; there is no drain seam coming);
-   *     ALSO returned (TASK-300 attempt 4) when execution IS reported live but
-   *     the run's LATEST raw_events row is already a turn-result event —
-   *     hasActiveExecution() only proves execute() has not returned, not that
-   *     a turn is still producing anything; a detached background child the
-   *     agent spawned (e.g. a left-running dev server inheriting stdio) can
-   *     keep that promise pending forever after the turn has actually ended.
-   *     `isLatestRunTurnCompleted()` (runQueries.ts) answers this from the
-   *     persisted event log itself rather than from event-recency staleness —
-   *     no 45-minute grace period, since a `result` row proves the turn is
-   *     over the instant it lands, however fresh;
+   *     { noOp: 'parked' } (TASK-300: the SAME shape 'stuck' answers, caught
+   *     the INSTANT it is submitted rather than after the StuckDetector's
+   *     45-minute grace period — there is no drain seam coming); ALSO
+   *     returned when execution IS reported live but
+   *     `isLatestRunTurnCompleted()` (runQueries.ts) says the run's last turn
+   *     already ended — hasActiveExecution() only proves execute() has not
+   *     returned, and a detached child the agent spawned (e.g. a dev server
+   *     inheriting stdio) can hold it pending forever after the turn ended.
+   *     That helper is always false for a programmatic run (a step's or
+   *     lane's `result` does not end the walk), so a live programmatic walk
+   *     still queues;
    *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
    *     (those rested states use runs.nudge / runs.resume / the question gate,
    *     not this queue path);
@@ -3110,18 +3104,10 @@ export const runsRouter = router({
         return { noOp: true, reason: 'not_running' };
       }
 
-      // 'parked' (visual-verify fix, TASK-300 attempt 2): the StuckDetector's
-      // parked_no_gate rung only fires once a run's last raw_events row is
-      // 45 minutes stale — a deliberate grace period so it does not escalate
-      // a run that is merely mid-step. That grace period means a run in
-      // EXACTLY this shape (status='running', no live turn, no gate) can sit
-      // for up to 45 minutes with queueInput still answering `{ queued: true
-      // }`, even though nothing can possibly drain the buffer during that
-      // window. Check the SAME "no live turn, no gate" condition here with NO
-      // staleness grace period — hasActiveExecution is a real-time signal
-      // (not a stale event-recency proxy), so there is no legitimate
-      // in-progress case it could misclassify: a run truly mid-turn, or
-      // resting at a genuine open gate, always reports it true.
+      // 'parked': the StuckDetector's parked_no_gate rung waits out a
+      // 45-minute grace period, during which a run with no live turn and no
+      // gate would otherwise keep answering `{ queued: true }` into a buffer
+      // nothing can drain. Check the SAME condition here with no grace period.
       if (run.status === 'running') {
         const hasGate = ctx.db
           .prepare(
@@ -3132,23 +3118,12 @@ export const runsRouter = router({
           .get(input.runId, input.runId) as { hasGate: number };
         if (!hasGate.hasGate) {
           const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
-          // (visual-verify fix, TASK-300 attempt 4): hasActiveExecution() is
-          // "execute()/executeProgrammatic has not returned yet" — NOT "a
-          // turn is actively generating". The observed run reproduced this
-          // gap exactly: the agent's turn ended (its final SDK message is
-          // already the last raw_events row), but a detached background
-          // child it spawned (e.g. `pnpm dev`) inherited stdio and kept the
-          // SDK subprocess's stdout pipe open, so the query() iterator never
-          // drained and execute()'s await never returned — hasActiveExecution
-          // reports true FOREVER even though nothing further will ever be
-          // produced. Event-recency staleness (attempts 2/3's fallback) is
-          // the wrong tool for this: it conflates "the turn ended" with "no
-          // events for N minutes", which is ALSO true of a run that is
-          // merely mid-step on a slow tool call. Read the completed-turn
-          // signal directly off the persisted event log instead — a `result`
-          // row proves the turn is over the moment it lands, at any age —
-          // so a message is only genuinely queueable when the executor is
-          // live AND the last event is NOT a turn-result.
+          // hasActiveExecution() means "execute() has not returned", not "a
+          // turn is generating": a detached child the agent spawned (e.g.
+          // `pnpm dev` inheriting stdio) can keep it true forever after the
+          // turn ended. So a message is queueable only when the executor is
+          // live AND the last turn has not ended (see isLatestRunTurnCompleted
+          // for why that is always false for a programmatic run).
           const turnCompleted = isLatestRunTurnCompleted(ctx.db, input.runId);
           if (!hasLiveTurn || turnCompleted) {
             return { noOp: true, reason: 'parked' };
@@ -3249,12 +3224,14 @@ export const runsRouter = router({
    * disabled (with an explanatory tooltip) instead of letting the human click
    * it and hit a `noOp` reason.
    *
-   * Checked in this order (TASK-299 attempt 2 — a truly terminal status and a
-   * flow with no `address-review` step disable the CTA even for a handed-over
-   * run; the earlier ordering let `'handed_over'` short-circuit both):
+   * Checked in this order (a truly terminal status and a flow with no
+   * `address-review` step disable the CTA even for a handed-over run, so both
+   * precede the `'handed_over'` check):
    *   1. missing row, or a genuinely TERMINAL status (`canceled` / `failed` /
    *      `completed`) → 'completed' — a handed-over run whose status has
    *      since gone terminal has no live chat left to deliver into either.
+   *      A `failed` PROGRAMMATIC run is exempt: rewindRunHandler re-drives a
+   *      failed step, so it falls through and stays eligible.
    *   2. the run's FROZEN definition (resolveRunFrozenSpec, the same source of
    *      truth rewindRunHandler validates against — never the live
    *      workflows.spec_json) has no `address-review` step (e.g. a quick
@@ -3302,7 +3279,12 @@ export const runsRouter = router({
       // TRUE for it regardless of whether it was ever handed over (a
       // handed-over run whose status has since flipped to terminal has no
       // live chat left to deliver into either).
-      if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(row.status)) {
+      // EXCEPT a programmatic run in a status rewindRunHandler still re-drives
+      // (REWINDABLE_STATUSES includes 'failed'): re-driving a step that died is
+      // exactly what the rewind path is for, so a failed programmatic run keeps
+      // its eligibility and falls through to the checks below.
+      const rewindableProgrammatic = row.execution_model === 'programmatic' && REWINDABLE_STATUSES.has(row.status);
+      if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(row.status) && !rewindableProgrammatic) {
         return { eligible: false, reason: 'completed' };
       }
       // Checked BEFORE isHandedOverRun / the programmatic fold below: the

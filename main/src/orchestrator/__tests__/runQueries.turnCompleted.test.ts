@@ -19,6 +19,9 @@ afterEach(() => {
 
 function freshDb(): Database.Database {
   db = createTestDb();
+  // GATE_SCHEMA predates execution_model (032), which the helper reads to
+  // exempt programmatic runs.
+  db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
   return db;
 }
 
@@ -61,6 +64,22 @@ describe('isLatestRunTurnCompleted', () => {
     seedRawEvent(database, runId, 'assistant');
 
     expect(isLatestRunTurnCompleted(database, runId)).toBe(false);
+  });
+
+  it('is false for a PROGRAMMATIC run even when the latest row is a result (one step/lane ended, not the walk)', () => {
+    const database = freshDb();
+    const { runId } = seedRun(database);
+    database.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run(runId);
+    seedRawEvent(database, runId, 'assistant');
+    seedRawEvent(database, runId, 'result');
+
+    expect(isLatestRunTurnCompleted(database, runId)).toBe(false);
+  });
+
+  it('is false for an unknown run id', () => {
+    const database = freshDb();
+
+    expect(isLatestRunTurnCompleted(database, 'missing-run')).toBe(false);
   });
 
   it('only looks at the LATEST row, not whether a result ever appeared', () => {

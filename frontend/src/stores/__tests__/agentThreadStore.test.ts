@@ -272,6 +272,30 @@ describe('init()', () => {
     expect(mockTurnStateQuery).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores a stale turnState inFlight:false answer when a LOCAL send started while the query was in flight (Send must not re-enable mid-turn)', async () => {
+    let resolveTurnState: ((v: { inFlight: boolean }) => void) | undefined;
+    mockTurnStateQuery = vi.fn().mockReturnValue(
+      new Promise<{ inFlight: boolean }>((resolve) => {
+        resolveTurnState = resolve;
+      }),
+    );
+    // The local turn stays in flight for the whole test.
+    mockSendMessageMutate = vi.fn().mockReturnValue(new Promise(() => {}));
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(mockTurnStateQuery).toHaveBeenCalled());
+
+    // The thread is usable while turnState is pending — the user sends.
+    void useAgentThreadStore.getState().sendMessage('hello');
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+
+    // The query's answer predates the send reaching the server.
+    resolveTurnState?.({ inFlight: false });
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().loading).toBe(false));
+
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+  });
+
   it('reconciles a hydrated `sending` flag by polling turnState until it reports idle, when no terminal event ever arrives on this renderer', async () => {
     vi.useFakeTimers();
     let calls = 0;

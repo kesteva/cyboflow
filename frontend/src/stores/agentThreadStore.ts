@@ -278,6 +278,12 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
   // via its own promise + `finally`.
   let hydratedSending = false;
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  // Bumped by every local `sendMessage`. Bootstrap's `turnState` hydration
+  // reads it before the query and drops the answer if it changed: once this
+  // renderer has started its own turn, it owns `sending` via that promise, and
+  // a `turnState` answer computed before the send reached the server (a stale
+  // `inFlight: false`) must not re-enable Send mid-turn.
+  let localSendEpoch = 0;
   const stopReconcile = (): void => {
     hydratedSending = false;
     if (reconcileTimer !== null) {
@@ -423,6 +429,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           // the server's own record of what is actually in flight, so a turn
           // that started before this mount still shows Stop, not Send.
           const epochBeforeQuery = terminalEpoch;
+          const sendEpochBeforeQuery = localSendEpoch;
           try {
             const { inFlight } = await trpc.cyboflow.agentThread.turnState.query({
               threadId: thread.id,
@@ -434,6 +441,9 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
             // envelope having already arrived by now. Trust the query's
             // answer only when nothing terminal has landed in the meantime.
             if (terminalEpoch !== epochBeforeQuery) return;
+            // A local send started while the query was in flight: this
+            // renderer now owns `sending`, and the answer may predate it.
+            if (localSendEpoch !== sendEpochBeforeQuery) return;
             set({ sending: inFlight });
             if (inFlight) {
               // Reconcile: this renderer holds no `sendMessage` promise for
@@ -519,8 +529,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       if (pendingHint !== null) set({ pendingContextHint: null });
       // This renderer is about to own `sending` via its own promise +
       // `finally` below — cancel any hydration-driven reconcile poll left
-      // over from bootstrap so the two mechanisms never race each other.
+      // over from bootstrap so the two mechanisms never race each other, and
+      // invalidate any bootstrap `turnState` hydration still in flight.
       stopReconcile();
+      localSendEpoch += 1;
       // A new turn starts the live tail clean — a prior turn's trailing
       // envelopes (if any survived without a `result`, e.g. a cancelled turn)
       // must not bleed into this one's progressive render.

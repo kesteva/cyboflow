@@ -1767,6 +1767,40 @@ describe('cyboflow.runs.queueInput — parked despite hasActiveExecution() repor
     }
   });
 
+  it('still queues for a LIVE programmatic run whose last row is one step/lane result — the walk has not ended', async () => {
+    const db = createTestDb({
+      disableForeignKeys: true,
+      includeWorkflowRunTaskColumns: true,
+      includeQuestionsTable: true,
+    });
+    const { runId } = seedRun(db, { status: 'running' });
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run(runId);
+    // Lane A's turn ended; lane B (same run_id, different spawn) is still live.
+    db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
+       VALUES (?, 'result', '{"is_error":false}', ?)`,
+    ).run(runId, new Date().toISOString());
+
+    const queueInput = vi.fn<(id: string, text: string) => void>();
+    setQueueInputDeps({
+      runExecutor: {
+        queueInput,
+        dequeueInput: vi.fn().mockReturnValue(false),
+        hasActiveExecution: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.queueInput({ runId, text: 'keep going' });
+
+      expect(result).toEqual({ queued: true });
+      expect(queueInput).toHaveBeenCalledWith(runId, 'keep going');
+    } finally {
+      db.close();
+    }
+  });
+
   it('refuses when hasActiveExecution() is false even if the last event is not a result (attempt-2 arm still holds)', async () => {
     const db = createTestDb({
       disableForeignKeys: true,

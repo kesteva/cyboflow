@@ -36,10 +36,7 @@ import { isLatestRunTurnCompleted } from './runQueries';
  * and is not trying to; it stops the clock from being the thing that
  * manufactures one.
  */
-// Exported (TASK-300 attempt 3): runs.ts's queueInput 'parked' check reuses
-// this SAME threshold as a fallback trigger when hasActiveExecution() alone
-// cannot be trusted — see the comment at that call site.
-export const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
+const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
 
 /** How often the detector scans for stale approvals. */
 const SCAN_INTERVAL_MS = 60_000; // 60 seconds
@@ -191,21 +188,11 @@ export class StuckDetector {
     // workflow_runs.updated_at: a step-report / current_step_id write does not
     // always bump updated_at, so keying staleness on it risks misclassifying a
     // run that is genuinely still executing a single long step. A run with
-    // ZERO raw_events rows falls back to `wr.created_at` (NOT a `0` epoch
-    // sentinel — see fix note below) so it is judged by the SAME 45-minute
-    // staleness window as a run that has emitted events, rather than reading
-    // as instantly maximally-stale.
-    //
-    // FIX (visual-verify, TASK-300 attempt 2): the `0` epoch fallback this
-    // COALESCE used to carry made a run with no raw_events yet — e.g. a spawn
-    // that started seconds ago and has not emitted its first SDK message —
-    // satisfy `0 < unixepoch(cutoff)` immediately, on the VERY NEXT scan tick,
-    // regardless of how young the run actually was. `wr.created_at` restores
-    // the intended 45-minute grace period for that case. The scan loop below
-    // additionally skips any row the live-turn check (`hasActiveRunForId`)
-    // reports as still active — the OTHER half of the same fix, covering a
-    // long-running but genuinely quiet turn (raw_events stale, spawn very much
-    // alive) that this query alone cannot distinguish from a truly parked run.
+    // ZERO raw_events rows falls back to `wr.created_at`, never a `0` epoch
+    // sentinel: a spawn that has not emitted its first SDK message yet must get
+    // the same 45-minute grace period, not read as maximally stale on the next
+    // tick. Recency alone cannot tell a parked run from a long, quiet live
+    // turn; the scan loop below settles that with the live-turn guard.
     this.stmtParkedNoGateRuns = this.db.prepare(
       `SELECT wr.id AS id
          FROM workflow_runs wr
@@ -300,30 +287,19 @@ export class StuckDetector {
       // directly instead of keying off a (nonexistent) approvals row.
       const parkedRows = this.stmtParkedNoGateRuns.all(cutoffIso) as ParkedRunRow[];
       for (const row of parkedRows) {
-        // Live-turn guard (visual-verify fix): the SQL above can only see
-        // raw_events recency, which is a STALE proxy for "is a turn actually
-        // running" — a long, quiet SDK turn (a tool call producing no
-        // intermediate events for well over 45 minutes) looks identical to a
-        // genuinely parked run by that measure alone. `hasActiveRunForId` is
-        // the same real-time "is execute()/executeProgrammatic still holding
-        // this run" signal rung 1 (orphan_pty) below uses in the inverse
-        // direction.
-        //
-        // FIX (TASK-300 attempt 4): skipping on `hasActiveRunForId` alone used
-        // to leave the hung-spawn shape uncaught FOREVER — a detached child
-        // the agent spawned (e.g. a left-running dev server) keeps that flag
-        // wedged true even after the turn itself has actually ended, so a run
-        // in exactly that shape never got a `stuck_reason` no matter how
-        // stale it went. `isLatestRunTurnCompleted` answers the ambiguity
-        // `hasActiveRunForId` cannot: a `result` row as the run's LAST event
-        // proves the turn is over regardless of what the process-liveness
-        // flag still claims. Skip (leave unclassified) only when the run is
-        // reported active AND its last event is NOT a turn-result — that is
-        // the genuinely-quiet-long-turn case this guard exists to protect.
-        // A hung spawn (active, but last event IS a result) now falls through
-        // and gets stamped `parked_no_gate` like any other parked run;
-        // actually settling or killing the surviving child process itself
-        // stays out of scope for TASK-311.
+        // Live-turn guard. Skip (leave unclassified) when the executor still
+        // holds the run (`hasActiveRunForId`, the same real-time signal rung 1
+        // uses inversely) AND its last turn has not ended — a long, quiet
+        // tool call looks identical to a parked run by recency alone.
+        // `isLatestRunTurnCompleted` catches the hung-spawn shape the liveness
+        // flag cannot: a detached child the agent spawned (e.g. a left-running
+        // dev server) can keep the flag true forever after the turn's `result`
+        // row landed, so an orchestrated run in that shape falls through and
+        // is stamped `parked_no_gate`. For a PROGRAMMATIC run that helper is
+        // always false (a step's or lane's `result` does not end the walk),
+        // so a live walk is always skipped — a programmatic walk wedged by a
+        // hung spawn is not caught here. Killing the surviving child process
+        // is out of scope (TASK-311).
         if (this.claudeManager.hasActiveRunForId(row.id) && !isLatestRunTurnCompleted(this.db, row.id)) {
           continue;
         }

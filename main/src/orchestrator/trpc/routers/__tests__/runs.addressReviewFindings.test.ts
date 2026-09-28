@@ -421,6 +421,27 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       expect(result).toEqual({ eligible: false, reason: 'completed' });
     });
 
+    it('stays eligible for a programmatic run that FAILED (rewindRunHandler re-drives a failed step)', async () => {
+      db = makeDb();
+      const { runId } = seedSprintRun(db, { status: 'failed', currentStepId: 'address-review' });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
+      expect(result).toEqual({ eligible: true });
+    });
+
+    it("is ineligible ('completed') for a handed-over run that FAILED — no live chat to deliver into", async () => {
+      db = makeDb();
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET status = 'failed' WHERE id = ?").run(runId);
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
+      expect(result).toEqual({ eligible: false, reason: 'completed' });
+    });
+
     it("is ineligible ('completed') for an unknown run id", async () => {
       db = makeDb();
       const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
