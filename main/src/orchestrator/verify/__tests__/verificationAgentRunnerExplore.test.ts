@@ -1721,6 +1721,27 @@ describe('VerificationAgentRunner — §A5 recipe validation on a passing explor
     expect(fallback.learnedRecipe).toBeUndefined();
   });
 
+  it('a binding-only pass (no declared channel) learns a serve-binding recipe — recorded or filled in', async () => {
+    const noChannel = makeTask({ attestation: undefined, serve: { cmd: SERVE_CMD } });
+    const recorded = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD }, attestation: { kind: 'serve-binding' } });
+    const omitted = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD } });
+    for (const recipeJson of [recorded, omitted]) {
+      const { runner, attest } = recipeRunner(validReport({ recipeJson }));
+      const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel }));
+      expect(attest).not.toHaveBeenCalled();
+      expect(result.status).toBe('passed');
+      expect(result.learnedRecipe).toMatchObject({ ok: true, entry: { attestation: { kind: 'serve-binding' } } });
+    }
+  });
+
+  it('a binding-only pass refuses a recipe claiming a nonce channel the harness never verified', async () => {
+    const noChannel = makeTask({ attestation: undefined, serve: { cmd: SERVE_CMD } });
+    const { runner } = recipeRunner(validReport({ recipeJson: RECIPE }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: false, reason: expect.stringContaining('"serve-binding"') });
+  });
+
   it('a passed explore run with no recipe carries nothing', async () => {
     const { runner } = recipeRunner(validReport());
     const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));

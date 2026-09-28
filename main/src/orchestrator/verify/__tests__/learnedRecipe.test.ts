@@ -6,7 +6,11 @@
  */
 import { describe, it, expect } from 'vitest';
 import { learnedRecipeCommands, tokenizeCommand, validateLearnedRecipe, type LearnedRecipeLeases } from '../learnedRecipe';
-import type { VerificationModality, VerificationTaskV1 } from '../../../../../shared/types/visualVerification';
+import type {
+  AttestationSpec,
+  VerificationModality,
+  VerificationTaskV1,
+} from '../../../../../shared/types/visualVerification';
 
 const PACKAGE_JSON = JSON.stringify({ scripts: { build: 'vite build', preview: 'vite preview', 'dev:app': 'electron .' } });
 const LEASED: LearnedRecipeLeases = { ports: [5173, 5174], udid: null, snapshotPath: '/private/tmp/cyboflow-verify-AbC/snapshot' };
@@ -36,7 +40,7 @@ function web(
     packageJsonRaw?: string | null;
     composed?: Pick<VerificationTaskV1, 'serve' | 'app'>;
     modality?: VerificationModality;
-    verifiedChannel?: string | null;
+    verifiedChannel?: AttestationSpec['kind'] | null;
   } = {},
 ) {
   return validateLearnedRecipe({
@@ -65,8 +69,29 @@ function reason(result: ReturnType<typeof validateLearnedRecipe>): string {
 }
 
 describe('validateLearnedRecipe — the channel the harness verified', () => {
-  it('never learns from a pass that rested on the serve binding alone', () => {
-    expect(reason(web(WEB_RECIPE, { verifiedChannel: 'serve-binding' }))).toMatch(/serve binding alone/);
+  const { attestation: _omitted, ...WEB_RECIPE_NO_CHANNEL } = WEB_RECIPE;
+  void _omitted;
+
+  it('a serve-binding pass learns a recipe that records serve-binding', () => {
+    const result = web({ ...WEB_RECIPE, attestation: { kind: 'serve-binding' } }, { verifiedChannel: 'serve-binding' });
+    expect(reason(result)).toBe('');
+    expect(result.ok && result.entry.attestation).toEqual({ kind: 'serve-binding' });
+  });
+
+  it('a serve-binding pass fills in serve-binding for a recipe with no attestation', () => {
+    const result = web(WEB_RECIPE_NO_CHANNEL, { verifiedChannel: 'serve-binding' });
+    expect(reason(result)).toBe('');
+    expect(result.ok && result.entry.attestation).toEqual({ kind: 'serve-binding' });
+  });
+
+  it('a serve-binding pass refuses a recipe naming a nonce channel it never verified', () => {
+    expect(reason(web(WEB_RECIPE, { verifiedChannel: 'serve-binding' }))).toMatch(
+      /recipe attestation "http-endpoint" is not the channel the harness verified \("serve-binding"\)/,
+    );
+  });
+
+  it('only a serve-binding pass fills in the channel: any other pass still needs the recipe to name it', () => {
+    expect(reason(web(WEB_RECIPE_NO_CHANNEL))).toMatch(/attestation/);
   });
 
   it('never learns from a pass with no verified channel', () => {

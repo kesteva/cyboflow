@@ -35,7 +35,11 @@ import {
   type VerifyRunbookModalityEntry,
   type VerifyRunbookV1,
 } from '../../../../shared/types/verifyRunbook';
-import type { VerificationModality, VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type {
+  AttestationSpec,
+  VerificationModality,
+  VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 import { findForbiddenTaskCommands } from './dependencyCommandGuard';
 import { SHELL_COMPOSITION_PATTERN, validateDraftedRunbook } from './runbookDraftValidation';
 import { checkMobileBuildIsolation } from './runbookStore';
@@ -275,15 +279,20 @@ function leakedLeaseViolation(command: string, leased: LearnedRecipeLeases): str
  *   - mobile: the recipe's bundle id must be the one `bundle-identity` attested.
  *
  * `verifiedChannel` is the channel the attestation floor VERIFIED for this pass.
- * A pass that rested on the serve binding alone (`'serve-binding'`, §A1.2) — or
- * on no verified channel — never learns: the recipe must carry a channel, and
- * one the harness did not observe would only fail its promotion proof. The
- * recipe's `attestation.kind` must be the verified channel.
+ * The recipe's `attestation.kind` must be that channel: one the harness did not
+ * observe would only fail its promotion proof. A pass with no verified channel
+ * never learns. A pass that rested on the serve binding (`'serve-binding'`,
+ * §A1.2) learns a `serve-binding` entry — the binding is the real identity tie
+ * (the nonce is agent-held), so the pinned record is no weaker than the explore
+ * pass it came from. For that channel only, a recipe with NO `attestation` is
+ * filled in with `{ kind: 'serve-binding' }`: the harness knows what it
+ * verified, and a recipe written under the older "omit it without a channel"
+ * instruction should not be lost for the want of a field the harness can supply.
  */
 export function validateLearnedRecipe(args: {
   recipeJson: string;
   modality: VerificationModality;
-  verifiedChannel: string | null;
+  verifiedChannel: AttestationSpec['kind'] | null;
   composed: Pick<VerificationTaskV1, 'serve' | 'app'>;
   /** The snapshot root's `package.json` text (web/cdp-app), `null` when absent or unreadable. */
   packageJsonRaw: string | null;
@@ -301,22 +310,23 @@ export function validateLearnedRecipe(args: {
     return { ok: false, reason: `recipeJson is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
   }
   if (!isRecord(decoded)) return { ok: false, reason: 'recipeJson is not an object' };
+  if (args.verifiedChannel === null) {
+    return { ok: false, reason: 'the pass rested on no verified attestation channel, which a recipe cannot carry' };
+  }
   const { levers: rawLevers, ...rawEntry } = decoded;
   const levers = rawLevers !== undefined ? rawLevers : args.fallbackLevers;
+  const filledEntry =
+    args.verifiedChannel === 'serve-binding' && rawEntry.attestation === undefined
+      ? { ...rawEntry, attestation: { kind: 'serve-binding' } }
+      : rawEntry;
   const parsed = parseVerifyRunbookV1({
     version: 1,
-    modalities: { [runbookModality]: rawEntry },
+    modalities: { [runbookModality]: filledEntry },
     ...(levers !== undefined ? { levers } : {}),
   });
   if (!parsed.ok) return { ok: false, reason: `recipe is not a valid runbook entry — ${parsed.error}` };
   const entry = parsed.runbook.modalities[runbookModality];
   if (entry === undefined) return { ok: false, reason: `recipe declares no "${modality}" entry` };
-  if (args.verifiedChannel === null || args.verifiedChannel === 'serve-binding') {
-    return {
-      ok: false,
-      reason: `the pass rested on ${args.verifiedChannel === null ? 'no verified attestation channel' : 'the serve binding alone'}, which a recipe cannot carry`,
-    };
-  }
   if (entry.attestation.kind !== args.verifiedChannel) {
     return {
       ok: false,
