@@ -334,9 +334,9 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
   properties: {
     verdict: {
       type: 'string',
-      enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction'],
+      enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept'],
       description:
-        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
+        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); accept = commit-integrity failures ONLY: the lane\'s own work is committed or needed no change, and the uncommitted changes are not this lane\'s — integrate it as is; give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
     },
     reason: {
       type: 'string',
@@ -459,12 +459,27 @@ export interface LaneAppendCorrectionDecision {
   guidance?: string;
 }
 
+/**
+ * COMMIT-INTEGRITY ONLY: integrate the lane as it stands. The supervisor judged
+ * that the lane's own work is committed (or the task needed no change) and that
+ * the uncommitted paths the probe saw belong to something else — a sibling lane
+ * sharing the worktree, generated output. Re-drives nothing and costs no rescue
+ * budget; the host audits it with a finding. On any other failure kind the
+ * parser downgrades it to give_up.
+ */
+export interface LaneAcceptDecision {
+  verdict: 'accept';
+  /** Why the dirt is not this lane's. REQUIRED — a blank one downgrades to give_up. */
+  reason: string;
+}
+
 /** The parsed, host-safe lane-triage verdict (every field a rescue needs is present). */
 export type LaneTriageDecision =
   | LaneGiveUpDecision
   | LaneRetryDecision
   | LaneAdjustAndRetryDecision
-  | LaneAppendCorrectionDecision;
+  | LaneAppendCorrectionDecision
+  | LaneAcceptDecision;
 
 /** Build the fail-safe `give_up` decision carrying a machine-authored reason. */
 function laneGiveUp(reason: string): LaneGiveUpDecision {
@@ -505,6 +520,9 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *      nothing to record); otherwise it is VALID AS GIVEN and never downgraded
  *      further — it names no step and re-drives nothing, so none of the rescue
  *      constraints below apply to it
+ *   1c. `accept` on a failure kind other than `commit-integrity`, or with a
+ *      blank `reason`                                    ⇒ give_up; otherwise VALID
+ *      AS GIVEN (it re-drives nothing, like append_correction)
  *   2. `give_up`                                        ⇒ give_up (reason kept when present)
  *   3. `retry`/`adjust_and_retry` with blank `guidance` ⇒ give_up (a rescue with
  *      nothing to do differently is just a wasted attempt)
@@ -535,6 +553,15 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
       reason: o.reason,
       ...(isNonEmptyString(o.guidance) ? { guidance: o.guidance } : {}),
     };
+  }
+  if (o.verdict === 'accept') {
+    if (req.failureKind !== 'commit-integrity') {
+      return laneGiveUp('lane triage tried to accept a lane that did not fail its commit-integrity check — letting the lane fail');
+    }
+    if (!isNonEmptyString(o.reason)) {
+      return laneGiveUp('lane triage accepted the lane without saying why — letting the lane fail');
+    }
+    return { verdict: 'accept', reason: o.reason };
   }
   if (o.verdict !== 'retry' && o.verdict !== 'adjust_and_retry') {
     return laneGiveUp('unrecognized lane triage verdict — letting the lane fail');
@@ -1214,7 +1241,23 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
   'task-verify': 'the task-verify gate kept returning FAIL until its loopback budget ran out',
   'code-review': 'code review kept reporting blocking defects until its loopback budget ran out',
   'merge-gate': 'the visual merge gate rejected this lane',
+  'commit-integrity':
+    'every inner step passed, but the lane made no git commit while the worktree holds uncommitted changes',
 };
+
+/**
+ * The extra verdict + evidence guidance a COMMIT-INTEGRITY consult needs. Every
+ * other failure kind is "the work is wrong"; this one is "is the work even
+ * this lane's?", and it is the only kind for which `accept` exists.
+ */
+function commitIntegrityTriageSection(req: LaneTriageRequest): string {
+  if (req.failureKind !== 'commit-integrity') return '';
+  return `
+
+THIS IS A COMMIT-INTEGRITY FAILURE, not a code defect. Every inner step of the lane passed; the question is only whether the lane left ITS OWN work uncommitted. Lanes of a sprint share ONE worktree, so uncommitted paths can belong to a sibling lane that is still working. Compare the uncommitted paths in the excerpt with what THIS task is about (its body, the lane's step outputs in the conversation, the files it names) and read the files if you need to. The extra verdict for this failure kind:
+- "accept" — the lane's own work is already committed, or the task needed no change (e.g. it was already implemented), and the uncommitted paths belong to other work. The host integrates the lane as it stands. \`reason\` is REQUIRED: say whose the paths are and why.
+Use "retry" (usually from the first inner step, with guidance naming the files to commit) when the uncommitted paths ARE this task's work.`;
+}
 
 /**
  * Compose the LANE-TRIAGE prompt for one sprint fan-out lane that exhausted its
@@ -1257,7 +1300,7 @@ Failing step: \`${req.stepId}\` (attempt ${req.attempt})
 This lane's inner step chain, in order: ${chain}
 
 Error / verdict excerpt:
-${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}
+${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}
 
 Current task body — the acceptance criteria this lane's agents are working from:
 ---
@@ -2540,6 +2583,8 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
       // Advisory: no re-drive, no budget spent. Say so plainly, or the reader
       // assumes the lane got another attempt.
       return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
+    case 'accept':
+      return `✔ **${req.taskRef}**: accept — the uncommitted changes are not this lane's, so integrate it as it stands. ${decision.reason}`;
   }
 }
 

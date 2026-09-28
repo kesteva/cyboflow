@@ -51,6 +51,7 @@ import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
   BuildBreakGroup,
   CommitIntegrityProbe,
+  CommitIntegrityReading,
   ControllerEscalation,
   ControllerHost,
   ControllerResult,
@@ -71,6 +72,7 @@ import type {
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
+import { commitIntegrityExcerpt } from './commitIntegrity';
 
 /**
  * Parse a task-verify agent's captured result text for its terminal verdict —
@@ -369,6 +371,24 @@ type LaneWalkOutcome =
       runtime?: string;
     }
   | { kind: 'failed'; error?: string; persisted: boolean };
+
+/**
+ * What one lane-triage consult resolved to, inside `runFanOut`:
+ *   - 'rescue'      — re-drive from `targetIndex` (state already reset);
+ *   - 'accept'      — commit-integrity only: integrate the lane as it stands;
+ *   - 'systemic'    — the consult died on the environment; park, do not fail;
+ *   - 'give_up'     — the supervisor judged the failure genuine;
+ *   - 'unconsulted' — no verdict at all (no seam, caps spent, a throwing consult).
+ * 'give_up' and 'unconsulted' settle identically at every budget-exhaustion
+ * site; only the commit-integrity site tells them apart, because there an
+ * AMBIGUOUS reading with nobody to judge it must not invent a failure.
+ */
+type LaneTriageVerdict =
+  | { kind: 'rescue'; targetIndex: number }
+  | { kind: 'accept'; reason: string }
+  | { kind: 'systemic'; error: string }
+  | { kind: 'give_up' }
+  | { kind: 'unconsulted' };
 
 /**
  * The wave loop's open systemic park: the parked lanes plus what their outcomes
@@ -1521,9 +1541,12 @@ export class WorkflowController {
    * bump `laneAttempt`. Bounded by MONITOR_LANE_RESCUE_CAP (per lane) and
    * MONITOR_RUN_RESCUE_CAP (per walk). Failures that are NOT budget exhaustion
    * never consult: a systemic failure (it has its own park path), an aborted
-   * result, a never-started / cycle lane (`markBlocked`), a lane the
-   * commit-integrity probe caught, and a task-verify output-CONTRACT exhaustion
-   * (a malformed result is not a defect a rescue can reason about).
+   * result, a never-started / cycle lane (`markBlocked`), and a task-verify
+   * output-CONTRACT exhaustion (a malformed result is not a defect a rescue can
+   * reason about). A lane the commit-integrity probe flags DOES consult (failure
+   * kind 'commit-integrity'), with one extra verdict — 'accept' — because there
+   * the question is whether the uncommitted work is even this lane's; see
+   * `checkCommitIntegrity`.
    */
   private async runFanOut(
     runId: string,
@@ -1580,6 +1603,20 @@ export class WorkflowController {
     let triageConsultChain: Promise<unknown> = Promise.resolve();
 
     /**
+     * SHARED-WORKTREE OWNERSHIP for the commit-integrity probe. Every lane of this
+     * fan-out edits the SAME worktree, so "HEAD did not move and the tree is dirty"
+     * only proves THIS lane left work uncommitted when no other lane was running
+     * alongside it. `activeLanes` is the set of lanes currently walking;
+     * `overlappedLanes` holds every lane that, at any point in its walk, shared the
+     * worktree with another live lane (marked on both sides at dispatch). Observed
+     * live 2026-09-25: a lane whose task was already done made no commit, a
+     * concurrently-running sibling's untracked files made the tree dirty, and the
+     * probe failed the no-op lane.
+     */
+    const activeLanes = new Set<string>();
+    const overlappedLanes = new Set<string>();
+
+    /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
      *  - required inner failure with a declared, in-chain loopback → re-drive its
      *    target through attempt 3; otherwise mark the lane (failed) + stop;
@@ -1589,7 +1626,8 @@ export class WorkflowController {
      *    fan-out;
      *  - all inner steps ok → mark the lane 'integrated', UNLESS the driver's
      *    optional commit-integrity probe shows the lane committed nothing and left
-     *    the worktree dirty, in which case the lane is failed instead.
+     *    NEW dirt in the worktree — then the monitor judges it, and a lane that
+     *    ran alone with no verdict is failed (see `checkCommitIntegrity`).
      * Returns `{ kind: 'aborted' }` when the signal fired mid-walk so the wave can
      * short out.
      *
@@ -1685,23 +1723,22 @@ export class WorkflowController {
       attempt: number,
       failureKind: LaneFailureKind,
       errorExcerpt: string,
-    ): Promise<number | null | { systemic: string }> => {
-      if (!this.host.triageLaneFailure) return null;
+    ): Promise<LaneTriageVerdict> => {
+      if (!this.host.triageLaneFailure) return { kind: 'unconsulted' };
       const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
       if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= MONITOR_RUN_RESCUE_CAP) {
         this.host.log?.(
           'info',
           `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${MONITOR_RUN_RESCUE_CAP}); not consulting lane triage`,
         );
-        return null;
+        return { kind: 'unconsulted' };
       }
       // Reserve now, release on every non-rescue arm below (see the docblock).
       laneRescues.perItem.set(itemId, usedForLane + 1);
       laneRescues.runTotal += 1;
-      const releaseReservation = (): null => {
+      const releaseReservation = (): void => {
         laneRescues.perItem.set(itemId, usedForLane);
         laneRescues.runTotal -= 1;
-        return null;
       };
 
       let outcome: LaneRescueOutcome;
@@ -1720,7 +1757,8 @@ export class WorkflowController {
           'warn',
           `fan-out item '${itemId}': lane triage threw (${err instanceof Error ? err.message : String(err)}); failing the lane`,
         );
-        return releaseReservation();
+        releaseReservation();
+        return { kind: 'unconsulted' };
       }
       if (outcome.kind === 'systemic') {
         // The consult itself died on an environment-level condition — it judged
@@ -1731,23 +1769,41 @@ export class WorkflowController {
           'warn',
           `fan-out item '${itemId}': lane triage hit a SYSTEMIC condition (${outcome.error}); parking the fan-out instead of failing the lane`,
         );
-        return { systemic: outcome.error };
+        return { kind: 'systemic', error: outcome.error };
       }
-      if (outcome.kind !== 'rescue') return releaseReservation();
+      if (outcome.kind === 'accept') {
+        // An ACCEPT re-drives nothing, so it spends no rescue budget. It is only
+        // meaningful for a commit-integrity consult; anywhere else it is a
+        // host/brain drift and settles like a give_up.
+        releaseReservation();
+        if (failureKind !== 'commit-integrity') {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': lane triage returned 'accept' for a ${failureKind} failure; treating it as give_up`,
+          );
+          return { kind: 'give_up' };
+        }
+        return { kind: 'accept', reason: outcome.reason };
+      }
+      if (outcome.kind !== 'rescue') {
+        releaseReservation();
+        return { kind: 'give_up' };
+      }
       const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
       if (targetIndex < 0) {
         this.host.log?.(
           'warn',
           `fan-out item '${itemId}': lane triage named '${outcome.targetStepId}', which is not one of this fan-out's inner steps; failing the lane`,
         );
-        return releaseReservation();
+        releaseReservation();
+        return { kind: 'give_up' };
       }
       laneRescues.guidance.set(itemId, outcome.guidance);
       this.host.log?.(
         'warn',
         `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,
       );
-      return targetIndex;
+      return { kind: 'rescue', targetIndex };
     };
 
     // The park step is NOT an inner-chain id, so the lane-store vocabulary must be
@@ -1886,13 +1942,13 @@ export class WorkflowController {
        * status-guarded to 'failed', so passing it on a not-actually-settled lane
        * is a harmless no-op.
        */
-      const rescueLaneOrNull = async (
+      const triageLane = async (
         failingStepId: string,
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
-      ): Promise<number | null | { systemic: string }> => {
-        const consult = async (): Promise<number | null | { systemic: string }> => {
+      ): Promise<LaneTriageVerdict> => {
+        const consult = async (): Promise<LaneTriageVerdict> => {
           // The wave already learned the environment is down (see the latch's
           // declaration): park without consulting and without reserving budget.
           // Read INSIDE the serialized turn, so a lane that failed while a
@@ -1902,7 +1958,7 @@ export class WorkflowController {
               'warn',
               `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition; parking without consulting`,
             );
-            return { systemic: systemicTriageLatch };
+            return { kind: 'systemic', error: systemicTriageLatch };
           }
           const verdict = await consultLaneTriage(
             itemId,
@@ -1911,7 +1967,7 @@ export class WorkflowController {
             failureKind,
             errorExcerpt,
           );
-          if (verdict !== null && typeof verdict === 'object') systemicTriageLatch = verdict.systemic;
+          if (verdict.kind === 'systemic') systemicTriageLatch = verdict.error;
           return verdict;
         };
         const turn = triageConsultChain.then(consult, consult);
@@ -1919,15 +1975,129 @@ export class WorkflowController {
           () => undefined,
           () => undefined,
         );
-        const targetIndex = await turn;
-        if (targetIndex === null || typeof targetIndex === 'object') return targetIndex;
-        clearStateForRewind(targetIndex);
+        const verdict = await turn;
+        if (verdict.kind !== 'rescue') return verdict;
+        clearStateForRewind(verdict.targetIndex);
         if (needsRevive) driver.reviveLane?.({ runId, itemId });
-        return targetIndex;
+        return verdict;
       };
 
-      for (let k = 0; k < inner.length; k++) {
+      /**
+       * The budget-exhaustion sites' view of `triageLane`: the inner index to
+       * re-drive from, `{ systemic }` when the consult died on the environment,
+       * or null ("settle this lane 'failed'") for every other verdict — give_up,
+       * no consult, and an 'accept', which only the commit-integrity site honors.
+       */
+      const rescueLaneOrNull = async (
+        failingStepId: string,
+        failureKind: LaneFailureKind,
+        errorExcerpt: string,
+        needsRevive = false,
+      ): Promise<number | null | { systemic: string }> => {
+        const verdict = await triageLane(failingStepId, failureKind, errorExcerpt, needsRevive);
+        if (verdict.kind === 'rescue') return verdict.targetIndex;
+        if (verdict.kind === 'systemic') return { systemic: verdict.error };
+        return null;
+      };
+
+      /**
+       * Lane-end commit-integrity check. Every inner step returned ok — but
+       * 'integrated' claims "complete AND committed in the session worktree"
+       * (sprintLaneStore.ts), which step verdicts alone cannot establish: a lane
+       * whose `git commit` was denied by a permission gate reported green with its
+       * changes untracked on disk (observed live).
+       *
+       * Sibling lanes commit into the SAME worktree, so an advanced HEAD is not
+       * proof THIS lane committed, and a clean tree may mean a sibling committed
+       * our work along with its own — both integrate. Only "nothing committed AND
+       * the tree is dirty" is suspicious, and even that is narrowed:
+       *   1. dirt that was already there when the lane started is not this lane's
+       *      (`newDirtyPaths` empty) ⇒ integrate;
+       *   2. otherwise the MONITOR judges it (failure kind 'commit-integrity'): it
+       *      may ACCEPT (the dirt is a sibling's / generated; this lane's work is
+       *      committed or needed no change), RESCUE (re-drive, e.g. "commit your
+       *      changes"), or give up;
+       *   3. with no verdict (no monitor, caps spent) the reading's OWNERSHIP
+       *      decides: a lane that ran alone left that dirt itself ⇒ fail, as the
+       *      probe always did; a lane that overlapped a sibling cannot be blamed
+       *      for dirt it may not own ⇒ integrate with a warning (the probe may
+       *      only withhold a false 'integrated', never invent a failure).
+       */
+      const checkCommitIntegrity = async (): Promise<
+        { kind: 'integrate' } | { kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }
+      > => {
+        if (commitProbe === undefined) return { kind: 'integrate' };
+        let reading: CommitIntegrityReading;
+        try {
+          reading = await commitProbe();
+        } catch (err) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
+          );
+          return { kind: 'integrate' };
+        }
+        if (reading.headAdvanced || !reading.dirty) return { kind: 'integrate' };
+        if (reading.newDirtyPaths !== undefined && reading.newDirtyPaths.length === 0) {
+          this.host.log?.(
+            'info',
+            `fan-out item '${itemId}': made no git commit, but every uncommitted path predates the lane; integrating`,
+          );
+          return { kind: 'integrate' };
+        }
+        const sharedWorktree = overlappedLanes.has(itemId);
+        const lastStepId = inner[inner.length - 1].id;
+        const verdict = await triageLane(
+          lastStepId,
+          'commit-integrity',
+          commitIntegrityExcerpt(reading, sharedWorktree),
+        );
+        if (verdict.kind === 'rescue') return { kind: 'redrive', targetIndex: verdict.targetIndex };
+        if (verdict.kind === 'systemic') {
+          // The lane row has NOT been written 'failed' here: park like the
+          // inner-step arm does.
+          return {
+            kind: 'settled',
+            outcome: { kind: 'systemic', error: verdict.error, origin: 'triage', stepId: lastStepId },
+          };
+        }
+        if (verdict.kind === 'accept') {
+          this.host.log?.(
+            'info',
+            `fan-out item '${itemId}': made no git commit with the worktree dirty, but the monitor ACCEPTED the lane (${verdict.reason}); integrating`,
+          );
+          return { kind: 'integrate' };
+        }
+        if (verdict.kind === 'unconsulted' && sharedWorktree) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': made no git commit and the worktree is dirty, but sibling lanes shared the worktree so the dirt cannot be attributed to this lane; integrating on step verdicts`,
+          );
+          return { kind: 'integrate' };
+        }
+        driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+        this.host.log?.(
+          'error',
+          `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
+        );
+        return { kind: 'settled', outcome: { kind: 'failed', persisted: true } };
+      };
+
+      for (let k = 0; k <= inner.length; k++) {
         if (signal?.aborted) return { kind: 'aborted' };
+        // LANE END (the extra k === inner.length pass): every inner step returned
+        // ok. Run the commit-integrity check here, INSIDE the loop, so a monitor
+        // rescue of a commit-integrity failure can re-drive the lane from an inner
+        // step exactly like every other rescue site (`k = target - 1; continue`).
+        if (k === inner.length) {
+          const laneEnd = await checkCommitIntegrity();
+          if (laneEnd.kind === 'redrive') {
+            k = laneEnd.targetIndex - 1; // The loop's k++ lands on the target next.
+            continue;
+          }
+          if (laneEnd.kind === 'settled') return laneEnd.outcome;
+          break;
+        }
         // Operator LANE REWIND — consult 1 of 3 (IDLE between inner steps). Covers
         // a request that lands while the lane is between turns (mid commit-probe,
         // or in the gap before the next step's lane write). Consulted BEFORE the
@@ -2518,36 +2688,6 @@ export class WorkflowController {
         }
       }
 
-      // Every inner step returned ok — but 'integrated' claims "complete AND
-      // committed in the session worktree" (sprintLaneStore.ts), which step
-      // verdicts alone cannot establish: a lane whose `git commit` was denied by
-      // a permission gate reported green with its changes untracked on disk
-      // (observed live). Consult the probe before making that claim.
-      if (commitProbe !== undefined) {
-        try {
-          const reading = await commitProbe();
-          // Deliberately conservative: sibling lanes commit into the SAME
-          // worktree, so an advanced HEAD is not proof THIS lane committed, and a
-          // clean tree may mean a sibling committed our work along with its own.
-          // Only the unambiguous case — nothing committed at all AND changes still
-          // sitting uncommitted — withholds 'integrated'. Per-lane attribution
-          // would need per-lane commit ranges the fan-out does not have.
-          if (!reading.headAdvanced && reading.dirty) {
-            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-            this.host.log?.(
-              'error',
-              `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
-            );
-            return { kind: 'failed', persisted: true };
-          }
-        } catch (err) {
-          this.host.log?.(
-            'warn',
-            `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
-          );
-        }
-      }
-
       driver.driveLane({ runId, itemId, status: 'integrated', allowedStepIds });
       return { kind: 'done' };
     };
@@ -2715,18 +2855,28 @@ export class WorkflowController {
     };
 
     /** Wrap a lane walk so a THROW fails that lane alone (never the whole pool). */
-    const runLane = (itemId: string): Promise<[string, LaneWalkOutcome]> =>
-      driveItem(itemId).then(
-        (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
-        (err): [string, LaneWalkOutcome] => [
-          itemId,
-          {
-            kind: 'failed',
-            error: err instanceof Error ? err.message : String(err),
-            persisted: false,
-          },
-        ],
-      );
+    const runLane = (itemId: string): Promise<[string, LaneWalkOutcome]> => {
+      if (activeLanes.size > 0) {
+        overlappedLanes.add(itemId);
+        for (const other of activeLanes) overlappedLanes.add(other);
+      }
+      activeLanes.add(itemId);
+      return driveItem(itemId)
+        .then(
+          (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
+          (err): [string, LaneWalkOutcome] => [
+            itemId,
+            {
+              kind: 'failed',
+              error: err instanceof Error ? err.message : String(err),
+              persisted: false,
+            },
+          ],
+        )
+        .finally(() => {
+          activeLanes.delete(itemId);
+        });
+    };
 
     while (remaining.size > 0 || inFlight.size > 0) {
       // 1 ── Cancellation stops DISPATCH, not the loop: in-flight lanes are drained

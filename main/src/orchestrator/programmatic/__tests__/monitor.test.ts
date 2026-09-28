@@ -2032,12 +2032,12 @@ function laneReq(p: Partial<LaneTriageRequest> = {}): LaneTriageRequest {
 }
 
 describe('MONITOR_LANE_TRIAGE_SCHEMA', () => {
-  it('enforces the four-verdict enum, requires verdict + reason, and forbids extra fields', () => {
+  it('enforces the five-verdict enum, requires verdict + reason, and forbids extra fields', () => {
     const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<
       string,
       { enum?: string[]; description?: string }
     >;
-    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction']);
+    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept']);
     // The enum's own description is what the model reads first, so it must say
     // what append_correction COSTS (nothing) and what give_up is FOR (escalation).
     expect(props.verdict.description).toContain('append_correction');
@@ -2073,6 +2073,16 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('expected the exporter to emit UTC timestamps');
     // The lane's inner chain, in order.
     expect(p).toContain('`implement` → `write-tests` → `code-review` → `task-verify`');
+  });
+
+  it('offers the accept verdict and the ownership question ONLY for a commit-integrity failure', () => {
+    const ci = buildLaneTriagePrompt(sprintCtx, history, laneReq({ failureKind: 'commit-integrity' }));
+    expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
+    expect(ci).toContain('THIS IS A COMMIT-INTEGRITY FAILURE');
+    expect(ci).toContain('"accept"');
+    const other = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(other).not.toContain('COMMIT-INTEGRITY FAILURE');
+    expect(other).not.toContain('"accept"');
   });
 
   it('reuses the shared digests (step timeline, lane section, recent conversation)', () => {
@@ -2142,6 +2152,25 @@ describe('buildLaneTriagePrompt', () => {
 });
 
 describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  it('parses accept for a commit-integrity failure', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'accept', reason: 'src/draft.ts belongs to TASK-266' },
+        laneReq({ failureKind: 'commit-integrity', stepId: 'task-verify' }),
+      ),
+    ).toEqual({ verdict: 'accept', reason: 'src/draft.ts belongs to TASK-266' });
+  });
+
+  it('downgrades accept to give_up on any other failure kind', () => {
+    expect(parseLaneTriageOutput({ verdict: 'accept', reason: 'fine' }, laneReq()).verdict).toBe('give_up');
+  });
+
+  it('downgrades accept with a blank reason to give_up', () => {
+    expect(
+      parseLaneTriageOutput({ verdict: 'accept', reason: '  ' }, laneReq({ failureKind: 'commit-integrity' })).verdict,
+    ).toBe('give_up');
+  });
+
   it('parses a well-formed retry', () => {
     expect(
       parseLaneTriageOutput(

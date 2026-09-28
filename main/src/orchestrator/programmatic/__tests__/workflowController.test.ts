@@ -2830,9 +2830,33 @@ describe('WorkflowController', () => {
         expect(driver.lanes.at(-1)).toMatchObject({ itemId: 't1', status: 'integrated' });
       });
 
-      it('FAILS a green lane that made no commit and left the worktree dirty', async () => {
+      it('FAILS a green lane that ran alone, made no commit and left the worktree dirty', async () => {
         // The live defect: every inner step returned ok but `git commit` was
         // denied, so the changes sat untracked and the lane still showed merged.
+        // With no other lane in the worktree the dirt is unambiguously its own.
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        driver.beginCommitProbe = async () =>
+          async () => ({ headAdvanced: false, dirty: true });
+        const { host, logs } = makeLoggingFanHost(driver);
+
+        const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+        // The outer step still settles (a lane failure is not terminal), but the
+        // lane is failed, not integrated.
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').at(-1)).toMatchObject({ status: 'failed' });
+        const errors = logs.filter((l) => l.level === 'error');
+        expect(errors.length).toBe(1);
+        expect(errors[0].message).toContain('made no git commit');
+        expect(errors[0].message).toContain('refusing to mark integrated');
+      });
+
+      it('integrates (with a warning) concurrent lanes whose shared-worktree dirt cannot be attributed', async () => {
+        // Live 2026-09-25: an already-done task made no commit while a sibling's
+        // untracked files dirtied the SHARED worktree — the probe must not blame
+        // the no-op lane for dirt it may not own.
         const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
         const driver = makeFanOutDriver(['t1', 't2']);
         driver.beginCommitProbe = async () =>
@@ -2841,19 +2865,12 @@ describe('WorkflowController', () => {
 
         const result = await new WorkflowController(makeRunner(), host).run('r', d);
 
-        // The outer step still settles (a lane failure is not terminal), but no
-        // lane is integrated — both are failed.
         expect(result.outcome).toBe('completed');
-        expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
         for (const item of ['t1', 't2']) {
-          expect(driver.lanes.filter((l) => l.itemId === item).at(-1)).toMatchObject({
-            status: 'failed',
-          });
+          expect(driver.lanes.filter((l) => l.itemId === item).at(-1)).toMatchObject({ status: 'integrated' });
         }
-        const errors = logs.filter((l) => l.level === 'error');
-        expect(errors.length).toBe(2);
-        expect(errors[0].message).toContain('made no git commit');
-        expect(errors[0].message).toContain('refusing to mark integrated');
+        expect(logs.some((l) => l.level === 'warn' && l.message.includes('cannot be attributed'))).toBe(true);
+        expect(logs.some((l) => l.level === 'error')).toBe(false);
       });
 
       it('integrates (with a warning) when opening the probe throws', async () => {

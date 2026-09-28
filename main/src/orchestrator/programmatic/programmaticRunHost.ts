@@ -1444,7 +1444,8 @@ export class ProgrammaticRunHost implements ControllerHost {
   /**
    * LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted when ONE
    * sprint fan-out lane exhausts an automatic budget, BEFORE the controller
-   * settles it 'failed'. Resolves the executable verdict only (give_up | rescue),
+   * settles it 'failed' (or, for a commit-integrity flag, before it refuses to
+   * integrate). Resolves the executable verdict only (give_up | rescue | accept),
    * so the controller never learns what a monitor, a task edit, or a finding is.
    *
    * Order of business, each arm short-circuiting to the pre-seam behavior:
@@ -1565,6 +1566,16 @@ export class ProgrammaticRunHost implements ControllerHost {
           ...(decision.guidance !== undefined ? { guidance: decision.guidance } : {}),
         });
         return { kind: 'give_up' };
+      }
+
+      if (decision.verdict === 'accept') {
+        // COMMIT-INTEGRITY ONLY (the parser refuses it elsewhere): the brain
+        // judged the uncommitted paths are not this lane's, so the lane
+        // integrates as it stands. Audited like a rescue — it overrides a
+        // backstop — and, like append_correction, it re-drives nothing and so
+        // costs no rescue budget.
+        await this.fileLaneAcceptFinding({ taskRef, req, reason: decision.reason });
+        return { kind: 'accept', reason: decision.reason };
       }
 
       let adjusted = false;
@@ -1943,6 +1954,41 @@ export class ProgrammaticRunHost implements ControllerHost {
       });
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] lane-correction finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Audit a commit-integrity ACCEPT: the supervisor overrode the backstop that
+   * refuses to integrate a lane with uncommitted work. Fail-soft — a broken
+   * review queue must never cost the lane its verdict.
+   */
+  private async fileLaneAcceptFinding(args: { taskRef: string; req: LaneTriageFailure; reason: string }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const body = [
+        `The run supervisor let task **${args.taskRef}** integrate although its lane made no git commit while the shared worktree held uncommitted changes.`,
+        '',
+        `- Failure: \`${args.req.failureKind}\` after step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        '- Verdict: accept — the supervisor judged the uncommitted changes are not this lane\'s work. Check the worktree before merging if that looks wrong.',
+        '',
+        '## Reason',
+        '',
+        args.reason.trim(),
+        '',
+        '## Probe evidence',
+        '',
+        args.req.errorExcerpt.trim(),
+      ].join('\n');
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor accepted ${args.taskRef} (commit-integrity)`,
+        body,
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-accept finding failed (fail-soft)', {
         runId: this.args.runId,
         taskRef: args.taskRef,
         error: err instanceof Error ? err.message : String(err),

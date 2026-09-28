@@ -369,6 +369,20 @@ export interface SupervisorEvent {
 export interface CommitIntegrityReading {
   headAdvanced: boolean;
   dirty: boolean;
+  /**
+   * The paths `git status --porcelain` reports right now. OPTIONAL (a probe that
+   * cannot list them leaves it absent) — evidence for the monitor's
+   * commit-integrity triage, never a decision input on its own.
+   */
+  dirtyPaths?: string[];
+  /**
+   * The subset of `dirtyPaths` that were NOT already dirty when the lane was
+   * dispatched. Lanes share ONE worktree, so dirt that predates the lane (a
+   * failed sibling's leftovers, a pre-existing edit) cannot be this lane's
+   * uncommitted work: an EMPTY list lets the lane integrate. Absent ⇒ the probe
+   * could not tell, and every dirty path counts as possibly this lane's.
+   */
+  newDirtyPaths?: string[];
 }
 
 /** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
@@ -438,7 +452,10 @@ export interface FanOutDriver {
    * would stamp 'integrated'. A lane that ran every inner step green but left
    * HEAD where it was AND the worktree dirty never committed its work — observed
    * live when a `git commit` was denied by a permission gate and the lane still
-   * reported integrated with the changes untracked on disk.
+   * reported integrated with the changes untracked on disk. Lanes share the
+   * worktree, so the reading also lists the dirty paths and which of them are
+   * NEW since lane start: the controller ignores pre-existing dirt and asks the
+   * monitor whose the rest is before failing anything.
    *
    * OPTIONAL and fail-soft at every seam, like `dependencies`/`expectedFiles`:
    * absent, resolving undefined, or throwing (in either half) ⇒ no probe ⇒ the
@@ -472,7 +489,7 @@ export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
  * Canonical HERE (not in monitor.ts) so the controller/host protocol stays free
  * of the monitor brain's heavier import graph; `monitor.ts` re-exports it.
  */
-export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate' | 'commit-integrity';
 
 /**
  * The lane/failure facts the controller already holds when a lane exhausts an
@@ -528,7 +545,14 @@ export interface LaneTriageFailure {
 export type LaneRescueOutcome =
   | { kind: 'give_up' }
   | { kind: 'systemic'; error: string }
-  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
+  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean }
+  /**
+   * 'accept' — COMMIT-INTEGRITY ONLY: the supervisor judged that the lane's own
+   * work is committed (or needed no change) and the uncommitted paths the probe
+   * saw belong to something else (a sibling lane, generated output). The
+   * controller integrates the lane. Any other failure kind treats it as give_up.
+   */
+  | { kind: 'accept'; reason: string };
 
 // ---------------------------------------------------------------------------
 // Adversarial-review LOOP protocol (the supervisor steering each automatic lap)

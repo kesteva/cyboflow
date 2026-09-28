@@ -782,6 +782,30 @@ describe('ProgrammaticRunHost', () => {
       expect(fileLaneTriageFinding).not.toHaveBeenCalled();
     });
 
+    // ── accept (commit-integrity only) ──────────────────────────────────────
+
+    it('returns accept and files an audit finding for a commit-integrity accept', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({ verdict: 'accept', reason: 'the untracked draft files are TASK-266 work' }),
+        readLaneTask: () => ({ taskRef: 'TASK-224', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({
+        ...failure,
+        failureKind: 'commit-integrity',
+        errorExcerpt: 'Uncommitted paths that appeared while this lane ran:\n- src/draft.ts',
+      });
+
+      expect(outcome).toEqual({ kind: 'accept', reason: 'the untracked draft files are TASK-266 work' });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor accepted TASK-224 (commit-integrity)');
+      expect(finding.body).toContain('TASK-266 work');
+      expect(finding.body).toContain('src/draft.ts');
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {
