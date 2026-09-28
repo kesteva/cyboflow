@@ -375,6 +375,7 @@ export interface SupervisorEvent {
  * `headAdvanced` — the worktree's HEAD sha moved since the lane was dispatched.
  * `dirty` — `git status --porcelain` is non-empty, i.e. tracked edits and/or
  * untracked files are still sitting in the worktree uncommitted.
+ * `committedBuildSlotPaths` — lane build output that made it INTO a commit.
  */
 export interface CommitIntegrityReading {
   headAdvanced: boolean;
@@ -393,10 +394,43 @@ export interface CommitIntegrityReading {
    * could not tell, and every dirty path counts as possibly this lane's.
    */
   newDirtyPaths?: string[];
+  /**
+   * Paths under `.cyboflow/build-slots/` (the lanes' private build output —
+   * laneBuildSlots.ts) that the commits between the lane's start HEAD — its
+   * FIRST dispatch's, see `CommitProbeOptions.buildSlotBaseHead` — and its end
+   * HEAD added or changed (`readCommittedBuildSlotPaths`, a tree comparison, so
+   * a later commit that removes them clears it). Empty when HEAD did not move;
+   * absent when the query failed (fail-soft). NON-EMPTY ⇒ the controller refuses
+   * to integrate even though HEAD advanced: build output must never be
+   * committed, whoever committed it.
+   */
+  committedBuildSlotPaths?: string[];
 }
 
 /** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
-export type CommitIntegrityProbe = () => Promise<CommitIntegrityReading>;
+export interface CommitIntegrityProbe {
+  (): Promise<CommitIntegrityReading>;
+  /**
+   * The lane-start HEAD sha this probe captured. OPTIONAL — a probe that cannot
+   * say leaves it absent. The controller keeps the one from a lane's FIRST
+   * dispatch and hands it back on a re-dispatch (`CommitProbeOptions`).
+   */
+  readonly startHead?: string;
+}
+
+/** Per-dispatch options for `FanOutDriver.beginCommitProbe`. */
+export interface CommitProbeOptions {
+  /**
+   * The start HEAD of this lane's FIRST dispatch, passed when the lane is being
+   * RE-dispatched (a systemic park's 'retry' restarts it from inner step 0 with
+   * a fresh probe). The build-slot range (`committedBuildSlotPaths`) then starts
+   * here instead of at the new start HEAD — otherwise build output an earlier
+   * dispatch of the same lane committed would already be in the new start HEAD
+   * and the re-run would integrate over it. The dirty-tree reading keeps the
+   * new start HEAD.
+   */
+  buildSlotBaseHead?: string;
+}
 
 /**
  * Resolves the runtime item set + drives one lane per item for a `fanOut` step
@@ -473,7 +507,7 @@ export interface FanOutDriver {
    * pre-backstop behavior. The backstop may only WITHHOLD a false 'integrated';
    * it must never invent a failure of its own.
    */
-  beginCommitProbe?(runId: string): Promise<CommitIntegrityProbe | undefined>;
+  beginCommitProbe?(runId: string, opts?: CommitProbeOptions): Promise<CommitIntegrityProbe | undefined>;
   /**
    * OPTIONAL targeted un-settle of ONE lane from 'failed' back to 'running',
    * for the controller's MONITOR LANE RESCUE at the visual merge gate. The
@@ -544,6 +578,14 @@ export interface LaneTriageFailure {
    * prerequisite. Present ⇒ a give_up may RELEASE them (`releaseDependents`).
    */
   dependents?: string[];
+  /**
+   * True when an 'accept' verdict cannot let this lane through — the lane's
+   * commits carry lane build output (`committedBuildSlotPaths`), which no
+   * ownership judgment can waive. The monitor's parse then downgrades an accept
+   * to give_up, so the chat and the review queue never record an accept the
+   * controller would refuse anyway.
+   */
+  acceptUnavailable?: boolean;
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
 }

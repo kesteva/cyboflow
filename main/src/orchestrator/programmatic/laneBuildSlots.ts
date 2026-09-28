@@ -22,6 +22,10 @@
  *     exclude that cannot be written means no slot dir at all. The entry is
  *     anchored and narrow: projects commit other `.cyboflow/` files
  *     (`verify-runbook.json`, baselines).
+ *   - VERIFIED with real git before the first slot is created: a `.gitignore`
+ *     negation outranks the local exclude, and files already tracked under the
+ *     root are never ignored ({@link verifyLaneBuildSlotsIgnored}). Either one
+ *     means no slot dirs for the run.
  *
  * The lane agent gets the dir as {@link LANE_SCRATCH_DIR_ENV} plus the two
  * module-cache overrides — pure caches, so redirecting them is safe for every
@@ -30,7 +34,9 @@
  * step prompt asks the agent to pass.
  *
  * Fail-soft end to end: any failure resolves `undefined` and the lane spawns
- * exactly as it did before this module existed.
+ * exactly as it did before this module existed. Never SILENT: the first failure
+ * of any kind reaches the one listener ({@link LaneBuildSlots.setUnavailableListener}),
+ * which the run host turns into a monitor chat line and a non-blocking finding.
  *
  * Electron-free and dependency-injected so it is unit-testable with fakes.
  */
@@ -66,22 +72,46 @@ export interface LaneScratch {
   env: Record<string, string>;
 }
 
+/** The outcome of checking that git really ignores the slots root. */
+export type VerifyIgnoredResult = { ok: true } | { ok: false; reason: string };
+
 export interface LaneBuildSlotsDeps {
   /**
    * Ensure `entries` are in the worktree's local git exclude. True when they are
    * present (already, or just added); false when the exclude could not be written.
    */
   ensureExcluded(worktreePath: string, entries: readonly string[]): boolean;
+  /**
+   * Confirm with real git that `root` (relative to the worktree) is ignored and
+   * holds nothing tracked — production: {@link verifyLaneBuildSlotsIgnored}.
+   * Called after the exclude is written and before any slot directory exists.
+   * A rejection counts as `{ ok: false }`.
+   */
+  verifyIgnored(worktreePath: string, root: string): Promise<VerifyIgnoredResult>;
   /** `mkdir -p`. May throw / reject. */
   mkdirp(dirPath: string): void | Promise<void>;
 }
 
 export class LaneBuildSlots {
-  /** Set once the exclude is known to be in place; a failure is retried next resolve. */
-  private excluded = false;
+  /**
+   * Set once the exclude is in place AND git confirmed it; memoized for the
+   * instance. An exclude that could not be WRITTEN is retried on the next resolve.
+   */
+  private ready = false;
   private excludeFailureLogged = false;
+  /**
+   * Why git's verification failed. STICKY: a `.gitignore` negation or a tracked
+   * file is a fact about the repo, not a transient error, so the run gets no slot
+   * dirs at all rather than a re-check on every lane step.
+   */
+  private verifyFailure: string | undefined;
+  /** The in-flight root preparation, shared by concurrent resolves. */
+  private preparing: Promise<boolean> | undefined;
   /** Slots whose directory already exists (created by this instance). */
   private readonly created = new Set<number>();
+  /** The first failure's reason, kept until a listener has been told (once). */
+  private unavailable: { reason: string; delivered: boolean } | undefined;
+  private unavailableListener: ((reason: string) => void) | undefined;
 
   constructor(
     private readonly worktreePath: string,
@@ -89,20 +119,47 @@ export class LaneBuildSlots {
     private readonly logger?: LoggerLike,
   ) {}
 
+  /**
+   * Subscribe to the FIRST failure of any kind (exclude write, git verification,
+   * a slot's mkdir), delivered at most once per instance — i.e. once per run. A
+   * failure that happened before subscription is delivered on subscription.
+   */
+  setUnavailableListener(listener: (reason: string) => void): void {
+    this.unavailableListener = listener;
+    this.deliverUnavailable();
+  }
+
+  /**
+   * Root-level preparation: write the exclude, then have git confirm it — once,
+   * before any slot directory exists. True when slots can be created. Called
+   * eagerly by the fan-out preflight so a failure surfaces before any lane
+   * dispatches, and again (memoized) by every {@link resolve}.
+   */
+  async prepare(): Promise<boolean> {
+    if (this.ready) return true;
+    if (this.verifyFailure !== undefined) return false;
+    this.preparing ??= this.prepareRoot().finally(() => {
+      this.preparing = undefined;
+    });
+    return this.preparing;
+  }
+
   /** The build directory for `slot`, created and git-excluded; undefined on any failure. */
   async resolve(slot: number): Promise<LaneScratch | undefined> {
     if (!Number.isInteger(slot) || slot < 0) return undefined;
-    // Exclude BEFORE the directory exists: never leave an un-excluded build tree
-    // in the worktree, even for a moment.
-    if (!this.ensureExcluded()) return undefined;
+    // Exclude + verify BEFORE the directory exists: never leave an un-ignored
+    // build tree in the worktree, even for a moment.
+    if (!(await this.prepare())) return undefined;
     const dir = path.resolve(this.worktreePath, LANE_BUILD_SLOTS_DIR, `slot-${slot}`);
     if (!this.created.has(slot)) {
       try {
         await this.deps.mkdirp(dir);
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         this.logger?.warn(`[LaneBuildSlots] could not create ${dir}; lane spawns without a build slot`, {
-          error: err instanceof Error ? err.message : String(err),
+          error: message,
         });
+        this.reportUnavailable(`could not create ${dir} (${message})`);
         return undefined;
       }
       this.created.add(slot);
@@ -122,26 +179,136 @@ export class LaneBuildSlots {
     };
   }
 
+  private async prepareRoot(): Promise<boolean> {
+    if (!this.ensureExcluded()) return false;
+    let result: VerifyIgnoredResult;
+    try {
+      result = await this.deps.verifyIgnored(this.worktreePath, LANE_BUILD_SLOTS_DIR);
+    } catch (err) {
+      result = {
+        ok: false,
+        reason: `git could not confirm that ${LANE_BUILD_SLOTS_DIR}/ is ignored (${err instanceof Error ? err.message : String(err)})`,
+      };
+    }
+    if (!result.ok) {
+      this.verifyFailure = result.reason;
+      this.logger?.warn(
+        `[LaneBuildSlots] ${LANE_BUILD_SLOTS_DIR}/ is not safely ignored in ${this.worktreePath}; lanes spawn without build slots`,
+        { reason: result.reason },
+      );
+      this.reportUnavailable(result.reason);
+      return false;
+    }
+    this.ready = true;
+    return true;
+  }
+
   private ensureExcluded(): boolean {
-    if (this.excluded) return true;
     let ok = false;
     try {
       ok = this.deps.ensureExcluded(this.worktreePath, [LANE_BUILD_SLOTS_EXCLUDE_ENTRY]);
     } catch {
       ok = false;
     }
-    if (ok) {
-      this.excluded = true;
-      return true;
-    }
+    if (ok) return true;
     if (!this.excludeFailureLogged) {
       this.excludeFailureLogged = true;
       this.logger?.warn(
         `[LaneBuildSlots] could not git-exclude ${LANE_BUILD_SLOTS_EXCLUDE_ENTRY} in ${this.worktreePath}; lanes spawn without build slots`,
       );
     }
+    this.reportUnavailable(`could not write the git exclude entry \`${LANE_BUILD_SLOTS_EXCLUDE_ENTRY}\` for this worktree`);
     return false;
   }
+
+  /** Record the FIRST failure only; later ones are already covered by its notice. */
+  private reportUnavailable(reason: string): void {
+    if (this.unavailable !== undefined) return;
+    this.unavailable = { reason, delivered: false };
+    this.deliverUnavailable();
+  }
+
+  private deliverUnavailable(): void {
+    const pending = this.unavailable;
+    const listener = this.unavailableListener;
+    if (pending === undefined || pending.delivered || listener === undefined) return;
+    pending.delivered = true;
+    try {
+      listener(pending.reason);
+    } catch (err) {
+      this.logger?.warn('[LaneBuildSlots] unavailable listener threw (fail-soft)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/** A finished git child (see `runGitExit` in utils/runGit.ts). */
+export interface GitExit {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Run git in `cwd`, resolving for ANY exit code; rejects only when git could not run. */
+export type GitExitRunner = (cwd: string, args: string[]) => Promise<GitExit>;
+
+/** How many tracked paths a verification failure names before summarizing. */
+const MAX_NAMED_TRACKED_PATHS = 3;
+
+/**
+ * Ask REAL git whether it ignores `root` in `worktreePath` — the production
+ * `LaneBuildSlotsDeps.verifyIgnored`. Writing the exclude is not proof: a
+ * `.gitignore` negation (`!/.cyboflow/build-slots/`) outranks `info/exclude`,
+ * and a file already TRACKED under the root is never ignored. So, before any
+ * slot directory exists:
+ *   1. `git ls-files -- <root>` must list nothing;
+ *   2. `git check-ignore -q -- <root>/` must exit 0 (1 = not ignored; anything
+ *      else = git failed). The probe is the ROOT ITSELF, as a directory: git
+ *      never re-includes anything under an excluded directory, so "the root is
+ *      excluded" is exactly "everything under it is ignored". The trailing slash
+ *      is load-bearing — the directory-only exclude rule cannot match the bare
+ *      root while that directory does not exist yet (git 2.54 answers 1 for
+ *      `.cyboflow/build-slots`, 0 for `.cyboflow/build-slots/`). A probe LEAF
+ *      inside a slot would be vacuous in the other direction: a `.gitignore`
+ *      that re-includes the root but also ignores the leaf's own name (a `.*`
+ *      rule for a `.probe` file) reads as ignored while `git status` lists
+ *      every slot file. No `--no-index`, so an already-tracked path would read
+ *      as NOT ignored.
+ * A git that cannot run at all rejects; the caller counts that as a failure.
+ */
+export async function verifyLaneBuildSlotsIgnored(
+  worktreePath: string,
+  root: string,
+  git: GitExitRunner,
+): Promise<VerifyIgnoredResult> {
+  const tracked = await git(worktreePath, ['ls-files', '--', root]);
+  if (tracked.exitCode !== 0) {
+    return { ok: false, reason: `\`git ls-files\` failed (exit ${tracked.exitCode})${stderrSuffix(tracked.stderr)}` };
+  }
+  const trackedPaths = tracked.stdout.split('\n').filter((line) => line.length > 0);
+  if (trackedPaths.length > 0) {
+    const named = trackedPaths.slice(0, MAX_NAMED_TRACKED_PATHS).join(', ');
+    const more = trackedPaths.length > MAX_NAMED_TRACKED_PATHS ? `, and ${trackedPaths.length - MAX_NAMED_TRACKED_PATHS} more` : '';
+    return {
+      ok: false,
+      reason: `files under ${root}/ are already tracked by git (${named}${more}), so git will not ignore them`,
+    };
+  }
+  const ignored = await git(worktreePath, ['check-ignore', '-q', '--', `${root}/`]);
+  if (ignored.exitCode === 0) return { ok: true };
+  if (ignored.exitCode === 1) {
+    return {
+      ok: false,
+      reason: `git does not ignore ${root}/ in this worktree although it is in the local exclude — a .gitignore rule re-includes it (e.g. \`!/${root}/\`)`,
+    };
+  }
+  return { ok: false, reason: `\`git check-ignore\` failed (exit ${ignored.exitCode})${stderrSuffix(ignored.stderr)}` };
+}
+
+function stderrSuffix(stderr: string): string {
+  const text = stderr.trim();
+  return text.length > 0 ? `: ${text}` : '';
 }
 
 export function laneBuildSlotsDisabled(): boolean {

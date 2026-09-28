@@ -2090,6 +2090,9 @@ describe('buildLaneTriagePrompt', () => {
     const ci = buildLaneTriagePrompt(sprintCtx, history, laneReq({ failureKind: 'commit-integrity' }));
     expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
     expect(ci).toContain('THIS IS A COMMIT-INTEGRITY FAILURE');
+    // The second commit-integrity shape (lane build output committed) has no accept.
+    expect(ci).toContain('carry files under `.cyboflow/build-slots/`');
+    expect(ci).toContain('"accept" is not available');
     const other = buildLaneTriagePrompt(sprintCtx, history, laneReq());
     expect(other).not.toContain('COMMIT-INTEGRITY FAILURE');
   });
@@ -2268,6 +2271,20 @@ describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
         laneReq(),
       ),
     ).toEqual({ verdict: 'accept', reason: 'functional criteria met', followUps: ['restyle the disabled button'] });
+  });
+
+  it('downgrades ANY accept to give_up when the request says accept is unavailable (committed build output)', () => {
+    const req = laneReq({ failureKind: 'commit-integrity', acceptUnavailable: true });
+    const decision = parseLaneTriageOutput({ verdict: 'accept', reason: 'a sibling committed them' }, req);
+    expect(decision.verdict).toBe('give_up');
+    expect(decision.reason).toContain('.cyboflow/build-slots/');
+    // Every other verdict is untouched by the flag.
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'retry', reason: 'r', targetStepId: 'implement', guidance: 'git rm -r --cached -- .cyboflow/build-slots' },
+        req,
+      ).verdict,
+    ).toBe('retry');
   });
 
   it('downgrades accept with a blank reason to give_up', () => {

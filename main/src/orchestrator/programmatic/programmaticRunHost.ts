@@ -284,6 +284,9 @@ export interface StepReporter {
   report(runId: string, stepId: string, status: WorkflowStepReportStatus): void;
 }
 
+/** Title of the once-per-run finding that lane build slots are unavailable. */
+export const LANE_BUILD_SLOTS_UNAVAILABLE_TITLE = 'Lane build slots unavailable — lanes may share build caches';
+
 export interface ProgrammaticRunHostArgs {
   runId: string;
   projectId: number;
@@ -459,6 +462,20 @@ export interface ProgrammaticRunHostArgs {
     run(action: EnvironmentActionKind): Promise<EnvironmentActionResult>;
   };
   /**
+   * The run's LANE BUILD SLOTS (laneBuildSlots.ts — the `LaneBuildSlots`
+   * instance whose resolver the step runner holds). Present ⇒ the fan-out
+   * preflight prepares them EAGERLY (exclude + git verification) so a failure
+   * surfaces before any lane dispatches, and the host subscribes to their
+   * once-per-run "unavailable" signal: one monitor chat line plus one
+   * NON-BLOCKING finding. Never blocks anything — a lane without a slot spawns
+   * as it did before slots existed. Absent (kill switch, no worktree) ⇒ neither,
+   * and no notice: a deliberate off switch is not a surprise.
+   */
+  laneBuildSlots?: {
+    prepare(): Promise<boolean>;
+    setUnavailableListener(listener: (reason: string) => void): void;
+  };
+  /**
    * SUPERVISOR-AUDIT sink. Files the NON-BLOCKING record of ONE review-loop
    * consult — the verdict, its rationale, and the steering the re-run will be
    * given — so an autonomous decision to spend (or not spend) another design
@@ -619,7 +636,14 @@ export class ProgrammaticRunHost implements ControllerHost {
   /** Autonomous resolves spent on this walk — see {@link MONITOR_WALK_RESOLVE_CAP}. */
   private walkResolveCount = 0;
 
-  constructor(private readonly args: ProgrammaticRunHostArgs) {}
+  constructor(private readonly args: ProgrammaticRunHostArgs) {
+    // The slots report their FIRST failure once (whether in the eager preflight
+    // or a later lane's mkdir); the notice itself is fail-soft, so the floating
+    // promise never rejects.
+    args.laneBuildSlots?.setUnavailableListener((reason) => {
+      void this.reportLaneBuildSlotsUnavailable(reason);
+    });
+  }
 
   reportStep(stepId: string, status: WorkflowStepReportStatus): void {
     try {
@@ -1548,6 +1572,7 @@ export class ProgrammaticRunHost implements ControllerHost {
           ...(req.dependents !== undefined && req.dependents.length > 0
             ? { dependents: req.dependents.map((id) => this.dependentFacts(id)) }
             : {}),
+          ...(req.acceptUnavailable === true ? { acceptUnavailable: true } : {}),
           ...(this.environmentForTriage() ?? {}),
         },
         req.signal,
@@ -2123,13 +2148,68 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   /**
-   * Fan-out PREFLIGHT (see `ControllerHost.prepareFanOutEnvironment`): when the
-   * worktree has a lockfile but packages with no `node_modules`, install before
-   * any lane runs, so no lane spends an attempt on `command not found`. Fail-soft:
-   * a failed install is reported and the fan-out proceeds (lane triage can still
-   * see the report and act).
+   * Fan-out PREFLIGHT (see `ControllerHost.prepareFanOutEnvironment`), both
+   * halves fail-soft and neither blocks the fan-out:
+   *   1. prepare the lane BUILD SLOTS' root (exclude + git verification) now, so
+   *      a failure's notice lands before any lane runs instead of mid-lane;
+   *   2. when the worktree has a lockfile but packages with no `node_modules`,
+   *      install before any lane runs, so no lane spends an attempt on `command
+   *      not found`. A failed install is reported and the fan-out proceeds (lane
+   *      triage can still see the report and act).
    */
   async prepareFanOutEnvironment(): Promise<void> {
+    await this.prepareLaneBuildSlots();
+    await this.installMissingDependencies();
+  }
+
+  /**
+   * Eager root preparation of the lane build slots. The result is not needed
+   * here — a failure reaches `reportLaneBuildSlotsUnavailable` through the
+   * listener, and a lane without a slot spawns as before.
+   */
+  private async prepareLaneBuildSlots(): Promise<void> {
+    const slots = this.args.laneBuildSlots;
+    if (!slots) return;
+    try {
+      await slots.prepare();
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane build-slot preflight failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * The ONE notice that lane build slots are unavailable (laneBuildSlots.ts
+   * delivers at most one reason per run): a monitor chat line plus a
+   * NON-BLOCKING finding, the same two channels a failed dependency install
+   * uses. The sprint continues either way — this only makes the fallback
+   * visible. Worded as "some or all lanes": only a failed git verification is
+   * sticky for the run; a failed exclude write is retried on the next lane, and
+   * a failed mkdir costs only that slot.
+   */
+  private async reportLaneBuildSlotsUnavailable(reason: string): Promise<void> {
+    this.injectMonitorTurn(
+      `⚠ Lane build slots unavailable — ${reason}. Some or all lanes may run without one and share the default build caches; the sprint continues.`,
+    );
+    await this.fileEnvironmentFinding({
+      title: LANE_BUILD_SLOTS_UNAVAILABLE_TITLE,
+      lines: [
+        'Cyboflow could not give some or all of this run\'s sprint lanes their private build directories (`.cyboflow/build-slots/slot-<n>/`).',
+        '',
+        `- Reason: ${reason}.`,
+        '- Scope: a failed git verification (a `.gitignore` re-include, files already tracked there) turns build slots off for the rest of the run; a failed exclude write or directory creation may be temporary, so later lanes can still get a slot.',
+        '- Consequence: a lane without a slot builds with the toolchains\' shared default caches, as lanes did before build slots existed. Concurrent Xcode builds can fail on `XCBuildData/build.db: database is locked`, and Codex lanes can hit `Operation not permitted` (sandbox EPERM) on the clang/Swift module cache.',
+        '- The sprint continues: nothing is blocked, parked or serialized.',
+        '',
+        'To be sure every lane gets a build slot, fix the reason above (for example remove a `.gitignore` rule that re-includes `.cyboflow/build-slots/`, or untrack files there with `git rm -r --cached -- .cyboflow/build-slots`) and start a new run. `CYBOFLOW_DISABLE_LANE_BUILD_SLOTS=1` turns build slots off deliberately, without this notice.',
+      ],
+    });
+  }
+
+  /** The dependency half of the fan-out preflight (see `prepareFanOutEnvironment`). */
+  private async installMissingDependencies(): Promise<void> {
     const env = this.args.environmentActions;
     if (!env) return;
     try {

@@ -74,7 +74,7 @@ import type {
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
-import { commitIntegrityExcerpt } from './commitIntegrity';
+import { commitIntegrityExcerpt, committedBuildSlotsExcerpt } from './commitIntegrity';
 
 /**
  * Parse a task-verify agent's captured result text for its terminal verdict —
@@ -1668,6 +1668,14 @@ export class WorkflowController {
     const activeLanes = new Set<string>();
     const overlappedLanes = new Set<string>();
     /**
+     * itemId → the lane-start HEAD of its FIRST dispatch (the commit probe's
+     * `startHead`). A systemic park's 'retry' re-dispatches a lane with a fresh
+     * probe, whose start HEAD already holds whatever the earlier dispatch
+     * committed; the build-slot half of the lane-end check must still see that,
+     * so every later dispatch diffs from here (`CommitProbeOptions`).
+     */
+    const laneFirstStartHeads = new Map<string, string>();
+    /**
      * itemId → the CONCURRENCY SLOT its live walk occupies: the lowest index no
      * other live lane holds, taken at dispatch and released when the walk settles,
      * so a lane dispatched into a freed slot inherits that slot's warm build
@@ -1791,6 +1799,7 @@ export class WorkflowController {
       failureKind: LaneFailureKind,
       errorExcerpt: string,
       stage: LaneTriageStage = 'exhausted',
+      acceptUnavailable = false,
     ): Promise<LaneTriageVerdict> => {
       if (!this.host.triageLaneFailure) return { kind: 'unconsulted' };
       if (stage === 'early') return consultEarly(itemId, failingStepId, attempt, failureKind, errorExcerpt);
@@ -1824,6 +1833,7 @@ export class WorkflowController {
           innerStepIds: allowedStepIds,
           ...(priorRescues.length > 0 ? { priorRescues: [...priorRescues] } : {}),
           ...(dependents.length > 0 ? { dependents } : {}),
+          ...(acceptUnavailable ? { acceptUnavailable: true } : {}),
           ...(signal ? { signal } : {}),
         });
       } catch (err) {
@@ -1976,7 +1986,13 @@ export class WorkflowController {
       // pre-backstop path (step verdicts alone).
       let commitProbe: CommitIntegrityProbe | undefined;
       try {
-        commitProbe = await driver.beginCommitProbe?.(runId);
+        const buildSlotBaseHead = laneFirstStartHeads.get(itemId);
+        commitProbe = await (buildSlotBaseHead !== undefined
+          ? driver.beginCommitProbe?.(runId, { buildSlotBaseHead })
+          : driver.beginCommitProbe?.(runId));
+        if (buildSlotBaseHead === undefined && commitProbe?.startHead !== undefined) {
+          laneFirstStartHeads.set(itemId, commitProbe.startHead);
+        }
       } catch (err) {
         this.host.log?.(
           'warn',
@@ -2092,6 +2108,9 @@ export class WorkflowController {
        * would drop it from the next wave's re-resolution). `reviveLane` is
        * status-guarded to 'failed', so passing it on a not-actually-settled lane
        * is a harmless no-op.
+       *
+       * `acceptUnavailable` tells the host that no accept can let this lane
+       * through (see `LaneTriageFailure.acceptUnavailable`).
        */
       const triageLane = async (
         failingStepId: string,
@@ -2099,6 +2118,7 @@ export class WorkflowController {
         errorExcerpt: string,
         needsRevive = false,
         stage: LaneTriageStage = 'exhausted',
+        acceptUnavailable = false,
       ): Promise<LaneTriageVerdict> => {
         const consult = async (): Promise<LaneTriageVerdict> => {
           // The wave already learned the environment is down (see the latch's
@@ -2119,6 +2139,7 @@ export class WorkflowController {
             failureKind,
             errorExcerpt,
             stage,
+            acceptUnavailable,
           );
           if (verdict.kind === 'systemic') systemicTriageLatch = verdict.error;
           return verdict;
@@ -2181,6 +2202,54 @@ export class WorkflowController {
       };
 
       /**
+       * The lane's commits (its FIRST dispatch's start HEAD → lane-end HEAD, see
+       * `laneFirstStartHeads`) carry files under `.cyboflow/build-slots/` — lane
+       * build output that must never be merged. The monitor is consulted
+       * (failure kind 'commit-integrity', with its own excerpt) and only a RESCUE
+       * keeps the lane alive: the re-driven lane is re-checked at its end, so a
+       * re-run that untracks them and commits integrates. Every other verdict
+       * fails the lane — there is deliberately no ownership fallback (a sibling's
+       * commit still cannot be merged under this lane), and 'accept', which
+       * elsewhere integrates, cannot waive it: the consult says so
+       * (`acceptUnavailable`, so the monitor's parse downgrades an accept to
+       * give_up before anything records it), and the accept arm below is only
+       * the safety net for a host that ignores the flag. Systemic parks exactly
+       * as the dirty-tree arm does.
+       */
+      const refuseCommittedBuildSlots = async (
+        paths: readonly string[],
+      ): Promise<{ kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }> => {
+        const lastStepId = inner[inner.length - 1].id;
+        const verdict = await triageLane(
+          lastStepId,
+          'commit-integrity',
+          committedBuildSlotsExcerpt(paths, overlappedLanes.has(itemId)),
+          false,
+          'exhausted',
+          true,
+        );
+        if (verdict.kind === 'rescue') return { kind: 'redrive', targetIndex: verdict.targetIndex };
+        if (verdict.kind === 'systemic') {
+          return {
+            kind: 'settled',
+            outcome: { kind: 'systemic', error: verdict.error, origin: 'triage', stepId: lastStepId },
+          };
+        }
+        if (verdict.kind === 'accept') {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': the monitor ACCEPTED the lane (${verdict.reason}), but accept cannot integrate a lane whose commits carry lane build output; failing it`,
+          );
+        }
+        driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+        this.host.log?.(
+          'error',
+          `fan-out item '${itemId}': its commits added lane build output under .cyboflow/build-slots/ (${paths.length} path(s), e.g. ${paths[0]}) — refusing to mark integrated`,
+        );
+        return { kind: 'settled', outcome: { kind: 'failed', persisted: true } };
+      };
+
+      /**
        * Lane-end commit-integrity check. Every inner step returned ok — but
        * 'integrated' claims "complete AND committed in the session worktree"
        * (sprintLaneStore.ts), which step verdicts alone cannot establish: a lane
@@ -2202,6 +2271,12 @@ export class WorkflowController {
        *      probe always did; a lane that overlapped a sibling cannot be blamed
        *      for dirt it may not own ⇒ integrate with a warning (the probe may
        *      only withhold a false 'integrated', never invent a failure).
+       *
+       * One reading overrides all of that: commits that carry LANE BUILD OUTPUT
+       * (`committedBuildSlotPaths`, laneBuildSlots.ts). An advanced HEAD proves
+       * nothing there — the commits themselves are wrong — and ownership cannot
+       * clear it: whoever committed the files, integrating would merge them. See
+       * `refuseCommittedBuildSlots`.
        */
       const checkCommitIntegrity = async (): Promise<
         { kind: 'integrate' } | { kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }
@@ -2216,6 +2291,10 @@ export class WorkflowController {
             `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
           );
           return { kind: 'integrate' };
+        }
+        const buildSlotPaths = reading.committedBuildSlotPaths;
+        if (buildSlotPaths !== undefined && buildSlotPaths.length > 0) {
+          return await refuseCommittedBuildSlots(buildSlotPaths);
         }
         if (reading.headAdvanced || !reading.dirty) return { kind: 'integrate' };
         if (reading.newDirtyPaths !== undefined && reading.newDirtyPaths.length === 0) {

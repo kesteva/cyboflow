@@ -131,7 +131,7 @@ import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blocki
 import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
-import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
+import { parsePorcelainPaths, readCommittedBuildSlotPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -314,7 +314,7 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync } from './utils/runGit';
+import { runGitAsync, runGitExit } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
@@ -2997,7 +2997,7 @@ async function initializeServices(): Promise<boolean> {
         // left the tree dirty. Every failure path (no worktree row, git error)
         // degrades to "no probe" / a rethrow the controller swallows, so the
         // backstop can only withhold a false integrate, never invent a failure.
-        beginCommitProbe: async (rid) => {
+        beginCommitProbe: async (rid, opts) => {
           const row = rawDb
             .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
             .get(rid) as { worktree_path?: unknown } | undefined;
@@ -3024,7 +3024,7 @@ async function initializeServices(): Promise<boolean> {
           } catch {
             startDirty = undefined;
           }
-          return async () => {
+          return Object.assign(async () => {
             const endHead = await readHead();
             const dirtyPaths = await readDirtyPaths();
             // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
@@ -3061,6 +3061,9 @@ async function initializeServices(): Promise<boolean> {
                 // Keep the plain comparison.
               }
             }
+            // Lane build output (.cyboflow/build-slots/) committed since the lane FIRST started — fail-soft (absent on error).
+            const committedBuildSlotPaths = await readCommittedBuildSlotPaths(
+              (args) => runGitExit(worktreePath, args), opts?.buildSlotBaseHead ?? startHead, endHead);
             return {
               headAdvanced,
               dirty: dirtyPaths.length > 0,
@@ -3068,8 +3071,9 @@ async function initializeServices(): Promise<boolean> {
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
+              ...(committedBuildSlotPaths !== undefined ? { committedBuildSlotPaths } : {}),
             };
-          };
+          }, { startHead });
         },
         // Targeted failed→running un-settle for the controller's MONITOR LANE
         // RESCUE at the visual merge gate: that gate durably writes the lane

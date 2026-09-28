@@ -1,9 +1,11 @@
 /**
  * LaneBuildSlots — per-concurrency-slot build directories for programmatic
- * fan-out lanes. The unit block drives fake deps; the real-git block proves the
+ * fan-out lanes. The unit block drives fake deps; the real-git blocks prove the
  * production exclude writer covers a slot dir inside a LINKED worktree (sprint
  * worktrees are `git worktree add` worktrees, whose `info/exclude` resolves
- * through the common dir) so the commit-integrity probe never sees it as dirt.
+ * through the common dir) so the commit-integrity probe never sees it as dirt,
+ * and that the production git verification catches what the exclude cannot
+ * (a `.gitignore` negation, files already tracked under the root).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'child_process';
@@ -12,14 +14,19 @@ import * as path from 'path';
 import { withTempDir } from '../../../__test_fixtures__/tmp';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
 import { ensureGitExcludeEntries } from '../../../utils/gitExcludeWriter';
+import { runGitExit } from '../../../utils/runGit';
 import {
+  LANE_BUILD_SLOTS_DIR,
   LANE_BUILD_SLOTS_EXCLUDE_ENTRY,
   LANE_BUILD_SLOTS_KILL_SWITCH_ENV,
   LANE_SCRATCH_DIR_ENV,
   LaneBuildSlots,
   laneBuildSlotsDisabled,
   stripInheritedLaneEnv,
+  verifyLaneBuildSlotsIgnored,
+  type GitExit,
   type LaneBuildSlotsDeps,
+  type VerifyIgnoredResult,
 } from '../laneBuildSlots';
 
 const WORKTREE = path.resolve('/tmp/lane-slots-wt');
@@ -30,11 +37,15 @@ function fakeDeps(over: Partial<LaneBuildSlotsDeps> = {}) {
     order.push(`exclude:${worktreePath}:${entries.join(',')}`);
     return over.ensureExcluded ? over.ensureExcluded(worktreePath, entries) : true;
   });
+  const verifyIgnored = vi.fn(async (worktreePath: string, root: string): Promise<VerifyIgnoredResult> => {
+    order.push(`verify:${worktreePath}:${root}`);
+    return over.verifyIgnored ? over.verifyIgnored(worktreePath, root) : { ok: true };
+  });
   const mkdirp = vi.fn(async (dirPath: string) => {
     order.push(`mkdir:${dirPath}`);
     if (over.mkdirp) await over.mkdirp(dirPath);
   });
-  return { order, ensureExcluded, mkdirp };
+  return { order, ensureExcluded, verifyIgnored, mkdirp };
 }
 
 describe('LaneBuildSlots', () => {
@@ -70,19 +81,20 @@ describe('LaneBuildSlots', () => {
     expect(scratch!.dir).toBe(path.resolve('relative/wt', '.cyboflow', 'build-slots', 'slot-0'));
   });
 
-  it('writes the git exclude BEFORE creating any directory, with the anchored build-slots entry', async () => {
+  it('writes the git exclude, then has git verify it, BEFORE creating any directory', async () => {
     const deps = fakeDeps();
     await new LaneBuildSlots(WORKTREE, deps).resolve(0);
 
     expect(deps.order).toEqual([
       `exclude:${WORKTREE}:${LANE_BUILD_SLOTS_EXCLUDE_ENTRY}`,
+      `verify:${WORKTREE}:${LANE_BUILD_SLOTS_DIR}`,
       `mkdir:${path.join(WORKTREE, '.cyboflow', 'build-slots', 'slot-0')}`,
     ]);
     // Narrow on purpose: projects commit other .cyboflow/ files.
     expect(LANE_BUILD_SLOTS_EXCLUDE_ENTRY).toBe('/.cyboflow/build-slots/');
   });
 
-  it('excludes once across many resolves and creates each slot dir once', async () => {
+  it('excludes and verifies once across many resolves and creates each slot dir once', async () => {
     const deps = fakeDeps();
     const slots = new LaneBuildSlots(WORKTREE, deps);
 
@@ -93,6 +105,7 @@ describe('LaneBuildSlots', () => {
     await slots.resolve(2);
 
     expect(deps.ensureExcluded).toHaveBeenCalledTimes(1);
+    expect(deps.verifyIgnored).toHaveBeenCalledTimes(1);
     expect(deps.mkdirp).toHaveBeenCalledTimes(3);
     expect(deps.mkdirp.mock.calls.map((c) => path.basename(String(c[0])))).toEqual(['slot-0', 'slot-1', 'slot-2']);
   });
@@ -155,7 +168,131 @@ describe('LaneBuildSlots', () => {
       expect(await slots.resolve(bad)).toBeUndefined();
     }
     expect(deps.ensureExcluded).not.toHaveBeenCalled();
+    expect(deps.verifyIgnored).not.toHaveBeenCalled();
     expect(deps.mkdirp).not.toHaveBeenCalled();
+  });
+
+  // ── git verification (the exclude is written, but does git honor it?) ──
+  it('creates NO directory when git says the root is not ignored, for the rest of the run', async () => {
+    const logger = makeSpyLogger();
+    const deps = fakeDeps({ verifyIgnored: async () => ({ ok: false, reason: 'a .gitignore rule re-includes it' }) });
+    const slots = new LaneBuildSlots(WORKTREE, deps, logger);
+
+    expect(await slots.resolve(0)).toBeUndefined();
+    expect(await slots.resolve(1)).toBeUndefined();
+    expect(await slots.prepare()).toBe(false);
+
+    expect(deps.mkdirp).not.toHaveBeenCalled();
+    // Sticky: a negation / tracked file is a fact about the repo, not re-asked per lane step.
+    expect(deps.verifyIgnored).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a REJECTING verification (git could not run) as a failure', async () => {
+    const deps = fakeDeps({
+      verifyIgnored: async () => {
+        throw new Error('spawn git ENOENT');
+      },
+    });
+    const reasons: string[] = [];
+    const slots = new LaneBuildSlots(WORKTREE, deps);
+    slots.setUnavailableListener((reason) => reasons.push(reason));
+
+    expect(await slots.resolve(0)).toBeUndefined();
+    expect(deps.mkdirp).not.toHaveBeenCalled();
+    expect(reasons).toEqual([`git could not confirm that ${LANE_BUILD_SLOTS_DIR}/ is ignored (spawn git ENOENT)`]);
+  });
+
+  it('shares one in-flight preparation between concurrent resolves (verification runs once, before any mkdir)', async () => {
+    let release: (result: VerifyIgnoredResult) => void = () => undefined;
+    const gate = new Promise<VerifyIgnoredResult>((resolve) => {
+      release = resolve;
+    });
+    const deps = fakeDeps({ verifyIgnored: () => gate });
+    const slots = new LaneBuildSlots(WORKTREE, deps);
+
+    const pending = [slots.prepare(), slots.resolve(0), slots.resolve(1)];
+    await Promise.resolve();
+    expect(deps.mkdirp).not.toHaveBeenCalled();
+    release({ ok: true });
+    const [prepared, first, second] = await Promise.all(pending);
+
+    expect(prepared).toBe(true);
+    expect(first).toMatchObject({ slot: 0 });
+    expect(second).toMatchObject({ slot: 1 });
+    expect(deps.verifyIgnored).toHaveBeenCalledTimes(1);
+  });
+
+  // ── the once-per-run "unavailable" notice ──
+  it('tells the listener about the FIRST failure only, whatever kind the later ones are', async () => {
+    let excludeOk = false;
+    const deps = fakeDeps({
+      ensureExcluded: () => excludeOk,
+      mkdirp: () => {
+        throw new Error('EACCES');
+      },
+    });
+    const reasons: string[] = [];
+    const slots = new LaneBuildSlots(WORKTREE, deps);
+    slots.setUnavailableListener((reason) => reasons.push(reason));
+
+    expect(await slots.prepare()).toBe(false); // exclude write fails
+    expect(await slots.resolve(0)).toBeUndefined(); // …and again
+    excludeOk = true;
+    expect(await slots.resolve(0)).toBeUndefined(); // exclude recovers, mkdir fails
+    expect(await slots.resolve(1)).toBeUndefined(); // another mkdir failure
+
+    expect(reasons).toEqual([
+      `could not write the git exclude entry \`${LANE_BUILD_SLOTS_EXCLUDE_ENTRY}\` for this worktree`,
+    ]);
+  });
+
+  it('reports a mkdir failure when it is the first failure', async () => {
+    const deps = fakeDeps({
+      mkdirp: () => {
+        throw new Error('EACCES: permission denied');
+      },
+    });
+    const reasons: string[] = [];
+    const slots = new LaneBuildSlots(WORKTREE, deps);
+    slots.setUnavailableListener((reason) => reasons.push(reason));
+
+    expect(await slots.prepare()).toBe(true); // the root is fine…
+    expect(await slots.resolve(2)).toBeUndefined(); // …the slot dir is not
+
+    expect(reasons).toEqual([
+      `could not create ${path.join(WORKTREE, '.cyboflow', 'build-slots', 'slot-2')} (EACCES: permission denied)`,
+    ]);
+  });
+
+  it('delivers a failure that happened before a listener subscribed, exactly once', async () => {
+    const deps = fakeDeps({ verifyIgnored: async () => ({ ok: false, reason: 'tracked files' }) });
+    const slots = new LaneBuildSlots(WORKTREE, deps);
+    expect(await slots.prepare()).toBe(false);
+
+    const listener = vi.fn();
+    slots.setUnavailableListener(listener);
+    await slots.resolve(0);
+    slots.setUnavailableListener(listener);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith('tracked files');
+  });
+
+  it('never notifies when everything succeeds, and survives a throwing listener', async () => {
+    const quiet = vi.fn();
+    const ok = new LaneBuildSlots(WORKTREE, fakeDeps());
+    ok.setUnavailableListener(quiet);
+    await ok.prepare();
+    await ok.resolve(0);
+    expect(quiet).not.toHaveBeenCalled();
+
+    const logger = makeSpyLogger();
+    const failing = new LaneBuildSlots(WORKTREE, fakeDeps({ ensureExcluded: () => false }), logger);
+    failing.setUnavailableListener(() => {
+      throw new Error('listener exploded');
+    });
+    expect(await failing.resolve(0)).toBeUndefined();
   });
 
   it('laneBuildSlotsDisabled is true only for the exact value "1"', () => {
@@ -228,28 +365,52 @@ function porcelain(cwd: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * A temp repo with one commit plus a LINKED worktree of it (how sprint
+ * worktrees are made), `prepareMain` running in the main checkout before the
+ * commit so it can seed a .gitignore or a tracked file.
+ */
+async function withLinkedWorktree(
+  prefix: string,
+  fn: (worktreePath: string) => Promise<void>,
+  prepareMain?: (mainRepo: string) => void,
+): Promise<void> {
+  await withTempDir(prefix, async (root) => {
+    const mainRepo = path.join(root, 'repo');
+    fs.mkdirSync(mainRepo);
+    git(['init', '-q'], mainRepo);
+    fs.writeFileSync(path.join(mainRepo, 'README.md'), 'hello\n', 'utf8');
+    git(['add', 'README.md'], mainRepo);
+    prepareMain?.(mainRepo);
+    git(['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], mainRepo);
+
+    // A space in the path, as real project paths often have.
+    const worktreePath = path.join(root, 'sprint wt');
+    git(['worktree', 'add', '-q', '-b', 'sprint-branch', worktreePath], mainRepo);
+    await fn(worktreePath);
+  });
+}
+
+/** The PRODUCTION git runner for the verification, as DefaultProgrammaticRunner wires it. */
+const productionGit = (cwd: string, args: string[]): Promise<GitExit> => runGitExit(cwd, args);
+
+/** PRODUCTION deps, exactly as DefaultProgrammaticRunner wires them. */
+function productionDeps(): LaneBuildSlotsDeps {
+  return {
+    ensureExcluded: (wt, entries) => ensureGitExcludeEntries(wt, entries) !== null,
+    verifyIgnored: (wt, root) => verifyLaneBuildSlotsIgnored(wt, root, productionGit),
+    mkdirp: async (dirPath) => {
+      await fs.promises.mkdir(dirPath, { recursive: true });
+    },
+  };
+}
+
 describe('LaneBuildSlots — real git, linked worktree', () => {
   it(
     'git-excludes the slot dir in a linked worktree so git status never lists its contents',
     async () => {
-      await withTempDir('lane-build-slots-', async (root) => {
-        const mainRepo = path.join(root, 'repo');
-        fs.mkdirSync(mainRepo);
-        git(['init', '-q'], mainRepo);
-        fs.writeFileSync(path.join(mainRepo, 'README.md'), 'hello\n', 'utf8');
-        git(['add', 'README.md'], mainRepo);
-        git(['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], mainRepo);
-
-        const worktreePath = path.join(root, 'wt');
-        git(['worktree', 'add', '-q', '-b', 'sprint-branch', worktreePath], mainRepo);
-
-        // PRODUCTION deps, exactly as DefaultProgrammaticRunner wires them.
-        const slots = new LaneBuildSlots(worktreePath, {
-          ensureExcluded: (wt, entries) => ensureGitExcludeEntries(wt, entries) !== null,
-          mkdirp: async (dirPath) => {
-            await fs.promises.mkdir(dirPath, { recursive: true });
-          },
-        });
+      await withLinkedWorktree('lane-build-slots-', async (worktreePath) => {
+        const slots = new LaneBuildSlots(worktreePath, productionDeps());
         const scratch = await slots.resolve(0);
         expect(scratch).toBeDefined();
         expect(fs.statSync(scratch!.dir).isDirectory()).toBe(true);
@@ -274,4 +435,135 @@ describe('LaneBuildSlots — real git, linked worktree', () => {
     },
     60_000,
   );
+
+  it(
+    'verification passes once the exclude is written — and the probe path is NOT vacuous',
+    async () => {
+      await withLinkedWorktree('lane-build-slots-verify-', async (worktreePath) => {
+        // Before the exclude exists git does NOT ignore the probe path, so a
+        // pass below is the exclude's doing, not a check that always says yes.
+        expect(await verifyLaneBuildSlotsIgnored(worktreePath, LANE_BUILD_SLOTS_DIR, productionGit)).toEqual({
+          ok: false,
+          reason: expect.stringContaining('git does not ignore .cyboflow/build-slots/'),
+        });
+
+        expect(ensureGitExcludeEntries(worktreePath, [LANE_BUILD_SLOTS_EXCLUDE_ENTRY])).not.toBeNull();
+        // The root directory does not exist yet: the probe form must still match.
+        expect(fs.existsSync(path.join(worktreePath, '.cyboflow'))).toBe(false);
+        expect(await verifyLaneBuildSlotsIgnored(worktreePath, LANE_BUILD_SLOTS_DIR, productionGit)).toEqual({
+          ok: true,
+        });
+        // Why the probe is the root WITH a trailing slash: the directory-only
+        // rule does not match the bare root while it does not exist (exit 1),
+        // but does match it asked as a directory (exit 0).
+        const bareRoot = await runGitExit(worktreePath, ['check-ignore', '-q', '--', LANE_BUILD_SLOTS_DIR]);
+        expect(bareRoot.exitCode).toBe(1);
+        const probe = await runGitExit(worktreePath, ['check-ignore', '-q', '--', `${LANE_BUILD_SLOTS_DIR}/`]);
+        expect(probe.exitCode).toBe(0);
+      });
+    },
+    60_000,
+  );
+
+  it(
+    'creates NO slot dir when the root is re-included even though a rule ignores dotfiles inside it',
+    async () => {
+      await withLinkedWorktree(
+        'lane-build-slots-dotmask-',
+        async (worktreePath) => {
+          const slots = new LaneBuildSlots(worktreePath, productionDeps());
+          expect(await slots.prepare()).toBe(false);
+          expect(fs.existsSync(path.join(worktreePath, '.cyboflow', 'build-slots'))).toBe(false);
+
+          // The trap a LEAF probe falls into: `.*` ignores a dotfile leaf, so it
+          // reads as ignored — while the root itself is re-included and git
+          // status would list every slot file.
+          const leaf = await runGitExit(worktreePath, [
+            'check-ignore',
+            '-q',
+            '--',
+            `${LANE_BUILD_SLOTS_DIR}/slot-0/.probe`,
+          ]);
+          expect(leaf.exitCode).toBe(0);
+          fs.mkdirSync(path.join(worktreePath, LANE_BUILD_SLOTS_DIR, 'slot-0'), { recursive: true });
+          fs.writeFileSync(path.join(worktreePath, LANE_BUILD_SLOTS_DIR, 'slot-0', 'a.o'), 'x', 'utf8');
+          expect(porcelain(worktreePath)).toContain('?? .cyboflow/build-slots/slot-0/a.o');
+        },
+        (mainRepo) => {
+          fs.writeFileSync(
+            path.join(mainRepo, '.gitignore'),
+            '!/.cyboflow/build-slots/\n.*\n!/.cyboflow/\n!.gitignore\n',
+            'utf8',
+          );
+          git(['add', '.gitignore'], mainRepo);
+        },
+      );
+    },
+    60_000,
+  );
+
+  for (const negation of ['!/.cyboflow/build-slots/', '!.cyboflow/build-slots/']) {
+    it(
+      `creates NO slot dir when a .gitignore negation (${negation}) re-includes the root`,
+      async () => {
+        await withLinkedWorktree(
+          'lane-build-slots-negation-',
+          async (worktreePath) => {
+            const reasons: string[] = [];
+            const slots = new LaneBuildSlots(worktreePath, productionDeps());
+            slots.setUnavailableListener((reason) => reasons.push(reason));
+
+            expect(await slots.prepare()).toBe(false);
+            expect(await slots.resolve(0)).toBeUndefined();
+
+            expect(fs.existsSync(path.join(worktreePath, '.cyboflow', 'build-slots'))).toBe(false);
+            expect(reasons).toHaveLength(1);
+            expect(reasons[0]).toContain('a .gitignore rule re-includes it');
+          },
+          (mainRepo) => {
+            fs.writeFileSync(path.join(mainRepo, '.gitignore'), `${negation}\n`, 'utf8');
+            git(['add', '.gitignore'], mainRepo);
+          },
+        );
+      },
+      60_000,
+    );
+  }
+
+  it(
+    'creates NO slot dir when files under the root are already tracked',
+    async () => {
+      await withLinkedWorktree(
+        'lane-build-slots-tracked-',
+        async (worktreePath) => {
+          const reasons: string[] = [];
+          const slots = new LaneBuildSlots(worktreePath, productionDeps());
+          slots.setUnavailableListener((reason) => reasons.push(reason));
+
+          expect(await slots.resolve(0)).toBeUndefined();
+
+          expect(fs.existsSync(path.join(worktreePath, '.cyboflow', 'build-slots', 'slot-0'))).toBe(false);
+          expect(reasons).toEqual([
+            'files under .cyboflow/build-slots/ are already tracked by git (.cyboflow/build-slots/old/output.o), so git will not ignore them',
+          ]);
+        },
+        (mainRepo) => {
+          const dir = path.join(mainRepo, '.cyboflow', 'build-slots', 'old');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'output.o'), 'x', 'utf8');
+          git(['add', '-f', '.cyboflow/build-slots/old/output.o'], mainRepo);
+        },
+      );
+    },
+    60_000,
+  );
+
+  it('reports a git that fails outright (not a repository) as a failure, not a pass', async () => {
+    await withTempDir('lane-build-slots-norepo-', async (dir) => {
+      const result = await verifyLaneBuildSlotsIgnored(dir, LANE_BUILD_SLOTS_DIR, (cwd, args) =>
+        runGitExit(cwd, args, { env: { GIT_CEILING_DIRECTORIES: path.dirname(dir) } }),
+      );
+      expect(result).toEqual({ ok: false, reason: expect.stringContaining('`git ls-files` failed (exit 128)') });
+    });
+  });
 });

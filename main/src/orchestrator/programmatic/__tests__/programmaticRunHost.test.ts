@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   ProgrammaticRunHost,
   ESCALATION_REVIEW_KILL_SWITCH_ENV,
+  LANE_BUILD_SLOTS_UNAVAILABLE_TITLE,
   LANE_TRIAGE_KILL_SWITCH_ENV,
   MONITOR_RUN_RESOLVE_CAP,
   MONITOR_WALK_RESOLVE_CAP,
@@ -806,6 +807,21 @@ describe('ProgrammaticRunHost', () => {
       expect(finding.body).toContain('src/draft.ts');
     });
 
+    it('tells the monitor when accept is unavailable (committed lane build output), and forwards nothing otherwise', async () => {
+      const monitor = makeLaneMonitor({ verdict: 'give_up', reason: 'untrack them first' });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor,
+        readLaneTask: () => ({ taskRef: 'TASK-301', taskTitle: 'T', taskBody: 'B' }),
+      });
+
+      await host.triageLaneFailure({ ...failure, failureKind: 'commit-integrity', acceptUnavailable: true });
+      await host.triageLaneFailure({ ...failure, failureKind: 'commit-integrity' });
+
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({ acceptUnavailable: true });
+      expect('acceptUnavailable' in (monitor.triageLane.mock.calls[1][0] as object)).toBe(false);
+    });
+
     it('files the audit finding plus one follow-up per waived item for a gate accept', async () => {
       const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
       const host = new ProgrammaticRunHost({
@@ -945,6 +961,94 @@ describe('ProgrammaticRunHost', () => {
         runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), environmentActions: complete,
       }).prepareFanOutEnvironment();
       expect(complete.run).not.toHaveBeenCalled();
+    });
+
+    // ── lane build slots: eager preparation + the once-per-run notice ───────
+
+    /** A fake LaneBuildSlots handle whose prepare() fails with `reason` (or succeeds when undefined). */
+    const makeSlots = (reason?: string) => {
+      let listener: ((r: string) => void) | undefined;
+      return {
+        prepare: vi.fn(async () => {
+          if (reason === undefined) return true;
+          listener?.(reason);
+          return false;
+        }),
+        setUnavailableListener: vi.fn((l: (r: string) => void) => {
+          listener = l;
+        }),
+        /** A LATER failure (e.g. a lane's mkdir), delivered the way LaneBuildSlots delivers it. */
+        fail: (r: string) => listener?.(r),
+      };
+    };
+
+    it('prepares the lane build slots in the fan-out preflight even with no environment actions', async () => {
+      const laneBuildSlots = makeSlots();
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        laneBuildSlots, fileLaneTriageFinding,
+      }).prepareFanOutEnvironment();
+
+      expect(laneBuildSlots.setUnavailableListener).toHaveBeenCalledTimes(1);
+      expect(laneBuildSlots.prepare).toHaveBeenCalledTimes(1);
+      expect(fileLaneTriageFinding).not.toHaveBeenCalled();
+    });
+
+    it('turns a lane build-slot failure into ONE monitor line and ONE non-blocking finding, and keeps going', async () => {
+      const laneBuildSlots = makeSlots('a .gitignore rule re-includes it (e.g. `!/.cyboflow/build-slots/`)');
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const injected: ClaudeStreamEvent[] = [];
+      const env = makeEnv(true);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        laneBuildSlots, fileLaneTriageFinding, environmentActions: env,
+        injectEvent: (e) => injected.push(e),
+      }).prepareFanOutEnvironment();
+      await vi.waitFor(() => expect(fileLaneTriageFinding).toHaveBeenCalledTimes(1));
+
+      // The dependency half of the preflight still ran: nothing is blocked.
+      expect(env.run).toHaveBeenCalledWith('install_dependencies');
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe(LANE_BUILD_SLOTS_UNAVAILABLE_TITLE);
+      expect(finding.body).toContain('a .gitignore rule re-includes it');
+      expect(finding.body).toContain('database is locked');
+      expect(finding.body).toContain('Operation not permitted');
+      expect(finding.body).toContain('The sprint continues');
+      // Never claims more than it knows: a failed exclude write is retried and a
+      // failed mkdir costs one slot, so it says "some or all".
+      expect(finding.body).toContain('some or all of this run');
+      expect(finding.body).not.toContain('off for this run');
+      const chat = injectedText(injected);
+      expect(chat).toContain('Lane build slots unavailable');
+      expect(chat).toContain('Some or all lanes may run without one');
+      expect(chat).toContain('the sprint continues');
+    });
+
+    it('reports a LATER (mkdir) failure through the same notice when the preflight succeeded', async () => {
+      const laneBuildSlots = makeSlots();
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        laneBuildSlots, fileLaneTriageFinding,
+      }).prepareFanOutEnvironment();
+      expect(fileLaneTriageFinding).not.toHaveBeenCalled();
+
+      laneBuildSlots.fail('could not create /wt/.cyboflow/build-slots/slot-1 (EACCES)');
+      await vi.waitFor(() => expect(fileLaneTriageFinding).toHaveBeenCalledTimes(1));
+      expect((fileLaneTriageFinding.mock.calls[0][0] as { body: string }).body).toContain('slot-1 (EACCES)');
+    });
+
+    it('never fails the preflight when preparing the slots throws', async () => {
+      const laneBuildSlots = {
+        prepare: vi.fn().mockRejectedValue(new Error('boom')),
+        setUnavailableListener: vi.fn(),
+      };
+      await expect(
+        new ProgrammaticRunHost({
+          runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), laneBuildSlots,
+        }).prepareFanOutEnvironment(),
+      ).resolves.toBeUndefined();
     });
 
     // ── append_correction (advisory, no rescue spent) ───────────────────────

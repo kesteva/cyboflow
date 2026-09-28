@@ -439,6 +439,12 @@ export interface LaneTriageRequest {
    * then refused).
    */
   environment?: { report: string; actions: EnvironmentActionKind[] };
+  /**
+   * True when no accept can let this lane through (its commits carry lane build
+   * output — see `LaneTriageFailure.acceptUnavailable`): the parse downgrades an
+   * accept to give_up.
+   */
+  acceptUnavailable?: boolean;
 }
 
 /**
@@ -588,10 +594,11 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *      nothing to record); otherwise it is VALID AS GIVEN and never downgraded
  *      further — it names no step and re-drives nothing, so none of the rescue
  *      constraints below apply to it
- *   1c. `accept` with a blank `reason`, or — on any failure kind other than
- *      `commit-integrity` — with no non-blank `followUps` ⇒ give_up (a waiver
- *      that names nothing it waives is not auditable); otherwise VALID AS GIVEN
- *      (it re-drives nothing, like append_correction)
+ *   1c. `accept` on a request marked `acceptUnavailable`, with a blank
+ *      `reason`, or — on any failure kind other than `commit-integrity` — with
+ *      no non-blank `followUps` ⇒ give_up (a waiver that names nothing it waives
+ *      is not auditable); otherwise VALID AS GIVEN (it re-drives nothing, like
+ *      append_correction)
  *   1d. `fix_environment` naming an action the request does not list as
  *      available, or an unusable target ⇒ give_up; guidance defaults
  *   2. `give_up`                                        ⇒ give_up (reason kept when present)
@@ -632,6 +639,11 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
     };
   }
   if (o.verdict === 'accept') {
+    if (req.acceptUnavailable === true) {
+      return laneGiveUp(
+        'lane triage accepted a lane whose commits carry lane build output (.cyboflow/build-slots/), which accept cannot waive — letting the lane fail',
+      );
+    }
     if (!isNonEmptyString(o.reason)) {
       return laneGiveUp('lane triage accepted the lane without saying why — letting the lane fail');
     }
@@ -1351,7 +1363,7 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
   'code-review': 'code review kept reporting blocking defects until its loopback budget ran out',
   'merge-gate': 'the visual merge gate rejected this lane',
   'commit-integrity':
-    'every inner step passed, but the lane made no git commit while the worktree holds uncommitted changes',
+    'every inner step passed, but the lane made no git commit while the worktree holds uncommitted changes — or its commits carry lane build output under .cyboflow/build-slots/ (the error excerpt says which)',
 };
 
 /**
@@ -1422,7 +1434,8 @@ function commitIntegrityTriageSection(req: LaneTriageRequest): string {
 
 THIS IS A COMMIT-INTEGRITY FAILURE, not a code defect. Every inner step of the lane passed; the question is only whether the lane left ITS OWN work uncommitted. Lanes of a sprint share ONE worktree, so uncommitted paths can belong to a sibling lane that is still working. Compare the uncommitted paths in the excerpt with what THIS task is about (its body, the lane's step outputs in the conversation, the files it names) and read the files if you need to. For this failure kind:
 - "accept" — the lane's own work is already committed, or the task needed no change (e.g. it was already implemented), and the uncommitted paths belong to other work. The host integrates the lane as it stands. \`reason\` is REQUIRED: say whose the paths are and why; \`followUps\` is not needed.
-Use "retry" (usually from the first inner step, with guidance naming the files to commit) when the uncommitted paths ARE this task's work.`;
+Use "retry" (usually from the first inner step, with guidance naming the files to commit) when the uncommitted paths ARE this task's work.
+If the excerpt instead says the lane's commits carry files under \`.cyboflow/build-slots/\` (lane build output), ownership is not the question and "accept" is not available: use "retry" with guidance to untrack them as the excerpt says, or "give_up".`;
 }
 
 /**
