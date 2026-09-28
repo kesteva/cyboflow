@@ -653,6 +653,38 @@ describe('AgentThreadService', () => {
       expect(h.codexManager.abortCalls).toHaveLength(0);
       await expect(sendPromise).resolves.toBeUndefined();
     });
+
+    it('preserves the interrupted turn\'s own captured session id even when the abort rejects resume-shaped: the NEXT turn resumes it, never cold-starts', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // Establish a stored resume id first.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      // Turn 2 resumes sess-1, emits its OWN init (sess-2) before hanging, and
+      // is interrupted mid-flight. The bridge captures sess-2 before the abort
+      // lands, so that is the id a correct implementation ends up with.
+      h.manager.queueHang('sess-2');
+      const sendPromise = h.service.sendMessage(thread.id, 'second');
+      await Promise.resolve();
+
+      // The abort rejects with a message that LOOKS like a stale-resume
+      // failure referencing the OLD id. Without the `pendingInterrupts` guard,
+      // the stale-resume branch would misread this as turn 2's own resume
+      // (sess-1) going stale, clear the just-captured sess-2, and retry fresh
+      // — exactly what this test proves does NOT happen.
+      h.manager.abortRejectMessage = 'No conversation found with session ID sess-1';
+      await h.service.interruptTurn(thread.id);
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // Only the 2 real spawns happened — no stale-resume retry spawn.
+      expect(h.manager.calls).toHaveLength(2);
+      const persistedThread = h.store.getThread(thread.id);
+      expect(persistedThread?.claudeSessionId).toBe('sess-2');
+
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'third');
+      expect(h.manager.calls[2].resumeSessionId).toBe('sess-2');
+    });
   });
 
   describe('runtime selection', () => {
