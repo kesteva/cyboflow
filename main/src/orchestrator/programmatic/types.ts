@@ -516,8 +516,24 @@ export interface LaneTriageFailure {
   errorExcerpt: string;
   /** The lane's configured inner chain, in execution order. */
   innerStepIds: readonly string[];
+  /**
+   * The failures earlier rescues of THIS lane already answered, oldest first.
+   * Absent on a lane's first consult. Present ⇒ a re-drive is only allowed when
+   * the supervisor attests the lane is converging (see MONITOR_LANE_RESCUE_CAP).
+   */
+  priorRescues?: LanePriorRescue[];
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
+}
+
+/** One failure an earlier monitor rescue of the same lane answered. */
+export interface LanePriorRescue {
+  stepId: string;
+  failureKind: LaneFailureKind;
+  /** The failure excerpt the supervisor saw at the time. */
+  errorExcerpt: string;
+  /** The guidance that rescue threaded into the re-run. */
+  guidance: string;
 }
 
 /**

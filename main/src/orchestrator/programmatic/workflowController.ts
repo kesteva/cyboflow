@@ -58,6 +58,7 @@ import type {
   ControllerStepContext,
   HumanGateDecision,
   LaneFailureKind,
+  LanePriorRescue,
   LaneRescueOutcome,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
@@ -278,24 +279,31 @@ export const MAX_SYSTEMIC_PAUSES = 10;
 export const MAX_VISUAL_LOOPBACKS = 5;
 
 /**
- * How many times ONE lane may be rescued by the monitor's autonomous lane triage
- * (`ControllerHost.triageLaneFailure`) across a whole walk. ONE: a rescue buys the
- * lane a fresh traversal from an earlier inner step with fresh guidance — if that
- * traversal fails too, the supervisor's read of the problem was wrong and a second
- * round of the same reasoning is not going to find a different answer. The lane
- * then settles 'failed' and reaches the human at the run's gate, which is the
- * outcome that always existed.
+ * HARD ceiling on how many times ONE lane may be rescued by the monitor's
+ * autonomous lane triage (`ControllerHost.triageLaneFailure`) across a whole walk.
+ * The first rescue is unconditional; every LATER one is PROGRESS-GATED: the
+ * request carries the lane's prior rescues, and the brain's parse ladder refuses a
+ * re-drive unless the supervisor attests the lane is CONVERGING (each traversal
+ * surfaced different, real defects and fixed the previous ones). A lane that
+ * repeats the same failure after a rescue therefore still stops after one — the
+ * supervisor's read was wrong and another round of it will not help — while
+ * genuinely hard work that keeps making progress (observed 2026-09-28: three
+ * concurrency lanes each fixed one real race per round and failed on the next)
+ * is not cut off mid-convergence. Sized at the same 3 as FAN_OUT_LANE_ATTEMPT_CAP.
  */
-export const MONITOR_LANE_RESCUE_CAP = 1;
+export const MONITOR_LANE_RESCUE_CAP = 3;
 
 /**
- * How many lane rescues the monitor may spend across a WHOLE walk, however many
- * lanes fail. Bounds the blast radius of a supervisor that has misdiagnosed
- * something run-wide (a broken toolchain, a bad merge base) into rescuing every
- * lane in turn: past this, failures settle as they always did rather than
- * multiplying agent turns against a cause no per-lane guidance can fix.
+ * How many lane rescues the monitor may spend across a WHOLE walk: floor(3 + n/2)
+ * for a sprint of n tasks. Bounds the blast radius of a supervisor that has
+ * misdiagnosed something run-wide (a broken toolchain, a bad merge base) into
+ * rescuing every lane in turn, while scaling with the sprint — a flat 4 was spent
+ * within the first hour of a 14-task sprint (2026-09-28), and the next lane then
+ * failed with its exact fix spelled out in its own FAIL text.
  */
-export const MONITOR_RUN_RESCUE_CAP = 4;
+export function monitorRunRescueCap(taskCount: number): number {
+  return Math.floor(3 + Math.max(0, taskCount) / 2);
+}
 
 /**
  * How many lanes of ONE wave must fail with the SAME error text before the
@@ -440,8 +448,19 @@ function fanOutPauseInfo(
 interface LaneRescueState {
   /** itemId → rescues spent (capped by MONITOR_LANE_RESCUE_CAP). */
   perItem: Map<string, number>;
-  /** Rescues spent across the walk (capped by MONITOR_RUN_RESCUE_CAP). */
+  /** Rescues spent across the walk (capped by `monitorRunRescueCap(knownItems.size)`). */
   runTotal: number;
+  /**
+   * Every fan-out item this walk has seen — the sprint's task count `n` in the
+   * run budget. A union, because re-resolution filters settled lanes out.
+   */
+  knownItems: Set<string>;
+  /**
+   * itemId → the failures a rescue already answered, oldest first. Handed back to
+   * the supervisor on the lane's next consult so it can judge convergence, which
+   * is what gates every rescue after the first (see MONITOR_LANE_RESCUE_CAP).
+   */
+  history: Map<string, LanePriorRescue[]>;
   /**
    * itemId → the guidance a rescue attached to that lane. STICKY for the life of
    * the lane: the controller threads it into EVERY subsequent inner-step spawn
@@ -452,6 +471,10 @@ interface LaneRescueState {
    * task's rescue into every sibling lane's next spawn of that step.
    */
   guidance: Map<string, string>;
+}
+
+function newLaneRescueState(): LaneRescueState {
+  return { perItem: new Map(), runTotal: 0, knownItems: new Set(), history: new Map(), guidance: new Map() };
 }
 
 /**
@@ -618,7 +641,7 @@ export class WorkflowController {
     // Walk-scoped autonomous LANE-RESCUE state (per-item + per-run caps, plus the
     // sticky per-lane rescue guidance). Created here rather than per fan-out step
     // so both caps bound the WHOLE walk, and threaded into runFanOut by reference.
-    const laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() };
+    const laneRescues: LaneRescueState = newLaneRescueState();
     // The human's most recent gate 'revise', threaded into every step the gate's
     // loopback re-drives. Walk-scoped and STICKY: set when applyGateDecision takes
     // a revise WITH a jump target, carried on every baseCtx from that target
@@ -1539,7 +1562,7 @@ export class WorkflowController {
    * inner step with supervisor guidance — the AUTONOMOUS analogue of the operator
    * rewind above, sharing its `clearStateForRewind` semantics and its refusal to
    * bump `laneAttempt`. Bounded by MONITOR_LANE_RESCUE_CAP (per lane) and
-   * MONITOR_RUN_RESCUE_CAP (per walk). Failures that are NOT budget exhaustion
+   * the run rescue cap (`monitorRunRescueCap`, per walk). Failures that are NOT budget exhaustion
    * never consult: a systemic failure (it has its own park path), an aborted
    * result, a never-started / cycle lane (`markBlocked`), and a task-verify
    * output-CONTRACT exhaustion (a malformed result is not a defect a rescue can
@@ -1556,7 +1579,7 @@ export class WorkflowController {
     signal: AbortSignal | undefined,
     systemicPauses: Map<string, number>,
     systemicGiveUps: Set<string>,
-    laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() },
+    laneRescues: LaneRescueState = newLaneRescueState(),
   ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
@@ -1565,6 +1588,7 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
+    for (const item of items) laneRescues.knownItems.add(item);
     // RUN-LEVEL verification posture, resolved ONCE here — BEFORE the first lane
     // is dispatched, so every lane's implement/task-verify runs under a known
     // posture. Resolving it lazily (from the first lane whose enqueue declined)
@@ -1575,7 +1599,7 @@ export class WorkflowController {
     // lane's triage consult dies on a systemic condition. Lanes run concurrently
     // and the consults are serialized on the monitor's send chain, so without it
     // five concurrently-failing lanes make five doomed consults against a dead
-    // quota — and the ones past MONITOR_RUN_RESCUE_CAP get no consult at all and
+    // quota — and the ones past the run rescue cap get no consult at all and
     // settle 'failed' on an environment condition. With it, the first systemic
     // verdict parks every later lane of the same epoch for free.
     //
@@ -1595,7 +1619,7 @@ export class WorkflowController {
      * is re-read AFTER the previous consult resolved. Lanes fail concurrently:
      * without the chain, every lane of a wave that fails before the first
      * consult returns passes the latch check together, four of them burn
-     * MONITOR_RUN_RESCUE_CAP on a monitor whose own turn is dead, and the fifth
+     * the run rescue cap on a monitor whose own turn is dead, and the fifth
      * — refused a consult on a "spent" budget — settles 'failed' on the
      * environment. The monitor already runs consults one at a time, so
      * serializing here costs no wall-clock.
@@ -1710,7 +1734,7 @@ export class WorkflowController {
      * rather than charged after it. Lanes run concurrently, and the consult is a
      * slow SDK turn: charging afterwards would let a whole wave of failing lanes
      * pass the cap check together and every one of them get rescued, which is
-     * exactly the runaway MONITOR_RUN_RESCUE_CAP exists to prevent. Reserving is
+     * exactly the runaway the run rescue cap exists to prevent. Reserving is
      * safe because the release path restores the counters exactly, so a give_up
      * still costs nothing — the caps bound INTERVENTION, not consultation.
      *
@@ -1726,13 +1750,15 @@ export class WorkflowController {
     ): Promise<LaneTriageVerdict> => {
       if (!this.host.triageLaneFailure) return { kind: 'unconsulted' };
       const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
-      if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= MONITOR_RUN_RESCUE_CAP) {
+      const runCap = monitorRunRescueCap(laneRescues.knownItems.size);
+      if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= runCap) {
         this.host.log?.(
           'info',
-          `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${MONITOR_RUN_RESCUE_CAP}); not consulting lane triage`,
+          `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${runCap}); not consulting lane triage`,
         );
         return { kind: 'unconsulted' };
       }
+      const priorRescues = laneRescues.history.get(itemId) ?? [];
       // Reserve now, release on every non-rescue arm below (see the docblock).
       laneRescues.perItem.set(itemId, usedForLane + 1);
       laneRescues.runTotal += 1;
@@ -1750,6 +1776,7 @@ export class WorkflowController {
           failureKind,
           errorExcerpt,
           innerStepIds: allowedStepIds,
+          ...(priorRescues.length > 0 ? { priorRescues: [...priorRescues] } : {}),
           ...(signal ? { signal } : {}),
         });
       } catch (err) {
@@ -1799,6 +1826,10 @@ export class WorkflowController {
         return { kind: 'give_up' };
       }
       laneRescues.guidance.set(itemId, outcome.guidance);
+      laneRescues.history.set(itemId, [
+        ...priorRescues,
+        { stepId: failingStepId, failureKind, errorExcerpt, guidance: outcome.guidance },
+      ]);
       this.host.log?.(
         'warn',
         `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,
@@ -2918,6 +2949,7 @@ export class WorkflowController {
         // re-reads dependencies (and a fan-out whose driver exposes none is
         // untouched).
         const appeared = fresh.filter((id) => !inScope.has(id));
+        for (const id of appeared) laneRescues.knownItems.add(id);
         if (appeared.length > 0) {
           for (const id of fresh) inScope.add(id);
           let freshDeps: Map<string, string[]> | undefined;

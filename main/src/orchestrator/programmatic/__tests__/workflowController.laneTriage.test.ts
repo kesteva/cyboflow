@@ -25,7 +25,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   WorkflowController,
   MONITOR_LANE_RESCUE_CAP,
-  MONITOR_RUN_RESCUE_CAP,
+  monitorRunRescueCap,
 } from '../workflowController';
 import type {
   ControllerHost,
@@ -428,28 +428,61 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
   // ── Budgets ───────────────────────────────────────────────────────────────
 
-  it(`caps rescues at MONITOR_LANE_RESCUE_CAP (${MONITOR_LANE_RESCUE_CAP}) per lane — the second failure settles WITHOUT consulting`, async () => {
+  it(`caps rescues at MONITOR_LANE_RESCUE_CAP (${MONITOR_LANE_RESCUE_CAP}) per lane — the next failure settles WITHOUT consulting`, async () => {
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
-    const runner = makeRunner({
-      implement: [
-        { status: 'failed', error: 'first' },
-        { status: 'failed', error: 'second' },
-      ],
-    });
+    const failures = Array.from({ length: MONITOR_LANE_RESCUE_CAP + 1 }, (_, i) => ({
+      status: 'failed' as const,
+      error: `failure ${i + 1}`,
+    }));
+    const runner = makeRunner({ implement: failures });
     const { host, driver, consults } = makeTriageHost({
       items: ['t1'],
-      outcomes: [rescue('implement'), rescue('implement')],
+      outcomes: failures.map(() => rescue('implement')),
     });
 
     await new WorkflowController(runner, host).run('r', d);
 
-    expect(consults).toHaveLength(1);
-    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+    expect(consults).toHaveLength(MONITOR_LANE_RESCUE_CAP);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(MONITOR_LANE_RESCUE_CAP + 1);
     expect(laneStatus(driver.lanes, 't1')).toBe('failed');
   });
 
-  it(`caps rescues at MONITOR_RUN_RESCUE_CAP (${MONITOR_RUN_RESCUE_CAP}) across the whole walk`, async () => {
-    const items = ['t1', 't2', 't3', 't4', 't5', 't6'];
+  it('hands every later consult of a lane the failures its earlier rescues answered', async () => {
+    // Every rescue after the first is progress-gated in the brain; the controller's
+    // job is to carry the lane's rescue history so the brain can judge it.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const runner = makeRunner({
+      implement: [
+        { status: 'failed', error: 'race A' },
+        { status: 'failed', error: 'race B' },
+      ],
+    });
+    const { host, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [rescue('implement', 'fix race A'), rescue('implement', 'fix race B')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(2);
+    expect(consults[0].priorRescues).toBeUndefined();
+    expect(consults[1].priorRescues).toEqual([
+      { stepId: 'implement', failureKind: 'inner-step', errorExcerpt: 'race A', guidance: 'fix race A' },
+    ]);
+  });
+
+  it('sizes the run rescue budget at floor(3 + n/2) for n tasks', () => {
+    expect(monitorRunRescueCap(0)).toBe(3);
+    expect(monitorRunRescueCap(1)).toBe(3);
+    expect(monitorRunRescueCap(5)).toBe(5);
+    expect(monitorRunRescueCap(14)).toBe(10);
+    expect(monitorRunRescueCap(58)).toBe(32);
+  });
+
+  it(`caps rescues at floor(3 + n/2) across the whole walk`, async () => {
+    const items = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10'];
+    const MONITOR_RUN_RESCUE_CAP = monitorRunRescueCap(items.length);
+    expect(MONITOR_RUN_RESCUE_CAP).toBe(8);
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
     // Every lane fails its first implement; a rescued lane succeeds on the retry.
     const scripts: Record<string, StepRunResult[]> = {};
@@ -462,7 +495,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
     await new WorkflowController(runner, host).run('r', d);
 
-    // Only the first four lanes to fail get a consult; the rest settle directly.
+    // Only the first eight lanes to fail get a consult; the rest settle directly.
     expect(consults).toHaveLength(MONITOR_RUN_RESCUE_CAP);
     const rescued = items.filter((id) => laneStatus(driver.lanes, id) === 'integrated');
     const abandoned = items.filter((id) => laneStatus(driver.lanes, id) === 'failed');

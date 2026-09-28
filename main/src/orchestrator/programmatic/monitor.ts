@@ -35,6 +35,7 @@ import type {
   GateEscalationRequest,
   EscalationReviewItemSummary,
   LaneFailureKind,
+  LanePriorRescue,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
   ReviewLoopRequest,
@@ -358,6 +359,12 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
       description:
         'adjust_and_retry only (REQUIRED there): the FULL replacement task body, minimally edited — never silently drop a security- or correctness-relevant criterion.',
     },
+    progress: {
+      type: 'string',
+      enum: ['converging', 'repeating'],
+      description:
+        'REQUIRED for retry / adjust_and_retry when this lane was ALREADY rescued: "converging" = each traversal fixed the previous defects and surfaced DIFFERENT real ones (another rescue is worth it); "repeating" = it is failing on the same problem again. A second rescue without "converging" is refused.',
+    },
   },
 };
 
@@ -370,7 +377,7 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
  * must stay free of this file's heavier import graph) and re-exported here so the
  * brain, the host seam, and the controller can never drift apart on the union.
  */
-export type { LaneFailureKind };
+export type { LaneFailureKind, LanePriorRescue };
 
 /**
  * Everything the monitor needs to triage ONE failing sprint fan-out lane. Assembled
@@ -397,6 +404,8 @@ export interface LaneTriageRequest {
   taskTitle: string;
   /** The task's CURRENT body — the acceptance criteria the lane's agents work from. */
   taskBody: string;
+  /** Failures earlier rescues of this lane answered, oldest first (absent on the first consult). */
+  priorRescues?: LanePriorRescue[];
 }
 
 /**
@@ -531,6 +540,8 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *   5. `adjust_and_retry` with a blank `taskBody`       ⇒ DOWNGRADE to `retry` — the
  *      guidance still carries the substance, and an empty body would wipe the task's
  *      acceptance criteria
+ *   5b. a re-drive of a lane that was ALREADY rescued without `progress:
+ *      'converging'` ⇒ append_correction (the diagnosis is kept; nothing re-runs)
  *   6. otherwise ⇒ the verdict as given (`reason` defaults to '' when non-string)
  */
 export function parseLaneTriageOutput(structured: unknown, req: LaneTriageRequest): LaneTriageDecision {
@@ -575,6 +586,18 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
   }
   const guidance = o.guidance;
   const reason = typeof o.reason === 'string' ? o.reason : '';
+  if ((req.priorRescues?.length ?? 0) > 0 && o.progress !== 'converging') {
+    // A lane that already had a rescue earns another only on attested
+    // convergence. Keep the diagnosis the supervisor made rather than dropping it.
+    return {
+      verdict: 'append_correction',
+      reason:
+        reason.trim().length > 0
+          ? `${reason} (Not re-driven: this lane was already rescued and the supervisor did not report it converging.)`
+          : 'This lane was already rescued and the supervisor did not report it converging, so it was not re-driven.',
+      guidance,
+    };
+  }
   if (o.verdict === 'retry' || !isNonEmptyString(o.taskBody)) {
     // adjust_and_retry with no replacement body downgrades to a plain rescue.
     return { verdict: 'retry', targetStepId, guidance, reason };
@@ -1246,6 +1269,27 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
 };
 
 /**
+ * The lane's earlier rescues, rendered so the supervisor can judge convergence —
+ * the condition every rescue after the first requires (`progress: 'converging'`).
+ */
+function priorRescuesSection(req: LaneTriageRequest): string {
+  const prior = req.priorRescues ?? [];
+  if (prior.length === 0) return '';
+  const rounds = prior
+    .map(
+      (r, i) =>
+        `Rescue ${i + 1} answered a \`${r.failureKind}\` failure at \`${r.stepId}\`:\n${fencedMarkdown(r.errorExcerpt)}\nGuidance given: ${oneLine(r.guidance)}`,
+    )
+    .join('\n\n');
+  return `
+
+THIS LANE WAS ALREADY RESCUED ${prior.length} time${prior.length === 1 ? '' : 's'}. Compare the current failure with what the earlier rescue(s) answered:
+${rounds}
+
+Another "retry" / "adjust_and_retry" is allowed ONLY if you set \`progress: "converging"\` — the lane fixed what it was told and is now failing on DIFFERENT, real defects. If it is failing on the same problem again, set \`progress: "repeating"\` and prefer "append_correction" or "give_up"; a re-drive without "converging" is refused.`;
+}
+
+/**
  * The extra verdict + evidence guidance a COMMIT-INTEGRITY consult needs. Every
  * other failure kind is "the work is wrong"; this one is "is the work even
  * this lane's?", and it is the only kind for which `accept` exists.
@@ -1300,7 +1344,7 @@ Failing step: \`${req.stepId}\` (attempt ${req.attempt})
 This lane's inner step chain, in order: ${chain}
 
 Error / verdict excerpt:
-${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}
+${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}${priorRescuesSection(req)}
 
 Current task body — the acceptance criteria this lane's agents are working from:
 ---
@@ -1321,7 +1365,7 @@ Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE decid
 
 RESOLVE IT YOURSELF WHERE YOU CAN. Between those four, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "append_correction" when neither will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
 
-AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane is rescued at most once), so spend it only where it will genuinely change the outcome.
+AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane gets one rescue, and more only while it is converging; the whole run has a fixed pool), so spend it only where it will genuinely change the outcome.
 
 \`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry" (and is IGNORED for "append_correction", which re-drives nothing). It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
 

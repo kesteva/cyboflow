@@ -1528,6 +1528,9 @@ export class ProgrammaticRunHost implements ControllerHost {
           innerStepIds: [...req.innerStepIds],
           taskTitle: facts?.taskTitle ?? '',
           taskBody: previousBody ?? '',
+          ...(req.priorRescues !== undefined && req.priorRescues.length > 0
+            ? { priorRescues: [...req.priorRescues] }
+            : {}),
         },
         req.signal,
       );

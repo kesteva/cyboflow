@@ -2132,7 +2132,7 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('AUTONOMOUS EXECUTION');
     expect(p).toContain('no human confirmation');
     expect(p).toContain('review queue');
-    expect(p).toContain('rescued at most once');
+    expect(p).toContain('more only while it is converging');
     expect(p).toContain('at or before the failing step');
     // The default target is named explicitly (the first inner step).
     expect(p).toContain('default to the FIRST inner step (`implement`)');
@@ -2152,6 +2152,28 @@ describe('buildLaneTriagePrompt', () => {
 });
 
 describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  const prior = [{ stepId: 'code-review', failureKind: 'code-review' as const, errorExcerpt: 'race A', guidance: 'fix A' }];
+
+  it('allows a re-drive of an already-rescued lane only when the supervisor attests convergence', () => {
+    const retry = { verdict: 'retry', reason: 'new race B', targetStepId: 'implement', guidance: 'fix B' };
+    expect(parseLaneTriageOutput({ ...retry, progress: 'converging' }, laneReq({ priorRescues: prior })).verdict).toBe(
+      'retry',
+    );
+    const repeating = parseLaneTriageOutput({ ...retry, progress: 'repeating' }, laneReq({ priorRescues: prior }));
+    expect(repeating.verdict).toBe('append_correction');
+    expect(repeating.reason).toContain('did not report it converging');
+    expect(parseLaneTriageOutput(retry, laneReq({ priorRescues: prior })).verdict).toBe('append_correction');
+    // A first rescue needs no attestation.
+    expect(parseLaneTriageOutput(retry, laneReq()).verdict).toBe('retry');
+  });
+
+  it('shows the prior rescues in the prompt', () => {
+    const p = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ priorRescues: prior }));
+    expect(p).toContain('THIS LANE WAS ALREADY RESCUED 1 time');
+    expect(p).toContain('race A');
+    expect(p).toContain('progress: "converging"');
+  });
+
   it('parses accept for a commit-integrity failure', () => {
     expect(
       parseLaneTriageOutput(
