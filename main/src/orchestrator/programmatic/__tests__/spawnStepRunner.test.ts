@@ -403,6 +403,85 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).not.toContain('## Operator guidance');
   });
 
+  // ── per-slot lane build directory (laneBuildSlots.ts) ─────────────────────
+  describe('lane build slot', () => {
+    const scratch = {
+      slot: 1,
+      dir: '/wt/.cyboflow/build-slots/slot-1',
+      env: {
+        CYBOFLOW_LANE_SCRATCH_DIR: '/wt/.cyboflow/build-slots/slot-1',
+        CLANG_MODULE_CACHE_PATH: '/wt/.cyboflow/build-slots/slot-1/clang-module-cache',
+        SWIFTPM_MODULECACHE_OVERRIDE: '/wt/.cyboflow/build-slots/slot-1/clang-module-cache',
+      },
+    };
+    const noSlotCtx: ControllerStepContext = { ...ctx, item: { id: 't1', over: 'tasks' }, spawnKey: 'r:t1' };
+    const laneCtx: ControllerStepContext = { ...noSlotCtx, laneSlot: 1 };
+    const passedOf = (spawner: ClaudeSpawnerLike): ClaudeSpawnerOptions =>
+      (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+
+    it('resolves ctx.laneSlot and threads the slot env + prompt section into the spawn', async () => {
+      const spawner = makeSpawner();
+      const laneScratch = vi.fn(async (_slot: number) => scratch);
+      const runner = new SpawnStepRunner(spawner, { ...opts, laneScratch });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), laneCtx);
+
+      expect(laneScratch).toHaveBeenCalledWith(1);
+      const passed = passedOf(spawner);
+      expect(passed.laneEnv).toEqual(scratch.env);
+      expect(passed.prompt).toContain('## Lane build directory');
+      expect(passed.prompt).toContain('`/wt/.cyboflow/build-slots/slot-1`');
+    });
+
+    it('spawns with no laneEnv and an unchanged prompt when the ctx carries no laneSlot', async () => {
+      const laneScratch = vi.fn(async (_slot: number) => scratch);
+      const withOption = makeSpawner();
+      const without = makeSpawner();
+
+      await new SpawnStepRunner(withOption, { ...opts, laneScratch }).runStep(
+        step({ id: 'implement', agent: 'implement' }),
+        noSlotCtx,
+      );
+      await new SpawnStepRunner(without, opts).runStep(step({ id: 'implement', agent: 'implement' }), noSlotCtx);
+
+      expect(laneScratch).not.toHaveBeenCalled();
+      expect('laneEnv' in passedOf(withOption)).toBe(false);
+      expect(passedOf(withOption).prompt).toBe(passedOf(without).prompt);
+      expect(passedOf(withOption).prompt).not.toContain('## Lane build directory');
+    });
+
+    it('spawns with no laneEnv and an unchanged prompt when no laneScratch option is bound', async () => {
+      const spawner = makeSpawner();
+      const baseline = makeSpawner();
+
+      await new SpawnStepRunner(spawner, opts).runStep(step({ id: 'implement', agent: 'implement' }), laneCtx);
+      await new SpawnStepRunner(baseline, opts).runStep(step({ id: 'implement', agent: 'implement' }), noSlotCtx);
+
+      expect('laneEnv' in passedOf(spawner)).toBe(false);
+      expect(passedOf(spawner).prompt).toBe(passedOf(baseline).prompt);
+    });
+
+    it('spawns without a build slot when the resolver rejects or resolves undefined', async () => {
+      for (const laneScratch of [
+        vi.fn(async (_slot: number) => {
+          throw new Error('mkdir EACCES');
+        }),
+        vi.fn(async (_slot: number) => undefined),
+      ]) {
+        const spawner = makeSpawner();
+        const result = await new SpawnStepRunner(spawner, { ...opts, laneScratch }).runStep(
+          step({ id: 'implement', agent: 'implement' }),
+          laneCtx,
+        );
+
+        expect(result.status).toBe('ok');
+        expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+        expect('laneEnv' in passedOf(spawner)).toBe(false);
+        expect(passedOf(spawner).prompt).not.toContain('## Lane build directory');
+      }
+    });
+  });
+
   it('adds NO guidance section when the bound thunk returns undefined for this step id', async () => {
     const spawner = makeSpawner();
     const runner = new SpawnStepRunner(spawner, { ...opts, stepGuidance: () => undefined });

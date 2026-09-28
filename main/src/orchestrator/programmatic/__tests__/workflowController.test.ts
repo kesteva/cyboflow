@@ -1164,6 +1164,112 @@ describe('WorkflowController', () => {
       ]);
     });
 
+    // ── concurrency slots (per-slot lane build directories) ──────────────────
+    it('gives concurrent lanes distinct slots and hands a freed slot to the next lane dispatched', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 2)])]);
+      const driver = makeFanOutDriver(['t0', 't1', 't2']);
+      const slotOf = new Map<string, number | undefined>();
+      const live = new Map<string, number | undefined>();
+      const concurrentSlots: Array<Array<number | undefined>> = [];
+      // t0 stays in flight until t2 has run, so t2 can only get a slot t1 freed.
+      let releaseT0!: () => void;
+      const t0Gate = new Promise<void>((resolve) => {
+        releaseT0 = resolve;
+        setTimeout(resolve, 2000); // never hang the suite if t2 is not dispatched
+      });
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          const itemId = ctx.item?.id ?? '?';
+          slotOf.set(itemId, ctx.laneSlot);
+          live.set(itemId, ctx.laneSlot);
+          if (live.size > 1) concurrentSlots.push([...live.values()]);
+          if (itemId === 't0') await t0Gate;
+          else await new Promise((res) => setTimeout(res, 1));
+          if (itemId === 't2') releaseT0();
+          live.delete(itemId);
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(slotOf.get('t0')).toBe(0);
+      expect(slotOf.get('t1')).toBe(1);
+      // t1 settled first and released slot 1; t0 still holds 0 ⇒ t2 reuses 1.
+      expect(slotOf.get('t2')).toBe(1);
+      // Every instant two lanes were live, they held distinct slots within [0, cap).
+      expect(concurrentSlots.length).toBeGreaterThan(0);
+      for (const slots of concurrentSlots) {
+        expect(new Set(slots).size).toBe(slots.length);
+        for (const slot of slots) expect([0, 1]).toContain(slot);
+      }
+    });
+
+    it("keeps a lane's slot across a loopback re-drive, even after a lower slot frees up", async () => {
+      const d = def([
+        phase('p1', [
+          step({
+            id: 'execute',
+            agent: 'orchestrate',
+            fanOut: {
+              over: 'tasks',
+              maxConcurrency: 2,
+              inner: [
+                { id: 'implement', agent: 'implement' },
+                { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+              ],
+            },
+          }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t0', 't1']);
+      const calls: Array<{ itemId?: string; stepId: string; attempt: number; slot?: number }> = [];
+      let t1VerifyFails = 1;
+      const runner: StepRunner = {
+        async runStep(s, ctx) {
+          calls.push({ itemId: ctx.item?.id, stepId: s.id, attempt: ctx.attempt, slot: ctx.laneSlot });
+          if (ctx.item?.id === 't1' && s.id === 'task-verify' && t1VerifyFails > 0) {
+            // Let t0 settle (freeing slot 0) before t1 loops back.
+            await new Promise((res) => setTimeout(res, 20));
+            t1VerifyFails -= 1;
+            return { status: 'failed', error: 'verify failed' };
+          }
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      const t1 = calls.filter((c) => c.itemId === 't1');
+      // implement → task-verify(fail) → implement (re-driven) → task-verify.
+      expect(t1.map((c) => `${c.stepId}@${c.attempt}`)).toEqual([
+        'implement@1',
+        'task-verify@1',
+        'implement@2',
+        'task-verify@2',
+      ]);
+      expect(new Set(t1.map((c) => c.slot))).toEqual(new Set([1]));
+      expect(calls.filter((c) => c.itemId === 't0').every((c) => c.slot === 0)).toBe(true);
+    });
+
+    it('carries no laneSlot on a non-fan-out step', async () => {
+      const d = def([phase('p1', [step({ id: 'plain' })])]);
+      const seen: ControllerStepContext[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          seen.push(ctx);
+          return { status: 'ok' };
+        },
+      };
+
+      await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(seen).toHaveLength(1);
+      expect('laneSlot' in seen[0]).toBe(false);
+    });
+
     it('marks a lane failed on a required inner-step failure while siblings integrate', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
       const driver = makeFanOutDriver(['t1', 't2']);

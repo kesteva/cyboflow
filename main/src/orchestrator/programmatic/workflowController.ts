@@ -1667,6 +1667,21 @@ export class WorkflowController {
      */
     const activeLanes = new Set<string>();
     const overlappedLanes = new Set<string>();
+    /**
+     * itemId → the CONCURRENCY SLOT its live walk occupies: the lowest index no
+     * other live lane holds, taken at dispatch and released when the walk settles,
+     * so a lane dispatched into a freed slot inherits that slot's warm build
+     * directory (laneBuildSlots.ts). Pure bookkeeping — the runner maps a slot to
+     * a path. Lowest-free rather than modulo so it stays within [0, cap) even if
+     * the cap changes mid-walk.
+     */
+    const laneSlots = new Map<string, number>();
+    const lowestFreeLaneSlot = (): number => {
+      const taken = new Set(laneSlots.values());
+      let slot = 0;
+      while (taken.has(slot)) slot += 1;
+      return slot;
+    };
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
@@ -2555,6 +2570,9 @@ export class WorkflowController {
           ...(laneRescues.guidance.has(itemId)
             ? { laneGuidance: laneRescues.guidance.get(itemId) }
             : {}),
+          // The concurrency slot this walk occupies, held for every re-drive
+          // inside it; the runner resolves it to the slot's build directory.
+          ...(laneSlots.has(itemId) ? { laneSlot: laneSlots.get(itemId) } : {}),
         };
         pendingContractError = undefined;
         pendingLoopbackFeedback = undefined;
@@ -3061,6 +3079,7 @@ export class WorkflowController {
         for (const other of activeLanes) overlappedLanes.add(other);
       }
       activeLanes.add(itemId);
+      laneSlots.set(itemId, lowestFreeLaneSlot());
       return driveItem(itemId)
         .then(
           (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
@@ -3075,6 +3094,7 @@ export class WorkflowController {
         )
         .finally(() => {
           activeLanes.delete(itemId);
+          laneSlots.delete(itemId);
         });
     };
 

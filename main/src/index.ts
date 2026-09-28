@@ -320,6 +320,7 @@ import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
+import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlots';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -372,6 +373,10 @@ for (const key of [
 ]) {
   delete process.env[key];
 }
+// Same reason for a hosting LANE's build-slot env (CYBOFLOW_LANE_SCRATCH_DIR and
+// the module-cache overrides that point into it): inherited, it would send this
+// instance's non-lane spawns into the outer run's slot directory.
+stripInheritedLaneEnv(process.env);
 
 // Set by the boot-time schema-version gate when the user picked "Check for
 // Updates" on a database that a newer build advanced. Consumed once by the

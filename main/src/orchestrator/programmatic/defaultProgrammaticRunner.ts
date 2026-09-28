@@ -87,7 +87,10 @@ import { hasReviewableDesignSurface } from '../runEntityOwnership';
 // rule (migration 143). This module used to keep a byte-identical private copy.
 import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
 import { EnvironmentActions, environmentActionsDisabled } from './environmentActions';
+import { LaneBuildSlots, laneBuildSlotsDisabled } from './laneBuildSlots';
 import { runToolCapture } from '../../utils/runGit';
+import { ensureGitExcludeEntries } from '../../utils/gitExcludeWriter';
+import { mkdir } from 'fs/promises';
 
 /**
  * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
@@ -862,6 +865,27 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       ? (agentKey: string) => this.deps.resolveStepRole!(ctx.runId, agentKey)
       : undefined;
 
+    // Per-SLOT private build directories for fan-out lanes, inside the run's
+    // worktree (laneBuildSlots.ts). One instance per run so the git exclude and
+    // each slot's mkdir happen once. Kill switch: CYBOFLOW_DISABLE_LANE_BUILD_SLOTS=1.
+    const laneBuildSlots =
+      !laneBuildSlotsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
+        ? new LaneBuildSlots(
+            ctx.worktreePath,
+            {
+              ensureExcluded: (worktreePath, entries) =>
+                ensureGitExcludeEntries(worktreePath, entries, {
+                  label: 'LaneBuildSlots',
+                  ...(this.deps.logger ? { logger: this.deps.logger } : {}),
+                }) !== null,
+              mkdirp: async (dirPath) => {
+                await mkdir(dirPath, { recursive: true });
+              },
+            },
+            this.deps.logger,
+          )
+        : undefined;
+
     const runner = new SpawnStepRunner(
       this.deps.spawner,
       {
@@ -913,6 +937,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
         ...(resolveStepRole ? { resolveStepRole } : {}),
         ...(definitionMergesDecomposition(def) ? { mergedDecomposition: true } : {}),
+        ...(laneBuildSlots ? { laneScratch: (slot: number) => laneBuildSlots.resolve(slot) } : {}),
       },
       this.deps.logger,
     );

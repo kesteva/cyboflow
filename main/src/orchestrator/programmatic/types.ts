@@ -287,6 +287,16 @@ export interface ControllerStepContext {
    * (byte-identical prompts).
    */
   laneGuidance?: string;
+  /**
+   * The CONCURRENCY SLOT this fan-out lane's walk occupies (0-based): the
+   * lowest index no other live lane held when it was dispatched, kept for every
+   * re-drive inside the walk and released when the walk settles, so the next
+   * lane dispatched into it reuses the same slot. The step runner resolves it to
+   * the slot's private build directory (laneBuildSlots.ts) — a prompt section
+   * plus spawn env. Pure bookkeeping here: the controller never sees a path.
+   * Absent on every non-fan-out step (byte-identical prompts and spawn env).
+   */
+  laneSlot?: number;
 }
 
 /**

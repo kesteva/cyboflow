@@ -3,6 +3,7 @@ import { watch, FSWatcher, readdirSync, statSync } from 'fs';
 import { join, relative } from 'path';
 import { fastCheckWorkingDirectory } from './gitPlumbingCommands';
 import type { Logger } from '../utils/logger';
+import { LANE_BUILD_SLOTS_DIR } from '../orchestrator/programmatic/laneBuildSlots';
 
 interface WatchedSession {
   sessionId: string;
@@ -48,6 +49,10 @@ export class GitFileWatcher extends EventEmitter {
   private readonly IGNORE_PATTERNS = [
     '.git/',
     'node_modules/',
+    // Fan-out lanes' private build dirs (laneBuildSlots.ts): git-excluded, and
+    // concurrent xcodebuild/SwiftPM output there would otherwise fire a refresh
+    // on every DerivedData write while the Diff tab is open.
+    `${LANE_BUILD_SLOTS_DIR}/`,
     '.DS_Store',
     'thumbs.db',
     '*.swp',

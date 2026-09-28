@@ -52,6 +52,7 @@ import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughn
 import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
 import type { StepDispatch } from './stepDispatch';
 import { flattenStepIds } from '../prompts/step-reporting-instructions';
+import { LANE_BUILD_SLOTS_DIR, LANE_SCRATCH_DIR_ENV } from './laneBuildSlots';
 
 /**
  * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
@@ -223,6 +224,16 @@ export interface ComposeStepPromptArgs {
    * this field existed).
    */
   laneGuidance?: string;
+  /**
+   * Absolute path of this fan-out lane's private BUILD directory — its
+   * concurrency slot's `.cyboflow/build-slots/slot-<n>` (laneBuildSlots.ts), also
+   * exported to the agent as `$CYBOFLOW_LANE_SCRATCH_DIR`. Rendered as a
+   * `## Lane build directory` section telling the agent to point toolchain build
+   * output there, since sibling lanes building the same worktree otherwise
+   * collide on shared caches. Absent (every non-lane step, and a lane whose slot
+   * could not be prepared) ⇒ no section (byte-identical prompts).
+   */
+  laneScratchDir?: string;
   /**
    * The §5.1 visual-verification output-contract defect quoted back to a
    * RE-DELEGATED task-verify (verification-agent redesign §5.3). Set ONLY on the
@@ -1012,6 +1023,20 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   }
   const userGuidance =
     guidanceBlocks.length > 0 ? `\n\n## Operator guidance\n\n${guidanceBlocks.join('\n\n')}` : '';
+  // This lane's private build directory (a concurrency slot's, reused by later
+  // lanes). The env var reaches a delegated subagent on its own; the flags below
+  // do not, so a delegating turn is told to pass the section on. Deliberately
+  // scoped to the Apple toolchains: the slot sits inside the worktree, and
+  // linters/test runners that ignore git excludes (ESLint flat config, vitest's
+  // default globs) would scan anything else sent there. And lane-only: the
+  // verifier runs a separate snapshot without this env, so the path must never
+  // reach a `## Visual verification task` (task-verify's build line uses
+  // `$VERIFY_DERIVED_DATA`) or a committed file.
+  const scratchVar = `$${LANE_SCRATCH_DIR_ENV}`;
+  const laneBuildDir =
+    args.laneScratchDir !== undefined && args.laneScratchDir.trim().length > 0
+      ? `\n\n## Lane build directory\n\nOther lanes build in this same worktree at the same time, so shared build caches collide. This lane has a private build directory: \`${args.laneScratchDir.trim()}\` (also \`${scratchVar}\`). It is git-excluded and reused by later lanes, so treat it as a cache: never commit it, never delete it. Send these Apple toolchains' build output there:\n\n- \`xcodebuild\`: \`-derivedDataPath "${scratchVar}/DerivedData" -clonedSourcePackagesDirPath "${scratchVar}/SourcePackages"\`\n- \`swift build\` / \`swift test\`: \`--scratch-path "${scratchVar}/swiftpm"\`. Inside a sandbox (a Codex agent's shell usually is one) also pass \`--disable-sandbox\`: SwiftPM's own manifest sandbox cannot start inside another sandbox and fails with \`sandbox_apply: Operation not permitted\`.\n\nThe clang/Swift module cache already points there (\`CLANG_MODULE_CACHE_PATH\`). Send nothing else there (no \`tsc\` or bundler output, no \`cargo\` target dir): linters and test runners do not read git excludes and would scan it. If one reports a file under \`${LANE_BUILD_SLOTS_DIR}/\`, that is build output, not your code: exclude the path from that command, never edit or delete it. Use this directory only in commands you run yourself in this lane: never write its path or \`${scratchVar}\` into a \`## Visual verification task\` (its build line uses \`$VERIFY_DERIVED_DATA\`), a runbook, or any committed file such as a script, Makefile or CI config. The verifier and other checkouts do not have it.${direct ? '' : ' When you delegate, pass this section to the subagent: the variable is already in its environment, but these instructions are not.'}`
+      : '';
   // The supervisor's ONE-SHOT retry guidance, rendered immediately after the
   // operator's section (and only when the host staged one for this attempt). Its
   // own heading, not a third block inside `## Operator guidance`: the heading is
@@ -1099,5 +1124,5 @@ ${doTheWork}
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${mergedDecompositionNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${mergedDecompositionNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${laneBuildDir}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

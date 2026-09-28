@@ -14,6 +14,11 @@ import type { SystemicPauseResolver } from '../systemicPauseGate';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 import Database from 'better-sqlite3';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import { withTempDir } from '../../../__test_fixtures__/tmp';
+import { LANE_BUILD_SLOTS_KILL_SWITCH_ENV } from '../laneBuildSlots';
 
 function makeSpawner(impl?: () => Promise<void>): ClaudeSpawnerLike {
   return {
@@ -994,4 +999,95 @@ describe('DefaultProgrammaticRunner — adversarial-review freshness (FB-9)', ()
     const fresh = await runWith(FAR_AHEAD, true);
     expect(fresh.gateCalls).toBeGreaterThan(0); // gate opened over this round's critique
   });
+});
+
+// ---------------------------------------------------------------------------
+// Lane build slots (laneBuildSlots.ts): the runner builds one LaneBuildSlots per
+// run over the run's worktree and hands SpawnStepRunner the resolver, so a
+// fan-out lane step spawns with its slot's env + prompt section. Real temp repos:
+// the production exclude writer and mkdir run for real.
+// ---------------------------------------------------------------------------
+
+describe('DefaultProgrammaticRunner — lane build slots', () => {
+  const savedKillSwitch = process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV];
+  afterEach(() => {
+    if (savedKillSwitch === undefined) delete process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV];
+    else process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV] = savedKillSwitch;
+  });
+
+  async function runLaneIn(worktreePath: string): Promise<ClaudeSpawnerOptions> {
+    const spawner = makeSpawner();
+    const driver: FanOutDriver = { resolveItems: vi.fn(() => ['task-1']), driveLane: vi.fn() };
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory: () => driver,
+    });
+    await runner.run({ ...ctxFor(fanOutDef(), { batchId: 'batch-9' }), worktreePath });
+    const calls = vi.mocked(spawner.spawnCliProcess).mock.calls.map(([o]) => o);
+    const lane = calls.find((o) => o.agentInvocationStepId === 'impl');
+    if (!lane) throw new Error('the fan-out lane step never spawned');
+    return lane;
+  }
+
+  function slotDir(worktreePath: string): string {
+    return path.join(worktreePath, '.cyboflow', 'build-slots', 'slot-0');
+  }
+
+  it(
+    'spawns a lane step with its slot env and prompt section, the dir created and git-excluded',
+    async () => {
+      delete process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV];
+      await withTempDir('runner-lane-slots-', async (repo) => {
+        execFileSync('git', ['init', '-q'], { cwd: repo, stdio: 'pipe' });
+
+        const lane = await runLaneIn(repo);
+
+        expect(lane.laneEnv?.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slotDir(repo));
+        expect(lane.prompt).toContain('## Lane build directory');
+        expect(fs.statSync(slotDir(repo)).isDirectory()).toBe(true);
+        fs.writeFileSync(path.join(slotDir(repo), 'artifact.o'), 'x', 'utf8');
+        const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+          cwd: repo,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        });
+        expect(status).not.toContain('build-slots');
+      });
+    },
+    60_000,
+  );
+
+  it(
+    'spawns WITHOUT a slot and creates nothing when the worktree cannot be git-excluded',
+    async () => {
+      delete process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV];
+      await withTempDir('runner-lane-slots-nogit-', async (dir) => {
+        const lane = await runLaneIn(dir); // not a git repo
+
+        expect('laneEnv' in lane).toBe(false);
+        expect(lane.prompt).not.toContain('## Lane build directory');
+        expect(fs.existsSync(path.join(dir, '.cyboflow'))).toBe(false);
+      });
+    },
+    60_000,
+  );
+
+  it(
+    'spawns WITHOUT a slot under the kill switch',
+    async () => {
+      process.env[LANE_BUILD_SLOTS_KILL_SWITCH_ENV] = '1';
+      await withTempDir('runner-lane-slots-off-', async (repo) => {
+        execFileSync('git', ['init', '-q'], { cwd: repo, stdio: 'pipe' });
+
+        const lane = await runLaneIn(repo);
+
+        expect('laneEnv' in lane).toBe(false);
+        expect(lane.prompt).not.toContain('## Lane build directory');
+        expect(fs.existsSync(path.join(repo, '.cyboflow'))).toBe(false);
+      });
+    },
+    60_000,
+  );
 });
