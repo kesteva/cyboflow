@@ -63,6 +63,7 @@ const ROLLUP: RunUsageRollup = {
   assistantMessageCount: 173,
   startedAt: null,
   endedAt: null,
+  gateReachedAt: null,
 };
 
 /** A complete eval fixture; override per-test. */

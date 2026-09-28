@@ -64,6 +64,7 @@ const ROLLUP: RunUsageRollup = {
   assistantMessageCount: 1,
   startedAt: null,
   endedAt: null,
+  gateReachedAt: null,
 };
 
 beforeEach(() => {

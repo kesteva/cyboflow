@@ -457,14 +457,16 @@ describe('stampArmGateReachedAt (migration 145)', () => {
     const db = dbAdapter(raw);
     seedRun(raw, 'runA', 'awaiting_review');
     stampArmGateReachedAt(db, 'runA', 'awaiting_review');
-    const first = (raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
-      gate_reached_at: string | null;
-    }).gate_reached_at;
+    // CURRENT_TIMESTAMP has 1-second resolution, so two calls in the same test
+    // tick would coincidentally match even without the IS NULL guard. Force a
+    // distinct sentinel value in between so an overwrite is actually detectable.
+    const sentinel = '2020-01-01 00:00:00';
+    raw.prepare('UPDATE workflow_runs SET gate_reached_at = ? WHERE id = ?').run(sentinel, 'runA');
     stampArmGateReachedAt(db, 'runA', 'awaiting_review');
     const second = (raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
       gate_reached_at: string | null;
     }).gate_reached_at;
-    expect(second).toBe(first);
+    expect(second).toBe(sentinel);
   });
 
   it('does NOT stamp an arm at awaiting_review behind an open MID-RUN human gate', () => {

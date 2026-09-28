@@ -174,9 +174,13 @@ describe('handleTerminalStatusEvent', () => {
       seedRun(raw, 'r1', 'exp-1', 'var-1');
       const { deps } = makeDeps(raw);
       handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
-      const first = readGateReachedAt(raw, 'r1');
+      // CURRENT_TIMESTAMP has 1-second resolution, so two calls in the same test
+      // tick would coincidentally match even without the IS NULL guard. Force a
+      // distinct sentinel value in between so an overwrite is actually detectable.
+      const sentinel = '2020-01-01 00:00:00';
+      raw.prepare('UPDATE workflow_runs SET gate_reached_at = ? WHERE id = ?').run(sentinel, 'r1');
       handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
-      expect(readGateReachedAt(raw, 'r1')).toBe(first);
+      expect(readGateReachedAt(raw, 'r1')).toBe(sentinel);
     });
 
     it('untagged run => no stamp (complete no-op, same as eval/reconcile/pairwise)', () => {
