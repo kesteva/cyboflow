@@ -400,6 +400,18 @@ export function setRetryRunDeps(deps: RetryRunDeps): void {
 /** The frozen-definition step id `addressReviewFindings` always rewinds to. */
 export const ADDRESS_REVIEW_STEP_ID = 'address-review';
 
+/**
+ * TASK-299: the stock chat message delivered to a HANDED-OVER run's agent when
+ * the review queue's "Address review findings" CTA is clicked — that run has
+ * no DAG left for a rewind to re-enter, but it DOES have a live agent sitting
+ * in chat, and the manual workaround today is exactly this: type "pull and
+ * address the findings" at it. Reuses `ADDRESS_REVIEW_FINDINGS_CONTRACT`
+ * (stepPrompt.ts) verbatim — the SAME contract the programmatic
+ * `address-review` step follows — rather than inventing a second, driftable
+ * copy of the same instructions.
+ */
+const ADDRESS_REVIEW_CHAT_MESSAGE = `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}`;
+
 let rewindRunDeps: RewindRunDeps | null = null;
 
 /**
@@ -432,14 +444,16 @@ export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progre
  * the live current step, so the request is refused rather than restarting
  * in-flight repair work), PLUS the handed-over-run chat-delivery outcomes
  * (TASK-299): `{ delivered: true; viaChat: true }` on success, or a `noOp`
- * carrying `nudgeRunHandler`'s own refusal reasons (minus `'empty'` — the
- * stock message is a non-empty constant, so that arm is unreachable here).
+ * carrying `nudgeRunHandler`'s own refusal reasons verbatim (its `'empty'`
+ * reason is unreachable here — the stock message is a non-empty constant —
+ * but is kept in the type rather than narrowed, since it is `NudgeRunResult`
+ * passed straight through).
  */
 export type AddressReviewFindingsResult =
   | RewindRunResult
   | { noOp: true; reason: 'in_progress' }
   | { delivered: true; viaChat: true }
-  | { noOp: true; reason: Exclude<NudgeNoOpReason, 'empty'> };
+  | { noOp: true; reason: NudgeNoOpReason };
 
 interface AddressReviewRunRow {
   status: string;
@@ -475,6 +489,51 @@ function isHandedOverRun(row: AddressReviewRunRow): boolean {
  */
 function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
   return row.current_step_id === ADDRESS_REVIEW_STEP_ID && (row.status === 'running' || row.status === 'starting');
+}
+
+/**
+ * TASK-299: `addressReviewFindings`'s handed-over-run branch — deliver the
+ * stock address-review request into that run's chat instead of rewinding.
+ *
+ * Reuses the EXACT seam a typed chat message takes for an idle orchestrated
+ * run resting at its final gate (ChatInput.tsx's `workflow-idle` mode ->
+ * `runs.nudge` -> `nudgeRunHandler`, which re-spawns the SDK conversation with
+ * `--resume`), NOT the monitor router's `send`: a handed-over run has no
+ * monitor session (monitors are wired only for programmatic runs), so
+ * `monitor.send` would resolve `{ delivered: false }` and silently drop the
+ * request — the exact "dead CTA" failure mode this task exists to fix.
+ *
+ * Every currently-pending BLOCKING eval-sourced finding for the run is passed
+ * as `ignoreBlockingReviewItemId` so the nudge is never refused by the very
+ * findings it is being sent to address — mirrors answerRecoveryGateHandler's
+ * "ignore the gate you are answering" pattern. Any OTHER pending blocking item
+ * still refuses the nudge with `'blocked'`, same as an ordinary chat message
+ * would today. `deliveredAt: 'turn-start'` mirrors answerRecoveryGate /
+ * approve-ideas verdict delivery: this resolves as soon as the agent's resumed
+ * turn STARTS with the request as its input, rather than blocking the mutation
+ * on however long the agent takes to work through the findings.
+ */
+async function deliverAddressReviewFindingsViaChat(
+  runId: string,
+  db: DatabaseLike,
+): Promise<AddressReviewFindingsResult> {
+  if (!nudgeRunDeps) {
+    throw new TRPCError({
+      code: 'METHOD_NOT_SUPPORTED',
+      message: 'nudge dependencies not wired yet. Call setNudgeRunDeps() at boot.',
+    });
+  }
+  const ignoreBlockingReviewItemId = selectPendingBlockingItemRows(db, runId)
+    .filter((r) => isEvalSourcedFinding(r.source))
+    .map((r) => r.id);
+  const nudge = await nudgeRunHandler(runId, ADDRESS_REVIEW_CHAT_MESSAGE, nudgeRunDeps, {
+    ignoreBlockingReviewItemId,
+    deliveredAt: 'turn-start',
+  });
+  if ('delivered' in nudge) {
+    return { delivered: true, viaChat: true };
+  }
+  return nudge;
 }
 
 // ---------------------------------------------------------------------------
@@ -3078,6 +3137,13 @@ export const runsRouter = router({
    *     target === current — so the CTA reads as "already addressing" instead.
    *     Every eval-finding card for the run shares this verdict, which is what
    *     makes the action effectively once-per-run across sibling cards.
+   *   - 'handed_over' — the run was flipped programmatic -> orchestrated by
+   *     migration 081's handover seam (`handed_over_at` is set). A rewind is
+   *     genuinely wrong here (there is no DAG left for it to re-enter), but the
+   *     run's agent is sitting live in chat, so THIS reason is the one
+   *     `eligible: false` case ReviewItemCard renders with the button still
+   *     ENABLED — clicking it delivers the stock request into that chat
+   *     instead of calling `addressReviewFindings`'s rewind path (TASK-299).
    *
    * A missing run row is folded into 'completed' — there is nothing to rewind
    * either way, and the eligibility check has no narrower reason to report.
@@ -3092,7 +3158,17 @@ export const runsRouter = router({
         });
       }
       const row = readAddressReviewRunRow(ctx.db, input.runId);
-      if (!row || row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
+      if (!row) {
+        return { eligible: false, reason: 'completed' };
+      }
+      // Checked BEFORE the programmatic/REWINDABLE_STATUSES fold below: a
+      // handed-over run's execution_model is 'orchestrated', which that fold
+      // would otherwise collapse into the same false 'completed' verdict the
+      // bug report's whole premise is about.
+      if (isHandedOverRun(row)) {
+        return { eligible: false, reason: 'handed_over' };
+      }
+      if (row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
         return { eligible: false, reason: 'completed' };
       }
       if (isAddressReviewInProgress(row)) {
@@ -3133,6 +3209,13 @@ export const runsRouter = router({
    * serialised by the handler's in-queue re-guard (the loser reads
    * 'not_rewindable' / 'race'). The caller (ReviewItemCard) should pre-check
    * `canAddressReviewFindings` so a `noOp` here is the exception, not the path.
+   *
+   * A HANDED-OVER run (TASK-299 — `canAddressReviewFindings`'s `'handed_over'`
+   * reason) never reaches `rewindRunHandler` at all: it is routed to
+   * {@link deliverAddressReviewFindingsViaChat} instead, which delivers the
+   * same request into the run's live chat. `rewindRunHandler` would only
+   * refuse it `not_programmatic` — a no-op that leaves the human with the same
+   * dead-looking CTA the bug report is about.
    */
   addressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -3144,6 +3227,9 @@ export const runsRouter = router({
         });
       }
       const row = readAddressReviewRunRow(rewindRunDeps.db, input.runId);
+      if (row && isHandedOverRun(row)) {
+        return deliverAddressReviewFindingsViaChat(input.runId, rewindRunDeps.db);
+      }
       if (row && isAddressReviewInProgress(row)) {
         return { noOp: true, reason: 'in_progress' };
       }

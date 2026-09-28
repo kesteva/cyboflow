@@ -29,8 +29,9 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, type SeedRunOverrides } from '../../../__test_fixtures__/orchestratorTestDb';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
-import { setRewindRunDeps } from '../runs';
+import { setRewindRunDeps, setNudgeRunDeps } from '../runs';
 import type { RewindRunExecutorLike, RewindRunDeps } from '../../../rewindRunHandler';
+import type { NudgeRunDeps } from '../../../nudgeRunHandler';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -104,6 +105,71 @@ function makeFakeExecutor(): RewindRunExecutorLike & { executeCalls: string[] } 
     setPendingCompletedSteps: () => {},
     hasActiveExecution: () => false,
     requestProgrammaticCancel: () => false,
+    execute: async (runId: string) => {
+      executeCalls.push(runId);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TASK-299 fixtures — the handed-over-run chat-delivery branch
+// ---------------------------------------------------------------------------
+
+/** Minimal migration-016-shaped `review_items` table, PLUS migration 085's `audience` column (reviewItemListing.ts's HUMAN_AUDIENCE_CLAUSE reads it). */
+function addReviewItemsTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS review_items (
+      id           TEXT PRIMARY KEY,
+      project_id   INTEGER NOT NULL,
+      run_id       TEXT,
+      entity_type  TEXT,
+      entity_id    TEXT,
+      kind         TEXT NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'pending',
+      blocking     BOOLEAN NOT NULL DEFAULT 0,
+      title        TEXT NOT NULL,
+      body         TEXT,
+      severity     TEXT,
+      source       TEXT,
+      audience     TEXT,
+      payload_json TEXT,
+      created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+      resolved_by  TEXT,
+      resolution   TEXT
+    )
+  `);
+}
+
+function insertBlockingReviewItem(
+  db: Database.Database,
+  opts: { id: string; runId: string; source: string },
+): void {
+  db.prepare(
+    `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title, source)
+     VALUES (?, 1, ?, 'finding', 'pending', 1, ?, ?)`,
+  ).run(opts.id, opts.runId, `finding ${opts.id}`, opts.source);
+}
+
+/** Seed a HANDED-OVER run (migration 081): orchestrated + handed_over_at set, resting for chat. */
+function seedHandedOverRun(db: Database.Database): { runId: string; workflowId: string } {
+  const { runId, workflowId } = seedSprintRun(db, { status: 'awaiting_review' });
+  setExecutionModel(db, runId, 'orchestrated');
+  db.prepare("UPDATE workflow_runs SET handed_over_at = '2026-09-22T17:44:07.000Z', claude_session_id = 'sess-1' WHERE id = ?").run(
+    runId,
+  );
+  return { runId, workflowId };
+}
+
+function makeFakeNudgeExecutor(): NudgeRunDeps['runExecutor'] & { setPendingNudgeCalls: Array<[string, string]>; executeCalls: string[] } {
+  const setPendingNudgeCalls: Array<[string, string]> = [];
+  const executeCalls: string[] = [];
+  return {
+    setPendingNudgeCalls,
+    executeCalls,
+    setPendingNudge: (runId: string, text: string) => {
+      setPendingNudgeCalls.push([runId, text]);
+    },
     execute: async (runId: string) => {
       executeCalls.push(runId);
     },
@@ -367,6 +433,138 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
 
       expect(result).toEqual({ eligible: false, reason: 'completed' });
+    });
+
+    // -- TASK-299: handed-over runs -----------------------------------------
+
+    it("is ineligible ('handed_over') for a run migration 081's handover flipped programmatic->orchestrated", async () => {
+      db = makeDb();
+      const { runId } = seedHandedOverRun(db);
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
+      expect(result).toEqual({ eligible: false, reason: 'handed_over' });
+    });
+
+    it("stays ('completed') for a run that was orchestrated from BIRTH — handed_over_at was never stamped", async () => {
+      db = makeDb();
+      const { runId } = seedSprintRun(db, { status: 'awaiting_review' });
+      setExecutionModel(db, runId, 'orchestrated');
+      // No handed_over_at stamp — this run never went through the handover seam.
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
+      expect(result).toEqual({ eligible: false, reason: 'completed' });
+    });
+  });
+
+  // -- addressReviewFindings on a HANDED-OVER run (TASK-299) -----------------
+  //
+  // A handed-over run has no DAG left for rewindRunHandler to re-enter (it
+  // would refuse 'not_programmatic'), but its agent is live in chat — so the
+  // mutation must route to nudgeRunHandler (the SAME seam ChatInput.tsx's
+  // 'workflow-idle' mode uses for a typed message) instead, and NEVER reach
+  // rewindRunHandler at all.
+
+  describe('addressReviewFindings — handed-over run (TASK-299)', () => {
+    it('delivers the stock findings request via chat (nudge), never touching the rewind executor', async () => {
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      // The very blocking eval finding this button is answering — must be
+      // ignored by the nudge's blocking guard, or the request refuses itself.
+      insertBlockingReviewItem(db, { id: 'rvw_eval_1', runId, source: 'agent:eval' });
+
+      const rewindExecutor = makeFakeExecutor();
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: rewindExecutor,
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor();
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      expect(result).toEqual({ delivered: true, viaChat: true });
+      expect(nudgeExecutor.executeCalls).toEqual([runId]);
+      expect(nudgeExecutor.setPendingNudgeCalls).toHaveLength(1);
+      const [nudgedRunId, nudgedText] = nudgeExecutor.setPendingNudgeCalls[0];
+      expect(nudgedRunId).toBe(runId);
+      expect(nudgedText).toContain('cyboflow_list_run_findings');
+      expect(nudgedText).toContain('## Findings contract (address-review)');
+      // The rewind path (not_programmatic) was never reached.
+      expect(rewindExecutor.executeCalls).toEqual([]);
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('running');
+    });
+
+    it('still refuses (blocked) when a DIFFERENT, non-eval blocking item is pending', async () => {
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      insertBlockingReviewItem(db, { id: 'rvw_eval_1', runId, source: 'agent:eval' });
+      insertBlockingReviewItem(db, { id: 'rvw_other', runId, source: 'gate:human-step:approve-plan' });
+
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: makeFakeExecutor(),
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor();
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      expect(result).toEqual({ noOp: true, reason: 'blocked' });
+      expect(nudgeExecutor.executeCalls).toEqual([]);
+    });
+
+    it('never reaches rewindRunHandler for a handed-over run even when address-review is a valid frozen step', async () => {
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+
+      const rewindExecutor = makeFakeExecutor();
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: rewindExecutor,
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: makeFakeNudgeExecutor(),
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      // A bare 'not_programmatic' noOp would mean rewindRunHandler was reached
+      // — the exact dead-CTA regression this task fixes.
+      expect(result).not.toEqual({ noOp: true, reason: 'not_programmatic' });
+      expect(rewindExecutor.executeCalls).toEqual([]);
     });
   });
 });

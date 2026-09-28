@@ -73,6 +73,12 @@
  *                    task never appears for these. The ad-hoc quick-session
  *                    verdict summary is a sub-case that drops Address
  *                    entirely (its run has no address-review step at all).
+ *                    A run migration 081's handover flipped to orchestrated
+ *                    (TASK-299) is a THIRD case: Address stays ENABLED (there
+ *                    is no DAG left for a rewind, but the run's agent is live
+ *                    in chat) and delivers the same stock request into that
+ *                    chat instead — see `addressReviewFindings`'s
+ *                    `handed_over` reason / `viaChat` result below.
  *   - permission   — a real-time PreToolUse/approval gate (blocking). Reuses the
  *                    APPROVAL resolution path: Approve / Reject route to
  *                    cyboflow.approvals.approve / reject via the folded approvalId.
@@ -418,18 +424,27 @@ type AddressReviewEligibility =
   | { eligible: false; reason: 'unavailable' }
   | null;
 
-/** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons, plus the client-side probe-failure reason. */
+/**
+ * Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons, plus
+ * the client-side probe-failure reason. `handed_over` is never actually shown
+ * as a disabled tooltip (that reason renders the button ENABLED instead — see
+ * the render below) but the map stays exhaustive over the type regardless.
+ */
 const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<AddressReviewIneligibleReason, string> = {
   completed: 'Run already completed — log or dismiss',
   no_step: 'This flow has no address-review step',
   in_progress: 'Address review is already running for this run',
   unavailable: 'Could not check eligibility — try again',
+  handed_over: 'This run was handed over to a live agent — Address sends the request into its chat',
 };
+
+/** Shown instead of the ordinary tooltip once a handed-over run's chat delivery has fired. */
+const ADDRESS_REVIEW_SENT_TOOLTIP = "Request sent to this run's chat — check there for progress";
 
 type AddressReviewFindingsResult = RouterOutputs['cyboflow']['runs']['addressReviewFindings'];
 type AddressReviewNoOpReason = Extract<AddressReviewFindingsResult, { noOp: true }>['reason'];
 
-/** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case). */
+/** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case, plus TASK-299's chat-delivery refusals). */
 const ADDRESS_REVIEW_NOOP_MESSAGE: Record<AddressReviewNoOpReason, string> = {
   not_found: 'Run not found.',
   not_programmatic: 'Only programmatic runs support Address review findings.',
@@ -439,6 +454,12 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<AddressReviewNoOpReason, string> = {
   target_not_prior: 'The address-review step is ahead of the run — nothing to rewind.',
   fanout_settled: 'Every sprint task in this run is already integrated.',
   race: 'The run changed state — try again.',
+  empty: 'Nothing to send.',
+  terminal: 'This run has ended and cannot receive messages.',
+  not_idle: 'This run is no longer resting for the agent to reply — try again once it settles.',
+  blocked: 'Another blocking item is holding this run — resolve it first.',
+  no_session: 'This run has no resumable chat session.',
+  execute_failed: 'The agent could not be re-driven — check the run logs.',
 };
 
 /**
@@ -529,6 +550,12 @@ export function ReviewItemCard({
   const [addressBusy, setAddressBusy] = React.useState(false);
   const [addressError, setAddressError] = React.useState<string | null>(null);
   const [addressEligibility, setAddressEligibility] = React.useState<AddressReviewEligibility>(null);
+  // TASK-299: set once a handed-over run's "Address review findings" click has
+  // delivered the stock request into that run's chat — a SEPARATE flag from
+  // addressEligibility's 'in_progress' (there is no address-review step
+  // running here, just a live agent that just received a message), so the
+  // button disables with its own "sent" tooltip instead of the rewind one.
+  const [addressSentViaChat, setAddressSentViaChat] = React.useState(false);
   // Plan v2: whether the inline "Switch runtime & retry" form is open for a
   // systemic-pause item (session surface only — the queue-side row lives in
   // the landing's NeedsInputSection, whose "Switch & retry…" opens the session).
@@ -640,6 +667,7 @@ export function ReviewItemCard({
     }
     let cancelled = false;
     setAddressEligibility(null);
+    setAddressSentViaChat(false);
     void trpc.cyboflow.runs.canAddressReviewFindings
       .query({ runId: item.run_id })
       .then((result) => {
@@ -675,6 +703,12 @@ export function ReviewItemCard({
   // run (cyboflow_list_run_findings, called from the step itself). The
   // findings stay pending — address-review resolves each one it fixes/triages
   // — so this action never removes the card the way a resolve/dismiss would.
+  //
+  // TASK-299: for a HANDED-OVER run (`addressEligibility.reason ===
+  // 'handed_over'` — see the render below, which keeps the button ENABLED for
+  // that one ineligible reason) the server routes this SAME mutation to a
+  // chat delivery instead of a rewind; the two outcomes are told apart by
+  // `'viaChat' in result`, not by a second handler here.
   const handleAddressReviewFindings = (): void => {
     if (item.run_id === null) return;
     setAddressBusy(true);
@@ -683,12 +717,19 @@ export function ReviewItemCard({
       .mutate({ runId: item.run_id })
       .then((result) => {
         if ('delivered' in result) {
-          // The run's address-review step is now the live current step — set
-          // eligibility to the same 'in_progress' the next query would report,
-          // right away, so the button re-renders disabled+tooltip instead of
-          // re-enabling on the now-stale `eligible:true` (a second click would
-          // otherwise reach the in_progress noOp error instead).
-          setAddressEligibility({ eligible: false, reason: 'in_progress' });
+          if ('viaChat' in result) {
+            // Delivered into the handed-over run's chat — there is no
+            // address-review step to mark 'in_progress', so a dedicated flag
+            // disables the button with its own "sent" tooltip instead.
+            setAddressSentViaChat(true);
+          } else {
+            // The run's address-review step is now the live current step — set
+            // eligibility to the same 'in_progress' the next query would report,
+            // right away, so the button re-renders disabled+tooltip instead of
+            // re-enabling on the now-stale `eligible:true` (a second click would
+            // otherwise reach the in_progress noOp error instead).
+            setAddressEligibility({ eligible: false, reason: 'in_progress' });
+          }
           trackEvent('review_item_resolved', {
             kind: item.kind,
             action: 'address_review_findings',
@@ -1283,14 +1324,33 @@ export function ReviewItemCard({
               </>
             );
           }
-          const ineligibleReason = addressEligibility && !addressEligibility.eligible ? addressEligibility.reason : undefined;
+          // TASK-299: 'handed_over' is the one ineligible reason that keeps the
+          // button CLICKABLE (this run has no DAG for a rewind, but does have a
+          // live agent in chat) — so eligibility for the click itself is
+          // "server said eligible, OR server said handed_over", not the bare
+          // `eligible` flag. `addressSentViaChat` disables it again once that
+          // chat delivery has actually fired, with its own "sent" tooltip
+          // outranking the ordinary ineligibility copy.
+          const ineligibleReason =
+            addressEligibility && !addressEligibility.eligible && addressEligibility.reason !== 'handed_over'
+              ? addressEligibility.reason
+              : undefined;
+          const addressReviewClickable =
+            addressEligibility !== null &&
+            (addressEligibility.eligible || addressEligibility.reason === 'handed_over');
           return (
             <>
               <Button
                 variant="primary"
                 size="sm"
-                disabled={busy || addressBusy || addressEligibility === null || !addressEligibility.eligible}
-                title={ineligibleReason ? ADDRESS_REVIEW_DISABLED_TOOLTIP[ineligibleReason] : undefined}
+                disabled={busy || addressBusy || addressSentViaChat || !addressReviewClickable}
+                title={
+                  addressSentViaChat
+                    ? ADDRESS_REVIEW_SENT_TOOLTIP
+                    : ineligibleReason
+                      ? ADDRESS_REVIEW_DISABLED_TOOLTIP[ineligibleReason]
+                      : undefined
+                }
                 onClick={handleAddressReviewFindings}
                 data-testid="address-review-findings"
               >
