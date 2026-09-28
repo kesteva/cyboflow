@@ -187,6 +187,29 @@ describe('CodexProcessUsageTracker', () => {
     }
   });
 
+  it('records an interrupted root only while its owner is active, and seals it', () => {
+    const db = createDb();
+    try {
+      const tracker = makeTracker(db);
+      const owner = createCodexUsageOwner({ invocationId: 'inv-1', runId: 'run-1', model: 'gpt-root', rootThreadId: 'root' });
+      tracker.bindOwner(owner);
+      tracker.observe(n.rawResponse('root', 'turn-1', 'r1', A));
+      tracker.recordInterruptedRoot(owner);
+      expect(rowUsage(db, 'codex-root-interrupted:inv-1:root')).toEqual(expected(A));
+      expect(owner.state).toBe('draining');
+
+      // An owner whose agent_result already sealed it writes no second copy.
+      const done = createCodexUsageOwner({ invocationId: 'inv-2', runId: 'run-1', model: 'gpt-root', rootThreadId: 'root' });
+      tracker.bindOwner(done);
+      tracker.observe(n.rawResponse('root', 'turn-2', 'r2', B));
+      tracker.sealRoot(done);
+      tracker.recordInterruptedRoot(done);
+      expect(rowUsage(db, 'codex-root-interrupted:inv-2:root')).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
   it('writes nothing for a hermetic spawn but still counts the root', () => {
     const tracker = new CodexProcessUsageTracker({ runId: 'agent:t', writer: null });
     tracker.setRootThread('root');

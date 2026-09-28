@@ -217,7 +217,9 @@ export interface CodexProcessUsageTrackerOptions {
  *   - never-registered threads (after buffering) and responses that arrive once
  *     their owner is sealed → `codex-unattributed:<runId>:<threadId>`;
  *   - at settlement, updates no response matched →
- *     `codex-usage-topup:<runId>:<threadId>`.
+ *     `codex-usage-topup:<runId>:<threadId>`;
+ *   - a root turn cancelled before its `agent_result` →
+ *     `codex-root-interrupted:<invocationId>:<rootThreadId>` (recordInterruptedRoot).
  *
  * A thread's usage never moves between keys once written.
  *
@@ -299,6 +301,37 @@ export class CodexProcessUsageTracker {
     this.anyRootSealed = true;
     if (owner.state === 'active') owner.state = 'draining';
     if (this.activeOwner === owner) this.activeOwner = null;
+  }
+
+  /**
+   * A cancelled root turn writes no `agent_result`, which is where a root's
+   * usage is otherwise recorded. Record what it used up to the cancel as its
+   * own `codex-root-interrupted` row, then seal it like a normal terminal.
+   * Nothing is written for a turn with no usage, a run-less spawn, or an owner
+   * whose `agent_result` already landed.
+   */
+  recordInterruptedRoot(owner: CodexUsageOwner): void {
+    if (owner.state === 'active') {
+      const usage = owner.accumulator.rootSnapshot();
+      const rootThreadId = this.rootThreadId;
+      if (usage !== undefined && rootThreadId !== null && this.options.writer) {
+        this.options.writer.write(
+          this.options.runId,
+          `codex-root-interrupted:${owner.invocationId}:${rootThreadId}`,
+          {
+            type: 'subagent_usage',
+            provider: 'codex',
+            thread_id: rootThreadId,
+            parent_thread_id: null,
+            invocation_id: owner.invocationId,
+            model_inferred: false,
+            message: { model: owner.model, usage: completeUsage(usage) },
+          },
+          'replace',
+        );
+      }
+    }
+    this.sealRoot(owner);
   }
 
   observe(notification: AppServerNotification): void {

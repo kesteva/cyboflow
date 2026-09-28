@@ -566,6 +566,7 @@ Each token comes from exactly one source:
 | Claude, outer agent | `result.usage`, per query | parentless deduplicated assistant messages (1c) |
 | Claude, children | Δ`modelUsage` − `result.usage`, per query, within one process segment | Task/Agent `tool_use`; parented assistant messages; dynamic-workflow `subagent:` rows |
 | Codex, root thread | `agent_result` | — |
+| Codex, root turn cancelled before its `agent_result` | `codex-root-interrupted:` rows | — |
 | Codex, descendants | `codex-subagent:` rows | — |
 | Codex, unattributed | `codex-unattributed:` rows | — |
 | Codex, missing responses | `codex-usage-topup:` rows | — |

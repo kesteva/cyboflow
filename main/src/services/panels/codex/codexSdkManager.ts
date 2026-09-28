@@ -1248,6 +1248,12 @@ export class CodexSdkManager extends AbstractCliManager {
       }
     } finally {
       entry.currentContext = null;
+      // A cancelled turn never wrote its agent_result: keep the root usage it
+      // already spent (the client is about to stop, so nothing more arrives).
+      if (abortController.signal.aborted && !ctx.terminalResultEmitted) {
+        ctx.terminalResultEmitted = true;
+        entry.usage.recordInterruptedRoot(usageOwner);
+      }
       // Park ONLY on a clean turn.completed (activeTurnId cleared by finishTurn).
       // Any error / interrupt / abort / kill-switch closes the process instead —
       // a turn.error never clears the active turn, so a reused turnSession would

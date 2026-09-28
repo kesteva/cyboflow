@@ -339,6 +339,33 @@ describe('CodexSdkManager per-response usage accounting', () => {
     }
   });
 
+  it('records a cancelled root turn\'s usage in a codex-root-interrupted row, with no agent_result', async () => {
+    const db = createDb();
+    try {
+      let started!: () => void;
+      const running = new Promise<void>((resolve) => { started = resolve; });
+      const { manager } = makeManager(db, {
+        onTurnStart: ({ client: c, turnId }) => {
+          c.notify(n.turnStarted(ROOT, turnId));
+          c.notify(n.rawResponse(ROOT, turnId, 'root-a', ROOT_A));
+          c.notify(n.rawResponse(ROOT, turnId, 'root-b', ROOT_B));
+          started();
+        },
+      });
+      const spawn = manager.spawnCliProcess(laneTurn());
+      await running;
+      await manager.killProcess('run-1');
+      await expect(spawn).resolves.toBeUndefined();
+      expect(agentResultUsages(db)).toEqual([]);
+      const row = usageRows(db).get(`codex-root-interrupted:${invocationId(db)}:${ROOT}`);
+      expect(row?.message).toEqual({ model: 'gpt-root', usage: sumUsage([expected(ROOT_A), expected(ROOT_B)]) });
+      expect(row?.model_inferred).toBe(false);
+      expect(row?.parent_thread_id).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
   it('kill during a drain cuts it short and settles', async () => {
     const db = createDb();
     try {
