@@ -296,10 +296,9 @@ import {
   backfillArchivedSessionReviewItems,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
-  backfillRunUsageRollups,
   stampSessionRunsOutcome,
 } from './orchestrator/runRecovery';
-import { backfillUsageAccounting } from './orchestrator/runUsageBackfill';
+import { runBootUsageBackfills } from './orchestrator/runUsageBackfill';
 import { replayCodexRunUsage } from './services/panels/codex/codexUsageReplay';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import {
@@ -4197,38 +4196,12 @@ app.whenReady().then(async () => {
     // fallback, so the gap is invisible until that log is pruned. Sweeping the
     // invariant here covers every writer at once, including future ones. Must run
     // AFTER the orphan sweeps + outcome backfill so runs force-terminated on this
-    // boot are materialized in the same pass. Fail-soft internally.
-    //
-    // It is chained after the usage accounting v1 backfill (migration 146), which
-    // rebuilds past Codex runs' descendant usage from their stored notifications
-    // and recomputes every run's row under the current fold — so a row the sweep
-    // adds already sees the historical rows. NOT awaited: the first-boot backfill
-    // takes seconds, yields between runs, and is marker-gated to one indexed
-    // lookup afterwards (runUsageBackfill.ts). Both are fail-soft internally.
+    // boot are materialized in the same pass. Chained after the usage accounting
+    // v1 backfill (migration 146), NOT awaited: see runBootUsageBackfills.
     const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
-    void backfillUsageAccounting(
-      db,
-      {
-        replayCodexRun: (runId) =>
-          replayCodexRunUsage(databaseService.getDb(), runId, { notifiedBefore: processStartedAt }),
-      },
-      loggerLike,
-    )
-      .then((accountingBackfill) => {
-        if (accountingBackfill.candidates > 0) {
-          console.log(
-            `[Main] Usage accounting backfill: ${accountingBackfill.backfilled} of ${accountingBackfill.candidates} run(s) recomputed` +
-              (accountingBackfill.failed > 0 ? `, ${accountingBackfill.failed} failed (retried next boot)` : ''),
-          );
-        }
-        const usageBackfill = backfillRunUsageRollups(db);
-        if (usageBackfill.materialized > 0) {
-          console.log(`[Main] Materialized ${usageBackfill.materialized} missing run_usage rollup(s) of ${usageBackfill.candidates} candidate(s)`);
-        }
-      })
-      .catch((err) => {
-        console.warn('[Main] usage backfill chain failed (continuing):', err instanceof Error ? err.message : String(err));
-      });
+    const replayCodexRun = (runId: string) =>
+      replayCodexRunUsage(databaseService.getDb(), runId, { notifiedBefore: processStartedAt });
+    void runBootUsageBackfills(db, { replayCodexRun }, loggerLike);
 
     // Boot self-heal (migration 066): the derived 'In development' stage projects
     // a task's live run associations, and the recovery sweeps above force-fail

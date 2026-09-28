@@ -60,6 +60,7 @@ import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 import { ACCOUNTING_VERSION, USAGE_FOLD_EVENT_TYPES, mostSevereCoverage } from './usageFold';
 import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
 import { writeRunUsageRow } from './runUsageRollup';
+import { backfillRunUsageRollups } from './runRecovery';
 
 /** What the Codex replay did for one run (see codexUsageReplay.ts). */
 export interface CodexRunReplayResult {
@@ -213,4 +214,34 @@ export async function backfillUsageAccounting(
     }
   }
   return result;
+}
+
+/**
+ * The boot entry point: this backfill, THEN the missing-row sweep
+ * (`backfillRunUsageRollups`), chained so a row the sweep adds already sees the
+ * historical rows this pass rebuilt. The caller does not await it; it never
+ * rejects.
+ */
+export async function runBootUsageBackfills(
+  db: DatabaseLike,
+  deps: UsageBackfillDeps,
+  logger?: LoggerLike,
+): Promise<void> {
+  try {
+    const accounting = await backfillUsageAccounting(db, deps, logger);
+    if (accounting.candidates > 0) {
+      logger?.info(
+        `[runUsageBackfill] usage accounting backfill: ${accounting.backfilled} of ${accounting.candidates} run(s) recomputed` +
+          (accounting.failed > 0 ? `, ${accounting.failed} failed (retried next boot)` : ''),
+      );
+    }
+    const sweep = backfillRunUsageRollups(db, logger);
+    if (sweep.materialized > 0) {
+      logger?.info(
+        `[runUsageBackfill] materialized ${sweep.materialized} missing run_usage rollup(s) of ${sweep.candidates} candidate(s)`,
+      );
+    }
+  } catch (err) {
+    logger?.warn('[runUsageBackfill] boot usage backfill chain failed (continuing)', { error: errorMessage(err) });
+  }
 }

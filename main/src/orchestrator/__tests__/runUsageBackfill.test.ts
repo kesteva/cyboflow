@@ -14,7 +14,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 
-import { backfillUsageAccounting, type UsageBackfillDeps } from '../runUsageBackfill';
+import { backfillUsageAccounting, runBootUsageBackfills, type UsageBackfillDeps } from '../runUsageBackfill';
 import { ACCOUNTING_VERSION } from '../usageFold';
 import { selectDailyModelUsage } from '../insightsQueries';
 import { replayCodexRunUsage } from '../../services/panels/codex/codexUsageReplay';
@@ -465,5 +465,37 @@ describe('backfillUsageAccounting', () => {
 
     expect(result).toMatchObject({ candidates: 0, markerWritten: false });
     expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runBootUsageBackfills', () => {
+  it('runs the v1 backfill, then the missing-row sweep', async () => {
+    const db = makeDb();
+    seedPostBoundaryCodexRun(db, 'run-a');
+    // Terminal, with events but none the fold reads: not a backfill candidate,
+    // so only the sweep writes its row.
+    db.prepare("INSERT INTO workflow_runs (id, status) VALUES ('run-empty', 'completed')").run();
+    db.prepare(
+      "INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES ('run-empty', 'user', '{}', '2026-09-01T00:00:00Z')",
+    ).run();
+
+    await runBootUsageBackfills(dbAdapter(db), realDeps(db));
+
+    expect(usageRow(db, 'run-a')).toMatchObject({ coverage: 'codex-run-level' });
+    expect(usageRow(db, 'run-empty')).toMatchObject({ input_tokens: 0, output_tokens: 0 });
+    expect(db.prepare('SELECT accounting_version FROM usage_backfill_marker').all()).toEqual([
+      { accounting_version: ACCOUNTING_VERSION },
+    ]);
+  });
+
+  it('never rejects', async () => {
+    const logger = makeSpyLogger();
+    const broken = {
+      prepare: () => {
+        throw new Error('db gone');
+      },
+      transaction: () => () => undefined,
+    } as unknown as Parameters<typeof runBootUsageBackfills>[0];
+    await expect(runBootUsageBackfills(broken, { replayCodexRun: () => { throw new Error('unused'); } }, logger)).resolves.toBeUndefined();
   });
 });
