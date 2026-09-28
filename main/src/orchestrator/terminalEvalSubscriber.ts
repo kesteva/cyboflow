@@ -139,7 +139,7 @@ export function handleTerminalStatusEvent(
     try {
       stampArmGateReachedAt(deps.db, event.runId, event.status);
     } catch (err) {
-      deps.logger?.warn?.('[pairwise] gate_reached_at stamp failed (swallowed)', {
+      deps.logger?.warn?.('[terminal-eval] gate_reached_at stamp failed (swallowed)', {
         runId: event.runId,
         error: err instanceof Error ? err.message : String(err),
       });

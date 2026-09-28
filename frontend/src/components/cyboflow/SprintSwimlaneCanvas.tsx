@@ -691,14 +691,16 @@ export function SprintSwimlaneCanvas({
               right read). Renders nothing when there is no model data at all
               (degrades to exactly today's rendering), and nothing for a
               column with no resolved entry (no placeholder, no layout
-              shift). */}
+              shift). Horizontal padding matches the lane box's own
+              `padding: '6px 8px 7px'` below so each column's dot sits over
+              the LaneStepCard it labels instead of drifting 8px left of it. */}
           {stepModels != null &&
             (() => {
               const fanOutRef = activeFanOutStepRef(definition);
               if (fanOutRef === null) return null;
               return (
                 <div
-                  style={{ display: 'flex', gap: 6, marginBottom: 4 }}
+                  style={{ display: 'flex', gap: 6, marginBottom: 4, paddingLeft: 8, paddingRight: 8 }}
                   data-testid="swimlane-lane-step-models"
                 >
                   {laneSteps.map((laneStep) => {

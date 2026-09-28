@@ -82,7 +82,11 @@ export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/e
  * OUTER-step entry. This is the discriminator a consumer keys on to tell the
  * two kinds of entry apart: an inner step's `id` can legally collide with an
  * outer step's `id` within the same phase, so the plain `(phaseId, stepId)`
- * pair is not enough to disambiguate. */
+ * pair is not enough to disambiguate. A consumer that iterates the RAW ARRAY
+ * (rather than looking a key up via `stepModelKey`/`indexStepModels`) must
+ * filter on this field itself — e.g. `WorkflowSummaryPanel`'s phase/step chip
+ * summary excludes every `fanOutStepId !== undefined` entry so a sprint's
+ * per-task lane chain doesn't inflate its chip-sum count. */
 export interface StepModelInfo {
   stepId: string;
   stepName: string;
