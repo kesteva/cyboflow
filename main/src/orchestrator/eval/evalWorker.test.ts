@@ -9,12 +9,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   EvalWorker,
   JUDGE_RETRY_BACKOFF_MS,
-  MAX_SLOT_ERROR_CHARS,
-  truncateSlotError,
   EVAL_REPORT_ARTIFACT_LABEL,
   EVAL_REPORT_POINTER,
   type JurySlot,
 } from './evalWorker';
+import { MAX_SLOT_ERROR_CHARS, truncateSlotError } from './judgeSlots';
 import type { ArtifactCreate } from '../artifactRouter';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
