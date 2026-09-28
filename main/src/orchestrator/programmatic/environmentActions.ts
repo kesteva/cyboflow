@@ -126,7 +126,16 @@ export class EnvironmentActions {
     });
   }
 
-  /** The actions available in this worktree right now. */
+  /**
+   * The actions available in this worktree right now.
+   *
+   * Nothing on win32: the injected exec is shell-free execFile, and on Windows
+   * pnpm/npm/yarn are `.cmd` shims, which execFile cannot launch (ENOENT without
+   * PATHEXT resolution; EINVAL without `shell: true` since the CVE-2024-27980
+   * fix). Enabling a shell reopens the quoting surface the closed argv avoids,
+   * and resolving each shim's JS entry point is untested — so the action (and
+   * the fan-out preflight) stays off there until someone verifies one of those.
+   */
   available(): EnvironmentActionKind[] {
     return this.platform !== 'win32' && this.plan() !== undefined ? ['install_dependencies'] : [];
   }
