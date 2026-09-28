@@ -95,7 +95,8 @@ import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
-import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
+import { TaskChangeRouter, taskChangeEvents } from './orchestrator/taskChangeRouter';
+import { attachHumanTaskReviewItemCloser } from './orchestrator/humanTaskReviewItemCloser';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
@@ -2018,6 +2019,10 @@ async function initializeServices(): Promise<boolean> {
   // construction: every Auto-mode conflict override files a non-blocking audit
   // finding on it.
   const reviewItemRouter = ReviewItemRouter.initialize(cyboflowDb);
+
+  // A human task's standing review item (humanPrerequisites) closes itself when
+  // the task reaches Done / Won't do, is archived, or is deleted — by any writer.
+  attachHumanTaskReviewItemCloser(taskChangeEvents, cyboflowDb, reviewItemRouter, cyboflowLogger);
 
   // Issue-tracker sync loop (migration 093). Started HERE, immediately after the
   // chokepoint it subscribes to: start() does boot crash-recovery (demoting any
