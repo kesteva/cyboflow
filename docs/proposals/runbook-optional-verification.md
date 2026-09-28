@@ -254,6 +254,7 @@ A rejection means nothing is learned. The verdict is unaffected.
 - **Stricter validation.** Two extra checks:
   - web/cdp-app: the recipe's `serve.cmd` must equal the composed `serve.cmd` the binding verified;
   - mobile: `app.bundleId` must equal the attested one.
+  - all: the recipe's `attestation.kind` must be the channel the floor verified for this pass. A pass that rested on the serve binding alone (A1.2) never learns: that channel cannot be written into a runbook, and a pinned run would need a real one.
   - mobile path values: `-project`/`-workspace` must be relative with no `$`/`` ` ``/`~` expansion and no `..` segment; `-derivedDataPath` must be exactly the DerivedData lever, and `-clonedSourcePackagesDirPath` the lever or a `..`-free path beneath it.
 
   "No step may write outside the snapshot or `$VERIFY_DATA_DIR`" is enforced as "no absolute path in any command".

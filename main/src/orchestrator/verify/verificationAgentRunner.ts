@@ -4057,6 +4057,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           ? validateLearnedRecipe({
               recipeJson: report.recipeJson,
               modality,
+              verifiedChannel: floor?.kind === 'verified' ? floor.channel : null,
               composed: req.task,
               packageJsonRaw:
                 modality === 'web' || modality === 'cdp-app'

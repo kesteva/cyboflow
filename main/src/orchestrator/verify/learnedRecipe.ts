@@ -273,10 +273,17 @@ function leakedLeaseViolation(command: string, leased: LearnedRecipeLeases): str
  *   - web/cdp-app: explore reaches `passed` only on the VERBATIM composed
  *     `serve.cmd` (§A1.2), so the recipe's serve must be that command;
  *   - mobile: the recipe's bundle id must be the one `bundle-identity` attested.
+ *
+ * `verifiedChannel` is the channel the attestation floor VERIFIED for this pass.
+ * A pass that rested on the serve binding alone (`'serve-binding'`, §A1.2) — or
+ * on no verified channel — never learns: the recipe must carry a channel, and
+ * one the harness did not observe would only fail its promotion proof. The
+ * recipe's `attestation.kind` must be the verified channel.
  */
 export function validateLearnedRecipe(args: {
   recipeJson: string;
   modality: VerificationModality;
+  verifiedChannel: string | null;
   composed: Pick<VerificationTaskV1, 'serve' | 'app'>;
   /** The snapshot root's `package.json` text (web/cdp-app), `null` when absent or unreadable. */
   packageJsonRaw: string | null;
@@ -304,6 +311,18 @@ export function validateLearnedRecipe(args: {
   if (!parsed.ok) return { ok: false, reason: `recipe is not a valid runbook entry — ${parsed.error}` };
   const entry = parsed.runbook.modalities[runbookModality];
   if (entry === undefined) return { ok: false, reason: `recipe declares no "${modality}" entry` };
+  if (args.verifiedChannel === null || args.verifiedChannel === 'serve-binding') {
+    return {
+      ok: false,
+      reason: `the pass rested on ${args.verifiedChannel === null ? 'no verified attestation channel' : 'the serve binding alone'}, which a recipe cannot carry`,
+    };
+  }
+  if (entry.attestation.kind !== args.verifiedChannel) {
+    return {
+      ok: false,
+      reason: `recipe attestation "${entry.attestation.kind}" is not the channel the harness verified ("${args.verifiedChannel}")`,
+    };
+  }
   const parsedLevers = parsed.runbook.levers;
 
   // Lever rules: a lever the binder would DROP binds nothing once pinned, and

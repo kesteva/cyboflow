@@ -30,10 +30,19 @@ const MOBILE_RECIPE = {
 };
 const MOBILE_COMPOSED: Pick<VerificationTaskV1, 'serve' | 'app'> = { app: APP };
 
-function web(recipe: unknown, over: { packageJsonRaw?: string | null; composed?: Pick<VerificationTaskV1, 'serve' | 'app'>; modality?: VerificationModality } = {}) {
+function web(
+  recipe: unknown,
+  over: {
+    packageJsonRaw?: string | null;
+    composed?: Pick<VerificationTaskV1, 'serve' | 'app'>;
+    modality?: VerificationModality;
+    verifiedChannel?: string | null;
+  } = {},
+) {
   return validateLearnedRecipe({
     recipeJson: typeof recipe === 'string' ? recipe : JSON.stringify(recipe),
     modality: over.modality ?? 'web',
+    verifiedChannel: over.verifiedChannel === undefined ? 'http-endpoint' : over.verifiedChannel,
     composed: over.composed ?? WEB_COMPOSED,
     packageJsonRaw: over.packageJsonRaw === undefined ? PACKAGE_JSON : over.packageJsonRaw,
     leased: LEASED,
@@ -44,6 +53,7 @@ function mobile(recipe: unknown) {
   return validateLearnedRecipe({
     recipeJson: JSON.stringify(recipe),
     modality: 'mobile',
+    verifiedChannel: 'bundle-identity',
     composed: MOBILE_COMPOSED,
     packageJsonRaw: null,
     leased: MOBILE_LEASED,
@@ -53,6 +63,20 @@ function mobile(recipe: unknown) {
 function reason(result: ReturnType<typeof validateLearnedRecipe>): string {
   return result.ok ? '' : result.reason;
 }
+
+describe('validateLearnedRecipe — the channel the harness verified', () => {
+  it('never learns from a pass that rested on the serve binding alone', () => {
+    expect(reason(web(WEB_RECIPE, { verifiedChannel: 'serve-binding' }))).toMatch(/serve binding alone/);
+  });
+
+  it('never learns from a pass with no verified channel', () => {
+    expect(reason(web(WEB_RECIPE, { verifiedChannel: null }))).toMatch(/no verified attestation channel/);
+  });
+
+  it('refuses a recipe naming a channel other than the verified one', () => {
+    expect(reason(web(WEB_RECIPE, { verifiedChannel: 'dom-marker' }))).toMatch(/not the channel the harness verified/);
+  });
+});
 
 describe('validateLearnedRecipe — accepted recipes', () => {
   it('a web recipe of declared scripts serving the verbatim composed command is learned', () => {
@@ -73,6 +97,7 @@ describe('validateLearnedRecipe — accepted recipes', () => {
     const fallback = validateLearnedRecipe({
       recipeJson: JSON.stringify({ ...WEB_RECIPE, serve: { cmd: 'pnpm run dev:app', attach: 'cdp' } }),
       modality: 'cdp-app',
+      verifiedChannel: 'http-endpoint',
       composed: { serve: { cmd: 'pnpm run dev:app', attach: 'cdp' } },
       packageJsonRaw: PACKAGE_JSON,
       leased: LEASED,
