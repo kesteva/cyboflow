@@ -53,7 +53,11 @@ the request runs:
 - **Learned runbooks.** A passing explore run may report the commands that
   stood the deliverable up. The harness validates them and stores an unproven
   draft of origin `learned` (the first one wins, and a committed
-  `.cyboflow/verify-runbook.json` entry takes precedence). The lane's next
+  `.cyboflow/verify-runbook.json` entry takes precedence). A web or cdp-app
+  pass that rested on the serve binding alone learns an entry with
+  `"attestation": {"kind": "serve-binding"}`, so a project whose app renders no
+  attestation nonce still learns and gets pinned; a pinned `serve-binding`
+  entry verifies exactly when the port is bound to its verbatim `serve.cmd`. The lane's next
   request runs that draft as a learned pin: a pass marks it proven, a failed
   stand-up discards it and re-runs the request in explore. Both events file a
   non-blocking finding naming the commands.

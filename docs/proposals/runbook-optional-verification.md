@@ -106,6 +106,13 @@ These are unconditional bug fixes that ignore the switch:
   - **Serve binding alone** (decided 2026-09-25, after the live smoke). When the task declared no channel, `passed` is allowed if it composed a `serve.cmd` and the binding holds: the port's listener is in the process group the driver started, and that group runs the verbatim composed command. Without this, a runbook-less web deliverable could never pass. The accepted gap is a composed command that deliberately fronts another server. A foreign listener still fails, and an unbound serve stays capped. Pinned rows are unchanged.
   - **Explore mobile** with no declared channel probes an implicit `bundle-identity` built from `app.bundleId`.
 
+**As built (2026-09-28): `serve-binding` is a declarable channel.** `{ "kind": "serve-binding" }` (no fields) joined `AttestationSpec`, for `web` and `cdp-app` only.
+- **Runbook parser:** accepted only on a web or cdp-app entry that carries a `serve`. `mobile` still requires `bundle-identity`, and `native-screen` refuses it.
+- **Floor, every mode:** there is no channel probe. The serve binding is the probe: it verifies iff the leased port's listener is the driver's serve group running the verbatim composed `serve.cmd`. A pinned foreign or unbound listener is `missing` (a pass fails), as for any declared channel whose binding breaks. In explore a foreign listener fails and an unbound one caps. A declaration with no composed `serve.cmd` caps at `low_confidence` in every mode, with the reason in the detail.
+- **Explore:** a task that declares `serve-binding` gets the same pass verdict as the undeclared binding-only pass above.
+- **Driver:** `"$VERIFY_DRIVER" attest binding` is the self-check. It reports ok, saying the channel is harness-verified, once a serve was started through the driver, and fails only when none was.
+- **Why it is safe to record:** the nonce channels are weaker than they look, because the agent holds the nonce and chooses what the driver serves. The binding is what actually ties a served surface to the deliverable. A pinned `serve-binding` entry therefore asserts nothing the explore pass it was learned from did not, and the accepted gap is unchanged: a composed command that deliberately fronts another server.
+
 #### A1.3 Levers in explore (F8, T-F4)
 - **Lever source.** With no pin, resolve the best record for (project, modality): proven, otherwise any `unproven-draft` of any origin. Pass **only its `levers`** to `resolveLeverEnv`, which already applies the name pattern, the deny list and harness-wins. Its build/serve reach the agent as hints in the EXPLORE block, together with its notes.
 - **Provenance.** Record the source as `leverSource: { hash, status, origin }`.
@@ -254,7 +261,7 @@ A rejection means nothing is learned. The verdict is unaffected.
 - **Stricter validation.** Two extra checks:
   - web/cdp-app: the recipe's `serve.cmd` must equal the composed `serve.cmd` the binding verified;
   - mobile: `app.bundleId` must equal the attested one.
-  - all: the recipe's `attestation.kind` must be the channel the floor verified for this pass. A pass that rested on the serve binding alone (A1.2) never learns: that channel cannot be written into a runbook, and a pinned run would need a real one.
+  - all: the recipe's `attestation.kind` must be the channel the floor verified for this pass, and a pass with no verified channel never learns. A web/cdp-app pass that rested on the serve binding (A1.2) learns a `serve-binding` entry (2026-09-28; at first such a pass never learned, because no runbook entry could carry that channel). A recipe that omits `attestation` on such a pass is filled in with `{ "kind": "serve-binding" }`, since the harness knows what it verified. A recipe naming a nonce channel the harness did not verify is refused.
   - mobile path values: `-project`/`-workspace` must be relative with no `$`/`` ` ``/`~` expansion and no `..` segment; `-derivedDataPath` must be exactly the DerivedData lever, and `-clonedSourcePackagesDirPath` the lever or a `..`-free path beneath it.
 
   "No step may write outside the snapshot or `$VERIFY_DATA_DIR`" is enforced as "no absolute path in any command".
