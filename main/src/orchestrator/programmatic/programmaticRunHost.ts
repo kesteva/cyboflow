@@ -1532,6 +1532,9 @@ export class ProgrammaticRunHost implements ControllerHost {
             ? { priorRescues: [...req.priorRescues] }
             : {}),
           ...(req.stage !== undefined ? { stage: req.stage } : {}),
+          ...(req.dependents !== undefined && req.dependents.length > 0
+            ? { dependents: req.dependents.map((id) => this.dependentFacts(id)) }
+            : {}),
         },
         req.signal,
       );
@@ -1547,6 +1550,10 @@ export class ProgrammaticRunHost implements ControllerHost {
             error: decision.systemicError,
           });
           return { kind: 'systemic', error: decision.systemicError };
+        }
+        if (decision.releaseDependents === true) {
+          await this.fileDependentsReleasedFinding({ taskRef, req, reason: decision.reason ?? '' });
+          return { kind: 'give_up', releaseDependents: true };
         }
         return { kind: 'give_up' };
       }
@@ -1569,6 +1576,10 @@ export class ProgrammaticRunHost implements ControllerHost {
           reason: decision.reason,
           ...(decision.guidance !== undefined ? { guidance: decision.guidance } : {}),
         });
+        if (decision.releaseDependents === true) {
+          await this.fileDependentsReleasedFinding({ taskRef, req, reason: decision.reason });
+          return { kind: 'give_up', releaseDependents: true };
+        }
         return { kind: 'give_up' };
       }
 
@@ -2023,6 +2034,48 @@ export class ProgrammaticRunHost implements ControllerHost {
       }
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] lane-accept finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** A dependent lane's display facts for the triage prompt (fail-soft to its id). */
+  private dependentFacts(itemId: string): { taskRef: string; taskTitle: string } {
+    try {
+      const facts = this.args.readLaneTask?.(itemId);
+      return { taskRef: facts?.taskRef ?? itemId, taskTitle: facts?.taskTitle ?? '' };
+    } catch {
+      return { taskRef: itemId, taskTitle: '' };
+    }
+  }
+
+  /**
+   * Audit a RELEASE: the supervisor let this lane fail but un-blocked the lanes
+   * waiting on it. Fail-soft.
+   */
+  private async fileDependentsReleasedFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const deps = (args.req.dependents ?? []).map((id) => this.dependentFacts(id).taskRef);
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor released the lanes waiting on ${args.taskRef}`,
+        body: [
+          `Task **${args.taskRef}** failed (\`${args.req.failureKind}\` at \`${args.req.stepId}\`), but the run supervisor judged that what its dependents build on is committed and working, so they were allowed to run instead of being blocked.`,
+          '',
+          `- Released: ${deps.join(', ')}`,
+          `- Reason: ${args.reason.trim().length > 0 ? args.reason.trim() : '(none given)'}`,
+          '',
+          `${args.taskRef} itself still needs your attention at the run's gate.`,
+        ].join('\n'),
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] dependents-released finding failed (fail-soft)', {
         runId: this.args.runId,
         taskRef: args.taskRef,
         error: err instanceof Error ? err.message : String(err),

@@ -366,6 +366,11 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
       description:
         'accept (REQUIRED except for commit-integrity): one entry per thing you are WAIVING — a residual defect, or a criterion the environment could not verify ("verify on a real device: …"). Each becomes a follow-up item for the human. Never waive a correctness or security defect.',
     },
+    releaseDependents: {
+      type: 'boolean',
+      description:
+        'give_up / append_correction only, and only when dependent lanes are listed: true = this lane fails, but what its dependents build on (the interface, module or data they consume) IS committed and works, so they should run instead of being blocked.',
+    },
     progress: {
       type: 'string',
       enum: ['converging', 'repeating'],
@@ -419,6 +424,8 @@ export interface LaneTriageRequest {
    * framing and what give_up means (see `buildLaneTriagePrompt`).
    */
   stage?: LaneTriageStage;
+  /** Not-yet-started lanes blocked on this one, by display ref (absent when none). */
+  dependents?: Array<{ taskRef: string; taskTitle: string }>;
 }
 
 /**
@@ -429,6 +436,8 @@ export interface LaneTriageRequest {
 export interface LaneGiveUpDecision {
   verdict: 'give_up';
   reason?: string;
+  /** Let the listed dependent lanes run although this one fails (see the schema). */
+  releaseDependents?: boolean;
   /**
    * Set ONLY when the triage exchange itself died on an environment-level
    * condition (a spent session limit, an expired login) — the verbatim error
@@ -479,6 +488,8 @@ export interface LaneAppendCorrectionDecision {
   reason: string;
   /** Optional corrective note recorded alongside the diagnosis. */
   guidance?: string;
+  /** Let the listed dependent lanes run although this one fails (see the schema). */
+  releaseDependents?: boolean;
 }
 
 /**
@@ -570,8 +581,11 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
     return laneGiveUp('unparseable lane triage verdict — letting the lane fail');
   }
   const o = structured as Record<string, unknown>;
+  // Only meaningful when there ARE dependents to release, and only on the two
+  // verdicts that let this lane fail.
+  const release = o.releaseDependents === true && (req.dependents?.length ?? 0) > 0 ? { releaseDependents: true } : {};
   if (o.verdict === 'give_up') {
-    return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}) };
+    return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}), ...release };
   }
   if (o.verdict === 'append_correction') {
     // The ONE verdict that names no step and re-drives nothing: the target-step
@@ -584,6 +598,7 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
       verdict: 'append_correction',
       reason: o.reason,
       ...(isNonEmptyString(o.guidance) ? { guidance: o.guidance } : {}),
+      ...release,
     };
   }
   if (o.verdict === 'accept') {
@@ -1291,6 +1306,18 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
 };
 
 /**
+ * The lanes blocked on this one. If it fails, they never start — unless the
+ * supervisor releases them because what they build on already landed.
+ */
+function dependentsSection(req: LaneTriageRequest): string {
+  const deps = req.dependents ?? [];
+  if (deps.length === 0 || req.stage === 'early') return '';
+  return `
+
+LANES WAITING ON THIS ONE: ${deps.map((d) => `**${d.taskRef}**${d.taskTitle ? ` (${oneLine(d.taskTitle)})` : ''}`).join(', ')}. If this lane fails they are BLOCKED and never start. If you let it fail ("give_up" / "append_correction") but what they need from it — the interface, module, procedure or data they consume — is already committed and working (check the worktree), set \`releaseDependents: true\` so they run anyway.`;
+}
+
+/**
  * The lane's earlier rescues, rendered so the supervisor can judge convergence —
  * the condition every rescue after the first requires (`progress: 'converging'`).
  */
@@ -1370,7 +1397,7 @@ Failing step: \`${req.stepId}\` (attempt ${req.attempt})
 This lane's inner step chain, in order: ${chain}
 
 Error / verdict excerpt:
-${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}${priorRescuesSection(req)}
+${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}${priorRescuesSection(req)}${dependentsSection(req)}
 
 Current task body — the acceptance criteria this lane's agents are working from:
 ---
@@ -2650,12 +2677,16 @@ function laneFailureAnnouncement(req: LaneTriageRequest): string {
  * completed act: the host executes it (and may still downgrade an adjust to a plain
  * rescue if the task edit is refused), so this turn must never claim success itself.
  */
+function releasedNote(req: LaneTriageRequest): string {
+  return `\n\nReleasing the lanes waiting on it: ${(req.dependents ?? []).map((d) => d.taskRef).join(', ')}.`;
+}
+
 function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecision): string {
   switch (decision.verdict) {
     case 'give_up':
       return req.stage === 'early'
         ? `↻ **${req.taskRef}**: no steering — the lane loops back for its final attempt as usual.${decision.reason ? ` ${decision.reason}` : ''}`
-        : `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}`;
+        : `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}${decision.releaseDependents ? releasedNote(req) : ''}`;
     case 'retry':
       return `▶ **${req.taskRef}**: rescue — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
     case 'adjust_and_retry':
@@ -2663,7 +2694,7 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
     case 'append_correction':
       // Advisory: no re-drive, no budget spent. Say so plainly, or the reader
       // assumes the lane got another attempt.
-      return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
+      return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}${decision.releaseDependents ? releasedNote(req) : ''}`;
     case 'accept':
       return req.failureKind === 'commit-integrity'
         ? `✔ **${req.taskRef}**: accept — the uncommitted changes are not this lane's, so integrate it as it stands. ${decision.reason}`

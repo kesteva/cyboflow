@@ -2168,6 +2168,31 @@ describe('buildLaneTriagePrompt', () => {
 });
 
 describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  it('keeps releaseDependents only when dependents exist, on give_up and append_correction', () => {
+    const dependents = [{ taskRef: 'TASK-274', taskTitle: 'Rail' }];
+    expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'r', releaseDependents: true }, laneReq({ dependents }))).toEqual({
+      verdict: 'give_up',
+      reason: 'r',
+      releaseDependents: true,
+    });
+    expect(
+      parseLaneTriageOutput({ verdict: 'append_correction', reason: 'r', releaseDependents: true }, laneReq({ dependents })),
+    ).toMatchObject({ releaseDependents: true });
+    expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'r', releaseDependents: true }, laneReq())).toEqual({
+      verdict: 'give_up',
+      reason: 'r',
+    });
+  });
+
+  it('lists the waiting lanes in the prompt only when there are some', () => {
+    const dependents = [{ taskRef: 'TASK-274', taskTitle: 'Rail' }];
+    const withDeps = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ dependents }));
+    expect(withDeps).toContain('LANES WAITING ON THIS ONE: **TASK-274** (Rail)');
+    expect(withDeps).toContain('releaseDependents: true');
+    const none = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq());
+    expect(none).not.toContain('LANES WAITING ON THIS ONE');
+  });
+
   const prior = [{ stepId: 'code-review', failureKind: 'code-review' as const, errorExcerpt: 'race A', guidance: 'fix A' }];
 
   it('allows a re-drive of an already-rescued lane only when the supervisor attests convergence', () => {

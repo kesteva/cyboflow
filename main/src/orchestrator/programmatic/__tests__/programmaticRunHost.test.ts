@@ -850,6 +850,25 @@ describe('ProgrammaticRunHost', () => {
       expect(finding.body).toContain('FINAL automatic attempt');
     });
 
+    it('maps dependents to refs for the monitor and audits a release', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const monitor = makeLaneMonitor({ verdict: 'give_up', reason: 'getStepModels is at HEAD', releaseDependents: true });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor,
+        readLaneTask: (id: string) => ({ taskRef: id === 'dep-1' ? 'TASK-274' : 'TASK-273', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({ ...failure, dependents: ['dep-1'] });
+
+      expect(outcome).toEqual({ kind: 'give_up', releaseDependents: true });
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({ dependents: [{ taskRef: 'TASK-274', taskTitle: 'T' }] });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor released the lanes waiting on TASK-273');
+      expect(finding.body).toContain('Released: TASK-274');
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {

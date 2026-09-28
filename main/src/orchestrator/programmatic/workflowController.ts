@@ -1628,6 +1628,20 @@ export class WorkflowController {
     let triageConsultChain: Promise<unknown> = Promise.resolve();
     /** Lanes that already had their one EARLY consult (see `consultEarly`). */
     const earlyConsulted = new Set<string>();
+    /**
+     * FAILED lanes whose dependents the supervisor RELEASED: the lane did not pass
+     * its own gates, but what its dependents build on is committed and works
+     * (observed 2026-09-28: a backend lane failed task-verify on criteria it could
+     * not meet while the procedure its three dependents consume was at HEAD, and
+     * all three were blocked). Dispatch treats a released prerequisite as
+     * satisfied; the lane itself still settles 'failed'.
+     */
+    const releasedPrereqs = new Set<string>();
+    /** The not-yet-settled lanes that list `itemId` as a blocking prerequisite. */
+    const pendingDependentsOf = (itemId: string): string[] =>
+      [...prereqs]
+        .filter(([dependent, ps]) => ps.includes(itemId) && remaining.has(dependent))
+        .map(([dependent]) => dependent);
 
     /**
      * SHARED-WORKTREE OWNERSHIP for the commit-integrity probe. Every lane of this
@@ -1764,6 +1778,7 @@ export class WorkflowController {
         return { kind: 'unconsulted' };
       }
       const priorRescues = laneRescues.history.get(itemId) ?? [];
+      const dependents = pendingDependentsOf(itemId);
       // Reserve now, release on every non-rescue arm below (see the docblock).
       laneRescues.perItem.set(itemId, usedForLane + 1);
       laneRescues.runTotal += 1;
@@ -1782,6 +1797,7 @@ export class WorkflowController {
           errorExcerpt,
           innerStepIds: allowedStepIds,
           ...(priorRescues.length > 0 ? { priorRescues: [...priorRescues] } : {}),
+          ...(dependents.length > 0 ? { dependents } : {}),
           ...(signal ? { signal } : {}),
         });
       } catch (err) {
@@ -1816,6 +1832,13 @@ export class WorkflowController {
       }
       if (outcome.kind !== 'rescue') {
         releaseReservation();
+        if (outcome.releaseDependents === true && dependents.length > 0) {
+          releasedPrereqs.add(itemId);
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': lane will fail, but the monitor RELEASED its dependents (${dependents.join(', ')})`,
+          );
+        }
         return { kind: 'give_up' };
       }
       const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
@@ -3141,8 +3164,8 @@ export class WorkflowController {
           if (inFlight.has(itemId) || deferred.has(itemId)) continue;
           if (parkPending?.items.has(itemId) === true) continue;
           const ps = prereqs.get(itemId) ?? [];
-          if (ps.some((p) => failed.has(p) || blocked.has(p))) continue;
-          if (!ps.every((p) => integrated.has(p))) continue;
+          if (ps.some((p) => (failed.has(p) && !releasedPrereqs.has(p)) || blocked.has(p))) continue;
+          if (!ps.every((p) => integrated.has(p) || (failed.has(p) && releasedPrereqs.has(p)))) continue;
           const files = expectedFiles?.get(itemId) ?? [];
           if (files.some((filePath) => claimedFiles.has(filePath))) continue;
           for (const filePath of files) claimedFiles.set(filePath, itemId);
@@ -3247,7 +3270,7 @@ export class WorkflowController {
             progressed = false;
             for (const itemId of [...remaining]) {
               const ps = prereqs.get(itemId) ?? [];
-              const dead = ps.find((p) => failed.has(p) || blocked.has(p));
+              const dead = ps.find((p) => (failed.has(p) && !releasedPrereqs.has(p)) || blocked.has(p));
               if (dead === undefined) continue;
               markBlocked(
                 itemId,

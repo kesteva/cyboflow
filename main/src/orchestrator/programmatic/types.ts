@@ -529,6 +529,11 @@ export interface LaneTriageFailure {
    * a give_up there means "loop back as usual", never "fail the lane".
    */
   stage?: LaneTriageStage;
+  /**
+   * Not-yet-started lanes (item ids) that list this lane as a blocking
+   * prerequisite. Present ⇒ a give_up may RELEASE them (`releaseDependents`).
+   */
+  dependents?: string[];
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
 }
@@ -569,7 +574,11 @@ export interface LanePriorRescue {
  * (a target it cannot locate is treated as a give_up).
  */
 export type LaneRescueOutcome =
-  | { kind: 'give_up' }
+  /**
+   * `releaseDependents` — the lane fails, but what its dependents build on is
+   * committed and works, so they may run instead of settling 'blocked'.
+   */
+  | { kind: 'give_up'; releaseDependents?: boolean }
   | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean }
   /**

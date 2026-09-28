@@ -1153,3 +1153,67 @@ describe('WorkflowController — early consult before the final attempt', () => 
     expect(earlyConsults).toHaveLength(0);
   });
 });
+
+// ── RELEASE: a failing lane's dependents run when what they need landed ───────
+//    Observed 2026-09-28: TASK-273 failed task-verify on criteria it could not
+//    meet while the procedure TASK-274/275/298 consume was at HEAD; all three
+//    were blocked.
+describe('WorkflowController — releasing a failed lane’s dependents', () => {
+  const chain = (): WorkflowStep => fanStep('execute', [{ id: 'implement' }]);
+
+  it('hands the consult the lanes waiting on the failing one', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']], ['t3', ['t1']]]);
+    const { host, consults } = makeTriageHost({ items: ['t1', 't2', 't3'], deps });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults[0].dependents).toEqual(['t2', 't3']);
+  });
+
+  it('runs the dependents of a released lane while the lane itself still fails', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']]]);
+    const { host, driver } = makeTriageHost({
+      items: ['t1', 't2'],
+      deps,
+      outcomes: [{ kind: 'give_up', releaseDependents: true }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(laneStatus(driver.lanes, 't2')).toBe('integrated');
+  });
+
+  it('still blocks dependents on a plain give_up', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']]]);
+    const { host, driver } = makeTriageHost({ items: ['t1', 't2'], deps, outcomes: [{ kind: 'give_up' }] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't2')).toBe('blocked');
+  });
+
+  it('keeps a dependent blocked while ANOTHER of its prerequisites failed unreleased', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({
+      't1:implement': [{ status: 'failed', error: 'boom' }],
+      't2:implement': [{ status: 'failed', error: 'boom' }],
+    });
+    const deps = new Map<string, string[]>([['t3', ['t1', 't2']]]);
+    const { host, driver } = makeTriageHost({
+      items: ['t1', 't2', 't3'],
+      deps,
+      outcomes: [{ kind: 'give_up', releaseDependents: true }, { kind: 'give_up' }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't3')).toBe('blocked');
+  });
+});
