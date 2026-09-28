@@ -93,6 +93,10 @@ class FakeManager implements AgentSpawnManagerLike {
    *  message instead of resolving it cleanly — both real managers currently
    *  resolve cleanly on abort, but AgentThreadService must handle either. */
   abortRejectMessage: string | null = null;
+  /** When set, the NEXT `abortInFlightTurn` call itself throws this message
+   *  (the abort attempt fails before touching the hung turn at all) instead
+   *  of settling it either way — the turn is left genuinely hanging. */
+  abortThrowMessage: string | null = null;
 
   queueInit(sessionId: string): void {
     this.behaviors.push({ kind: 'init', sessionId });
@@ -140,6 +144,11 @@ class FakeManager implements AgentSpawnManagerLike {
 
   async abortInFlightTurn(spawnKey: string): Promise<void> {
     this.abortCalls.push(spawnKey);
+    if (this.abortThrowMessage !== null) {
+      const message = this.abortThrowMessage;
+      this.abortThrowMessage = null;
+      throw new Error(message);
+    }
     const pending = this.pendingHang;
     this.pendingHang = null;
     if (pending === null) return;
@@ -150,6 +159,23 @@ class FakeManager implements AgentSpawnManagerLike {
     } else {
       pending.resolve();
     }
+  }
+
+  /** Manually settle a still-hung turn cleanly — simulates the turn finishing
+   *  on its own after a failed abort attempt left it untouched. */
+  resolveHang(): void {
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    pending?.resolve();
+  }
+
+  /** Manually settle a still-hung turn with a real failure — simulates a
+   *  genuine spawn failure landing after a failed abort attempt left the
+   *  turn untouched. */
+  rejectHang(message: string): void {
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    pending?.reject(new Error(message));
   }
 
   /**
@@ -684,6 +710,68 @@ describe('AgentThreadService', () => {
       h.manager.queueInit('sess-2');
       await h.service.sendMessage(thread.id, 'third');
       expect(h.manager.calls[2].resumeSessionId).toBe('sess-2');
+    });
+
+    it('a failed abort attempt returns { interrupted: false } and does not mask the turn\'s real outcome', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      await Promise.resolve();
+
+      // The abort call itself fails (e.g. the manager can't reach the process)
+      // — the turn is left genuinely hanging, not settled either way.
+      h.manager.abortThrowMessage = 'no live process for spawn key';
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: false });
+
+      // The turn later completes normally on its own (nothing actually aborted
+      // it). Without clearing the pending-interrupt flag on a failed abort,
+      // this normal completion would be misrecorded as an intentional "Stopped".
+      h.manager.resolveHang();
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user']);
+    });
+
+    it('a failed abort attempt does not swallow a genuine spawn failure that follows', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      await Promise.resolve();
+
+      h.manager.abortThrowMessage = 'no live process for spawn key';
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: false });
+
+      // The still-hung turn is settled with a real failure, not an abort.
+      h.manager.rejectHang('API Error: 500 internal');
+
+      await expect(sendPromise).rejects.toThrow(/500/);
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user', 'result']);
+    });
+  });
+
+  describe('isTurnInFlight', () => {
+    it('is false when the thread is idle', () => {
+      const thread = h.service.ensureGlobalThread();
+      expect(h.service.isTurnInFlight(thread.id)).toBe(false);
+    });
+
+    it('is true while a turn is in flight, and false again once it settles', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'hello');
+      await Promise.resolve();
+      expect(h.service.isTurnInFlight(thread.id)).toBe(true);
+
+      h.manager.resolveHang();
+      await sendPromise;
+      expect(h.service.isTurnInFlight(thread.id)).toBe(false);
     });
   });
 

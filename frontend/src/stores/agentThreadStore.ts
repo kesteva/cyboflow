@@ -180,7 +180,9 @@ export interface AgentThreadState {
   proposals: AgentProposal[];
   /** True while the initial bootstrap (getThread + listProposals) is in flight. */
   loading: boolean;
-  /** True while a turn (sendMessage) is in flight — the composer's disable signal. */
+  /** True while a turn (sendMessage) is in flight — the composer's disable signal.
+   *  Also hydrated from the server's `turnState` query at bootstrap, so a
+   *  renderer reload mid-turn still shows Stop rather than Send. */
   sending: boolean;
   /**
    * Bumped on every debounced onThreadEvent tick. {@link useUnifiedAgentThreadMessages}
@@ -341,6 +343,18 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           const thread = await trpc.cyboflow.agentThread.getThread.query();
           set({ thread });
           await refreshProposals(thread.id);
+          // A renderer reload loses the in-memory `sending` flag a live
+          // `sendMessage` call would otherwise be holding — hydrate it from
+          // the server's own record of what is actually in flight, so a turn
+          // that started before this mount still shows Stop, not Send.
+          try {
+            const { inFlight } = await trpc.cyboflow.agentThread.turnState.query({
+              threadId: thread.id,
+            });
+            if (!tornDown) set({ sending: inFlight });
+          } catch (err: unknown) {
+            console.warn('[agentThreadStore] turnState hydration failed:', err);
+          }
           if (tornDown) return;
           threadEventSub = openResilientSubscription<unknown[]>(
             'onThreadEvent',

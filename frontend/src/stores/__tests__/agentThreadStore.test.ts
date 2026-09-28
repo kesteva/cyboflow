@@ -14,6 +14,7 @@ import type { StreamEvent } from '../../utils/cyboflowApi';
 // Mutable mock refs — replaced in beforeEach so each test gets fresh spies.
 let mockGetThreadQuery: ReturnType<typeof vi.fn>;
 let mockListProposalsQuery: ReturnType<typeof vi.fn>;
+let mockTurnStateQuery: ReturnType<typeof vi.fn>;
 let mockSendMessageMutate: ReturnType<typeof vi.fn>;
 let mockInterruptTurnMutate: ReturnType<typeof vi.fn>;
 let mockConfirmProposalMutate: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ vi.mock('../../trpc/client', () => ({
       agentThread: {
         getThread: { get query() { return mockGetThreadQuery; } },
         listProposals: { get query() { return mockListProposalsQuery; } },
+        turnState: { get query() { return mockTurnStateQuery; } },
         sendMessage: { get mutate() { return mockSendMessageMutate; } },
         interruptTurn: { get mutate() { return mockInterruptTurnMutate; } },
         confirmProposal: { get mutate() { return mockConfirmProposalMutate; } },
@@ -103,6 +105,7 @@ let unsub: (() => void) | null = null;
 beforeEach(() => {
   mockGetThreadQuery = vi.fn().mockResolvedValue(makeThread());
   mockListProposalsQuery = vi.fn().mockResolvedValue([]);
+  mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: false });
   mockSendMessageMutate = vi.fn().mockResolvedValue({ ok: true });
   mockInterruptTurnMutate = vi.fn().mockResolvedValue({ interrupted: true });
   mockConfirmProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: false });
@@ -189,6 +192,34 @@ describe('init()', () => {
 
     expect(useAgentThreadStore.getState().thread).toBeNull();
     errSpy.mockRestore();
+  });
+
+  it('hydrates `sending` true from turnState when a turn is already in flight (a reload mid-turn)', async () => {
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    expect(mockTurnStateQuery).toHaveBeenCalledWith({ threadId: 'thread-1' });
+  });
+
+  it('leaves `sending` false when turnState reports the thread idle', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    await vi.waitFor(() => expect(mockTurnStateQuery).toHaveBeenCalled());
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+  });
+
+  it('a turnState failure is swallowed and leaves `sending` at its default', async () => {
+    mockTurnStateQuery = vi.fn().mockRejectedValue(new Error('boom'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().loading).toBe(false));
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+    warnSpy.mockRestore();
   });
 });
 

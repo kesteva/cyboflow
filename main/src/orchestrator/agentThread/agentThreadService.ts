@@ -499,11 +499,27 @@ export class AgentThreadService {
     try {
       await this.managerFor(info.runtime).abortInFlightTurn(info.spawnKey);
     } catch (err) {
+      // The abort call itself failed — the turn is NOT known to be stopping.
+      // Clear the pending flag so whatever the turn actually does next (a
+      // normal completion, or a genuine spawn failure) is recorded as that
+      // real outcome instead of being misread as an intentional "Stopped".
+      this.pendingInterrupts.delete(threadId);
       this.deps.logger?.warn(
         `[agentThreadService] abortInFlightTurn failed for thread ${threadId}: ${errMessage(err)}`,
       );
+      return { interrupted: false };
     }
     return { interrupted: true };
+  }
+
+  /**
+   * Whether a turn is currently in flight for this thread. Lets a reloaded
+   * renderer hydrate the composer's Stop affordance for a turn that started
+   * before it mounted, rather than only ever learning about it from the
+   * `sendMessage` call that started it in the same renderer session.
+   */
+  isTurnInFlight(threadId: string): boolean {
+    return this.inFlight.has(threadId);
   }
 
   /** Persist + publish the muted "Stopped" transcript marker for an interrupted turn. */
