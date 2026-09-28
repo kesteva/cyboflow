@@ -65,6 +65,9 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '071_raw_events_dedup.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '085_review_item_audience.sql'), 'utf-8'));
+  // Migration 145: gate_reached_at, selected by insightsQueries.fetchRunTimestamps
+  // (rollupRunUsage's finalize-seam read path exercised below).
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN gate_reached_at DATETIME;');
 
   // Seed the run hosting the session (review_items.run_id FK) + the session.
   db.prepare(
