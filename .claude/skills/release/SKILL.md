@@ -80,10 +80,11 @@ fallback for when CI cannot run.
 
 ## Phase 1 — Full test gate (all must pass)
 
-> The tag workflow gates on **Code Quality for the bump commit**, which covers
-> the same unit/integration/Windows legs on CI. Run this locally anyway when the
-> release carries risky changes — but a green local gate is no longer what
-> authorises the release, and a red CI gate stops it regardless.
+> The tag workflow reuses **Code Quality for the dev-tested commit** (the pure
+> bump's parent — see Phase 2), which covers the same unit/integration/Windows
+> legs on CI. Skip this phase by default; run it only when the release carries
+> risky changes — a green local gate is not what authorises the release, and a
+> red CI gate stops it regardless.
 
 **Start the Windows leg FIRST** — it runs on a hosted runner for ~15 min, in
 parallel with everything below. The `skipIf(process.platform !== 'win32')`
@@ -172,13 +173,35 @@ combined) and exist because CI can never run them (no authenticated `claude` on
 hosted runners). The Windows run is the mirror image: it exists because this
 Mac can never run those suites.
 
-## Phase 2 — Version bump + changelog
+## Phase 2 — Version bump + changelog (on the dev-tested commit)
+
+**Build the release commit on the commit the user tested, not on local `main`.**
+Local `main` often carries merges made after that dev build started; bumping on
+top of them ships untested code. Ask the user which dev build they tested and
+get its SHA (the app footer's commit, or the dev-release run summary), then work
+in a throwaway worktree at it:
+
+```bash
+SHA=<tested dev build commit>
+git fetch origin
+git merge-base --is-ancestor "$SHA" origin/main || echo "NOT ON origin/main — stop"
+gh api "repos/kesteva/cyboflow/actions/workflows/quality.yml/runs?head_sha=$SHA" \
+  --jq '.workflow_runs[0].conclusion'          # must print: success
+WT="$(mktemp -d)/release"; git worktree add --detach "$WT" "$SHA"
+```
+
+Do every edit below **in `$WT`**. Keep the commit a PURE bump — only the four
+manifests' `"version"` lines and `CHANGELOG.md`. `stable-release.yml` then
+reuses `$SHA`'s green Code Quality run instead of re-running the suite; any
+other change (even a manifest line besides `version`) silently falls back to
+gating the bump commit itself, i.e. the old 20–45 min wait.
 
 - Bump the version in **all four** `package.json` files (root, `frontend`,
   `main`, `shared`).
 - In `CHANGELOG.md`, move the `[Unreleased]` items under a new
   `## [<version>] — YYYY-MM-DD` heading (grouped Added / Changed / Fixed), derived
-  from `git log --oneline v<last>..HEAD`.
+  from `git log --oneline v<last>..$SHA` — NOT `..main`, which would list
+  commits this release does not contain.
   - **After the edit, confirm you did NOT eat the previous heading**: an Edit whose
     `old_string` spans `## [Unreleased]\n\n## [<prev>]` must re-add `## [<prev>]` in
     the `new_string`, or the prior release's notes merge under the new heading (and
@@ -187,14 +210,15 @@ Mac can never run those suites.
     be there, directly after your new section.
 - Commit exactly those five files:
   ```bash
+  cd "$WT"
   git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
   git commit -m "chore: release <version>
 
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   Signed-off-by: Krishna <13578267+kesteva@users.noreply.github.com>"
   ```
-  Build **after** this commit — the DMGs stamp `buildInfo.gitCommit` from it, and
-  the tag must point here.
+  The DMGs stamp `buildInfo.gitCommit` from this commit, and the tag must point
+  here — not at a merge commit made later.
 
 ## Phase 3 — Tag + push (CONFIRM FIRST)
 
@@ -203,13 +227,29 @@ verifies, publishes to R2 and cuts the GitHub release from the tag.
 
 ```bash
 V=<version>
-git tag -a "v$V" -m "v$V"
-git push origin main
+REL=$(git -C "$WT" rev-parse HEAD)            # the bump commit; its parent is $SHA
+git tag -a "v$V" -m "v$V" "$REL"
+# Land the bump on origin/main WITHOUT pushing unrelated local main work.
+# origin/main normally still sits at $SHA → fast-forward; if it moved on,
+# merge the bump onto it (the tag stays on $REL, so the gate still sees $SHA).
+if [ "$(git rev-parse origin/main)" = "$SHA" ]; then
+  git push origin "$REL:refs/heads/main"
+else
+  git -C "$WT" checkout -q --detach origin/main
+  git -C "$WT" merge --no-ff --no-edit "$REL"
+  git push origin "$(git -C "$WT" rev-parse HEAD):refs/heads/main"
+fi
 git push origin "v$V"
 git ls-remote --tags origin "refs/tags/v$V" | grep -q . || echo "TAG DID NOT ARRIVE"
+git worktree remove "$WT"
+git switch main && git merge --no-edit "v$V"  # bring local main along (in the main checkout)
 ```
 
-Do NOT tag before the bump commit exists — the tag must point at it.
+Push main BEFORE the tag: the workflow refuses a tag that is not on
+`origin/main`, and the `site` job bakes cyboflow.com from main's CHANGELOG. The
+final local merge can conflict in `CHANGELOG.md` if local-only commits added
+`[Unreleased]` entries — keep both sides. The workflow log's "Resolve + assert"
+line names the gate SHA: it should read `gate = <$SHA>, the version-bump parent`.
 
 Push the tag as its own command and check it landed. `git push --follow-tags`
 pushes only ANNOTATED tags, so with a lightweight `git tag "v$V"` it silently
