@@ -303,6 +303,22 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(canonicalize(value)) ?? 'null';
 }
 
+/**
+ * The app-server env: the run env plus a fan-out lane's build-slot env
+ * (`options.laneEnv`, programmatic/laneBuildSlots.ts), merged LAST so it wins.
+ * The app-server hands its env to every command the agent runs, which is how the
+ * slot reaches a Codex lane's shell. ONE builder for both the cold spawn and the
+ * warm fingerprint so the two can never disagree. No laneEnv ⇒ the run env as-is.
+ */
+function appServerEnvironment(
+  runId: string,
+  runtimeConfig: CodexMcpRuntimeConfig,
+  options: ClaudeSpawnerOptions,
+): NodeJS.ProcessEnv {
+  const env = buildCodexAppServerEnvironment(runId, runtimeConfig);
+  return options.laneEnv ? { ...env, ...options.laneEnv } : env;
+}
+
 function defaultCodexAppServerClientFactory(
   options: CodexAppServerClientOptions,
 ): CodexAppServerClientLike {
@@ -772,7 +788,7 @@ export class CodexSdkManager extends AbstractCliManager {
     agentRoles: CodexAgentRoles,
   ): string {
     return sha1(stableSerialize({
-      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
+      env: appServerEnvironment(runId, runtimeConfig, options),
       thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig, agentRoles),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
@@ -847,7 +863,7 @@ export class CodexSdkManager extends AbstractCliManager {
       command: executable.executablePath,
       cwd: options.worktreePath,
       env: prependCodexPathToEnvironment(
-        buildCodexAppServerEnvironment(runId, runtimeConfig),
+        appServerEnvironment(runId, runtimeConfig, options),
         executable.pathDir,
       ),
       onServerRequest: (request) => {

@@ -116,6 +116,28 @@ describe('PiSdkManager gate mode (CYBOFLOW_GATE_MODE)', () => {
     expect(second[PI_GATE_ENV_KEYS.mode]).toBe('dontAsk');
   });
 
+  it('merges a lane build-slot env (laneEnv) last on the workflow entry point, and adds nothing without one', async () => {
+    const saved = process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    // This suite may itself run inside a cyboflow lane whose env carries it.
+    delete process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    try {
+      const slot = '/tmp/wt/.cyboflow/build-slots/slot-0';
+      const lane = await spawnOnce(makeManager(), {
+        spawnKey: 'run-1:TASK-1',
+        laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: slot, [PI_GATE_ENV_KEYS.mode]: 'lane-wins' },
+      });
+      expect(lane.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      // LAST: it beats even a key the manager itself sets.
+      expect(lane[PI_GATE_ENV_KEYS.mode]).toBe('lane-wins');
+
+      const plain = await spawnOnce(makeManager());
+      expect(plain.CYBOFLOW_LANE_SCRATCH_DIR).toBeUndefined();
+      expect(plain[PI_GATE_ENV_KEYS.mode]).toBe('gated');
+    } finally {
+      if (saved !== undefined) process.env.CYBOFLOW_LANE_SCRATCH_DIR = saved;
+    }
+  });
+
   it('spawns with lockdown flags, one --print, and the prompt on stdin only', async () => {
     await spawnOnce(makeManager());
     const args = lastSpawnCall()[1];

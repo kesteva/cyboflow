@@ -514,6 +514,37 @@ describe('OmpSdkManager — the spawn', () => {
     }
   });
 
+  it('merges a lane build-slot env (laneEnv) last, and adds nothing without one', async () => {
+    const saved = process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    // This suite may itself run inside a cyboflow lane whose env carries it.
+    delete process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      const slot = '/tmp/worktree/.cyboflow/build-slots/slot-0';
+      await manager.spawnCliProcess(
+        turn({
+          spawnKey: 'run-1:TASK-1',
+          laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: slot, CYBOFLOW_RUN_ARTIFACTS_DIR: '/lane/wins' },
+        }),
+      );
+      await manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-2' }));
+
+      const laneEnv = clients[0].options.env ?? {};
+      expect(laneEnv.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      // LAST: it beats even a key the manager itself sets.
+      expect(laneEnv.CYBOFLOW_RUN_ARTIFACTS_DIR).toBe('/lane/wins');
+      expect(laneEnv.CYBOFLOW_RUN_ID).toBe('run-1');
+      const plainEnv = clients[1].options.env ?? {};
+      expect(plainEnv.CYBOFLOW_LANE_SCRATCH_DIR).toBeUndefined();
+      expect(plainEnv.CYBOFLOW_RUN_ARTIFACTS_DIR).toContain('run-1');
+      await manager.killAllProcesses();
+    } finally {
+      if (saved !== undefined) process.env.CYBOFLOW_LANE_SCRATCH_DIR = saved;
+      db.close();
+    }
+  });
+
   it('writes .omp/mcp.json for a worktree session and skips it in place', async () => {
     const db = createDb();
     try {

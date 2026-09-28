@@ -1105,6 +1105,23 @@ describe('CodexSdkManager warm app-server reuse', () => {
     }
   });
 
+  it('cold-respawns when the lane env changes (laneEnv is part of the warm fingerprint)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      await manager.spawnCliProcess(baseTurn({
+        prompt: 'second',
+        resumeSessionId: 'codex-thread-1',
+        laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: '/tmp/worktree/.cyboflow/build-slots/slot-0' },
+      }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('stops (not just evicts) a parked app-server whose client errors with no active turn', async () => {
     const db = createDb();
     try {
@@ -1180,6 +1197,67 @@ function agentTurn(
     ...overrides,
   } as Parameters<CodexSdkManager['spawnCliProcess']>[0];
 }
+
+describe('CodexSdkManager lane build-slot env', () => {
+  // The app-server hands its env to every command the agent runs, so a fan-out
+  // lane's build slot (programmatic/laneBuildSlots.ts) reaches the agent's shell
+  // only through the app-server env — merged LAST so it wins.
+  const LANE_KEYS = ['CYBOFLOW_LANE_SCRATCH_DIR', 'CLANG_MODULE_CACHE_PATH', 'SWIFTPM_MODULECACHE_OVERRIDE'] as const;
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    // This suite may itself run inside a cyboflow lane whose env carries these.
+    for (const key of LANE_KEYS) {
+      saved.set(key, process.env[key]);
+      delete process.env[key];
+    }
+  });
+  afterEach(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('merges laneEnv into the app-server env, overriding an inherited value', async () => {
+    process.env.CLANG_MODULE_CACHE_PATH = '/inherited/module-cache';
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      const slot = '/tmp/worktree/.cyboflow/build-slots/slot-1';
+      await manager.spawnCliProcess(baseTurn({
+        spawnKey: 'run-1:TASK-1',
+        laneEnv: {
+          CYBOFLOW_LANE_SCRATCH_DIR: slot,
+          CLANG_MODULE_CACHE_PATH: `${slot}/clang-module-cache`,
+          SWIFTPM_MODULECACHE_OVERRIDE: `${slot}/clang-module-cache`,
+        },
+      }));
+
+      const env = clients[0].options.env ?? {};
+      expect(env.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      expect(env.CLANG_MODULE_CACHE_PATH).toBe(`${slot}/clang-module-cache`);
+      expect(env.SWIFTPM_MODULECACHE_OVERRIDE).toBe(`${slot}/clang-module-cache`);
+      // The run env is intact alongside it.
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-1');
+      expect(env.PATH).toContain('/app/codex/codex-path');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds no lane keys to a spawn without laneEnv', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ spawnKey: 'run-1:TASK-1' }));
+
+      const env = clients[0].options.env ?? {};
+      for (const key of LANE_KEYS) expect(env[key]).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+});
 
 describe('CodexSdkManager hermetic global-agent spawn', () => {
   it('routes the turn into the injected sink and writes NEITHER run-keyed table', async () => {

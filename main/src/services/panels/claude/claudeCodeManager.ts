@@ -64,7 +64,7 @@ import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cybof
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { UserEvent } from '../../../../../shared/types/claudeStream';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
@@ -715,7 +715,7 @@ export interface SpawnEventsSink {
   dispose(runId?: string): void;
 }
 
-export interface ClaudeSpawnOptions {
+export interface ClaudeSpawnOptions extends LaneSpawnEnv {
   /**
    * Set ONLY by a seam that showed the user their provider is switched off and
    * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
@@ -3376,15 +3376,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // reports the PNG BASENAMES via cyboflow_report_artifact(atype:'screenshots').
     const artifactRunKey =
       options.runId && options.runId.length > 0 ? options.runId : options.sessionId;
-    const runArtifactsDir = getCyboflowSubdirectory('artifacts', 'runs', artifactRunKey);
     return {
       ...process.env,
       PATH: await this.resolveSpawnPath(),
-      CYBOFLOW_RUN_ARTIFACTS_DIR: runArtifactsDir,
+      CYBOFLOW_RUN_ARTIFACTS_DIR: getCyboflowSubdirectory('artifacts', 'runs', artifactRunKey),
       // Mark the tree as agent-spawned so a project gate run by this agent
       // self-governs its vitest fork pool (shared/types/testConcurrency.ts).
       ...managedTestConcurrencyEnv(),
-      ...(verbose ? { MCP_DEBUG: '1' } : {})
+      ...(verbose ? { MCP_DEBUG: '1' } : {}),
+      ...options.laneEnv, // a fan-out lane's build slot (LaneSpawnEnv) — LAST, so it wins
     };
   }
 
