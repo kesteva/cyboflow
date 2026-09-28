@@ -580,7 +580,13 @@ export type LaneRescueOutcome =
    */
   | { kind: 'give_up'; releaseDependents?: boolean }
   | { kind: 'systemic'; error: string }
-  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean }
+  /**
+   * `free` — the rescue follows an ENVIRONMENT fix (e.g. dependencies were
+   * installed): the lane failed on the worktree, not on its work, so the re-drive
+   * is not charged to the run's rescue pool. It still counts toward the lane's own
+   * MONITOR_LANE_RESCUE_CAP, so a lane cannot loop on it.
+   */
+  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean; free?: boolean }
   /**
    * 'accept' — proceed past the failing step as if it had passed. The supervisor
    * judged the task's substance done and what is left waivable: cosmetic
@@ -1119,6 +1125,13 @@ export interface ControllerHost {
    * controller settles the lane failed exactly as before the seam existed.
    */
   triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
+  /**
+   * Optional PREFLIGHT, awaited once when a fan-out starts, before any lane is
+   * dispatched: repair what would fail EVERY lane the same way (today: a worktree
+   * with no installed dependencies). Must never throw and never fail the run;
+   * absent ⇒ no preflight.
+   */
+  prepareFanOutEnvironment?(runId: string): Promise<void>;
 
   /**
    * Optional REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling.

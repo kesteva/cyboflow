@@ -869,6 +869,84 @@ describe('ProgrammaticRunHost', () => {
       expect(finding.body).toContain('Released: TASK-274');
     });
 
+    const makeEnv = (ok: boolean) => ({
+      describe: () => 'Dependency folders MISSING: node_modules.',
+      available: () => ['install_dependencies' as const],
+      missingDependencyDirs: () => ['.'],
+      run: vi.fn().mockResolvedValue({ ok, summary: ok ? '`pnpm install` succeeded' : '`pnpm install` failed', detail: 'log' }),
+    });
+
+    it('runs a fix_environment action and returns a FREE rescue on success', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const environmentActions = makeEnv(true);
+      const monitor = makeLaneMonitor({
+        verdict: 'fix_environment',
+        action: 'install_dependencies',
+        targetStepId: 'implement',
+        guidance: 'deps installed; re-run typecheck',
+        reason: 'tsc: command not found',
+      });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor, environmentActions, fileLaneTriageFinding,
+        readLaneTask: () => ({ taskRef: 'TASK-273', taskTitle: 'T', taskBody: 'B' }),
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({
+        environment: { actions: ['install_dependencies'] },
+      });
+      expect(environmentActions.run).toHaveBeenCalledWith('install_dependencies');
+      expect(outcome).toEqual({
+        kind: 'rescue',
+        targetStepId: 'implement',
+        guidance: 'deps installed; re-run typecheck',
+        adjusted: false,
+        free: true,
+      });
+      expect((fileLaneTriageFinding.mock.calls[0][0] as { title: string }).title).toBe(
+        'Monitor fixed the environment for TASK-273 (install_dependencies)',
+      );
+    });
+
+    it('lets the lane fail when the environment action fails', async () => {
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({
+          verdict: 'fix_environment', action: 'install_dependencies', targetStepId: 'implement', guidance: 'g', reason: 'r',
+        }),
+        environmentActions: makeEnv(false),
+        fileLaneTriageFinding: vi.fn().mockResolvedValue(undefined),
+      });
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
+    it('installs missing dependencies in the fan-out preflight, and files a finding only on failure', async () => {
+      const ok = makeEnv(true);
+      const fileOk = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        environmentActions: ok, fileLaneTriageFinding: fileOk,
+      }).prepareFanOutEnvironment();
+      expect(ok.run).toHaveBeenCalledTimes(1);
+      expect(fileOk).not.toHaveBeenCalled();
+
+      const bad = makeEnv(false);
+      const fileBad = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        environmentActions: bad, fileLaneTriageFinding: fileBad,
+      }).prepareFanOutEnvironment();
+      expect((fileBad.mock.calls[0][0] as { title: string }).title).toBe('Dependency install failed before the sprint started');
+
+      const complete = { ...makeEnv(true), missingDependencyDirs: () => [] };
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), environmentActions: complete,
+      }).prepareFanOutEnvironment();
+      expect(complete.run).not.toHaveBeenCalled();
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {

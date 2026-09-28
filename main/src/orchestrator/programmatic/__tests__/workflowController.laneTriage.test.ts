@@ -1217,3 +1217,63 @@ describe('WorkflowController — releasing a failed lane’s dependents', () => 
     expect(laneStatus(driver.lanes, 't3')).toBe('blocked');
   });
 });
+
+// ── ENVIRONMENT: preflight + free (environment-fix) rescues ──────────────────
+describe('WorkflowController — environment fixes', () => {
+  it('awaits the host environment preflight before dispatching any lane', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const order: string[] = [];
+    const runner: StepRunner = {
+      async runStep() {
+        order.push('step');
+        return { status: 'ok' };
+      },
+    };
+    const { host } = makeTriageHost({ items: ['t1'] });
+    host.prepareFanOutEnvironment = async () => {
+      order.push('preflight');
+    };
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(order).toEqual(['preflight', 'step']);
+  });
+
+  it('dispatches anyway when the preflight throws', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver } = makeTriageHost({ items: ['t1'] });
+    host.prepareFanOutEnvironment = async () => {
+      throw new Error('pnpm exploded');
+    };
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('does not charge a FREE (environment-fix) rescue to the run pool', async () => {
+    // Two lanes ⇒ run pool floor(3 + 2/2) = 4. t1 (dispatched first) needs three
+    // FREE rescues; t2 then needs two paid ones. Charged, t1 would leave one slot
+    // and t2's second failure would settle unconsulted.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const boom: StepRunResult = { status: 'failed', error: 'tsc: command not found' };
+    const runner = makeRunner({ 't1:implement': [boom, boom, boom], 't2:implement': [boom, boom] });
+    const free: LaneRescueOutcome = {
+      kind: 'rescue',
+      targetStepId: 'implement',
+      guidance: 'deps installed',
+      adjusted: false,
+      free: true,
+    };
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1', 't2'],
+      outcomes: [free, free, free, rescue('implement'), rescue('implement')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults.map((c) => c.itemId)).toEqual(['t1', 't1', 't1', 't2', 't2']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    expect(laneStatus(driver.lanes, 't2')).toBe('integrated');
+  });
+});

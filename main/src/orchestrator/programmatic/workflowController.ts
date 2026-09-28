@@ -1596,6 +1596,17 @@ export class WorkflowController {
     // reaches almost nobody: under the rolling pool the set of lanes whose
     // prompts are already composed is permanently cap-sized.
     await this.ensureVerificationPosture(runId);
+    // Environment preflight (fail-soft by contract, belt-and-braces here): repair
+    // what would otherwise fail every lane identically, before any lane burns an
+    // attempt on it.
+    try {
+      await this.host.prepareFanOutEnvironment?.(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `fan-out environment preflight threw (${err instanceof Error ? err.message : String(err)}); dispatching anyway`,
+      );
+    }
     // PARK-EPOCH LATCH (defined ⇒ latched): set to the error text the moment one
     // lane's triage consult dies on a systemic condition. Lanes run concurrently
     // and the consults are serialized on the monitor's send chain, so without it
@@ -1850,11 +1861,20 @@ export class WorkflowController {
         releaseReservation();
         return { kind: 'give_up' };
       }
+      if (outcome.free === true) {
+        // An environment fix, not a judgment about the work: refund the run pool
+        // (the per-lane count stays spent, bounding a lane that keeps asking).
+        laneRescues.runTotal -= 1;
+      }
       laneRescues.guidance.set(itemId, outcome.guidance);
-      laneRescues.history.set(itemId, [
-        ...priorRescues,
-        { stepId: failingStepId, failureKind, errorExcerpt, guidance: outcome.guidance },
-      ]);
+      // Only a judgment about the WORK enters the convergence history; an
+      // environment fix says nothing about whether the lane is converging.
+      if (outcome.free !== true) {
+        laneRescues.history.set(itemId, [
+          ...priorRescues,
+          { stepId: failingStepId, failureKind, errorExcerpt, guidance: outcome.guidance },
+        ]);
+      }
       this.host.log?.(
         'warn',
         `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,

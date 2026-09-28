@@ -2032,12 +2032,12 @@ function laneReq(p: Partial<LaneTriageRequest> = {}): LaneTriageRequest {
 }
 
 describe('MONITOR_LANE_TRIAGE_SCHEMA', () => {
-  it('enforces the five-verdict enum, requires verdict + reason, and forbids extra fields', () => {
+  it('enforces the verdict enum, requires verdict + reason, and forbids extra fields', () => {
     const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<
       string,
       { enum?: string[]; description?: string }
     >;
-    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept']);
+    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept', 'fix_environment']);
     // The enum's own description is what the model reads first, so it must say
     // what append_correction COSTS (nothing) and what give_up is FOR (escalation).
     expect(props.verdict.description).toContain('append_correction');
@@ -2168,6 +2168,39 @@ describe('buildLaneTriagePrompt', () => {
 });
 
 describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  it('parses fix_environment only for an action the request lists as available', () => {
+    const environment = { report: 'Dependency folders MISSING: node_modules.', actions: ['install_dependencies' as const] };
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'fix_environment', environmentAction: 'install_dependencies', reason: 'tsc: command not found', targetStepId: 'task-verify' },
+        laneReq({ environment }),
+      ),
+    ).toMatchObject({ verdict: 'fix_environment', action: 'install_dependencies', targetStepId: 'task-verify' });
+    expect(
+      parseLaneTriageOutput({ verdict: 'fix_environment', environmentAction: 'install_dependencies', reason: 'r' }, laneReq()).verdict,
+    ).toBe('give_up');
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'fix_environment', environmentAction: 'rm_rf', reason: 'r' },
+        laneReq({ environment }),
+      ).verdict,
+    ).toBe('give_up');
+  });
+
+  it('shows the environment report and the fix_environment option in the prompt', () => {
+    const environment = { report: 'Dependency folders MISSING: node_modules.', actions: ['install_dependencies' as const] };
+    const p = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ environment }));
+    expect(p).toContain('WORKTREE ENVIRONMENT');
+    expect(p).toContain('Dependency folders MISSING');
+    expect(p).toContain('"fix_environment"');
+    const none = buildLaneTriagePrompt(
+      ctx,
+      { conversation: [], steps: [], lanes: [] },
+      laneReq({ environment: { report: 'No JavaScript lockfile', actions: [] } }),
+    );
+    expect(none).not.toContain('"fix_environment"');
+  });
+
   it('keeps releaseDependents only when dependents exist, on give_up and append_correction', () => {
     const dependents = [{ taskRef: 'TASK-274', taskTitle: 'Rail' }];
     expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'r', releaseDependents: true }, laneReq({ dependents }))).toEqual({

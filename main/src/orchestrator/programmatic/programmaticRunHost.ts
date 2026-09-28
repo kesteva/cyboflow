@@ -65,6 +65,7 @@ import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../..
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
 import { buildBreakGroupKey } from './buildBreakDetector';
+import type { EnvironmentActionKind, EnvironmentActionResult } from './environmentActions';
 
 /**
  * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
@@ -445,6 +446,18 @@ export interface ProgrammaticRunHostArgs {
    * throwing/absent sink never blocks the rescue it was supposed to audit.
    */
   fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
+  /**
+   * The run worktree's ENVIRONMENT ACTIONS (a closed, host-run set — see
+   * environmentActions.ts). Present ⇒ lane triage sees an environment report and
+   * may request `fix_environment`, and the fan-out preflight installs missing
+   * dependencies. Absent ⇒ neither (the pre-seam behavior).
+   */
+  environmentActions?: {
+    describe(): string;
+    available(): EnvironmentActionKind[];
+    missingDependencyDirs(): string[];
+    run(action: EnvironmentActionKind): Promise<EnvironmentActionResult>;
+  };
   /**
    * SUPERVISOR-AUDIT sink. Files the NON-BLOCKING record of ONE review-loop
    * consult — the verdict, its rationale, and the steering the re-run will be
@@ -1535,6 +1548,7 @@ export class ProgrammaticRunHost implements ControllerHost {
           ...(req.dependents !== undefined && req.dependents.length > 0
             ? { dependents: req.dependents.map((id) => this.dependentFacts(id)) }
             : {}),
+          ...(this.environmentForTriage() ?? {}),
         },
         req.signal,
       );
@@ -1581,6 +1595,10 @@ export class ProgrammaticRunHost implements ControllerHost {
           return { kind: 'give_up', releaseDependents: true };
         }
         return { kind: 'give_up' };
+      }
+
+      if (decision.verdict === 'fix_environment') {
+        return await this.runLaneEnvironmentFix({ taskRef, req, decision });
       }
 
       if (decision.verdict === 'accept') {
@@ -2036,6 +2054,124 @@ export class ProgrammaticRunHost implements ControllerHost {
       this.args.logger?.warn('[ProgrammaticRunHost] lane-accept finding failed (fail-soft)', {
         runId: this.args.runId,
         taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** The `environment` field of a lane-triage request, or undefined when unwired. */
+  private environmentForTriage(): { environment: { report: string; actions: EnvironmentActionKind[] } } | undefined {
+    const env = this.args.environmentActions;
+    if (!env) return undefined;
+    try {
+      return { environment: { report: env.describe(), actions: env.available() } };
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment report failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Execute a supervisor's `fix_environment`: run the host-owned action, audit it,
+   * and on success re-drive the lane as a FREE rescue (the lane failed on the
+   * worktree, not its work, so the run pool is not charged). A failed or
+   * unavailable action lets the lane fail, with the command output on record.
+   */
+  private async runLaneEnvironmentFix(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    decision: { action: EnvironmentActionKind; targetStepId: string; guidance: string; reason: string };
+  }): Promise<LaneRescueOutcome> {
+    const env = this.args.environmentActions;
+    const { taskRef, req, decision } = args;
+    if (!env) return { kind: 'give_up' };
+    this.injectMonitorTurn(`🔧 Running environment action \`${decision.action}\` for **${taskRef}**…`);
+    let result: EnvironmentActionResult;
+    try {
+      result = await env.run(decision.action);
+    } catch (err) {
+      result = { ok: false, summary: 'the action threw', detail: err instanceof Error ? err.message : String(err) };
+    }
+    this.injectMonitorTurn(
+      result.ok
+        ? `✔ \`${decision.action}\`: ${result.summary}. Re-driving **${taskRef}** from \`${decision.targetStepId}\`.`
+        : `✖ \`${decision.action}\`: ${result.summary} — letting **${taskRef}** fail.`,
+    );
+    await this.fileEnvironmentFinding({
+      title: result.ok
+        ? `Monitor fixed the environment for ${taskRef} (${decision.action})`
+        : `Environment fix failed for ${taskRef} (${decision.action})`,
+      lines: [
+        `The run supervisor judged that **${taskRef}** failed on the worktree environment, not its work (\`${req.failureKind}\` at \`${req.stepId}\`), and ran \`${decision.action}\`.`,
+        '',
+        `- Result: ${result.summary}`,
+        `- Reason: ${decision.reason.trim().length > 0 ? decision.reason.trim() : '(none given)'}`,
+        result.ok ? `- Re-driving the lane from \`${decision.targetStepId}\`.` : '- The lane settles failed.',
+        '',
+        '## Output (tail)',
+        '',
+        '```',
+        result.detail,
+        '```',
+      ],
+    });
+    if (!result.ok) return { kind: 'give_up' };
+    return { kind: 'rescue', targetStepId: decision.targetStepId, guidance: decision.guidance, adjusted: false, free: true };
+  }
+
+  /**
+   * Fan-out PREFLIGHT (see `ControllerHost.prepareFanOutEnvironment`): when the
+   * worktree has a lockfile but packages with no `node_modules`, install before
+   * any lane runs, so no lane spends an attempt on `command not found`. Fail-soft:
+   * a failed install is reported and the fan-out proceeds (lane triage can still
+   * see the report and act).
+   */
+  async prepareFanOutEnvironment(): Promise<void> {
+    const env = this.args.environmentActions;
+    if (!env) return;
+    try {
+      const missing = env.missingDependencyDirs();
+      if (missing.length === 0 || !env.available().includes('install_dependencies')) return;
+      const where = missing.map((rel) => (rel === '.' ? 'node_modules' : `${rel}/node_modules`)).join(', ');
+      this.injectMonitorTurn(`🔧 The worktree is missing installed dependencies (${where}). Installing before any lane runs…`);
+      const result = await env.run('install_dependencies');
+      this.injectMonitorTurn(
+        result.ok
+          ? `✔ Dependencies installed (${result.summary}).`
+          : `✖ Dependency install failed (${result.summary}). Lanes will run anyway; typecheck/lint may fail until this is fixed.`,
+      );
+      if (!result.ok) {
+        await this.fileEnvironmentFinding({
+          title: 'Dependency install failed before the sprint started',
+          lines: [
+            `The worktree was missing installed dependencies (${where}), and the pre-dispatch install failed: ${result.summary}.`,
+            '',
+            '## Output (tail)',
+            '',
+            '```',
+            result.detail,
+            '```',
+          ],
+        });
+      }
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment preflight failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async fileEnvironmentFinding(args: { title: string; lines: string[] }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      await this.args.fileLaneTriageFinding({ title: args.title, body: args.lines.join('\n') });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment finding failed (fail-soft)', {
+        runId: this.args.runId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
