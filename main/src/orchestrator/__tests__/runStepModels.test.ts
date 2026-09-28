@@ -471,6 +471,257 @@ describe('resolveRunStepModels', () => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveRunStepModels — fan-out inner steps (TASK-298)
+//
+// A SEPARATE spec fixture (not TEST_SPEC) so these additions cannot perturb
+// the exact-stepId-list assertions above (the human-gate-omission list, the
+// getPhaseState-parity list, the leak-check key-set list).
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliberately declares an OUTER step ('code-review') whose id collides with
+ * an INNER fanOut step's id in the SAME phase — the load-bearing regression
+ * this task exists to fix: the 2-arg `(phaseId, stepId)` key alone cannot
+ * disambiguate the two. Also carries an inner human-gate step ('review-gate')
+ * to cover the omission case.
+ */
+const FANOUT_SPEC = {
+  id: 'step-models-fanout-test',
+  phases: [
+    {
+      id: 'plan',
+      label: 'Plan',
+      color: '#3b6dd6',
+      steps: [{ id: 'scope', name: 'Scope', agent: 'planner-agent' }],
+    },
+    {
+      id: 'execute',
+      label: 'Execute',
+      color: '#2db67a',
+      steps: [
+        // Outer step id 'code-review' — pinned to opus-agent.
+        { id: 'code-review', name: 'Outer code review', agent: 'opus-agent' },
+        {
+          id: 'fan-step',
+          name: 'Fan step',
+          agent: 'executor-agent',
+          fanOut: {
+            over: 'tasks',
+            inner: [
+              // Inner step id ALSO 'code-review' — pinned to codex-agent.
+              // Must resolve to its OWN entry, distinct from the outer one.
+              { id: 'code-review', name: 'Inner code review', agent: 'codex-agent' },
+              { id: 'implement', name: 'Implement', agent: 'opus-agent' },
+              // Inner human gate — must be omitted, mirroring the outer
+              // human-gate omission (resolveStepAgentKey(..., 'human') -> null).
+              { id: 'review-gate', name: 'Review gate', agent: 'human' },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+function seedFanOutRun(
+  db: Database.Database,
+  runId: string,
+  opts?: { model?: string | null; agentProvider?: string },
+): void {
+  const workflowId = `wf-${runId}`;
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(workflowId, 'step-models-fanout-test', JSON.stringify(FANOUT_SPEC));
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, model, agent_provider)
+     VALUES (?, ?, 1, '/tmp/test', 'running', '{}', ?, ?)`,
+  ).run(runId, workflowId, opts?.model ?? null, opts?.agentProvider ?? 'claude');
+}
+
+describe('resolveRunStepModels — fan-out inner steps (TASK-298)', () => {
+  it('emits an entry for every non-human fanOut.inner step, reusing the outer-step precedence verbatim', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-basic', { model: 'haiku', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-basic', fakeResolveEffectiveAgents);
+
+    // 'implement' -> opus-agent -> pinned Opus, exactly the same precedence
+    // path an OUTER opus-agent step resolves through (`resolveStepModelLabel`
+    // is shared, not re-derived).
+    const implement = result.find((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step');
+    expect(implement).toBeDefined();
+    expect(implement?.stepName).toBe('Implement');
+    expect(implement?.phaseId).toBe('execute');
+    expect(implement?.agentKey).toBe('opus-agent');
+    expect(implement?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(implement?.family).toBe('opus');
+
+    // The outer fan-step itself still resolves normally (agent
+    // 'executor-agent' has no effective-agent row -> inherits the run
+    // model) and is unaffected by the new inner-step walk.
+    const fanStep = result.find((s) => s.stepId === 'fan-step');
+    expect(fanStep).toBeDefined();
+    expect(fanStep?.fanOutStepId).toBeUndefined();
+    expect(fanStep?.label).toBe(AGENT_MODEL_LABELS.haiku);
+  });
+
+  it('omits an inner fanOut.inner step whose resolveStepAgentKey is null (human gate), exactly like an outer human gate', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-human-gate', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-human-gate', fakeResolveEffectiveAgents);
+
+    // 'review-gate' (agent: 'human') never fabricates a model — omitted
+    // entirely, the same rule the outer-step loop applies.
+    expect(result.some((s) => s.stepId === 'review-gate')).toBe(false);
+    // Its siblings in the same fanOut.inner chain are unaffected.
+    expect(result.some((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step')).toBe(true);
+  });
+
+  it('an inner step id colliding with an outer step id in the SAME phase resolves to two DISTINCT entries', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-collision', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-collision', fakeResolveEffectiveAgents);
+
+    const codeReviewEntries = result.filter((s) => s.stepId === 'code-review');
+    // Both entries exist — neither clobbered the other.
+    expect(codeReviewEntries).toHaveLength(2);
+
+    const outerCodeReview = codeReviewEntries.find((s) => s.fanOutStepId === undefined);
+    const innerCodeReview = codeReviewEntries.find((s) => s.fanOutStepId === 'fan-step');
+    expect(outerCodeReview).toBeDefined();
+    expect(innerCodeReview).toBeDefined();
+
+    // Outer 'code-review' -> opus-agent -> pinned Opus.
+    expect(outerCodeReview?.agentKey).toBe('opus-agent');
+    expect(outerCodeReview?.stepName).toBe('Outer code review');
+    expect(outerCodeReview?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(outerCodeReview?.family).toBe('opus');
+
+    // Inner 'code-review' -> codex-agent -> pinned gpt-5.6-sol, family 'other'
+    // — its own, correct resolution, not the outer entry's.
+    expect(innerCodeReview?.agentKey).toBe('codex-agent');
+    expect(innerCodeReview?.stepName).toBe('Inner code review');
+    expect(innerCodeReview?.phaseId).toBe('execute');
+    expect(innerCodeReview?.label).toBe('gpt-5.6-sol');
+    expect(innerCodeReview?.family).toBe('other');
+  });
+
+  it('resolveStepModelLabel extraction: the SAME agentKey resolves to the IDENTICAL {label, family} whether reached via the outer-step loop or the fan-out inner-step loop', () => {
+    // Direct proof the extraction (`resolveStepModelLabel`) did not silently
+    // change behavior for either call site: FANOUT_SPEC pins 'opus-agent' to
+    // BOTH the outer 'code-review' step and the inner 'implement' step, under
+    // the identical run-level substrate (same runModel/runProvider/gates —
+    // there are none here). If the two loops had drifted (e.g. one still
+    // read `usableModelAlias`/`gateRuntimePin` inline while the other used a
+    // stale copy), this would be the test to catch it: the two resolved
+    // values would differ even though the input (agentKey -> effective agent)
+    // is identical.
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-label-parity', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-label-parity', fakeResolveEffectiveAgents);
+
+    const outerOpusStep = result.find((s) => s.stepId === 'code-review' && s.fanOutStepId === undefined);
+    const innerOpusStep = result.find((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step');
+    expect(outerOpusStep).toBeDefined();
+    expect(innerOpusStep).toBeDefined();
+    expect(outerOpusStep?.agentKey).toBe('opus-agent');
+    expect(innerOpusStep?.agentKey).toBe('opus-agent');
+
+    // The load-bearing assertion: identical {label, family} from both loops
+    // for the same agentKey/effective-agent/run substrate.
+    expect({ label: innerOpusStep?.label, family: innerOpusStep?.family }).toEqual({
+      label: outerOpusStep?.label,
+      family: outerOpusStep?.family,
+    });
+    // Pinned to a concrete value too, so a future accidental change to BOTH
+    // loops in lockstep (which the cross-equality check above cannot catch)
+    // still fails this test.
+    expect(outerOpusStep?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(outerOpusStep?.family).toBe('opus');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunStepModels — outer step is BOTH a trailing human gate AND a
+// fan-out.
+// ---------------------------------------------------------------------------
+
+const HUMAN_FANOUT_SPEC = {
+  id: 'step-models-human-fanout-test',
+  phases: [
+    {
+      id: 'execute',
+      label: 'Execute',
+      color: '#2db67a',
+      steps: [
+        {
+          id: 'fan-step',
+          name: 'Fan step',
+          // A REAL (non-'human') agent with a trailing human checkpoint —
+          // the exact shape `workflowController.ts`'s `hasTrailingGate`
+          // documents ("the planner's `context` step... runs its agent
+          // first, then opens the gate"), just also carrying `fanOut`.
+          agent: 'executor-agent',
+          human: true,
+          fanOut: {
+            over: 'tasks',
+            inner: [{ id: 'implement', name: 'Implement', agent: 'opus-agent' }],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+function seedHumanFanOutRun(db: Database.Database, runId: string): void {
+  const workflowId = `wf-${runId}`;
+  db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`).run(
+    workflowId,
+    'step-models-human-fanout-test',
+    JSON.stringify(HUMAN_FANOUT_SPEC),
+  );
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, model, agent_provider)
+     VALUES (?, ?, 1, '/tmp/test', 'running', '{}', ?, ?)`,
+  ).run(runId, workflowId, 'sonnet', 'claude');
+}
+
+describe('resolveRunStepModels — outer step is human:true AND has fanOut', () => {
+  it('omits the outer human-gate step from the result, but still resolves its non-human fanOut.inner step', () => {
+    // A step can legally be BOTH a real agent's trailing human checkpoint
+    // AND a fan-out (`workflowController.ts`'s `hasTrailingGate`): the agent
+    // fans out real work, THEN the gate opens. The outer entry must still be
+    // omitted (never fabricate a model for the gate step itself), but the
+    // fan-out inner-step walk must not be skipped just because the OUTER
+    // step happens to be a human gate.
+    const db = makeDb();
+    seedHumanFanOutRun(db, 'run-human-fanout');
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-human-fanout', fakeResolveEffectiveAgents);
+
+    // Outer 'fan-step' (the human gate) is omitted.
+    expect(result.some((s) => s.stepId === 'fan-step')).toBe(false);
+
+    // Its non-human, pinned inner step IS present, keyed to the outer step's id.
+    expect(result).toHaveLength(1);
+    const implement = result.find((s) => s.stepId === 'implement');
+    expect(implement).toBeDefined();
+    expect(implement?.fanOutStepId).toBe('fan-step');
+    expect(implement?.stepName).toBe('Implement');
+    expect(implement?.phaseId).toBe('execute');
+    expect(implement?.agentKey).toBe('opus-agent');
+    expect(implement?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(implement?.family).toBe('opus');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cyboflow.runs.getStepModels (tRPC procedure)
 // ---------------------------------------------------------------------------
 

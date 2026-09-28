@@ -53,6 +53,7 @@ import {
   isAgentProvider,
   WORKFLOW_AGENT_RUNTIME_LABELS,
   type AgentProvider,
+  type WorkflowAgentRuntime,
 } from '../../../shared/types/agentRuntime';
 import {
   AGENT_MODEL_LABELS,
@@ -71,10 +72,17 @@ export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/e
 /** One flattened step's resolved model. Never carries agent internals
  * (systemPrompt/tools/mcp*) — this is the wire shape `runs.getStepModels`
  * returns verbatim. `WorkflowStep.id` is unique only WITHIN its phase, so
- * consumers key on `(phaseId, stepId)` — see `stepModelKey` in
+ * consumers key on `(phaseId, stepId[, fanOutStepId])` — see `stepModelKey` in
  * `shared/types/agents.ts`. `agentKey` is the resolved step agent identifier
  * (from `resolveStepAgentKey`) — not an internal, since it names nothing
- * about the agent's configuration, only which one ran. */
+ * about the agent's configuration, only which one ran.
+ *
+ * `fanOutStepId` is set ONLY on an entry produced from a `fanOut.inner` step
+ * (the owning outer fan-out step's own `id`) — absent/undefined on every
+ * OUTER-step entry. This is the discriminator a consumer keys on to tell the
+ * two kinds of entry apart: an inner step's `id` can legally collide with an
+ * outer step's `id` within the same phase, so the plain `(phaseId, stepId)`
+ * pair is not enough to disambiguate. */
 export interface StepModelInfo {
   stepId: string;
   stepName: string;
@@ -82,6 +90,7 @@ export interface StepModelInfo {
   agentKey: string;
   label: string;
   family: ModelFamily;
+  fanOutStepId?: string;
 }
 
 /**
@@ -163,6 +172,63 @@ function resolveEffectiveDefinition(
 }
 
 /**
+ * Shape the per-step resolution helper is called with — the step's resolved
+ * `agentKey` plus the exact triple `resolveStepSpawnTarget` reduces (already
+ * gated by {@link gateRuntimePin} / {@link usableModelAlias} when `gates` is
+ * supplied). `agentKey` is not read by the resolution itself; it is carried
+ * here so both call sites (the outer-step loop and the fan-out inner-step
+ * loop) pass ONE shape, matching the effective-agent lookup each performs
+ * before calling in.
+ */
+interface StepModelResolutionInput {
+  agentKey: string;
+  runtime: WorkflowAgentRuntime | undefined;
+  model: string | null;
+  providerModel: string | null;
+}
+
+/**
+ * The per-step label/family resolution body — steps 2-3 of the module doc's
+ * PRECEDENCE list, reduced through the exact same {@link resolveStepSpawnTarget}
+ * the spawn seam uses. Factored out so the outer-step loop and the fan-out
+ * inner-step loop (`fanOut.inner`) can never drift from one another's
+ * precedence.
+ */
+function resolveStepModelLabel(
+  input: StepModelResolutionInput,
+  runProvider: AgentProvider,
+  runModel: string | null,
+): { label: string; family: ModelFamily } {
+  const { runtime, model, providerModel } = input;
+  const target = resolveStepSpawnTarget({ runtime, model, providerModel }, runProvider, runModel);
+
+  let label: string;
+  let family: ModelFamily;
+  if (target.source === 'run') {
+    label = runModelLabel(runModel, runProvider);
+    family = inheritedFamily(runModel, runProvider);
+  } else if (
+    target.source === 'pin' &&
+    target.model !== undefined &&
+    // A non-Claude pin of '' or 'auto' is not a pin at all — the same
+    // "no concrete model" values `inheritedFamily` treats as unpinned.
+    // Route those to the unpinned/provider-default branch below instead
+    // of labeling the literal string 'auto' as a family:'other' model.
+    (target.provider === 'claude' || (target.model !== '' && target.model !== 'auto'))
+  ) {
+    ({ label, family } =
+      target.provider === 'claude' ? claudePinLabel(target.model) : { label: target.model, family: 'other' });
+  } else {
+    // Flipped provider with no pin for it — that provider's own default:
+    // 'Auto' for Claude (the CLI default, as runModelLabel names it), else
+    // the runtime's label ("Codex SDK") — no single model id to name.
+    label = target.provider === 'claude' || !runtime ? 'Auto' : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
+    family = 'auto';
+  }
+  return { label, family };
+}
+
+/**
  * Resolve, for every non-human step of `runId`'s flattened workflow
  * definition, the model it actually runs on. See the module doc for the full
  * resolution path and precedence.
@@ -195,49 +261,79 @@ export function resolveRunStepModels(
       // Human gate — never fabricate a model for a step no agent runs. The
       // `human` flag is honored too, so a custom spec that sets it without
       // `agent: 'human'` is still treated as a gate (the canvas card keys off
-      // the flag, the backend off the agent key — both must agree).
-      if (agentKey === null || step.human === true) continue;
+      // the flag, the backend off the agent key — both must agree). This only
+      // omits the OUTER step's own entry: a step can legally be BOTH a human
+      // gate AND a fan-out (a trailing checkpoint after fanning out real
+      // agent work — `workflowController.ts`'s `hasTrailingGate`), so the
+      // fan-out inner-step walk below always runs regardless of this skip.
+      const skipOuter = agentKey === null || step.human === true;
+      if (!skipOuter) {
+        const effective = effectiveByKey.get(agentKey);
+        const runtime = gates
+          ? gateRuntimePin(effective?.runtime, gates.isProviderEnabled)
+          : effective?.runtime ?? undefined;
+        const claudeModel = effective?.model ?? null;
+        const { label, family } = resolveStepModelLabel(
+          {
+            agentKey,
+            runtime,
+            model: gates ? usableModelAlias(claudeModel, gates.isModelUsable) : claudeModel,
+            providerModel: effective?.providerModel ?? null,
+          },
+          runProvider,
+          runModel,
+        );
 
-      const effective = effectiveByKey.get(agentKey);
-      const runtime = gates
-        ? gateRuntimePin(effective?.runtime, gates.isProviderEnabled)
-        : effective?.runtime ?? undefined;
-      const claudeModel = effective?.model ?? null;
-      const target = resolveStepSpawnTarget(
-        {
-          runtime,
-          model: gates ? usableModelAlias(claudeModel, gates.isModelUsable) : claudeModel,
-          providerModel: effective?.providerModel ?? null,
-        },
-        runProvider,
-        runModel,
-      );
-
-      let label: string;
-      let family: ModelFamily;
-      if (target.source === 'run') {
-        label = runModelLabel(runModel, runProvider);
-        family = inheritedFamily(runModel, runProvider);
-      } else if (
-        target.source === 'pin' &&
-        target.model !== undefined &&
-        // A non-Claude pin of '' or 'auto' is not a pin at all — the same
-        // "no concrete model" values `inheritedFamily` treats as unpinned.
-        // Route those to the unpinned/provider-default branch below instead
-        // of labeling the literal string 'auto' as a family:'other' model.
-        (target.provider === 'claude' || (target.model !== '' && target.model !== 'auto'))
-      ) {
-        ({ label, family } =
-          target.provider === 'claude' ? claudePinLabel(target.model) : { label: target.model, family: 'other' });
-      } else {
-        // Flipped provider with no pin for it — that provider's own default:
-        // 'Auto' for Claude (the CLI default, as runModelLabel names it), else
-        // the runtime's label ("Codex SDK") — no single model id to name.
-        label = target.provider === 'claude' || !runtime ? 'Auto' : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
-        family = 'auto';
+        out.push({ stepId: step.id, stepName: step.name, phaseId: phase.id, agentKey, label, family });
       }
 
-      out.push({ stepId: step.id, stepName: step.name, phaseId: phase.id, agentKey, label, family });
+      // Fan-out inner chain (IDEA-061 sprint-lane coverage): the sprint swimlane
+      // strip's per-lane step cards come from `fanOut.inner`, not `phase.steps`.
+      // Runs unconditionally whenever the outer step declares
+      // `fanOut`, even when the outer step itself was just skipped above (a
+      // human-gated fan-out step still ran real agent work in its inner
+      // steps). Each inner step is resolved exactly like an outer step
+      // (same agentKey resolution, same gates, same `resolveStepModelLabel`
+      // precedence) and keyed with the owning fan-out step's own id
+      // (`fanOutStepId`) so an inner id colliding with an outer id in the same
+      // phase never clobbers the other's entry (see `stepModelKey`'s 3-arg
+      // form, `shared/types/agents.ts`).
+      if (step.fanOut !== undefined) {
+        for (const inner of step.fanOut.inner) {
+          const innerAgentKey = resolveStepAgentKey(inner.id, inner.agent);
+          // Mirrors the outer human-gate omission above — defensive: today
+          // `FanOutInnerStep.agent` is a required non-null string, so this
+          // branch may never trigger in practice, but the check stays for
+          // parity with the outer loop and future-proofing.
+          if (innerAgentKey === null) continue;
+
+          const innerEffective = effectiveByKey.get(innerAgentKey);
+          const innerRuntime = gates
+            ? gateRuntimePin(innerEffective?.runtime, gates.isProviderEnabled)
+            : innerEffective?.runtime ?? undefined;
+          const innerClaudeModel = innerEffective?.model ?? null;
+          const innerResolved = resolveStepModelLabel(
+            {
+              agentKey: innerAgentKey,
+              runtime: innerRuntime,
+              model: gates ? usableModelAlias(innerClaudeModel, gates.isModelUsable) : innerClaudeModel,
+              providerModel: innerEffective?.providerModel ?? null,
+            },
+            runProvider,
+            runModel,
+          );
+
+          out.push({
+            stepId: inner.id,
+            stepName: inner.name ?? inner.id,
+            phaseId: phase.id,
+            agentKey: innerAgentKey,
+            fanOutStepId: step.id,
+            label: innerResolved.label,
+            family: innerResolved.family,
+          });
+        }
+      }
     }
   }
 

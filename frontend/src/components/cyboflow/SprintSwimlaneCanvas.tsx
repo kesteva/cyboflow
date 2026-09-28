@@ -72,9 +72,10 @@ export interface SprintSwimlaneCanvasProps {
    * PLAN and SPRINT-REVIEW cards show their model exactly as a non-fan-out
    * run's cards do.
    *
-   * Covers only the outer `phases[].steps` cards. The per-lane step strip is
-   * NOT covered: those come from the fan-out step's `fanOut.inner`, which
-   * `resolveRunStepModels` does not descend into, so no entry exists for them.
+   * Also carries 3-arg-keyed entries (`stepModelKey(phaseId, stepId, fanOutStepId)`)
+   * for the fan-out step's `fanOut.inner` chain — `resolveRunStepModels` walks
+   * those too, and the lane step-card strip's header row consumes them (see
+   * `activeFanOutStepRef` below).
    *
    * `null`/omitted renders exactly as before this prop existed.
    */
@@ -169,6 +170,24 @@ function activeFanOutCap(definition: WorkflowDefinition | null): number {
   return fanOutStep?.fanOut !== undefined
     ? effectiveMaxConcurrency(fanOutStep.fanOut)
     : SPRINT_BATCH_CAP;
+}
+
+/**
+ * Locates the same active fan-out step `laneStepIdsFor`/`activeFanOutCap`
+ * derive the lane columns/cap from, but returns its own `id` + owning phase's
+ * `id` (rather than its `inner` chain) — the pair needed to build the 3-arg
+ * `stepModelKey(phaseId, laneStep.id, fanOutStepId)` the lane-step-model
+ * header row looks each column's resolved model up by. `null` when no fanOut
+ * step resolves (legacy/orchestrated-only defs, or a null definition) — the
+ * header row renders nothing in that case.
+ */
+function activeFanOutStepRef(definition: WorkflowDefinition | null): { phaseId: string; stepId: string } | null {
+  if (definition === null) return null;
+  for (const p of definition.phases) {
+    const s = p.steps.find((s) => s.fanOut !== undefined);
+    if (s !== undefined) return { phaseId: p.id, stepId: s.id };
+  }
+  return null;
 }
 
 /**
@@ -665,6 +684,51 @@ export function SprintSwimlaneCanvas({
           >
             EXECUTE / PARALLEL ×{total}
           </span>
+
+          {/* Lane-step-model header — ONE shared row above the per-lane step
+              strip (the same N inner steps repeat across every lane, so a
+              model doesn't vary by lane; showing it once per column is the
+              right read). Renders nothing when there is no model data at all
+              (degrades to exactly today's rendering), and nothing for a
+              column with no resolved entry (no placeholder, no layout
+              shift). */}
+          {stepModels != null &&
+            (() => {
+              const fanOutRef = activeFanOutStepRef(definition);
+              if (fanOutRef === null) return null;
+              return (
+                <div
+                  style={{ display: 'flex', gap: 6, marginBottom: 4 }}
+                  data-testid="swimlane-lane-step-models"
+                >
+                  {laneSteps.map((laneStep) => {
+                    const model = stepModels.get(
+                      stepModelKey(fanOutRef.phaseId, laneStep.id, fanOutRef.stepId),
+                    );
+                    return (
+                      <div
+                        key={laneStep.id}
+                        data-testid={`swimlane-lane-step-model-${laneStep.id}`}
+                        style={{ flex: 1, minWidth: 0 }}
+                        {...(model !== undefined ? { title: `${laneStep.label} · ${model.label}` } : {})}
+                      >
+                        {model !== undefined && (
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              width: 4,
+                              height: 4,
+                              borderRadius: '50%',
+                              background: modelFamilyColor(model.family),
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {lanes.map((lane) => {
