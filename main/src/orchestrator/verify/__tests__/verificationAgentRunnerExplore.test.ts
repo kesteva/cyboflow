@@ -817,6 +817,22 @@ describe('verifyHarnessContract(provider, mode)', () => {
     expect(flat(verifyHarnessContract('claude', 'explore'))).toContain('ONE portable-runbook entry for VERIFY_MODALITY');
     expect(flat(VERIFY_HARNESS_CONTRACT)).not.toContain('ONE portable-runbook entry');
   });
+
+  it('a binding-only pass records serve-binding in its recipe rather than omitting it (§A5)', () => {
+    for (const provider of ['claude', 'codex'] as const) {
+      const explore = flat(verifyHarnessContract(provider, 'explore'));
+      expect(explore).toContain('rested on the serve binding alone, so record { "kind": "serve-binding" }');
+      expect(explore).not.toContain('otherwise omit recipeJson');
+    }
+  });
+
+  it('every mode names the serve-binding self-check as harness-verified', () => {
+    for (const mode of ['pinned', 'explore'] as const) {
+      const text = flat(verifyHarnessContract('claude', mode));
+      expect(text).toContain('"$VERIFY_DRIVER" attest binding');
+      expect(text).toContain('"serve-binding" → attest binding (that channel is harness-verified');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

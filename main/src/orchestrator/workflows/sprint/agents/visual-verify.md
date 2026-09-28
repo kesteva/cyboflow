@@ -55,6 +55,10 @@ code and have no stake in it passing.
     ask the deliverable for `$VERIFY_ATTEST_NONCE` (or the declared `expected`
     value for `cdp`) and exit non-zero on a mismatch. They are diagnostics for
     YOU, not the proof — see **Attest** in Method below.
+  - `attest binding` — the `serve-binding` self-check. That channel is
+    harness-verified (the harness binds the leased port to the serve the
+    driver started), so this only confirms you started one through
+    `$VERIFY_DRIVER serve`; there is nothing else to fix on your side.
   Screenshots always land in `$VERIFY_ARTIFACTS_DIR`. Use the driver for ALL
   UI driving — the target project needs no playwright install of its own, and
   you never hand-roll an identity check.
@@ -181,9 +185,11 @@ The harness contract appended to this prompt tells you which mode you are in.
     shape and rules). Spell every leased value as its lever — `${PORT}`,
     `$VERIFY_DRIVER_PORT`, `$VERIFY_DATA_DIR`, `$VERIFY_DERIVED_DATA`,
     `$VERIFY_SIM_UDID` — never a literal port, UDID or absolute path. On web
-    and cdp-app its `serve.cmd` must equal the composed one. The harness keeps
-    it as an unproven draft that a later request proves; omit it on any other
-    outcome.
+    and cdp-app its `serve.cmd` must equal the composed one, and its
+    `attestation` is the task's declared channel — or, when none was declared,
+    `{ "kind": "serve-binding" }`, the binding a web/cdp-app pass rested on.
+    The harness keeps it as an unproven draft that a later request proves; omit
+    it on any other outcome.
 
 ## Method
 
@@ -229,10 +235,13 @@ The harness contract appended to this prompt tells you which mode you are in.
    A failing self-check means your setup is wrong — say so and report the
    failure rather than passing behaviors the harness will reject anyway.
    Running it is never what makes the attestation count, and skipping it never
-   makes it fail. Two of the six kinds have no self-check at all:
-   `file-identity` (the runner owns the `htmlPath` it asked you to open) and
-   `bundle-identity` (the harness hashes the installed app itself —
-   `mobile-install` is your whole part). When the task declared NO channel,
+   makes it fail. Three of the seven kinds need nothing from the deliverable:
+   `file-identity` (the runner owns the `htmlPath` it asked you to open; no
+   self-check), `bundle-identity` (the harness hashes the installed app itself —
+   `mobile-install` is your whole part) and `serve-binding` (the harness binds
+   the leased port to the serve you started through the driver — serve the
+   composed `serve.cmd` verbatim that way and leave it running; `attest
+   binding` only confirms you did). When the task declared NO channel,
    report what you observed: `pass` the behaviors that held, and set
    `confidence` (a number from 0 to 1) to how sure you are that the surface you
    drove was this deliverable. Do not cap the verdict yourself — the harness

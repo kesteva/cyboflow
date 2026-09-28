@@ -193,9 +193,13 @@ The `dom-marker` line in that example assumes the page renders this request's
 nonce: some element whose text or `data-verify-nonce` attribute carries
 `VERIFY_ATTEST_NONCE` when the app is built or served. Declare `dom-marker` or
 `http-endpoint` only when you can see the repo doing that (grep for
-`VERIFY_ATTEST_NONCE` / `data-verify-nonce`). Otherwise omit `attestation`
-entirely — a channel the deliverable does not carry makes a working change fail
-identity.
+`VERIFY_ATTEST_NONCE` / `data-verify-nonce`). Otherwise, for a `web` or
+`cdp-app` task with a composed `serve`, declare `{ "kind": "serve-binding" }`:
+it needs no repo support, because the harness itself binds the leased port to
+the process your composed `serve.cmd` started. It is the WEAKEST channel —
+identity rests on that port binding alone — so prefer a nonce channel whenever
+the repo renders one. With no composed `serve`, omit `attestation` entirely —
+a channel the deliverable does not carry makes a working change fail identity.
 
 **Electron / desktop-app recipe (`cdp-app`):**
 
@@ -333,15 +337,20 @@ Field rules:
   bare `target.htmlPath` and does not need to be spelled out; `{ "kind":
   "bundle-identity", "bundleId": "..." }` for `mobile`, where the harness
   itself hashes the installed app against the product staged for this request
-  (echo `app.bundleId` exactly). Compose one whenever the deliverable actually
+  (echo `app.bundleId` exactly); `{ "kind": "serve-binding" }` for `web` /
+  `cdp-app` with a composed `serve` when the repo renders no nonce — the
+  harness binds the leased port to the process that serve started, and that
+  binding is the whole proof, so it is the weakest channel (identity rests on
+  the port binding alone). Compose one whenever the deliverable actually
   carries it: `dom-marker` / `http-endpoint` only when the repo visibly renders
   `VERIFY_ATTEST_NONCE` (in an element's text or a `data-verify-nonce`
   attribute, or in an HTTP response); `cdp-token` only for a global the build
-  really sets. Otherwise omit `attestation` — never invent a
+  really sets; `serve-binding` only alongside a composed `serve` (without one
+  it can never verify). Otherwise omit `attestation` — never invent a
   `urlPath`/`selector`/global that doesn't exist, because a declared channel
   that does not verify fails the run. With no channel, a pass can still land:
   capped at `low_confidence`, or `passed` when the harness binds your composed
-  web/cdp-app serve. A bare `target.url` task (no `build`, no `serve`, no
+  web/cdp-app serve — exactly as a declared `serve-binding` would. A bare `target.url` task (no `build`, no `serve`, no
   `htmlPath`) has no channel available at all and cannot attest — say so.
 - `behaviors` (required, non-empty for Form A): the smoke checks, derived from
   THIS task's acceptance criteria. `steps` are concrete UI actions

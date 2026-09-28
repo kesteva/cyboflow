@@ -59,6 +59,7 @@ Environment (already set for your Bash tool):
     "$VERIFY_DRIVER" attest dom <selector>
     "$VERIFY_DRIVER" attest cdp <expression> <expected>
     "$VERIFY_DRIVER" attest window <titlePattern>
+    "$VERIFY_DRIVER" attest binding
   All driver commands act on ONE persistent browser page across invocations.
 `;
 
@@ -175,7 +176,9 @@ ATTESTATION (the harness proves identity; you cannot):
 const HEAD_SELF_CHECK_THROUGH_NATIVE = `- The attest subcommands are SELF-CHECK aids, and worth running: kind "http-endpoint"
   → attest http <urlPath>; "dom-marker" → attest dom <selector>; "cdp-token" →
   attest cdp <expression> <expected>; "window-identity" → attest window
-  <titlePattern>. A failure tells you your serve step is wrong (a stale process, the
+  <titlePattern>; "serve-binding" → attest binding (that channel is harness-verified:
+  the harness binds the leased port to the serve "$VERIFY_DRIVER serve" started, so
+  the self-check only confirms you started one). A failure tells you your serve step is wrong (a stale process, the
   user's own app, a missing marker route) while you can still fix it and re-serve —
   which is exactly when that information is useful. Running one is never what makes
   the attestation count, and skipping one never makes it fail.
@@ -286,8 +289,9 @@ EXPLORE MODE — this project has no proven verification runbook for this modali
     - never a literal port, UDID, snapshot path or any other absolute path, and no
       dependency install or rebuild.
     - "attestation" is the channel the task declared (mobile: bundle-identity on
-      app.bundleId). With none declared, name one only if your own attest self-check
-      verified it; otherwise omit recipeJson — a recipe must carry a channel.
+      app.bundleId). A web / cdp-app pass with no channel declared rested on the serve
+      binding alone, so record { "kind": "serve-binding" } — never a channel the task
+      did not declare (the harness refuses a recipe naming one it did not verify).
     - "levers" (optional) names the env vars the app reads, e.g.
       { "dataDirEnv": "CYBOFLOW_DIR" }; without it, the levers bound for this run apply.
 `;

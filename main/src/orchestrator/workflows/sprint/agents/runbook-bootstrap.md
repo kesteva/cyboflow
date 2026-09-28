@@ -177,12 +177,14 @@ from another worktree, or the developer's own running app.
 | `window-identity` | `titlePattern`, `app` | `native-screen` | The named application has an OS window whose title matches. The weakest channel; say so in `notes`. |
 | `file-identity` | *(none)* | a pre-live `htmlPath` only | Identity by construction — the runner wrote the file it opens. |
 | `bundle-identity` | `bundleId` | `mobile` | The installed app matches the product staged for this request. Not yours to draft — see `mobile` above. |
+| `serve-binding` | *(none)* | `web`, `cdp-app` — with a `serve` | The leased port's listener is the process group the driver started for this entry's verbatim `serve.cmd`. Needs no repo support, but identity rests on that port binding alone: the weakest web channel. Prefer a nonce channel when the project renders one. |
 
-You may not invent a seventh kind, and you may not name a route, selector, or global
+You may not invent an eighth kind, and you may not name a route, selector, or global
 that **does not already exist**. An attestation that points at something absent
 fails the proof in the most confusing possible way. If this project has nothing to
-attest with, the honest answers are: propose adding a `data-verify-build`
-attribute as your one config change, or return `not-possible`.
+attest with, the honest answers are: `serve-binding` for a `web` or `cdp-app`
+entry with a `serve`, propose adding a `data-verify-build` attribute as your one
+config change, or return `not-possible`.
 
 ## Your one allowed config change
 
