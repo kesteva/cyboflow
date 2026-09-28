@@ -2159,14 +2159,19 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         } catch (error) {
           console.error(`[IPC:git] Failed to resolve ${mainBranch} HEAD for session ${sessionId}:`, error);
         }
-        // Counted BEFORE the close-out runs (finalizeSprintLanesOnSessionMerge
-        // is idempotent and would read 0 afterward) so the response can report
-        // how many integrated-lane tasks it is ABOUT to move to Done.
-        const tasksMovedToDone = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
+        // finalizeSprintLanesOnSessionMerge is fail-soft — a task-side move can
+        // throw and get swallowed (logged, loop continues) — so the count the
+        // caller sees must reflect what ACTUALLY moved, not what was eligible
+        // going in. Read the "not yet Done" count before and after the
+        // close-out and report the delta: any lane that failed to move stays
+        // counted in the "after" read and is correctly excluded here.
+        const tasksNotYetDoneBeforeCloseOut = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
         const { stampedRuns } = await closeOutSessionAfterLanding(databaseService, sessionId, {
           mergeSha,
           overrideUndelivered: true,
         });
+        const tasksNotYetDoneAfterCloseOut = countIntegratedLaneTasksNotYetDone(databaseService, sessionId);
+        const tasksMovedToDone = Math.max(0, tasksNotYetDoneBeforeCloseOut - tasksNotYetDoneAfterCloseOut);
         console.log(
           `[IPC:git] Mark complete: session ${sessionId}'s branch already landed on ${mainBranch} — ran the full close-out (stamped ${stampedRuns} run(s) outcome='merged', moved ${tasksMovedToDone} task(s) to Done)`,
         );
