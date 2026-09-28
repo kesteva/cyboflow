@@ -56,6 +56,7 @@ import type { PairwiseJudgeClient, PairwiseRawResult } from './pairwiseJudge';
 import { computePairwisePromptHash } from './pairwiseJudge';
 import { aggregatePairwise } from './pairwiseScoring';
 import { runJudgeGrade } from './judgeConcurrency';
+import { resolveSlotModel, truncateSlotError } from './judgeSlots';
 import { CodexJurorUnavailableError } from './codexJudge';
 import { EvalJudgeMaxTurnsError, isDeterministicJudgeFailure } from './judgeErrors';
 
@@ -70,21 +71,12 @@ export const DEFAULT_PAIRWISE_MAX_RETRIES = 2;
  * unbounded judge fan-out.
  */
 export const MAX_PAIRWISE_BACKFILL_DRAWS = 2;
-/** Cap on a per-slot failure message folded into the persisted degradation note. */
-export const MAX_PAIRWISE_SLOT_ERROR_CHARS = 200;
 /**
  * Small back-off before a slot's single retry, mirroring EvalWorker's
  * JUDGE_RETRY_BACKOFF_MS: an instantly-repeated retry tends to hit the same
  * upstream blip that caused the first (non-deterministic) failure.
  */
 export const PAIRWISE_JUDGE_RETRY_BACKOFF_MS = 250;
-
-/** Truncate a judge failure message for the durable one-line degradation note. */
-function truncateSlotError(message: string): string {
-  return message.length <= MAX_PAIRWISE_SLOT_ERROR_CHARS
-    ? message
-    : `${message.slice(0, MAX_PAIRWISE_SLOT_ERROR_CHARS)}…`;
-}
 
 /**
  * Per-slot grading outcome — mirrors EvalWorker's tagged union so the pairwise
@@ -500,7 +492,7 @@ export class PairwiseJudgeWorker {
     // judge only resolves after its first grade, which happens AFTER this write. The
     // Codex slot's model reaches the DB via the per-sample stamp in collectSamples.
     const primaryClaudeSlot = this.deps.panel.find((slot) => slot.provider === 'claude');
-    const judgeModel = primaryClaudeSlot ? this.resolveSlotModel(primaryClaudeSlot) : null;
+    const judgeModel = primaryClaudeSlot ? resolveSlotModel(primaryClaudeSlot) : null;
 
     // pending → running (stamp the judge model now).
     this.db
@@ -675,14 +667,8 @@ export class PairwiseJudgeWorker {
       // Read AFTER the await: a Codex judge only learns its model once the first
       // grade has come back, so stamping before would lose it.
       judgeName: slot.judge.name,
-      judgeModel: this.resolveSlotModel(slot),
+      judgeModel: resolveSlotModel(slot),
     };
-  }
-
-  /** Prefer the judge's live resolved model; fall back to the slot's declared one. */
-  private resolveSlotModel(slot: PairwisePanelSlot): string | null {
-    const resolvedModel = slot.judge.resolvedModel;
-    return resolvedModel && resolvedModel.length > 0 ? resolvedModel : slot.model;
   }
 
   /**

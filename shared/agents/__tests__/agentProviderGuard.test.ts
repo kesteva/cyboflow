@@ -16,6 +16,7 @@ import {
   agentProviderDisabledMessage,
   assertAgentProviderAllowed,
   isAgentProviderAllowed,
+  isAgentProviderDisabled,
   setAgentProviderAccessResolver,
 } from '../agentProviderGuard';
 import { parseAgentProviderDisabled } from '../../types/agentRuntime';
@@ -102,5 +103,27 @@ describe('agentProviderDisabledMessage — the IPC propagation helper', () => {
     expect(agentProviderDisabledMessage(new Error('worktree locked'))).toBeNull();
     expect(agentProviderDisabledMessage('nope')).toBeNull();
     expect(agentProviderDisabledMessage(undefined)).toBeNull();
+  });
+});
+
+describe('isAgentProviderDisabled', () => {
+  it('matches a live refusal, scoped to a provider when one is given', () => {
+    const codex = new AgentProviderDisabledError('codex', 'an eval juror');
+    expect(isAgentProviderDisabled(codex)).toBe(true);
+    expect(isAgentProviderDisabled(codex, 'codex')).toBe(true);
+    expect(isAgentProviderDisabled(codex, 'claude')).toBe(false);
+  });
+
+  it('matches a boundary-crossed refusal by name, even when scoped', () => {
+    const crossed = new Error('provider off');
+    crossed.name = 'AgentProviderDisabledError';
+    expect(isAgentProviderDisabled(crossed)).toBe(true);
+    expect(isAgentProviderDisabled(crossed, 'codex')).toBe(true);
+  });
+
+  it('rejects anything else', () => {
+    expect(isAgentProviderDisabled(new Error('worktree locked'))).toBe(false);
+    expect(isAgentProviderDisabled('AgentProviderDisabledError')).toBe(false);
+    expect(isAgentProviderDisabled(undefined)).toBe(false);
   });
 });

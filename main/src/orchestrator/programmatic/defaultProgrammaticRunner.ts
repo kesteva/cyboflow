@@ -86,6 +86,8 @@ import { hasReviewableDesignSurface } from '../runEntityOwnership';
 // artifact says, and only the gate-body copy knows the `reported_at` freshness
 // rule (migration 143). This module used to keep a byte-identical private copy.
 import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
+import { EnvironmentActions, environmentActionsDisabled } from './environmentActions';
+import { runToolCapture } from '../../utils/runGit';
 
 /**
  * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
@@ -1007,8 +1009,19 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const verifyRunbookStatus = this.deps.verifyRunbookStatus;
     const verifyLiveConfig = this.deps.verifyLiveConfig;
 
+    // The run worktree's closed set of host-run environment actions (lane triage's
+    // `fix_environment` + the fan-out dependency preflight). Kill switch:
+    // CYBOFLOW_DISABLE_ENV_ACTIONS=1.
+    const environmentActions =
+      !environmentActionsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
+        ? new EnvironmentActions(ctx.worktreePath, (bin, args, cwd, timeoutMs) =>
+            runToolCapture(bin, cwd, args, { timeout: timeoutMs }),
+          )
+        : undefined;
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
+      ...(environmentActions ? { environmentActions } : {}),
       projectId: ctx.run.project_id,
       reporter: this.deps.reporter,
       gate: this.deps.gate,

@@ -51,6 +51,7 @@ import {
   type SnapshotDeps,
 } from './snapshotRunForEval';
 import { runJudgeGrade, type JudgeLane } from './judgeConcurrency';
+import { resolveSlotModel, truncateSlotError } from './judgeSlots';
 
 /** Legacy fallback count when a required jury is accidentally configured empty. */
 export const DEFAULT_SAMPLE_COUNT = 3;
@@ -66,22 +67,6 @@ export const MAX_FINDINGS_PER_EVAL = 10;
  * clear without materially lengthening the failure path.
  */
 export const JUDGE_RETRY_BACKOFF_MS = 250;
-
-/**
- * Cap on the per-slot failure message persisted into jury_json. A generic thrown
- * juror error (turn.failed message, malformed JSON, app-server exit, strict-schema
- * 400) is otherwise written ONLY to the per-launch-truncated backend log, leaving
- * a dropped slot undiagnosable after the fact — so the reason is stored on the
- * slot provenance, truncated to keep the row bounded.
- */
-export const MAX_SLOT_ERROR_CHARS = 500;
-
-/** Truncate a juror failure message for durable slot provenance. */
-export function truncateSlotError(message: string): string {
-  return message.length <= MAX_SLOT_ERROR_CHARS
-    ? message
-    : `${message.slice(0, MAX_SLOT_ERROR_CHARS)}…`;
-}
 
 /** Tab label of the ad-hoc verdict's full-report artifact. */
 export const EVAL_REPORT_ARTIFACT_LABEL = 'Eval report';
@@ -391,7 +376,7 @@ export class EvalWorker {
     }
 
     const primaryClaudeSlot = this.deps.jury.find((slot) => slot.provider === 'claude');
-    const judgeModel = primaryClaudeSlot ? this.resolveSlotModel(primaryClaudeSlot) : null;
+    const judgeModel = primaryClaudeSlot ? resolveSlotModel(primaryClaudeSlot) : null;
     const evalKey = this.evalKey(runId, rubricVersion);
     this.collectedSlots.delete(evalKey);
 
@@ -493,7 +478,7 @@ export class EvalWorker {
         slots.push({
           slot: jurySlot.slot,
           provider: jurySlot.provider,
-          model: this.resolveSlotModel(jurySlot),
+          model: resolveSlotModel(jurySlot),
           status: 'ok',
           sampleIndex,
         });
@@ -502,7 +487,7 @@ export class EvalWorker {
         slots.push({
           slot: jurySlot.slot,
           provider: jurySlot.provider,
-          model: this.resolveSlotModel(jurySlot),
+          model: resolveSlotModel(jurySlot),
           status: outcome.status,
           ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
           ...(outcome.error ? { error: outcome.error } : {}),
@@ -1118,14 +1103,6 @@ export class EvalWorker {
 
   private evalKey(runId: string, rubricVersion: string): string {
     return `${runId}\u0000${rubricVersion}`;
-  }
-
-  private resolveSlotModel(slot: JurySlot): string | null {
-    if ('resolvedModel' in slot.judge) {
-      const resolvedModel = (slot.judge as { resolvedModel?: unknown }).resolvedModel;
-      if (typeof resolvedModel === 'string' && resolvedModel.length > 0) return resolvedModel;
-    }
-    return slot.model;
   }
 
   private parseGate(json: string | null): GateResults | null {

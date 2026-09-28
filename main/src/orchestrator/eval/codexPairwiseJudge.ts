@@ -55,31 +55,8 @@ import {
   type PairwiseRawResult,
 } from './pairwiseJudge';
 import { CodexJurorUnavailableError } from './codexJudge';
-import { AgentProviderDisabledError } from '../../../../shared/agents/agentProviderGuard';
-
-interface QueryWithResolvedModel {
-  getResolvedModel(): string | null;
-}
-
-function hasResolvedModel(
-  query: PairwiseStructuredQueryFn,
-): query is PairwiseStructuredQueryFn & QueryWithResolvedModel {
-  return 'getResolvedModel' in query
-    && typeof (query as { getResolvedModel?: unknown }).getResolvedModel === 'function';
-}
-
-/**
- * True when `err` is a CODEX provider-disabled refusal. Scoped to `codex` on the
- * typed branch so a refusal for a DIFFERENT provider is never rewrapped as a
- * Codex-juror outage (this adapter only ever calls Codex, so that is defensive).
- * The bare `name` match stays unscoped: an error that crossed a module/prototype
- * boundary has lost both its prototype and its `provider` field, and the injected
- * query fn is Codex's either way.
- */
-function isAgentProviderDisabledError(err: unknown): boolean {
-  if (err instanceof AgentProviderDisabledError) return err.provider === 'codex';
-  return err instanceof Error && err.name === 'AgentProviderDisabledError';
-}
+import { isAgentProviderDisabled } from '../../../../shared/agents/agentProviderGuard';
+import { hasResolvedModel } from './judgeSlots';
 
 export interface CodexPairwiseJudgeDeps {
   /** The Codex structured-query fn (real impl in codexEvalJudgeQuery.ts; a fake in tests). */
@@ -113,7 +90,7 @@ export class CodexPairwiseJudge implements PairwiseJudgeClient {
       if (err instanceof CodexJurorUnavailableError) {
         throw err; // pass through by identity — do not rewrap an already-typed refusal
       }
-      if (isAgentProviderDisabledError(err)) {
+      if (isAgentProviderDisabled(err, 'codex')) {
         const message = err instanceof Error ? err.message : String(err);
         this.deps.logger?.warn('[codexPairwiseJudge] Codex provider disabled', { error: message });
         throw new CodexJurorUnavailableError(message, 'provider-disabled');
