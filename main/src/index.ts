@@ -1918,6 +1918,7 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
+    additionalOptions: { db: databaseService.getDb() },
     skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {
@@ -2771,6 +2772,11 @@ async function initializeServices(): Promise<boolean> {
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
+    // Direct step dispatch: the role's effective prompt (same layering as above).
+    resolveStepRole: (runId, agentKey) => {
+      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
+      return systemPrompt ? { systemPrompt } : undefined;
+    },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
@@ -3120,6 +3126,8 @@ async function initializeServices(): Promise<boolean> {
     // for, never as "this project has no runbook".
     verifyRunbookStatus: async (projectId, modality, probePath) =>
       verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
+    // §A6 — the posture reads the runbook-optional kill switch LIVE, like gate 3.
+    verifyLiveConfig: () => configManager.getVisualVerifyConfig(),
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>

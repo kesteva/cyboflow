@@ -357,6 +357,36 @@ export interface MobileAppSpec {
 export const DEFAULT_MOBILE_PRODUCT_GLOB = 'Build/Products/*-iphonesimulator/*.app';
 
 /**
+ * The ENGINE-ONLY key that tags an `app` block the harness INFERRED from the
+ * project's own Xcode files rather than one a composer or a proven runbook
+ * supplied (docs/proposals/runbook-optional-verification.md §A2). Stored as
+ * `"_inferred": true` INSIDE the persisted `task_json`'s `app` object.
+ *
+ * {@link parseMobileAppSpec} rebuilds the block from its known fields, so the
+ * key never survives a wire parse: a composer cannot claim its own guess was
+ * inferred (and so buy the lenient failure mapping an inferred block gets). The
+ * engine reads it off the RAW `task_json` with {@link taskJsonHasInferredApp}.
+ */
+export const INFERRED_APP_KEY = '_inferred';
+
+/**
+ * Does this RAW (unparsed) `task_json` carry an `app` block tagged
+ * {@link INFERRED_APP_KEY}? Total: `null`, unparseable or non-object content
+ * answers false.
+ */
+export function taskJsonHasInferredApp(taskJson: string | null): boolean {
+  if (taskJson === null) return false;
+  try {
+    const raw: unknown = JSON.parse(taskJson);
+    if (typeof raw !== 'object' || raw === null) return false;
+    const app = (raw as Record<string, unknown>).app;
+    return typeof app === 'object' && app !== null && (app as Record<string, unknown>)[INFERRED_APP_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The composed visual-verification task (§5.1). `behaviors` is the core
  * payload — the acceptance-criteria-derived steps the verification agent
  * independently drives and judges — and MAY be an empty array (a degenerate
@@ -446,11 +476,53 @@ export interface VerificationTaskV1 {
 }
 
 /**
+ * Every `VerificationReportV1.outcome` the agent may report, in one place: the
+ * report type, {@link normalizeVerificationReportV1}, the SDK/Codex
+ * `json_schema` enum and the renderer's outcome guard all read THIS list, so a
+ * new outcome cannot reach one boundary and be refused (or silently dropped) at
+ * another (docs/proposals/runbook-optional-verification.md, "Report-contract
+ * widening (F6)").
+ *
+ *   - `'pass'` / `'fail'` — the surface was exercised and judged. `fail` must
+ *     name an observed defect; see the coercion rules on the normalizer.
+ *   - `'build_failed'` / `'launch_failed'` — the deliverable could not be stood
+ *     up from its own committed state (carries `buildLogExcerpt`).
+ *   - `'unverifiable'` (A4) — the surface could not be exercised for reasons
+ *     OUTSIDE the change (carries a required `diagnosis`). Never a verdict on
+ *     the code: where it lands (advisory vs blocking) is the runner's call,
+ *     keyed on the execution mode and harness corroboration.
+ *   - `'wrong_environment'` (A3) — the request was dispatched to the wrong
+ *     modality for this deliverable (carries `neededModality` + a required
+ *     `diagnosis`, optionally the `app` the right modality needs). Routed to
+ *     the runner's re-dispatch channel, never to a verdict.
+ */
+export const VERIFICATION_REPORT_OUTCOMES = [
+  'pass',
+  'fail',
+  'build_failed',
+  'launch_failed',
+  'unverifiable',
+  'wrong_environment',
+] as const;
+
+/** One member of {@link VERIFICATION_REPORT_OUTCOMES}. */
+export type VerificationReportOutcome = (typeof VERIFICATION_REPORT_OUTCOMES)[number];
+
+/** Runtime guard for a {@link VerificationReportOutcome} — shared by the normalizer and the renderer. */
+export function isVerificationReportOutcome(value: unknown): value is VerificationReportOutcome {
+  return (VERIFICATION_REPORT_OUTCOMES as readonly unknown[]).includes(value);
+}
+
+/**
  * The verification agent's structured result (§5.4/§5.9), returned via
  * `outputFormat: json_schema` and re-validated harness-side (never trusted
- * verbatim). `behaviors[].id` must echo the task's ids; `outcome: 'pass'` with
- * any failing behavior is coerced to `'fail'` by {@link normalizeVerificationReportV1}
- * — the structured verdict, not prose, drives the merge gate.
+ * verbatim). `behaviors[].id` must echo the task's ids; the structured
+ * per-behavior verdict, not the self-reported outcome or its prose, drives the
+ * merge gate — see the COERCION rules on {@link normalizeVerificationReportV1}.
+ *
+ * Only the fields named here survive normalization: the normalizer REBUILDS the
+ * report, so an agent-supplied key the harness owns (e.g. a `provenance` block,
+ * which the runner attaches after normalization) can never ride through.
  */
 export interface VerificationReportV1 {
   version: 1;
@@ -460,9 +532,39 @@ export interface VerificationReportV1 {
     evidence: { screenshots: string[]; notes: string };
   }>;
   screenshots: Array<{ fileName: string; caption: string }>;
-  outcome: 'pass' | 'fail' | 'build_failed' | 'launch_failed';
+  outcome: VerificationReportOutcome;
   /** Required when outcome is build_/launch_failed; see {@link normalizeVerificationReportV1}. */
   buildLogExcerpt?: string;
+  /**
+   * Why the surface could not be exercised (`'unverifiable'`) or why this is
+   * the wrong environment (`'wrong_environment'`) — REQUIRED non-empty for
+   * those two outcomes, optional narrative on the rest. Filed as a
+   * non-blocking finding by the runner; model-authored prose, never proof.
+   */
+  diagnosis?: string;
+  /**
+   * `'wrong_environment'` only (dropped on every other outcome): the modality
+   * the agent found this deliverable actually needs. Any
+   * {@link VerificationModality} member is accepted here; restricting
+   * `'native-screen'` to `native-desktop` runs is the runner's call (A3), not
+   * this contract's.
+   */
+  neededModality?: VerificationModality;
+  /**
+   * `'wrong_environment'` only (dropped on every other outcome), optional: the
+   * iOS-Simulator stand-up the agent inferred for a `neededModality: 'mobile'`
+   * re-dispatch. Validated by {@link parseMobileAppSpec} exactly as a composed
+   * task's `app` is.
+   */
+  app?: MobileAppSpec;
+  /**
+   * The agent's stand-up recipe as a JSON STRING (A5 "learn from success"): a
+   * portable-runbook entry the harness parses and validates itself, and only
+   * from a terminal `passed` explore request. A string rather than a nested
+   * object so the Codex strict schema stays trivial (F6); the normalizer
+   * type-checks it and nothing more.
+   */
+  recipeJson?: string;
   /** 0..1; clamped by the normalizer. */
   confidence: number;
   /** Maps onto VerdictV1.feedback. */
@@ -479,6 +581,48 @@ export interface VerificationReportV1 {
    * round-trips unchanged.
    */
   attestation?: { verified: boolean; kind: AttestationSpec['kind']; detail: string };
+  /**
+   * HARNESS-owned run provenance (docs/proposals/runbook-optional-verification.md
+   * §A1.1): attached by the runner AFTER normalization, never accepted from the
+   * agent (the normalizer rebuilds the report, so an agent-supplied key is
+   * dropped before this is set).
+   */
+  provenance?: VerificationRunProvenance;
+}
+
+/**
+ * How a verification request runs (runbook-optional-verification.md §A1),
+ * selected by the agent engine's pre-lease gate (3):
+ *   - `'pinned'`  — the row carries a runbook pin (a proven record injected at
+ *                   enqueue, a setup/bootstrap proof, or a learned pin): today's
+ *                   contract, unchanged;
+ *   - `'explore'` — no pin, the kill switch is off and the modality is
+ *                   explore-eligible: deploy, treating the composed
+ *                   build/serve/target/app as hints;
+ *   - `'legacy'`  — everything else that runs (the kill switch is on, or an
+ *                   ineligible modality whose task derives no environment): the
+ *                   pre-explore unpinned contract, byte for byte.
+ */
+export const VERIFICATION_EXECUTION_MODES = ['pinned', 'explore', 'legacy'] as const;
+export type VerificationExecutionMode = (typeof VERIFICATION_EXECUTION_MODES)[number];
+
+/** Where an explore request's levers came from (§A1.3): the best record for (project, modality). */
+export interface VerificationLeverSource {
+  hash: string;
+  status: 'proven' | 'unproven-draft';
+  origin: string | null;
+}
+
+/** The harness-owned provenance block on {@link VerificationReportV1.provenance}. */
+export interface VerificationRunProvenance {
+  executionMode: VerificationExecutionMode;
+  /** Explore only, when a record supplied levers/hints (§A1.3). */
+  leverSource?: VerificationLeverSource;
+  /** Mobile only (§B3): the engine requested by config vs the one that drove. */
+  driveEngineRequested?: MobileDriveEngine;
+  driveEngineUsed?: 'xcode' | 'maestro' | 'none';
+  /** Why the drive engine (or attestation) degraded, when it did. */
+  degradeReason?: string;
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
@@ -910,10 +1054,45 @@ export function parseVerificationTaskV1(
  * does not set `coerced`). `buildLogExcerpt` is required (non-empty) exactly
  * when `outcome` is `'build_failed'`/`'launch_failed'`.
  *
- * COERCION (the one place this function mutates the reported shape): an
- * `outcome: 'pass'` alongside any `behaviors[].result === 'fail'` is coerced
- * to `outcome: 'fail'` with `coerced: true` — the structured per-behavior
- * verdict, not the agent's self-reported outcome, drives the merge gate.
+ * Runbook-optional widening (docs/proposals/runbook-optional-verification.md,
+ * "Report-contract widening (F6)"): `outcome` is any
+ * {@link VERIFICATION_REPORT_OUTCOMES} member.
+ *   - `'unverifiable'` requires a non-empty `diagnosis`.
+ *   - `'wrong_environment'` requires a non-empty `diagnosis` and a
+ *     `neededModality` that is a {@link VerificationModality} member (all four
+ *     — the native-desktop-only restriction on `'native-screen'` is enforced by
+ *     the runner, which knows the run's type); an optional `app` is validated
+ *     by {@link parseMobileAppSpec}. On every OTHER outcome `neededModality` /
+ *     `app` are ignored rather than carried, so a stray one can never reach the
+ *     runner's re-dispatch channel.
+ *   - `diagnosis` on any other outcome, and `recipeJson` on any outcome, are
+ *     type-checked (string) when present and carried through.
+ *
+ * COERCION (the one place this function mutates the reported shape; both
+ * rules set `coerced: true`, and they are disjoint — the first needs a failing
+ * behavior, the second needs none):
+ *   1. An advancing-capable claim contradicted by the evidence — `outcome:
+ *      'pass'` or `'unverifiable'` alongside any `behaviors[].result ===
+ *      'fail'` — becomes `'fail'`. A failing behavior IS an observed defect,
+ *      and the structured per-behavior verdict, not the agent's self-reported
+ *      outcome, drives the merge gate. (`'unverifiable'` joined this rule with
+ *      the widening: in explore mode it advances the lane, so an agent must not
+ *      be able to report a defect it saw as "could not exercise".)
+ *   2. A4, "fail with no failing behavior": `outcome: 'fail'` on a task with at
+ *      least one expected behavior, where NO behavior failed and EVERY expected
+ *      behavior is `not_testable` (reported as such, or uncovered) — becomes
+ *      `'unverifiable'`, with a `diagnosis` synthesized from the agent's own
+ *      words. "I could exercise nothing" is not evidence against the change (the
+ *      `6626c0d` case, which looped implement back on working code). Because
+ *      every reported id is a member of `expectedBehaviorIds` (enforced above),
+ *      "every expected behavior is not_testable" reduces to "every REPORTED
+ *      behavior is not_testable". A zero-behavior task (legacy intent-only,
+ *      bootstrap and setup proofs) keeps `'fail'`: it has no behavior to be
+ *      untestable, its `fail` names its defect in `issues`/`feedback`, and the
+ *      verify-setup diagnose loop reads the resulting `failureClass`.
+ * No rule ever UPGRADES a verdict: nothing becomes `'pass'`, and a `'pass'`
+ * whose behaviors were all `not_testable` stays `'pass'` here — the runner caps
+ * it at `low_confidence`.
  *
  * Modality-roster widening (§4/§7.1): `attestation`, when present, is
  * validated tolerantly — shape-checked (`verified` boolean, `kind` one of
@@ -934,6 +1113,9 @@ export function normalizeVerificationReportV1(
   if (!Array.isArray(value.behaviors)) return { ok: false, error: 'behaviors: expected an array' };
   const behaviors: VerificationReportV1['behaviors'] = [];
   let anyBehaviorFailed = false;
+  // Any behavior the agent actually exercised (pass OR fail) — the A4 coercion
+  // below applies only when this stays false.
+  let anyBehaviorExercised = false;
   for (let i = 0; i < value.behaviors.length; i++) {
     const item = value.behaviors[i];
     const path = `behaviors[${i}]`;
@@ -946,6 +1128,7 @@ export function normalizeVerificationReportV1(
       return { ok: false, error: `${path}.result: expected 'pass' | 'fail' | 'not_testable'` };
     }
     if (item.result === 'fail') anyBehaviorFailed = true;
+    if (item.result !== 'not_testable') anyBehaviorExercised = true;
     if (!isRecord(item.evidence)) return { ok: false, error: `${path}.evidence: expected an object` };
     if (!isStringArray(item.evidence.screenshots)) {
       return { ok: false, error: `${path}.evidence.screenshots: expected an array of strings` };
@@ -973,15 +1156,13 @@ export function normalizeVerificationReportV1(
     screenshots.push({ fileName: item.fileName, caption: item.caption });
   }
 
-  if (
-    value.outcome !== 'pass' &&
-    value.outcome !== 'fail' &&
-    value.outcome !== 'build_failed' &&
-    value.outcome !== 'launch_failed'
-  ) {
-    return { ok: false, error: "outcome: expected 'pass' | 'fail' | 'build_failed' | 'launch_failed'" };
+  if (!isVerificationReportOutcome(value.outcome)) {
+    return {
+      ok: false,
+      error: `outcome: expected ${VERIFICATION_REPORT_OUTCOMES.map((o) => `'${o}'`).join(' | ')}`,
+    };
   }
-  let outcome: VerificationReportV1['outcome'] = value.outcome;
+  let outcome: VerificationReportOutcome = value.outcome;
 
   const requiresBuildLog = outcome === 'build_failed' || outcome === 'launch_failed';
   let buildLogExcerpt: string | undefined;
@@ -998,6 +1179,50 @@ export function normalizeVerificationReportV1(
       return { ok: false, error: 'buildLogExcerpt: expected string' };
     }
     buildLogExcerpt = value.buildLogExcerpt;
+  }
+
+  const requiresDiagnosis = outcome === 'unverifiable' || outcome === 'wrong_environment';
+  let diagnosis: string | undefined;
+  if (requiresDiagnosis) {
+    if (!isNonEmptyString(value.diagnosis)) {
+      return {
+        ok: false,
+        error: 'diagnosis: required non-empty string when outcome is unverifiable/wrong_environment',
+      };
+    }
+    diagnosis = value.diagnosis;
+  } else if (value.diagnosis !== undefined) {
+    if (typeof value.diagnosis !== 'string') return { ok: false, error: 'diagnosis: expected string' };
+    diagnosis = value.diagnosis;
+  }
+
+  // `neededModality` / `app` mean something only for a mismatch report; on any
+  // other outcome they are ignored (not validated, not carried) so a stray one
+  // can never steer the runner's re-dispatch channel.
+  let neededModality: VerificationModality | undefined;
+  let app: MobileAppSpec | undefined;
+  if (outcome === 'wrong_environment') {
+    if (!isVerificationModality(value.neededModality)) {
+      return {
+        ok: false,
+        error: `neededModality: expected one of ${VERIFICATION_MODALITIES.join('|')} when outcome is wrong_environment`,
+      };
+    }
+    neededModality = value.neededModality;
+    if (value.app !== undefined) {
+      const parsedApp = parseMobileAppSpec(value.app, 'app');
+      if (!parsedApp.ok) return { ok: false, error: parsedApp.error };
+      app = parsedApp.app;
+    }
+  }
+
+  let recipeJson: string | undefined;
+  if (value.recipeJson !== undefined) {
+    // Type-check ONLY: the harness parses and validates the recipe itself, and
+    // only from a terminal `passed` explore request (A5) — a malformed recipe
+    // must never invalidate an otherwise-honest verdict.
+    if (typeof value.recipeJson !== 'string') return { ok: false, error: 'recipeJson: expected string' };
+    recipeJson = value.recipeJson;
   }
 
   if (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence)) {
@@ -1040,18 +1265,23 @@ export function normalizeVerificationReportV1(
     if (!isAttestationKind(att.kind)) {
       return {
         ok: false,
-        error:
-          'attestation.kind: expected one of http-endpoint|dom-marker|cdp-token|window-identity|file-identity',
+        error: `attestation.kind: expected one of ${ATTESTATION_KINDS.join('|')}`,
       };
     }
     if (typeof att.detail !== 'string') return { ok: false, error: 'attestation.detail: expected string' };
     attestation = { verified: att.verified, kind: att.kind, detail: att.detail };
   }
 
+  // The two COERCION rules (see the doc above) — disjoint by construction: rule
+  // 1 needs a failing behavior, rule 2 needs none.
   let coerced = false;
-  if (outcome === 'pass' && anyBehaviorFailed) {
+  if ((outcome === 'pass' || outcome === 'unverifiable') && anyBehaviorFailed) {
     outcome = 'fail';
     coerced = true;
+  } else if (outcome === 'fail' && expectedIds.size > 0 && !anyBehaviorFailed && !anyBehaviorExercised) {
+    outcome = 'unverifiable';
+    coerced = true;
+    diagnosis = synthesizeCoercedUnverifiableDiagnosis(diagnosis, feedback);
   }
 
   const report: VerificationReportV1 = {
@@ -1060,12 +1290,36 @@ export function normalizeVerificationReportV1(
     screenshots,
     outcome,
     ...(buildLogExcerpt !== undefined ? { buildLogExcerpt } : {}),
+    ...(diagnosis !== undefined ? { diagnosis } : {}),
+    ...(neededModality !== undefined ? { neededModality } : {}),
+    ...(app !== undefined ? { app } : {}),
+    ...(recipeJson !== undefined ? { recipeJson } : {}),
     confidence,
     feedback,
     issues,
     ...(attestation !== undefined ? { attestation } : {}),
   };
   return { ok: true, report, coerced };
+}
+
+/**
+ * The fixed head of the `diagnosis` {@link normalizeVerificationReportV1}
+ * writes when its A4 rule turns a `fail` into `unverifiable`. Exported so a
+ * consumer (a finding, a test) can recognize a HARNESS-coerced diagnosis
+ * rather than mistaking it for the agent's own.
+ */
+export const UNVERIFIABLE_COERCION_NOTE =
+  "coerced from 'fail': no behavior failed and every expected behavior was not_testable, so nothing observed a defect";
+
+/**
+ * The coerced `unverifiable` report's diagnosis: the harness's reason first,
+ * then the agent's own words — its `diagnosis` when it wrote one, else its
+ * `feedback` — so the finding a human reads still says what the agent saw.
+ */
+function synthesizeCoercedUnverifiableDiagnosis(diagnosis: string | undefined, feedback: string): string {
+  const ownDiagnosis = diagnosis?.trim() ?? '';
+  const own = ownDiagnosis.length > 0 ? ownDiagnosis : feedback.trim();
+  return own.length > 0 ? `${UNVERIFIABLE_COERCION_NOTE}. Agent: ${own}` : UNVERIFIABLE_COERCION_NOTE;
 }
 
 /**
@@ -1476,7 +1730,9 @@ export interface VisualVerifyConfig {
   mobileDeadlineFloorMs?: number;
   /**
    * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time,
-   * measured from `enqueued_at` (redesign §5.6). A row that has not acquired its
+   * measured from max(enqueue, last drain progress) and hard-capped at
+   * ceiling + 2 × AGENT_REQUEST_TIMEOUT_CEILING_MS from enqueue (redesign §5.6;
+   * main/src/orchestrator/verify/queuedAgeDeadline.ts). A row that has not acquired its
    * lease within this window is terminalized 'skipped' (fail-open, concrete lease
    * reason) instead of sitting `queued` forever while a merge-gate lane waits.
    * Default 15 min ({@link DEFAULT_QUEUED_AGE_CEILING_MS}).
@@ -1520,6 +1776,56 @@ export interface VisualVerifyConfig {
    * {@link runbookBootstrapKillSwitchEngaged}.
    */
   autoBootstrapRunbook?: boolean;
+  /**
+   * The runbook-optional KILL SWITCH (docs/proposals/runbook-optional-verification.md
+   * §A1, RS-11). Default OFF: a request with no proven runbook EXPLORES
+   * (deploys, treating the composed build/serve as hints) instead of skipping.
+   * ON restores the pre-explore contract byte for byte — gate 3 skips an
+   * unpinned build/serve request again, and explore mode, learned recipes and
+   * the explore run posture are all off. The unconditional bug fixes that
+   * shipped alongside explore (the total input hash, queued-age correctness,
+   * honest verdicts, …) ignore this switch.
+   *
+   * Read LIVE (the `liveConfig` path, like `autoBootstrapRunbook`), never from
+   * a boot snapshot, so flipping it takes effect on the next request. The
+   * design's environment switch `CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1` can only
+   * ever turn it ON, and is applied where the switch is read — it is never
+   * persisted into, or folded by ConfigManager into, this field.
+   */
+  requireProvenRunbook?: boolean;
+  /**
+   * Deadline FLOOR (ms) for an EXPLORE-mode request (§A1.1). Default 900000
+   * (15 min) — {@link DEFAULT_EXPLORE_DEADLINE_FLOOR_MS}. An explore run has no
+   * proven recipe, so it spends turns finding how the deliverable stands up
+   * before the first behavior is driven. Clamped on read to
+   * [{@link EXPLORE_DEADLINE_FLOOR_MIN_MS}, {@link EXPLORE_DEADLINE_FLOOR_MAX_MS}]
+   * — the default agent deadline below, the 20-minute agent ceiling above.
+   */
+  exploreDeadlineFloorMs?: number;
+  /**
+   * Which engine DRIVES a `mobile` verification's simulator (§B3). Default
+   * `'auto'`: the Xcode 27 DeviceInteraction rung when this host's probe says
+   * it is available (or cannot tell), else Maestro when it resolves with a
+   * device-pin flag, else none (observe-only, drive-required behaviors coerced
+   * to `not_testable`). A pinned engine that fails DEGRADES rather than skips;
+   * provenance records what was requested versus used. Build, install, launch
+   * and `bundle-identity` stay on the CLI path whatever this says.
+   */
+  mobileDriveEngine?: MobileDriveEngine;
+}
+
+/**
+ * The `mobile` drive-engine selector ({@link VisualVerifyConfig.mobileDriveEngine}).
+ * `'none'` pins the observe-only rung; `'auto'` is the probe-driven default.
+ */
+export type MobileDriveEngine = 'auto' | 'xcode' | 'maestro' | 'none';
+
+/** The four {@link MobileDriveEngine} members, for iteration and validation. */
+export const MOBILE_DRIVE_ENGINES: readonly MobileDriveEngine[] = ['auto', 'xcode', 'maestro', 'none'] as const;
+
+/** Runtime guard for a {@link MobileDriveEngine} (config.json is hand-editable). */
+export function isMobileDriveEngine(value: unknown): value is MobileDriveEngine {
+  return (MOBILE_DRIVE_ENGINES as readonly unknown[]).includes(value);
 }
 
 /**
@@ -1541,6 +1847,9 @@ export interface ResolvedVisualVerifyConfig {
   queuedAgeCeilingMs: number;
   agentSlots: number;
   autoBootstrapRunbook: boolean;
+  requireProvenRunbook: boolean;
+  exploreDeadlineFloorMs: number;
+  mobileDriveEngine: MobileDriveEngine;
 }
 
 /**
@@ -1565,11 +1874,17 @@ export interface ResolvedVisualVerifyConfig {
 export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [29260, 29262, 29264, 29266, 29268] as const;
 
 /**
- * The default enqueue-age ceiling — 15 minutes covering a request's QUEUED +
- * lease-wait time (redesign §5.6). Sized above the 10-minute default agent
- * deadline (a request that DID lease its slot may legitimately run ~10 min), so
- * this ceiling only bites a row that never got a lease at all (persistent
- * contention / a wedged pool) rather than one that is simply running long.
+ * The default queued-age ceiling — 15 minutes a `queued` request may wait
+ * without the scheduler making progress (redesign §5.6, amended by
+ * runbook-optional-verification A9). The clock runs from max(enqueue, the last
+ * drain pass that settled in-flight work), not from enqueue alone: an agent
+ * request may hold its slot for up to the 20-minute
+ * AGENT_REQUEST_TIMEOUT_CEILING_MS, longer than this ceiling, so an
+ * enqueue-anchored clock expired the rows queued behind it at the very pass
+ * that freed their lease. The 15 minutes are therefore sized against a WEDGED
+ * pool (no pass settles anything), not against run length. An outer hard cap
+ * of this ceiling + 2 × that agent ceiling (55 min by default), measured from
+ * enqueue, bounds a row that keeps losing its lease while other traffic moves.
  */
 export const DEFAULT_QUEUED_AGE_CEILING_MS = 15 * 60 * 1000;
 
@@ -1600,6 +1915,43 @@ export const DEFAULT_MOBILE_SIM_SLOTS = 1;
 export const DEFAULT_MOBILE_DEADLINE_FLOOR_MS = 900_000;
 
 /**
+ * The default deadline FLOOR for an EXPLORE-mode request — 15 minutes
+ * (runbook-optional-verification.md §A1.1). With no proven recipe the agent
+ * first has to work out how the deliverable stands up, so the web-shaped
+ * 10-minute default kills healthy explore runs mid-build.
+ */
+export const DEFAULT_EXPLORE_DEADLINE_FLOOR_MS = 15 * 60 * 1000;
+
+/**
+ * Lower clamp on a configured explore floor: the scheduler's default agent
+ * deadline (`DEFAULT_AGENT_REQUEST_TIMEOUT_MS`, 10 min). The consumer takes
+ * `max(default, floor)`, so a smaller value could only ever read as a setting
+ * that does nothing; clamping here makes the resolved config say what runs.
+ * Duplicated rather than imported (shared/ cannot import the orchestrator); a
+ * configManager test pins the two equal.
+ */
+export const EXPLORE_DEADLINE_FLOOR_MIN_MS = 10 * 60 * 1000;
+
+/**
+ * Upper clamp on a configured explore floor: the 20-minute agent ceiling
+ * (`AGENT_REQUEST_TIMEOUT_CEILING_MS`). No request may run past it, so a floor
+ * above it would be a floor nothing can honour. Duplicated for the same reason
+ * as {@link EXPLORE_DEADLINE_FLOOR_MIN_MS}, and pinned by the same test.
+ */
+export const EXPLORE_DEADLINE_FLOOR_MAX_MS = 20 * 60 * 1000;
+
+/**
+ * Resolve a persisted `exploreDeadlineFloorMs` (config.json is hand-editable):
+ * a non-number / non-finite value floors to
+ * {@link DEFAULT_EXPLORE_DEADLINE_FLOOR_MS}; a number is clamped into
+ * [{@link EXPLORE_DEADLINE_FLOOR_MIN_MS}, {@link EXPLORE_DEADLINE_FLOOR_MAX_MS}].
+ */
+export function resolveExploreDeadlineFloorMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_EXPLORE_DEADLINE_FLOOR_MS;
+  return Math.min(EXPLORE_DEADLINE_FLOOR_MAX_MS, Math.max(EXPLORE_DEADLINE_FLOOR_MIN_MS, value));
+}
+
+/**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
  * persisted block is absent. `enabled` floors to false (master switch OFF by
  * default); the rest mirror the design doc (#7), EXCEPT `autoBootstrapRunbook`,
@@ -1607,8 +1959,10 @@ export const DEFAULT_MOBILE_DEADLINE_FLOOR_MS = 900_000;
  * being off by default already gates whether verification runs at all, so this
  * default only matters once a project has opted in, and at that point the
  * bootstrap should not need a second opt-in just to stop skipping every check
- * forever. `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` is the kill switch. Kept here
- * so the contract + defaults live in one reviewed place.
+ * forever. `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` is the kill switch.
+ * `requireProvenRunbook` floors to false for the runbook-optional reason: a
+ * missing runbook changes how a request runs (explore), not whether it runs.
+ * Kept here so the contract + defaults live in one reviewed place.
  */
 export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   enabled: false,
@@ -1624,7 +1978,25 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
   agentSlots: DEFAULT_VERIFY_AGENT_SLOTS,
   autoBootstrapRunbook: true,
+  requireProvenRunbook: false,
+  exploreDeadlineFloorMs: DEFAULT_EXPLORE_DEADLINE_FLOOR_MS,
+  mobileDriveEngine: 'auto',
 };
+
+/**
+ * The runbook-optional KILL SWITCH (runbook-optional-verification.md §A1,
+ * RS-11): true when a missing proven runbook must SKIP again (the pre-explore
+ * contract). On when the LIVE config says so, or when
+ * `CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1` — the env override only ever turns it on.
+ * Callers pass the live config (`liveConfig()`), never a boot snapshot, so a
+ * Settings flip binds the next request.
+ */
+export function requireProvenRunbookEngaged(
+  config: { requireProvenRunbook?: boolean },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return config.requireProvenRunbook === true || env.CYBOFLOW_VERIFY_REQUIRE_RUNBOOK === '1';
+}
 
 /**
  * The lane-runbook-bootstrap KILL SWITCH: `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1`

@@ -27,7 +27,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createVerdictDelivery, createCapabilityBreakerFinding } from '../verify/verdictDelivery';
+import {
+  createVerdictDelivery,
+  createCapabilityBreakerFinding,
+  createExploreStaleProofFinding,
+} from '../verify/verdictDelivery';
 import {
   VERIFY_NO_RUNBOOK_REASON,
   VERIFY_RUNBOOK_DRIFTED_REASON,
@@ -1264,6 +1268,33 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     expect(f[0].body).toMatch(/Cannot find module "\.\/missing"/);
   });
 
+  it('a low_confidence WITH a report still carries the reason (the unverifiable diagnosis reaches the human)', async () => {
+    seedRun(db, 'run-b4');
+    seedRequestFull(db, {
+      id: 'vr_lc',
+      runId: 'run-b4',
+      status: 'low_confidence',
+      enqueueKey: 'run-b4:TASK-1:1',
+      errorMessage: 'unverifiable: no simulator runtime matches the deployment target',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'unverifiable',
+        diagnosis: 'no simulator runtime matches the deployment target',
+        confidence: 0,
+        feedback: '',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
+    await deliver({ requestId: 'vr_lc', runId: 'run-b4', projectId: 1, type: 'static-render-snapshot', status: 'low_confidence', verdict: undefined, fileNames: [] });
+
+    const f = visualFindings(db, 'run-b4');
+    expect(f).toHaveLength(1);
+    expect(f[0].body).toMatch(/Reason: unverifiable: no simulator runtime matches the deployment target/);
+  });
+
   it('timeout / skipped bodies carry the concrete error_message reason', async () => {
     seedRun(db, 'run-b3');
     seedRequestFull(db, { id: 'vr_to', runId: 'run-b3', status: 'timeout', errorMessage: 'request timed out' });
@@ -1770,6 +1801,34 @@ describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () =>
     const body = bodyOf(db, 'run-brk');
     expect(body).toContain('chromium not resolved (absent)');
     expect(body).toContain('clears itself');
+  });
+
+  it('§A7 stale-proof: files ONE non-blocking finding per dedupeKey, even when called twice', async () => {
+    seedRun(db, 'run-stale', 'tsk_1');
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_1', 1, 'TASK-100', 'T', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const file = createExploreStaleProofFinding({ db: dbAdapter(db) });
+    const finding = {
+      projectId: 1,
+      runId: 'run-stale',
+      laneTaskRef: 'TASK-1',
+      modality: 'web' as const,
+      title: 'Verification runbook (web) needs re-proving — lanes explore meanwhile',
+      body: 'the recorded proof is stale',
+      dedupeKey: 'visual-verify:explore-stale-proof:run-stale:web',
+    };
+    await file(finding);
+    await file(finding);
+
+    const findings = findingRows(db, 'run-stale');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].source).toBe(finding.dedupeKey);
+    expect(findings[0].blocking).toBe(0);
+    expect(findings[0].audience).toBe('human');
+    const { body } = db.prepare(`SELECT body FROM review_items WHERE id = ?`).get(findings[0].id) as { body: string };
+    expect(body).toContain('the recorded proof is stale');
   });
 
   it('is FAIL-SOFT: a router failure never throws back into the settled verdict path', async () => {

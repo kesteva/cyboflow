@@ -265,6 +265,16 @@ export interface ClaudeSpawnerOptions {
    */
   disallowedTools?: string[];
   /**
+   * Run on the provider's STANDARD service tier instead of whatever tier the
+   * user's own CLI config selects. Set ONLY by the two workflow spawn seams
+   * (RunExecutor.execute, SpawnStepRunner) — quick chats and the global agent
+   * keep the user's choice. The Codex app-server otherwise inherits
+   * `service_tier` from `~/.codex/config.toml` onto every lane, and `priority`
+   * is billed as "1.5x speed, increased usage". Claude ignores this: its fast
+   * mode is already pinned off for every spawn (`fastModePerSessionOptIn`).
+   */
+  standardServiceTier?: boolean;
+  /**
    * HERMETIC global-agent isolation — the spawner-side twin of
    * {@link ClaudeSpawnOptions.isolation} (claudeCodeManager.ts). Set ONLY by the
    * global-agent thread, whose synthetic identity (`agent:<threadId>` for
@@ -987,6 +997,7 @@ export class RunExecutor {
           // both it and the hidden flag are still live here.
           hidePromptFromTranscript:
             turnKind === 'launch' || (turnKind === 'nudge' && this.hiddenNudges.has(runId)),
+          standardServiceTier: true,
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });

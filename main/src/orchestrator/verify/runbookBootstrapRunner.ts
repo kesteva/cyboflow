@@ -378,6 +378,15 @@ export type RunbookBootstrapArgs =
        * produce the same runbook.
        */
       proveRegistered: boolean;
+      /**
+       * runbook-optional-verification.md §A7 — the request will EXPLORE, so the
+       * bootstrap may PROVE the registered draft (`proveRegistered`) and nothing
+       * more: a failed proof settles the run's stamp instead of feeding a draft
+       * round, and no drafting agent, file, commit or registration ever happens.
+       * Still behind the §10 suppression, like every derive. Absent/false ⇒
+       * today's derive exactly.
+       */
+      proveOnly?: boolean;
     })
   | (RunbookBootstrapCommonArgs & { mode: 'reprove' });
 
@@ -724,7 +733,8 @@ async function bootstrap(
       stamp.runbookVersion,
       stamp.commitSha,
       rung1FromStamp(stamp),
-      /* finalRound */ stamp.round >= MAX_BOOTSTRAP_ROUNDS,
+      // A prove-only run has no next round: its failure settles (§A7).
+      /* finalRound */ stamp.round >= MAX_BOOTSTRAP_ROUNDS || args.proveOnly === true,
       /* clearsSuppression */ true,
     );
     if ('settled' in resumed) {
@@ -791,11 +801,34 @@ async function bootstrap(
   progress.rung1 = lastRung1;
   progress.commitSha = lastCommitSha;
 
+  // (2a) PROVE-ONLY (runbook-optional-verification.md §A7): the request will
+  // explore, so the registered draft is proven and that is all — whatever the
+  // proof says, no draft round follows. A fresh claim proves; anything else (a
+  // resumed owner whose in-flight proof was not recoverable, or one a pre-explore
+  // attempt left mid-derive) settles the stamp rather than resume drafting.
+  if (args.proveOnly === true) {
+    if (claim.kind === 'claimed') {
+      const proved = await proveRegisteredRecord({ ...args, modality }, deps, /* finalRound */ true);
+      if (proved !== null && 'settled' in proved) return proved.settled;
+    }
+    return await refuse(
+      { ...args, modality },
+      deps,
+      progress,
+      'infrastructure',
+      'the registered verification runbook draft could not be proven, and a request that explores ' +
+        'does not draft a replacement',
+      inputHash,
+      hostFingerprint,
+      /* suppress */ false,
+    );
+  }
+
   // (2b) A record is already REGISTERED as a draft: prove it before deploying
   // anything (see `proveRegistered`). Only on a FRESH claim — a resumed owner
   // either awaited its in-flight proof above or is past this point already.
   if (args.proveRegistered && claim.kind === 'claimed') {
-    const proved = await proveRegisteredRecord({ ...args, modality }, deps);
+    const proved = await proveRegisteredRecord({ ...args, modality }, deps, /* finalRound */ false);
     if (proved !== null) {
       if ('settled' in proved) return proved.settled;
       feedback = proved.retryWith;
@@ -1608,7 +1641,9 @@ function describeDraftFailure(response: Exclude<RunbookDraftResponse, { kind: 'o
  * with no agent deployed, no file written, no commit, no registration — the
  * same proof a `'reprove'` fires, but feeding a FAILURE into the derive loop
  * rather than settling on it (`finalRound: false`), because here a draft round
- * is still available and the failure is exactly the feedback it wants.
+ * is still available and the failure is exactly the feedback it wants. A
+ * PROVE-ONLY run (§A7) passes `finalRound: true`: no draft round follows, so the
+ * failure settles the stamp like a reprove's.
  *
  * Returns `null` when there is nothing provable — no record, a record that is
  * already proven (the store would not have said `'draft'`, but the read is not
@@ -1621,6 +1656,11 @@ function describeDraftFailure(response: Exclude<RunbookDraftResponse, { kind: 'o
 async function proveRegisteredRecord(
   args: DeriveArgs & { modality: VerifyRunbookModality },
   deps: RunbookBootstrapDeps,
+  /**
+   * `true` for a PROVE-ONLY run (§A7): no draft round follows, so a failed proof
+   * SETTLES the stamp instead of returning its failure as draft feedback.
+   */
+  finalRound: boolean,
 ): Promise<ProofConsumption | null> {
   const { projectId, runId, laneTaskRef, modality } = args;
   const record = deps.currentRecord(projectId, modality);
@@ -1638,13 +1678,12 @@ async function proveRegisteredRecord(
     runbookLocalVersion: record.version,
   });
   if ('error' in enqueued) {
-    deps.logger?.warn('[runbookBootstrap] the registered draft could not be proven; deriving instead', {
-      runId,
-      projectId,
-      modality,
-      laneTaskRef,
-      error: enqueued.error,
-    });
+    deps.logger?.warn(
+      finalRound
+        ? '[runbookBootstrap] the registered draft could not be proven (prove-only: not deriving)'
+        : '[runbookBootstrap] the registered draft could not be proven; deriving instead',
+      { runId, projectId, modality, laneTaskRef, error: enqueued.error },
+    );
     return null;
   }
   deps.stamps.advance({
@@ -1677,7 +1716,7 @@ async function proveRegisteredRecord(
     record.version,
     /* commitSha */ null,
     /* rung1 */ null,
-    /* finalRound */ false,
+    finalRound,
     /* clearsSuppression */ true,
   );
   if ('settled' in consumed) {

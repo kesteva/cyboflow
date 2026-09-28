@@ -48,7 +48,8 @@ import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL } from './ModelSelector';
+import { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
 import type { AgentProvider, WorkflowRunStorableRuntime } from '../../../../shared/types/agentRuntime';

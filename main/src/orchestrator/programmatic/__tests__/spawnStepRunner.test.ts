@@ -45,6 +45,8 @@ describe('SpawnStepRunner', () => {
     expect(passed.agentPermissionMode).toBe('auto');
     expect(passed.agentInvocationStepId).toBe('epics');
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
+    // Workflow turns never inherit a premium tier from the user's CLI config.
+    expect(passed.standardServiceTier).toBe(true);
   });
 
   it('denies the visual-verification enqueue tool on every step turn (live-smoke fix 2026-07-22)', async () => {

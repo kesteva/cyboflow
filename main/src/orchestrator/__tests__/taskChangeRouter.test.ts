@@ -2203,7 +2203,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         title: 'Epic child',
         parentEpicId: epicId,
       });
-      seedRunWithSeedIdeas(db, { runId: 'run-retired-idea', seedIdeaId: ideaId });
+      seedRunWithSeedIdeas(db, { runId: 'run-retired-idea', seedIdeaId: ideaId, status: 'completed' });
       seedRunForTask(db, {
         taskId: childTaskId,
         runId: 'run-retired-epic',
@@ -2230,6 +2230,83 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(reapForRun).toHaveBeenCalledTimes(2);
       expect(reapForRun).toHaveBeenCalledWith(1, 'run-retired-idea');
       expect(reapForRun).toHaveBeenCalledWith(1, 'run-retired-epic');
+    });
+
+    // IN-FLIGHT GUARD: the Won't-do / delete active-run guards exempt the
+    // orchestrator and ideas/epics carry none, so the reap itself must never
+    // touch a still-running run's uncommitted artifacts. Terminal runs of the
+    // same entity are still reaped as before.
+    it("an orchestrator Won't-do of a task skips its in-flight run but still reaps its terminal one", async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Retire mid-flight',
+      });
+      seedRunForTask(db, { taskId, runId: 'run-inflight-task', status: 'running' });
+      seedRunForTask(db, { taskId, runId: 'run-settled-task', status: 'completed' });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(10),
+      });
+
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id)
+        .toBe(stageId(10));
+      expect(reapForRun).toHaveBeenCalledTimes(1);
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-settled-task');
+      expect(reapForRun).not.toHaveBeenCalledWith(1, 'run-inflight-task');
+    });
+
+    it("a Won't-do of an idea or epic skips their in-flight runs", async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId: ideaId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'idea',
+        title: 'Idea with a live planner run',
+      });
+      const { taskId: epicId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'Epic with a live child run',
+      });
+      const { taskId: childTaskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Live child',
+        parentEpicId: epicId,
+      });
+      seedRunWithSeedIdeas(db, { runId: 'run-live-idea', seedIdeaId: ideaId, status: 'running' });
+      seedRunForTask(db, { taskId: childTaskId, runId: 'run-live-epic-child', status: 'awaiting_review' });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'idea',
+        taskId: ideaId,
+        stageId: stageId(10),
+      });
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'epic',
+        taskId: epicId,
+        stageId: stageId(10),
+      });
+
+      expect(reapForRun).not.toHaveBeenCalled();
     });
 
     it('archiving does not reap artifacts', async () => {
@@ -2434,6 +2511,62 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(reapForRun).toHaveBeenCalledTimes(2);
       expect(reapForRun).toHaveBeenCalledWith(1, 'run-epic-child');
       expect(reapForRun).toHaveBeenCalledWith(1, 'run-direct-child');
+    });
+
+    it('an orchestrator delete of a task skips its in-flight run and still deletes the task', async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Delete mid-flight',
+      });
+      seedRunForTask(db, { taskId, runId: 'run-inflight-delete', status: 'running' });
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'batch-inflight-delete',
+        runId: 'run-settled-delete',
+        runStatus: 'failed',
+      });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await expect(
+        router.applyDelete(1, { actor: 'orchestrator', entityType: 'task', taskId }),
+      ).resolves.toEqual({ taskId, deletedIds: [taskId] });
+
+      expect(rowCount(db, 'tasks', taskId)).toBe(0);
+      expect(reapForRun).toHaveBeenCalledTimes(1);
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-settled-delete');
+      expect(reapForRun).not.toHaveBeenCalledWith(1, 'run-inflight-delete');
+    });
+
+    it('an orchestrator idea/epic delete cascade skips in-flight child-task runs, reaps terminal ones', async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+      seedRunForTask(db, { taskId: epicTaskId, runId: 'run-live-epic-child', status: 'running' });
+      seedRunForTask(db, { taskId: directTaskId, runId: 'run-done-direct-child', status: 'completed' });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      // Epic-rooted cascade: its only child run is live -> nothing reaped.
+      await router.applyDelete(1, { actor: 'orchestrator', entityType: 'epic', taskId: epicId });
+      expect(rowCount(db, 'epics', epicId)).toBe(0);
+      expect(reapForRun).not.toHaveBeenCalled();
+
+      // Idea-rooted cascade: the remaining direct child's run is terminal -> reaped.
+      await router.applyDelete(1, { actor: 'orchestrator', entityType: 'idea', taskId: ideaId });
+      expect(rowCount(db, 'ideas', ideaId)).toBe(0);
+      expect(reapForRun).toHaveBeenCalledTimes(1);
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-done-direct-child');
+      expect(reapForRun).not.toHaveBeenCalledWith(1, 'run-live-epic-child');
     });
 
     it('a failed delete reap does not block later reaps or roll back the delete', async () => {

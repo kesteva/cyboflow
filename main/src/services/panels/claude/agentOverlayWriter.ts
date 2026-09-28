@@ -289,6 +289,26 @@ export function resolveRunEffectiveAgents(
 }
 
 /**
+ * The effective agents THIS RUN's frozen definition binds — the roles a non-Claude
+ * runtime registers natively (Codex agent roles, OMP project agents) so its
+ * `cyboflow-<key>` delegations resolve to the run's actual role prompts.
+ *
+ * Unlike {@link listRunAgentTargets}, an unresolvable definition yields `[]`
+ * rather than the whole catalogue: every registered role is advertised in the
+ * runtime's delegation-tool description, so a quick chat or a definition-less
+ * custom flow would otherwise pay for two dozen roles it never deploys.
+ */
+export function resolveRunDeployableAgents(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): EffectiveAgent[] {
+  const used = usedAgentKeysForRun(db, runId, logger);
+  if (used === null) return [];
+  return resolveRunEffectiveAgents(db, runId, logger).filter((agent) => used.has(agent.agentKey));
+}
+
+/**
  * The agents THIS RUN can spawn, each paired with the PROVIDER it resolves onto:
  * its pinned runtime's provider when one is set, else the run row's
  * `agent_provider` stamp (absent/unknown ⇒ 'claude'). Backs the "Switch runtime &

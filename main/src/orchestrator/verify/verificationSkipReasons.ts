@@ -65,6 +65,28 @@ export const VERIFY_NO_RUNBOOK_REASON =
   'no proven verification runbook for this project (run verification setup)';
 
 /**
+ * The pre-lease skip for a COMPOSED task with no surface at all — no build, no
+ * serve, no pre-live target, no mobile `app` block (see `taskHasRunnableSurface`).
+ * A composer defect, not an environment one: re-composing the task fixes it,
+ * running verification setup does not — so the text deliberately avoids the
+ * "verification runbook" substring the run-level decline collapse keys on.
+ * `declared` is the task's own `modality` when it disagrees with the stamped
+ * one (the shiny-eagle shape: an iOS app composed as `native-screen`, stamped
+ * `web`), which is the most useful single clue for whoever reads the finding.
+ */
+export function nothingToRunReason(stamped: string, declared: string | undefined): string {
+  const mismatch =
+    declared !== undefined && declared !== stamped
+      ? ` (the task declared modality '${declared}', but this request resolved to '${stamped}')`
+      : '';
+  return (
+    'the composed verification task names nothing to stand up or look at — no build, no serve, ' +
+    `no target and no app block${mismatch}; re-compose it for the project's actual surface ` +
+    "(an iOS app is modality 'mobile' with an app block)"
+  );
+}
+
+/**
  * The §3.2 skip reason for §4's PRE-MERGE case: a runbook IS proven for this
  * project, this branch just does not carry the portable file yet.
  *

@@ -503,8 +503,14 @@ a summary held only in your context.
      decomposition yields **>1 task**, create ONE epic whose title is the idea's
      title (body: a one-line pointer to the idea, e.g. its ref + caption) and file
      every one of those tasks under it. Exactly 1 task → create no epic.
+     **Exception — `tasks` absent from the appended step list:** this step is the
+     only one that decomposes, so DO delegate `cyboflow-epics` for a `small` idea
+     too, asking for no epics and its complete task list, then create those tasks
+     per step 9's rules (fallback epic first, stamps, batch rules).
    - **Batch branch:** the `cyboflow-epics` subagent stays skipped (every batched
-     idea is `small` — a `large` one was guarded out), but the fallback rule applies
+     idea is `small` — a `large` one was guarded out) unless `tasks` is absent, in
+     which case delegate it once per approved idea per the exception above. The
+     fallback rule applies
      **per idea**: each approved idea that yields >1 task gets its OWN epic named
      after it. Never pool two ideas' tasks under one epic.
    - **Stamp** `epics` once step 9 settles the count: `complete` when the idea ended

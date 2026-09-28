@@ -134,6 +134,19 @@ function placeholders(n: number): string {
   return new Array(n).fill('?').join(', ');
 }
 
+/**
+ * Default lookback window (days) shared by every "recent usage" Insights
+ * surface that doesn't take an explicit `days` input (TASK-290 follow-up).
+ * Both `selectWorkflowUsageStats` (the per-workflow Statistics cards) and the
+ * `insights.dailyUsage` router procedure's own default (`input.days ??
+ * DAILY_USAGE_DEFAULT_WINDOW_DAYS`, backing the 30-day daily-model chart) read
+ * this ONE constant rather than each carrying its own literal `30` — before
+ * this the cards had NO date window at all, so a card could count a run the
+ * chart's 30-day default excludes, showing two different totals for the same
+ * workflow on the same screen.
+ */
+export const DAILY_USAGE_DEFAULT_WINDOW_DAYS = 30;
+
 /** Event kinds whose nested `message.usage` contributes assistant-side tokens. */
 const ASSISTANT_USAGE_EVENT_TYPES = [
   'assistant',
@@ -1009,6 +1022,15 @@ interface RunIdRow {
  * raw_events; it performs only the narrow model-resolution scan. The LIMIT is
  * applied AFTER the OR, so the N-runs cap semantics are unchanged.
  *
+ * Date window (TASK-290 follow-up): candidate runs are additionally restricted
+ * to `workflow_runs.created_at >= datetime('now', '-DAILY_USAGE_DEFAULT_WINDOW_DAYS
+ * days')` — the SAME window the daily-usage chart applies to its raw_events scan
+ * (see `selectDailyModelUsage`'s default `days`). Before this the cards had no
+ * date window at all, so a workflow's card could count a run older than the
+ * chart's 30-day default window — the same workflow showing two different
+ * totals on the same screen. `limitRunsPerWorkflow` remains a row-count safety
+ * bound WITHIN that window, not a substitute for it.
+ *
  * @param db                   - Narrow DatabaseLike surface.
  * @param projectId            - When non-null, restricts to that project. Same
  *   migration-030 caveat as selectWorkflowRunStats: the per-project branch
@@ -1016,7 +1038,8 @@ interface RunIdRow {
  *   NULL) is omitted from a per-project usage view (its runs still carry a real
  *   workflow_runs.project_id). All-projects (null) sees every flow. Deliberately
  *   unchanged scope for this pass.
- * @param limitRunsPerWorkflow - Recent-run window per workflow (default 200).
+ * @param limitRunsPerWorkflow - Recent-run row cap per workflow, applied WITHIN
+ *   the date window (default 200) — a safety bound, not the window itself.
  */
 export function selectWorkflowUsageStats(
   db: DatabaseLike,
@@ -1043,15 +1066,20 @@ export function selectWorkflowUsageStats(
   ) as WorkflowWithRunIdsRow[];
 
   // Per workflow: last N run ids that carry usage — a materialized run_usage row
-  // OR at least one raw_events row. The OR (not a switch) keeps historic runs
-  // without a materialized row visible; the LIMIT after it preserves the N cap.
-  // Scope a (now possibly global) flow's runs to the queried project via the run's
-  // own project_id; `? IS NULL` disables the filter in the cross-project view.
+  // OR at least one raw_events row — within the last DAILY_USAGE_DEFAULT_WINDOW_DAYS
+  // days (the same window the daily-usage chart applies, so a card can never count
+  // a run the chart's default window excludes). The OR (not a switch) keeps
+  // historic-but-in-window runs without a materialized row visible; the LIMIT
+  // after it is a row-count safety bound within that window, not a substitute
+  // for it. Scope a (now possibly global) flow's runs to the queried project via
+  // the run's own project_id; `? IS NULL` disables the filter in the
+  // cross-project view.
   const recentRunsStmt = db.prepare(
     `SELECT r.id AS runId
      FROM workflow_runs r
      WHERE r.workflow_id = ?
        AND (? IS NULL OR r.project_id = ?)
+       AND r.created_at >= datetime('now', '-' || ? || ' days')
        AND (
          EXISTS (SELECT 1 FROM run_usage u WHERE u.run_id = r.id)
          OR EXISTS (SELECT 1 FROM raw_events e WHERE e.run_id = r.id)
@@ -1066,6 +1094,7 @@ export function selectWorkflowUsageStats(
       wf.workflowId,
       projectId,
       projectId,
+      DAILY_USAGE_DEFAULT_WINDOW_DAYS,
       limitRunsPerWorkflow,
     ) as RunIdRow[];
     const runIds = runIdRows.map((row) => row.runId);

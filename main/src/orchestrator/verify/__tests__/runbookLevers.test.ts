@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveLeverEnv } from '../runbookLevers';
+import { isBindableLeverName, resolveLeverEnv } from '../runbookLevers';
 
 const BASE = Object.freeze({ VERIFY_PORT: '4300', VERIFY_ATTEST_NONCE: 'nonce-1', VERIFY_MODALITY: 'web' });
 const VALUES = {
@@ -217,5 +217,50 @@ describe('resolveLeverEnv', () => {
     const base = { VERIFY_PORT: '4300' };
     resolveLeverEnv(base, { portEnv: 'PORT', nonceEnv: 'BUILD_ID' }, VALUES);
     expect(base).toEqual({ VERIFY_PORT: '4300' });
+  });
+});
+
+describe('isBindableLeverName', () => {
+  /**
+   * The runner's harness env as a cdp-app request sees it: every key is
+   * `VERIFY_*` or the (denied) PATH, and VERIFY_DATA_DIR carries the data dir.
+   */
+  const HARNESS_BASE = Object.freeze({
+    VERIFY_ARTIFACTS_DIR: '/artifacts/run-1',
+    PATH: '/usr/bin',
+    VERIFY_DATA_DIR: VALUES.dataDir,
+    VERIFY_DRIVER_PORT: '9300',
+    VERIFY_DRIVER: '/driver.mjs',
+    VERIFY_ATTEST_NONCE: VALUES.nonce,
+    VERIFY_MODALITY: 'cdp-app',
+    VERIFY_PEEKABOO_BIN: '/peekaboo',
+    VERIFY_PORT: VALUES.port,
+  });
+
+  it.each([
+    ['CYBOFLOW_DIR', true],
+    ['APP_DATA_DIR', true],
+    // The lever's own harness var already carries the value: a correct no-op.
+    ['VERIFY_DATA_DIR', true],
+    ['cyboflow_dir', false],
+    ['CYBOFLOW DIR', false],
+    ['', false],
+    ['HOME', false],
+    ['NODE_OPTIONS', false],
+    ['VERIFY_PORT', false],
+    ['VERIFY_ARTIFACTS_DIR', false],
+  ] as const)('dataDirEnv %j → %s, and agrees with what resolveLeverEnv exports', (name, bindable) => {
+    expect(isBindableLeverName('dataDirEnv', name)).toBe(bindable);
+    const { additions, dropped } = resolveLeverEnv(HARNESS_BASE, { dataDirEnv: name }, VALUES);
+    const exported = additions[name] === VALUES.dataDir || (dropped.length === 0 && HARNESS_BASE[name as keyof typeof HARNESS_BASE] === VALUES.dataDir);
+    expect(exported).toBe(bindable);
+  });
+
+  it("treats each lever's own harness var as bound and every other VERIFY_* name as a shadow", () => {
+    expect(isBindableLeverName('portEnv', 'VERIFY_PORT')).toBe(true);
+    expect(isBindableLeverName('portEnv', 'VERIFY_DATA_DIR')).toBe(false);
+    expect(isBindableLeverName('nonceEnv', 'VERIFY_ATTEST_NONCE')).toBe(true);
+    expect(isBindableLeverName('simUdidEnv', 'VERIFY_SIM_UDID')).toBe(true);
+    expect(isBindableLeverName('derivedDataEnv', 'VERIFY_DERIVED_DATA')).toBe(true);
   });
 });

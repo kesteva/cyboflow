@@ -797,6 +797,11 @@ describe('LandingHome — page states', () => {
         status: 'completed',
         workflowName: 'planner',
         session_id: 'swift-bison-20260917',
+        // "Most recent activity wins" (2026-09-25): the flow run must finish
+        // at/after the chat's own restedAtIso (2026-09-17) to still speak for
+        // the session — this run genuinely finished after that rest, nothing
+        // reused the session afterward.
+        ended_at: '2026-09-17T00:30:00.000Z',
       }),
     ];
 
@@ -840,6 +845,9 @@ describe('LandingHome — page states', () => {
         status: 'canceled',
         workflowName: 'planner',
         session_id: 'swift-bison-20260917',
+        // "Most recent activity wins" (2026-09-25) — see the sibling
+        // "fully terminal" test above for why this needs to postdate restedAtIso.
+        ended_at: '2026-09-17T00:30:00.000Z',
       }),
     ];
 

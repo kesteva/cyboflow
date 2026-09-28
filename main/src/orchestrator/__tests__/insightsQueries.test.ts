@@ -555,6 +555,23 @@ function reportStepPayload(
   return base;
 }
 
+/**
+ * A datetime N days ago (relative to SQLite's own `now`, not the test host
+ * clock — matches how the helpers under test compute their own windows), at
+ * `hhmmss`. First 10 chars of `ts` are the day. Shared by every describe block
+ * that needs fixtures inside/outside a `datetime('now', '-N days')` window
+ * (selectDailyModelUsage's day-window and selectWorkflowUsageStats' TASK-290
+ * follow-up date window) rather than each hand-rolling its own relative date.
+ */
+function daysAgoAtWindow(
+  db: Database.Database,
+  n: number,
+  hhmmss = '10:00:00',
+): { day: string; ts: string } {
+  const day = (db.prepare(`SELECT date('now', ?) AS d`).get(`-${n} days`) as { d: string }).d;
+  return { day, ts: `${day} ${hhmmss}` };
+}
+
 // ---------------------------------------------------------------------------
 // 1. selectWorkflowRunStats
 // ---------------------------------------------------------------------------
@@ -1512,6 +1529,11 @@ describe('selectWorkflowUsageStats', () => {
     db = createInsightsDb();
   });
 
+  /** Local wrapper over the module-level `daysAgoAtWindow` closing over this describe's `db`. */
+  function daysAgoAt(n: number, hhmmss = '10:00:00'): { day: string; ts: string } {
+    return daysAgoAtWindow(db, n, hhmmss);
+  }
+
   it('aggregates usage and cost across a workflow runs', () => {
     seedWorkflow(db, { id: 'wf-1', name: 'Sprint' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
@@ -1555,10 +1577,12 @@ describe('selectWorkflowUsageStats', () => {
 
   it('honors the limitRunsPerWorkflow window', () => {
     seedWorkflow(db, { id: 'wf-1' });
-    // 3 runs each with usage; window of 2 → only the 2 most recent counted.
-    seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: '2026-06-01 10:00:00' });
-    seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: '2026-06-02 10:00:00' });
-    seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: '2026-06-03 10:00:00' });
+    // 3 runs each with usage, all inside the 30-day date window; row-cap window
+    // of 2 → only the 2 most recent counted. Relative dates (not fixed literals)
+    // so this stays inside the date window regardless of when the suite runs.
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', createdAt: daysAgoAt(3).ts });
+    seedRun(db, { id: 'r2', workflowId: 'wf-1', createdAt: daysAgoAt(2).ts });
+    seedRun(db, { id: 'r3', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
     seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 1, output: 0 }));
     seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 2, output: 0 }));
     seedEvent(db, 'r3', 'assistant', assistantPayload({ input: 3, output: 0 }));
@@ -1567,6 +1591,23 @@ describe('selectWorkflowUsageStats', () => {
     expect(stats.runsWithUsage).toBe(2);
     // most recent 2 = r3(3) + r2(2) → avg 2.5 → rounded 3 (banker-agnostic round).
     expect(stats.avgTotalTokens).toBe(3);
+  });
+
+  it('excludes a run older than the 30-day date window even though it has usage (TASK-290 follow-up)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    // rOld is 31 days old — outside the window the daily-usage chart also
+    // applies — and must NOT be counted even though it carries real usage and
+    // the limitRunsPerWorkflow row cap has plenty of headroom.
+    seedRun(db, { id: 'rOld', workflowId: 'wf-1', createdAt: daysAgoAt(31).ts });
+    seedEvent(db, 'rOld', 'assistant', assistantPayload({ input: 1000, output: 0 }), daysAgoAt(31).ts);
+    // rRecent is inside the window.
+    seedRun(db, { id: 'rRecent', workflowId: 'wf-1', createdAt: daysAgoAt(1).ts });
+    seedEvent(db, 'rRecent', 'assistant', assistantPayload({ input: 10, output: 0 }), daysAgoAt(1).ts);
+
+    const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
+    expect(stats.runsWithUsage).toBe(1);
+    expect(stats.avgTotalTokens).toBe(10);
+    expect(stats.totalTokens).toBe(10);
   });
 
   it('qualifies a run via its materialized run_usage row even with no raw_events', () => {
@@ -2174,12 +2215,9 @@ describe('selectDailyModelUsage', () => {
     db = createInsightsDb();
   });
 
-  /** A datetime in the window, N days ago, at 10:00 — first 10 chars are the day. */
+  /** Local wrapper over the module-level `daysAgoAtWindow` closing over this describe's `db`. */
   function daysAgoAt(n: number, hhmmss = '10:00:00'): { day: string; ts: string } {
-    const day = (
-      db.prepare(`SELECT date('now', ?) AS d`).get(`-${n} days`) as { d: string }
-    ).d;
-    return { day, ts: `${day} ${hhmmss}` };
+    return daysAgoAtWindow(db, n, hhmmss);
   }
 
   it('returns [] on an empty DB', () => {
@@ -2590,7 +2628,7 @@ describe('selectDailyModelUsage', () => {
     });
   });
 
-  it('chart totalTokens sum equals the per-run card totals from selectRunUsageRollups for the same window (Codex/OMP included, no drops or double-counts)', () => {
+  it('chart totalTokens sum equals the real per-workflow card total (selectWorkflowUsageStats) for the same window (Codex/OMP included, no drops or double-counts)', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r-claude', workflowId: 'wf-1', agentProvider: 'claude', agentRuntime: 'claude-sdk' });
     seedRun(db, {
@@ -2628,10 +2666,15 @@ describe('selectDailyModelUsage', () => {
       (sum, p) => sum + p.totalTokens,
       0,
     );
-    const cardTotal = selectRunUsageRollups(dbAdapter(db), ['r-claude', 'r-codex', 'r-omp']).reduce(
-      (sum, r) => sum + r.totalTokens,
-      0,
-    );
+    // Exercises the ACTUAL per-workflow card query (selectWorkflowUsageStats),
+    // not a hand-picked run-id list fed straight to selectRunUsageRollups — the
+    // card query applies its own recent-runs selection (including, since
+    // TASK-290's follow-up, the SAME 30-day date window the chart above uses),
+    // so this is the only form of the assertion that would catch a drift
+    // between the two (e.g. a run older than 30 days that the card counts but
+    // the chart excludes, or vice versa).
+    const [cardStats] = selectWorkflowUsageStats(dbAdapter(db), null);
+    const cardTotal = cardStats.totalTokens ?? 0;
     expect(chartTotal).toBe(cardTotal);
     expect(chartTotal).toBe(120 + 500 + 75);
   });

@@ -24,7 +24,7 @@ vi.mock('../../verify/enqueueFromTask', async (importOriginal) => {
       task: args.task,
       modality: 'cdp-app',
     })),
-    resolveEnqueueModality: vi.fn(async () => 'cdp-app'),
+    resolveEnqueueModality: vi.fn(async (args: { task: unknown }) => ({ modality: 'cdp-app', task: args.task })),
   };
 });
 vi.mock('../../verify/snapshotProvisioner', async (importOriginal) => {
@@ -37,7 +37,7 @@ import type { McpQueryMessage, McpQueryResponse } from '../mcpQueryMessages';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { VerificationScheduler } from '../../verify/verificationScheduler';
 import { SprintLaneStore } from '../../sprintLaneStore';
-import { prepareVerificationEnqueue } from '../../verify/enqueueFromTask';
+import { prepareVerificationEnqueue, resolveEnqueueModality } from '../../verify/enqueueFromTask';
 
 const client = {} as net.Socket;
 const WORKTREE = '/tmp/wt-run-ok';
@@ -185,6 +185,48 @@ describe('VerifyToolHandlers — runbook bootstrap on the MCP path', () => {
     expect(scheduler.maybeBootstrapRunbook).not.toHaveBeenCalled();
     expect(scheduler.enqueue).toHaveBeenCalledTimes(1);
     expect(writes[0]).toMatchObject({ ok: true, data: { requestId: 'vr-1', snapshotSha: 'sha-after-bootstrap' } });
+  });
+
+  // §A2 — resolution can hand back a DIFFERENT task (a project-surface hit adds
+  // an inferred `app` block). The bootstrap decision and the deferred
+  // preparation must both see THAT task, or the row would persist the composed
+  // one and re-derive to `web`.
+  it('threads the task resolution returned (an inferred app) to the bootstrap AND the deferred preparation', async () => {
+    const inferred = {
+      ...TASK,
+      serve: undefined,
+      modality: 'mobile',
+      app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'App', _inferred: true },
+    };
+    vi.mocked(resolveEnqueueModality).mockResolvedValueOnce({
+      modality: 'mobile',
+      task: inferred as unknown as Parameters<typeof resolveEnqueueModality>[0]['task'],
+    });
+    const { tools, scheduler } = setup();
+
+    await tools.handleRequestVerification(request('r1'), client);
+    await settle();
+
+    expect(scheduler.evaluateRunbookBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({ modality: 'mobile', task: inferred }),
+    );
+    expect(scheduler.maybeBootstrapRunbook).toHaveBeenCalledWith(expect.objectContaining({ task: inferred }));
+    expect(vi.mocked(prepareVerificationEnqueue)).toHaveBeenCalledWith(
+      expect.objectContaining({ modality: 'mobile', task: inferred }),
+    );
+  });
+
+  it('the immediate path hands the preparation the run worktree as the surface-probe root', async () => {
+    const { tools } = setup({ decision: { proceed: false, reason: 'already-proven' } });
+
+    await tools.handleRequestVerification(request('r1'), client);
+
+    expect(vi.mocked(prepareVerificationEnqueue)).toHaveBeenCalledWith(
+      expect.objectContaining({ surfaceRoot: WORKTREE }),
+    );
+    expect(vi.mocked(prepareVerificationEnqueue)).toHaveBeenCalledWith(
+      expect.not.objectContaining({ probePath: expect.anything() }),
+    );
   });
 
   it('a run with no sprint batch is not lane traffic: no preflight, immediate unkeyed enqueue', async () => {

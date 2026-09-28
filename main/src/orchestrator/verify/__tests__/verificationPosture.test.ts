@@ -7,7 +7,7 @@
  * finding the enqueue seam was changed to suppress; reading an unwired probe as
  * 'absent' declares a healthy project unverifiable. Both are pinned here.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   resolveVerificationPosture,
   isNoModalityDeclineReason,
@@ -16,14 +16,25 @@ import {
 } from '../verificationPosture';
 import type { VerifyRunbookStatusDetail } from '../runbookStore';
 
-/** Deps over a fixed stamp + a fixed runbook answer, recording the probe args. */
+/** The runbook-optional kill switch ENGAGED — the pre-§A6 contract every legacy case below pins. */
+const KILL_SWITCH_ON = { requireProvenRunbook: true };
+
+/**
+ * Deps over a fixed stamp + a fixed runbook answer, recording the probe args.
+ *
+ * `liveConfig` defaults to the kill switch ENGAGED, so every pre-existing case
+ * asserts the byte-identical legacy ladder (runbook-optional-verification.md
+ * §A1 "A6 is off"); the §A6 block passes explore-on configs explicitly.
+ */
 function makeDeps(
   stamp: VerificationRunStamp | null | (() => never),
   runbook: VerifyRunbookStatusDetail | null | (() => never) = null,
+  liveConfig: VerificationPostureDeps['liveConfig'] | null = () => KILL_SWITCH_ON,
 ): VerificationPostureDeps & { probes: Array<{ projectId: number; modality: string; probePath?: string }> } {
   const probes: Array<{ projectId: number; modality: string; probePath?: string }> = [];
   return {
     probes,
+    ...(liveConfig !== null ? { liveConfig } : {}),
     readRunStamp: () => (typeof stamp === 'function' ? stamp() : stamp),
     async runbookStatus(projectId, modality, probePath) {
       probes.push({ projectId, modality, ...(probePath !== undefined ? { probePath } : {}) });
@@ -204,6 +215,76 @@ describe('resolveVerificationPosture', () => {
         'r1',
       ),
     ).resolves.toEqual({ kind: 'available' });
+  });
+});
+
+// ── §A6: run posture under the runbook-optional contract ─────────────────────
+describe('resolveVerificationPosture — explore on (kill switch NOT engaged, §A6)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const EXPLORE_ON = () => ({ requireProvenRunbook: false });
+  const ABSENT: VerifyRunbookStatusDetail = { status: 'absent', reason: 'no-record' };
+
+  it('no longer declines a mobile-flow run for runbook ABSENCE — every decline reason — and reads no probe', async () => {
+    // A mobile lane with no pin EXPLORES on a fresh leased simulator (gate 3,
+    // isExploreEligible: mobile always), so a run-level "unavailable" would
+    // suppress exactly the lanes that can now run. Pre-§A6 each of these was
+    // 'unavailable' (the legacy cases above, switch engaged).
+    for (const status of [
+      ABSENT,
+      { status: 'absent', reason: 'drifted' },
+      { status: 'unproven-draft', reason: 'content-drifted' },
+      { status: 'absent', reason: 'proven-file-absent-here' },
+      { status: 'absent', reason: 'indeterminate' },
+    ] satisfies VerifyRunbookStatusDetail[]) {
+      const deps = makeDeps(stamp({ verifyType: 'mobile-flow' }), status, EXPLORE_ON);
+      await expect(resolveVerificationPosture(deps, 'r1')).resolves.toEqual({ kind: 'available' });
+      expect(deps.probes).toHaveLength(0);
+    }
+  });
+
+  it('treats an UNWIRED or THROWING live-config read as the config default (switch off ⇒ explore)', async () => {
+    const unwired = makeDeps(stamp({ verifyType: 'mobile-flow' }), ABSENT, null);
+    await expect(resolveVerificationPosture(unwired, 'r1')).resolves.toEqual({ kind: 'available' });
+    const throwing = makeDeps(stamp({ verifyType: 'mobile-flow' }), ABSENT, () => {
+      throw new Error('config gone');
+    });
+    await expect(resolveVerificationPosture(throwing, 'r1')).resolves.toEqual({ kind: 'available' });
+  });
+
+  it('the env override CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1 engages the switch whatever the config says', async () => {
+    vi.stubEnv('CYBOFLOW_VERIFY_REQUIRE_RUNBOOK', '1');
+    for (const liveConfig of [EXPLORE_ON, null]) {
+      const deps = makeDeps(stamp({ verifyType: 'mobile-flow' }), ABSENT, liveConfig);
+      const posture = await resolveVerificationPosture(deps, 'r1');
+      expect(posture).toEqual({
+        kind: 'unavailable',
+        reason: expect.stringContaining('no proven mobile verification runbook'),
+        declineCode: 'no-verification-runbook',
+      });
+      expect(deps.probes).toEqual([{ projectId: 7, modality: 'mobile', probePath: '/tmp/wt' }]);
+    }
+  });
+
+  it('STILL declines a native-desktop run for runbook absence — native-screen is pinned-only', async () => {
+    const deps = makeDeps(stamp({ verifyType: 'native-desktop' }), ABSENT, EXPLORE_ON);
+    const posture = await resolveVerificationPosture(deps, 'r1');
+    expect(posture).toEqual({
+      kind: 'unavailable',
+      reason: expect.stringContaining('no proven native-screen runbook'),
+      declineCode: 'no-verification-runbook',
+    });
+    expect(deps.probes).toEqual([{ projectId: 7, modality: 'native-screen', probePath: '/tmp/wt' }]);
+  });
+
+  it('leaves `disabled` and the ordinary web types exactly as they were', async () => {
+    const off = makeDeps(stamp({ verifyEnabled: false, verifyType: 'mobile-flow' }), ABSENT, EXPLORE_ON);
+    await expect(resolveVerificationPosture(off, 'r1')).resolves.toEqual({ kind: 'disabled' });
+    const web = makeDeps(stamp({ verifyType: 'interactive-web-behavior' }), ABSENT, EXPLORE_ON);
+    await expect(resolveVerificationPosture(web, 'r1')).resolves.toEqual({ kind: 'available' });
+    expect(web.probes).toHaveLength(0);
   });
 });
 

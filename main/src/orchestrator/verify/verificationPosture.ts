@@ -33,11 +33,12 @@
  * real per-lane findings on a healthy project.
  *
  * Standalone-friendly by construction: this module imports NOTHING at runtime
- * beyond the pure decline classifier. The run stamp and the runbook status both
+ * beyond the pure decline classifier and the pure kill-switch predicate. The run stamp and the runbook status both
  * arrive as injected thunks, so the runbook query is the SAME closure the
  * scheduler's §3.2 degrade gate consults (index.ts builds it once for both) and
  * is never duplicated here.
  */
+import { requireProvenRunbookEngaged } from '../../../../shared/types/visualVerification';
 import type { VerificationModality, VerificationType } from '../../../../shared/types/visualVerification';
 import type { VerificationPosture } from '../programmatic/types';
 import type { VerifyRunbookStatusDetail } from './runbookStore';
@@ -83,6 +84,17 @@ export interface VerificationPostureDeps {
     modality: VerificationModality,
     probePath?: string,
   ): Promise<VerifyRunbookStatusDetail | null>;
+  /**
+   * The LIVE visual-verify config, read once per posture — the same read the
+   * agent engine's gate 3 makes (`liveConfig()`, never a boot snapshot, F12), so
+   * the run-level answer and the per-request mode cannot disagree about the
+   * runbook-optional kill switch (runbook-optional-verification.md §A6).
+   *
+   * Absent, or throwing, ⇒ only the env override is consulted
+   * (`CYBOFLOW_VERIFY_REQUIRE_RUNBOOK=1`); the config default is OFF, i.e.
+   * explore on — the same answer the engine reaches with its default config.
+   */
+  liveConfig?(): { requireProvenRunbook?: boolean };
 }
 
 /**
@@ -186,13 +198,31 @@ export function isNoModalityDeclineReason(
 }
 
 /**
+ * The runbook-optional kill switch as the posture sees it — the live config when
+ * wired, the env override always. A config read that throws is read as "switch
+ * off" (the env still binds): the posture fails OPEN, and `available` is what an
+ * exploring mobile run resolves to anyway.
+ */
+function killSwitchEngaged(deps: VerificationPostureDeps): boolean {
+  let config: { requireProvenRunbook?: boolean } = {};
+  try {
+    config = deps.liveConfig?.() ?? {};
+  } catch {
+    config = {};
+  }
+  return requireProvenRunbookEngaged(config);
+}
+
+/**
  * Resolve the run's verification posture. Never rejects.
  *
  * Ladder, in order:
  *   1. the stamp is unreadable            → `available` (fail-open: behave as before)
  *   2. `verify_enabled = 0`               → `disabled`  (today's behaviour verbatim)
  *   3. stamped type `mobile-flow` AND
- *      no PROVEN mobile runbook           → `unavailable`
+ *      the kill switch is ENGAGED AND
+ *      no PROVEN mobile runbook           → `unavailable` (switch off: mobile
+ *                                           explores, so → `available` — §A6)
  *   4. stamped type `native-desktop` AND
  *      no PROVEN native-screen runbook    → `unavailable` (classified by the
  *                                           SAME decline function the gate uses)
@@ -201,7 +231,12 @@ export function isNoModalityDeclineReason(
  * Rung 3 used to be an unconditional short-circuit — the mobile modality was
  * deferred, so no runbook could have made it work. The iOS-Simulator tier ended
  * that, and the rung is now the structural twin of rung 4 in every respect:
- * same probe, same classifier, same fail-open.
+ * same probe, same classifier, same fail-open. Under the runbook-optional
+ * contract (runbook-optional-verification.md §A6) it only binds with the kill
+ * switch engaged: otherwise a mobile lane with no pin EXPLORES on a fresh leased
+ * simulator, and declaring the run unverifiable for want of a runbook would
+ * suppress exactly the lanes that can now run. Rung 4 stays, switch or no
+ * switch: native-screen is pinned-only.
  *
  * No `web` / `cdp-app` runbook probe here on purpose. Those modalities are
  * resolved per REQUEST (the composed task's `serve.attach` picks between them)
@@ -228,6 +263,13 @@ export async function resolveVerificationPosture(
       : stamp.verifyType === 'native-desktop'
         ? ({ modality: 'native-screen', reasonFor: nativeRunbookReason } as const)
         : null;
+  // §A6 — with explore on (the kill switch NOT engaged), a mobile request with
+  // no proven runbook explores rather than skips (gate 3, `isExploreEligible`:
+  // mobile always), so runbook absence no longer makes a mobile-flow run
+  // unverifiable and the probe is not even read. native-desktop is untouched:
+  // native-screen is pinned-only, so its runbook still decides. Read only for a
+  // mobile-flow run — every other stamp's answer does not depend on it.
+  if (probe?.modality === 'mobile' && !killSwitchEngaged(deps)) return { kind: 'available' };
   if (probe !== null) {
     let status: VerifyRunbookStatusDetail | null;
     try {

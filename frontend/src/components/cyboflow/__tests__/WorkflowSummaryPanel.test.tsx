@@ -279,6 +279,14 @@ describe('WorkflowSummaryPanel', () => {
       ...ROLLUP,
       model: null,
       multiModel: true,
+      // Run-level input/output are ALSO zero here (this run's usage is 100%
+      // cache) so the per-model shortfall check — which compares the
+      // breakdown's input+output sum against usage.totalTokens — sees 0 vs 0
+      // and never trips; see the dedicated shortfall tests below for the
+      // pruned-breakdown case.
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
       perModelUsage: [
         // opus cache-write rate = 1.25 * $5/MTok = $6.25/MTok:
         // 1,000,000 * $6.25/MTok = $6.25, input/output both zero.
@@ -291,6 +299,64 @@ describe('WorkflowSummaryPanel', () => {
     renderPanel();
     // If cache tokens were dropped from the per-model sum this would render $0.00.
     expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $6.55');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-shortfall-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('flags a per-model SHORTFALL and shows the authoritative run-level cost when the breakdown sum is < 97% of the run total', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      // Authoritative run-level totals (the durable run_usage row).
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      totalTokens: 1_000_000,
+      costUsd: 5, // must be what renders — the priced per-model sum must NOT win.
+      // The breakdown's raw_events were partially pruned: only 600,000 of the
+      // run's 1,000,000 input tokens still resolve per-model (60% < 97%
+      // tolerance) even though 2 distinct models still show up.
+      perModelUsage: [
+        { model: 'claude-opus-4-5', inputTokens: 400_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'claude-sonnet-4-5', inputTokens: 200_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $5.00');
+    expect(screen.getByTestId('run-summary-shortfall-model-cost-note')).toHaveTextContent(
+      'Per-model breakdown incomplete — some event history was pruned',
+    );
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('does NOT flag a shortfall when the breakdown sum is within the 97% tolerance of the run total', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      totalTokens: 1_000_000,
+      costUsd: 5,
+      // 700,000 + 280,000 = 980,000 of 1,000,000 = 98% — inside the 3%
+      // tolerance, so the priced per-model sum (opus $3.50 + sonnet $0.84 =
+      // $4.34) wins as usual, not the shortfall fallback.
+      perModelUsage: [
+        { model: 'claude-opus-4-5', inputTokens: 700_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'claude-sonnet-4-5', inputTokens: 280_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $4.34');
+    expect(screen.queryByTestId('run-summary-shortfall-model-cost-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
   });

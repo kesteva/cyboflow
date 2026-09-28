@@ -8,7 +8,6 @@ import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import type { OmpModelCatalog } from '../../../../../shared/types/agentModels';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
 import { isPermissionMode } from '../../../../../shared/types/workflows';
-import { isValidEffortForProvider } from '../../../../../shared/types/reasoningEffort';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 import type {
   AgentInitEvent,
@@ -19,6 +18,8 @@ import type {
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import type { ConversationMessage } from '../../../database/models';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
+import type { EffectiveAgent } from '../../../orchestrator/agents/effectiveAgents';
+import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import { loadMergedPermissionRules } from '../../../orchestrator/permissionRules';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
@@ -30,9 +31,11 @@ import { perfBump } from '../../perfTracer';
 import type { SessionManager } from '../../sessionManager';
 import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../../../../shared/streamParser';
 import { resolveAgentModelAlias } from '../agentModelContext';
+import { resolveRunDeployableAgents } from '../claude/agentOverlayWriter';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveOmpGateExtensionPath } from './gate/ompGatePath';
 import type { OmpGateConfig, OmpGateSentinel } from './gate/ompGateTypes';
+import { renderOmpAgentMarkdown, toOmpThinkingLevel, writeOmpAgentFiles } from './ompAgentWriter';
 import { OmpApprovalBridge } from './ompApprovalBridge';
 import {
   OmpQuestionBridge,
@@ -54,7 +57,6 @@ import { supportsConfigurableHandlerTimeout } from './ompVersions';
 import {
   lastAssistantTextIn,
   OMP_RPC_UI_MODE_ARGS,
-  OMP_THINKING_LEVELS,
   OmpRpcClient,
   OmpTurnProjector,
   type OmpExtensionUiRequestEvent,
@@ -374,10 +376,6 @@ export function assertOmpSdkSpawnFlags(args: readonly string[]): void {
   }
 }
 
-function isOmpThinkingLevel(value: string): value is OmpThinkingLevel {
-  return (OMP_THINKING_LEVELS as readonly string[]).includes(value);
-}
-
 export interface OmpSdkManagerDeps {
   /** Builds the RPC transport; a fake in tests. */
   createClient?: OmpRpcClientFactory;
@@ -693,6 +691,7 @@ export class OmpSdkManager extends AbstractCliManager {
     // prose from a workflow's markdown, never a bare path — but a future caller
     // that passes a short single-token suffix should know.
     const systemPromptAppend = options.systemPromptAppend?.trim();
+    const agents = this.resolveDeployableAgents(options, runId);
 
     // The fingerprint deliberately sees the argv WITHOUT `--resume`: the resume
     // target changes between the first turn and its continuations, and treating
@@ -726,10 +725,51 @@ export class OmpSdkManager extends AbstractCliManager {
         env: { ...env, CYBOFLOW_OMP_GATE_SENTINEL: '<per-spawn>' },
         gateConfig,
         sessionDir,
+        // The role files are spawn-baked too: OMP may read `.omp/agents/` once
+        // at process start, and only the COLD path rewrites them, so a changed
+        // role prompt must force a cold respawn rather than let a parked child
+        // keep delegating to the old one.
+        agents: digestOmpAgentFiles(agents),
       }),
     );
 
-    return { baseArgs, env, gateConfig, sessionDir, sentinelPath, fingerprint, permissionMode, model };
+    return {
+      baseArgs,
+      env,
+      gateConfig,
+      sessionDir,
+      sentinelPath,
+      fingerprint,
+      permissionMode,
+      model,
+      agents,
+    };
+  }
+
+  /**
+   * The run's roles to register as OMP project agents — the ones its frozen
+   * definition binds (`resolveRunDeployableAgents`), `[]` when it binds none.
+   *
+   * Nothing for an in-place session: same policy as `.omp/mcp.json` (see
+   * {@link ensureMcpConfig}) — writing `.omp/` into the user's real repo is
+   * intrusive. Fail-soft: the resolver already degrades every bad layer, and
+   * anything it still throws costs this spawn its roles, never the spawn.
+   */
+  private resolveDeployableAgents(options: ClaudeSpawnerOptions, runId: string): EffectiveAgent[] {
+    if (this.isInPlaceSession(options.sessionId)) return [];
+    try {
+      return resolveRunDeployableAgents(
+        this.db,
+        runId,
+        this.logger ? makeLoggerLike(this.logger) : undefined,
+      );
+    } catch (error) {
+      this.logger?.warn(
+        `[OmpSdkManager] could not resolve the roles for run ${runId}; no cyboflow roles are ` +
+          `registered for this OMP session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -827,12 +867,11 @@ export class OmpSdkManager extends AbstractCliManager {
    * Per-turn reasoning effort as OMP's `--thinking` level. Re-guarded against
    * OMP's own scale here (as Codex's turn options are) so a caller that skipped
    * `normalizeEffortSelection` cannot push an unaccepted value onto the argv.
+   * Shares its normalizer with the role files' `thinkingLevel`
+   * (`ompAgentWriter.toOmpThinkingLevel`), so the two cannot drift.
    */
   private resolveThinkingLevel(options: ClaudeSpawnerOptions): OmpThinkingLevel | undefined {
-    const effort = options.reasoningEffort;
-    if (!effort || !isValidEffortForProvider('omp', effort)) return undefined;
-    const normalized = effort.toLowerCase().trim();
-    return isOmpThinkingLevel(normalized) ? normalized : undefined;
+    return toOmpThinkingLevel(options.reasoningEffort);
   }
 
   /**
@@ -851,12 +890,37 @@ export class OmpSdkManager extends AbstractCliManager {
       );
       return;
     }
-    // The writer appends `.omp/` to the worktree-local git exclude whenever it
-    // actually writes, so the config never reaches the session diff rail.
+    // The writer appends `.omp/` to the worktree-local git exclude on every
+    // call, so the config never reaches the session diff rail.
     writeOmpMcpConfig({
       worktreeRoot: options.worktreePath,
       nodeExecutablePath: runtimeConfig.nodeExecutablePath,
       bridgeScriptPath: runtimeConfig.bridgeScriptPath,
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
+  }
+
+  /**
+   * Register the run's roles as OMP project agents (`.omp/agents/`) — the cold
+   * path only, beside `.omp/mcp.json`: a warm reuse already matched the
+   * fingerprint, which covers every role file's rendered content. Skipped in
+   * place for the same reason as {@link ensureMcpConfig}, and logged for the
+   * same reason: an orchestrator whose `cyboflow-*` delegations fall through to
+   * OMP's defaults behaves very differently.
+   */
+  private ensureAgentFiles(options: ClaudeSpawnerOptions, plan: OmpSpawnPlan): void {
+    if (this.isInPlaceSession(options.sessionId)) {
+      this.logger?.info(
+        `[OmpSdkManager] in-place session ${options.sessionId}: skipping .omp/agents, so the ` +
+          "run's cyboflow roles are not registered as OMP agents (same policy as .omp/mcp.json)",
+      );
+      return;
+    }
+    // Never throws; it also puts `.omp/` in the worktree-local git exclude
+    // before it creates anything.
+    writeOmpAgentFiles({
+      worktreeRoot: options.worktreePath,
+      agents: plan.agents,
       ...(this.logger ? { logger: this.logger } : {}),
     });
   }
@@ -898,6 +962,7 @@ export class OmpSdkManager extends AbstractCliManager {
     warmEligible: boolean,
   ): WarmOmpEntry {
     this.ensureMcpConfig(options);
+    this.ensureAgentFiles(options, plan);
     fs.mkdirSync(plan.sessionDir, { recursive: true });
 
     const entry: WarmOmpEntry = {
@@ -1733,6 +1798,27 @@ interface OmpSpawnPlan {
   fingerprint: string;
   permissionMode: PermissionMode;
   model: string | undefined;
+  /** The roles the cold path registers under `.omp/agents/`; `[]` in place. */
+  agents: readonly EffectiveAgent[];
+}
+
+/**
+ * A stable digest of the role files a spawn registers: each role's RENDERED
+ * file (so anything that changes what OMP reads changes the digest), sorted by
+ * key so resolution order cannot perturb it. A render failure digests as the
+ * error — still stable, and `writeOmpAgentFiles` skips that role the same way.
+ */
+function digestOmpAgentFiles(agents: readonly EffectiveAgent[]): string {
+  const rendered = [...agents]
+    .sort((a, b) => (a.agentKey < b.agentKey ? -1 : a.agentKey > b.agentKey ? 1 : 0))
+    .map((agent) => {
+      try {
+        return [agent.agentKey, renderOmpAgentMarkdown(agent)];
+      } catch (error) {
+        return [agent.agentKey, `<unrenderable: ${error instanceof Error ? error.message : String(error)}>`];
+      }
+    });
+  return sha1(stableSerialize(rendered));
 }
 
 /** Keep a panel id usable as one path segment. */

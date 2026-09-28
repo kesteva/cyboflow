@@ -30,6 +30,13 @@ import {
   type ResolvedCodexExecutable,
 } from './codexExecutablePath';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
+import { resolveRunDeployableAgents } from '../claude/agentOverlayWriter';
+import {
+  defaultCodexAgentRolesDir,
+  materializeCodexAgentRoles,
+  type CodexAgentRoles,
+} from './appServer/agentRoles';
 import { buildCodexTurnInput } from './appServer/imageSpill';
 import {
   CODEX_APP_SERVER_APPROVAL_SOURCE,
@@ -96,6 +103,9 @@ export type CodexAppServerClientFactory = (
 ) => CodexAppServerClientLike;
 
 export type CodexExecutableResolver = () => ResolvedCodexExecutable;
+
+/** Where native agent-role files are written; injectable so tests use a temp dir. */
+export type CodexAgentRolesDirResolver = () => string;
 
 export type CodexMcpRuntimeConfig = CodexAppServerMcpRuntimeConfig;
 
@@ -180,6 +190,13 @@ interface WarmCodexEntry {
   persistRawNotifications: boolean;
   /** The isolation inputs this entry's thread was (or will be) opened with; undefined for a run-scoped spawn. */
   isolationConfig: CodexIsolationConfig | undefined;
+  /**
+   * The native agent roles this entry's thread was (or will be) opened with —
+   * resolved once per spawn and reused for thread/start AND thread/resume, so the
+   * thread carries exactly the roles its warm fingerprint hashed. Empty for an
+   * isolation spawn or a run with no deployable roles.
+   */
+  agentRoles: CodexAgentRoles;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -369,6 +386,7 @@ export class CodexSdkManager extends AbstractCliManager {
     private readonly createAppServerClient: CodexAppServerClientFactory = defaultCodexAppServerClientFactory,
     private readonly resolveExecutable: CodexExecutableResolver = resolveCodexExecutablePath,
     private readonly clientVersion: string = 'development',
+    private readonly resolveAgentRolesDir: CodexAgentRolesDirResolver = defaultCodexAgentRolesDir,
   ) {
     super(sessionManager, logger, configManager);
     if (db == null) {
@@ -633,7 +651,18 @@ export class CodexSdkManager extends AbstractCliManager {
     // fingerprint) without a restart.
     const isolationConfig: CodexIsolationConfig | undefined =
       options.isolation === 'agent' ? { disabledMcpServers: readUserMcpServerNames() } : undefined;
-    const fingerprint = this.computeWarmFingerprint(runId, options, runtimeConfig, executable, isolationConfig);
+    // Resolved BEFORE the fingerprint so the roles are part of the fingerprinted
+    // thread configuration: role files are content-addressed, so a changed role
+    // prompt changes a `config_file` path and busts a parked entry by itself.
+    const agentRoles = this.resolveAgentRoles(runId, options);
+    const fingerprint = this.computeWarmFingerprint(
+      runId,
+      options,
+      runtimeConfig,
+      executable,
+      isolationConfig,
+      agentRoles,
+    );
 
     // Warm reuse: a parked entry for this key whose thread + fingerprint match the
     // incoming resume-continuation absorbs the turn with NO cold app-server spawn.
@@ -651,7 +680,16 @@ export class CodexSdkManager extends AbstractCliManager {
       }
     }
 
-    const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible, isolationConfig);
+    const entry = this.buildColdEntry(
+      options,
+      runId,
+      runtimeConfig,
+      executable,
+      fingerprint,
+      warmEligible,
+      isolationConfig,
+      agentRoles,
+    );
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     return await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
@@ -685,9 +723,42 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   /**
+   * The run's deployable roles, materialized as native Codex agent-role files
+   * (appServer/agentRoles.ts) and returned as the thread's `config.agents` map.
+   *
+   * Never for a hermetic global-agent spawn: that thread is run-less (no frozen
+   * definition to resolve) and deliberately deploys nothing. Otherwise the roles
+   * are the ones the run's FROZEN definition binds (resolveRunDeployableAgents) —
+   * `{}` for a quick chat or a definition-less flow, which keeps their thread
+   * configuration byte-identical to a role-less spawn.
+   *
+   * Fail-soft end to end: a failure here must never block a spawn — it degrades
+   * to "no native roles", which only means the orchestrator does each role's
+   * work itself (the runtime-adapter prompt's fallback) instead of delegating.
+   */
+  private resolveAgentRoles(runId: string, options: ClaudeSpawnerOptions): CodexAgentRoles {
+    if (options.isolation === 'agent') return {};
+    // Adapt only a REAL logger: a logger-less manager stays silent, as every
+    // `this.logger?.` call in this file does, instead of falling back to the
+    // console shim makeLoggerLike builds for an absent one.
+    const logger = this.logger ? makeLoggerLike(this.logger) : undefined;
+    try {
+      const agents = resolveRunDeployableAgents(this.db, runId, logger);
+      if (agents.length === 0) return {};
+      return materializeCodexAgentRoles(agents, this.resolveAgentRolesDir(), logger);
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] native agent-role registration failed for run ${runId}; spawning without roles: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {};
+    }
+  }
+
+  /**
    * Fingerprint the spawn-baked inputs (serialized env + thread configuration —
-   * incl. `developerInstructions`, model, sandbox, and the runId-bearing MCP
-   * bridge env — plus executable path/version and client init version). A warm
+   * incl. `developerInstructions`, model, sandbox, the runId-bearing MCP
+   * bridge env, and the native agent-role map (content-addressed role-file
+   * paths) — plus executable path/version and client init version). A warm
    * turn whose fingerprint changed forces a cold respawn instead of splicing a
    * mismatched conversation onto the live thread. runId is baked into the env, so
    * a cross-run reuse self-invalidates.
@@ -698,10 +769,11 @@ export class CodexSdkManager extends AbstractCliManager {
     runtimeConfig: CodexMcpRuntimeConfig,
     executable: ResolvedCodexExecutable,
     isolationConfig: CodexIsolationConfig | undefined,
+    agentRoles: CodexAgentRoles,
   ): string {
     return sha1(stableSerialize({
       env: buildCodexAppServerEnvironment(runId, runtimeConfig),
-      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig),
+      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig, agentRoles),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
       clientVersion: this.clientVersion,
@@ -742,6 +814,7 @@ export class CodexSdkManager extends AbstractCliManager {
     fingerprint: string,
     warmEligible: boolean,
     isolationConfig: CodexIsolationConfig | undefined,
+    agentRoles: CodexAgentRoles,
   ): WarmCodexEntry {
     // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
     // never an `agent:` id-prefix sniff. The client callbacks below are baked once
@@ -755,6 +828,7 @@ export class CodexSdkManager extends AbstractCliManager {
       rawNotificationSink: new CodexRawNotificationSink(this.db, this.logger),
       persistRawNotifications: !isolationSpawn,
       isolationConfig,
+      agentRoles,
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -1001,13 +1075,20 @@ export class CodexSdkManager extends AbstractCliManager {
                 options,
                 runtimeConfig,
                 entry.isolationConfig,
+                entry.agentRoles,
               )),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread resume',
             )
           : await withTimeout(
               entry.turnSession.startThread(
-                buildCodexAppServerThreadStartParams(runId, options, runtimeConfig, entry.isolationConfig),
+                buildCodexAppServerThreadStartParams(
+                  runId,
+                  options,
+                  runtimeConfig,
+                  entry.isolationConfig,
+                  entry.agentRoles,
+                ),
               ),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread start',

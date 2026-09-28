@@ -156,8 +156,8 @@ function makeServices(opts: {
   return createSessionOps(services);
 }
 
-async function invoke(ops: SessionOpsLike) {
-  return (await ops.getStatistics({ sessionId: SESSION_ID })) as StatisticsResult;
+async function invoke(ops: SessionOpsLike, baseRef?: string) {
+  return (await ops.getStatistics({ sessionId: SESSION_ID, baseRef })) as StatisticsResult;
 }
 
 describe('sessionOps.getStatistics — file statistics', () => {
@@ -311,5 +311,54 @@ describe('sessionOps.getStatistics — file statistics', () => {
       WORKTREE,
       expect.arrayContaining([`${optionLikeCandidate}^{commit}`]),
     );
+  });
+
+  // TASK-278: `baseRef` is the caller's persisted BaseSelector selection —
+  // it must take precedence over the session's recorded `base_commit` in the
+  // fallback chain, so the card agrees with whatever the Diff panel beside it
+  // is showing.
+  it('diffs against the caller-supplied baseRef, not the recorded base_commit, when both are given', async () => {
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+      changedFiles: [],
+    }));
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+
+    const result = await invoke(ops, 'main');
+
+    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'main');
+    expect(result.data.files.totalFilesChanged).toBe(0);
+  });
+
+  it('falls back to base_commit when the caller-supplied baseRef does not resolve', async () => {
+    mockRunGitAsync.mockImplementation(async (_cwd: string, args: string[]) => {
+      if (args.includes('no-such-branch^{commit}')) throw new Error('unknown revision');
+      const revArg = args[args.length - 1];
+      const match = typeof revArg === 'string' ? revArg.match(/^(.*)\^\{commit\}$/) : null;
+      return match ? match[1] : '';
+    });
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 15443, deletions: 745, filesChanged: 177 },
+      changedFiles: ['CHANGELOG.md'],
+    }));
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+
+    const result = await invoke(ops, 'no-such-branch');
+
+    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, BASE_COMMIT);
+    expect(result.data.files.totalFilesChanged).toBe(177);
+  });
+
+  it('with no baseRef supplied, behaves exactly as before (diffs against base_commit)', async () => {
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 15443, deletions: 745, filesChanged: 177 },
+      changedFiles: ['CHANGELOG.md', 'docs/ARCHITECTURE.md'],
+    }));
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+
+    const result = await invoke(ops);
+
+    expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, BASE_COMMIT);
+    expect(result.data.files.totalFilesChanged).toBe(177);
   });
 });

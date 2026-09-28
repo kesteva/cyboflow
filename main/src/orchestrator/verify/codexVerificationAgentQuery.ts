@@ -12,8 +12,9 @@
  * `sandbox: 'danger-full-access'` / `approvalPolicy: 'never'` with a turn-level
  * `sandboxPolicy: { type: 'dangerFullAccess' }` — parity with the Claude verifier's
  * actual (OS-unsandboxed) posture, since the verifier must build/serve/drive a real
- * deliverable. It is nevertheless HERMETIC in config terms: NO `config` is attached
- * to the thread, so there is no cyboflow MCP server and no cyboflow-state write path.
+ * deliverable. It is nevertheless HERMETIC in config terms: the thread's only `config`
+ * key is `allow_login_shell: false` (see startThread below), so there is no cyboflow
+ * MCP server and no cyboflow-state write path.
  * The workflow persona + immutable harness contract ride as `developerInstructions`.
  *
  * Like verificationAgentQuery, on timeout/error this THROWS a
@@ -239,28 +240,51 @@ function toJsonValue(value: unknown): AppServerJsonValue {
  * Undo the strict-schema nullability promotion on the parsed report
  * (adversarial-review fix): `toStrictOutputSchema` makes every OPTIONAL
  * VerificationReportV1 property required-but-nullable, so a schema-compliant
- * Codex report carries `buildLogExcerpt: null` (on any non-build outcome) and
- * `issues[].fileName: null` — which `normalizeVerificationReportV1` rejects
- * ("expected string"), collapsing every valid Codex report into the fail-open
- * `skipped` bucket. Strip exactly those nulls back to ABSENT here so the shared
- * normalizer stays strict for both runtimes. COUPLING: the optional properties of
- * VERIFICATION_REPORT_JSON_SCHEMA are `buildLogExcerpt` and `issues[].fileName`;
- * anyone adding an optional field to the schema must extend this stripper (the
- * boundary round-trip test guards the current pair). Exported for unit tests.
+ * Codex report carries `buildLogExcerpt: null` (on any non-build outcome),
+ * `attestation: null`, `issues[].fileName: null`, `app.productGlob: null`, … —
+ * which `normalizeVerificationReportV1` rejects ("expected string"/"expected an
+ * object"), turning every valid Codex report into a blocking "invalid
+ * structured report". Strip exactly those nulls back to ABSENT here so the
+ * shared normalizer stays strict for both runtimes.
+ *
+ * The stripped set is DERIVED from VERIFICATION_REPORT_JSON_SCHEMA — every
+ * property a node declares but does not list in its `required`, at any depth,
+ * which is exactly the set the strict transform made nullable. It used to be a
+ * hand-kept list, and that list missed `attestation` the moment the echo was
+ * added (runbook-optional-verification.md F6); deriving it means a new optional
+ * field needs no edit here. A null on a REQUIRED property, or on a key the
+ * schema does not declare, is left as-is for the normalizer to judge. Exported
+ * for unit tests.
  */
 export function stripStrictSchemaNulls(structured: unknown): unknown {
-  if (!isRecord(structured)) return structured;
-  const out: Record<string, unknown> = { ...structured };
-  if (out.buildLogExcerpt === null) delete out.buildLogExcerpt;
-  if (Array.isArray(out.issues)) {
-    out.issues = out.issues.map((issue) => {
-      if (!isRecord(issue) || issue.fileName !== null) return issue;
-      const rest: Record<string, unknown> = { ...issue };
-      delete rest.fileName;
-      return rest;
-    });
+  return stripNullOptionals(structured, VERIFICATION_REPORT_JSON_SCHEMA);
+}
+
+/** Walk `value` alongside its JSON-schema node, dropping `null` on the node's non-required declared properties. */
+function stripNullOptionals(value: unknown, schema: unknown): unknown {
+  if (!isRecord(schema)) return value;
+  if (Array.isArray(value)) {
+    const items = schema.items;
+    return isRecord(items) ? value.map((item) => stripNullOptionals(item, items)) : value;
   }
-  return out;
+  const properties = schema.properties;
+  if (!isRecord(value) || !isRecord(properties)) return value;
+  const required = new Set(
+    Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : [],
+  );
+  const out: Array<[string, unknown]> = [];
+  for (const [key, entry] of Object.entries(value)) {
+    // Own-property lookup: a model-authored key like "constructor" must not
+    // resolve to Object.prototype and read as a declared optional.
+    if (!Object.prototype.hasOwnProperty.call(properties, key)) {
+      out.push([key, entry]);
+      continue;
+    }
+    if (entry === null && !required.has(key)) continue;
+    out.push([key, stripNullOptionals(entry, properties[key])]);
+  }
+  // fromEntries defines OWN keys, so a model-authored "__proto__" stays data.
+  return Object.fromEntries(out);
 }
 
 function parseModels(value: unknown): AppServerModel[] {
@@ -495,8 +519,17 @@ export function makeCodexVerificationAgentQuery(
         turnSession.startThread({
           ...(args.cwd ? { cwd: args.cwd } : {}),
           // Parity with the Claude verifier's OS-unsandboxed posture; hermetic in
-          // config terms — NO `config` attached, so no cyboflow MCP server.
+          // config terms — no MCP server config is attached, so no cyboflow MCP
+          // server.
           sandbox: 'danger-full-access',
+          // The ONE config key: keep the shell tool out of LOGIN shells. A login
+          // shell re-sorts PATH on macOS (path_helper + `brew shellenv` put
+          // `/opt/homebrew/bin` back in front), which pushes the runner's
+          // dependency-guard PATH shim (dependencyGuardShim.ts, §A1.4 F8 — the
+          // ONLY dependency guard on this runtime) behind the real package
+          // managers. Measured on 0.153.3: the default puts homebrew first; this
+          // keeps the prepended shim dir ahead of it.
+          config: { allow_login_shell: false },
           approvalPolicy: 'never',
           // The workflow persona + immutable harness contract ride here.
           developerInstructions: args.systemPrompt,

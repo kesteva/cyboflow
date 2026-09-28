@@ -11,14 +11,16 @@
  * Every parser is DEFENSIVE: a malformed payload degrades to `null` / a neutral
  * fallback. A verify-queue panel must never throw or blank on one bad row.
  */
-import type {
-  RequestStatus,
-  VerdictV1,
-  VerificationFailureClass,
-  VerificationFailureEvidence,
-  VerificationRequestInput,
-  VerificationTaskV1,
-  VerificationReportV1,
+import {
+  VERIFICATION_REPORT_OUTCOMES,
+  type RequestStatus,
+  type VerdictV1,
+  type VerificationFailureClass,
+  type VerificationFailureEvidence,
+  type VerificationRequestInput,
+  type VerificationTaskV1,
+  type VerificationReportOutcome,
+  type VerificationReportV1,
 } from '../../../../shared/types/visualVerification';
 import type { VerificationRequest } from '../../hooks/useVerificationRequests';
 
@@ -118,19 +120,35 @@ export function parseReport(json: string | null): VerificationReportV1 | null {
   }
 }
 
-/** True for a valid `VerificationReportV1['outcome']` member. */
-function isReportOutcome(value: unknown): value is VerificationReportV1['outcome'] {
-  return (
-    value === 'pass' || value === 'fail' || value === 'build_failed' || value === 'launch_failed'
-  );
+/**
+ * True for a valid `VerificationReportV1['outcome']` member — read off the
+ * shared {@link VERIFICATION_REPORT_OUTCOMES} list, so a report whose outcome
+ * the harness accepts can never degrade to "no report" here.
+ */
+function isReportOutcome(value: unknown): value is VerificationReportOutcome {
+  return (VERIFICATION_REPORT_OUTCOMES as readonly unknown[]).includes(value);
 }
+
+/**
+ * Human copy for each report outcome — the Verify-Queue card's "report
+ * outcome: …" line. A `Record` over the shared union, so a new outcome is a
+ * compile error here until it has a label rather than a raw snake_case token.
+ */
+export const REPORT_OUTCOME_LABEL: Readonly<Record<VerificationReportOutcome, string>> = {
+  pass: 'pass',
+  fail: 'fail',
+  build_failed: 'build failed',
+  launch_failed: 'launch failed',
+  unverifiable: 'unverifiable',
+  wrong_environment: 'wrong environment',
+};
 
 /**
  * Just the `outcome` member of a serialized `VerificationReportV1` — the CARD
  * shows the report OUTCOME only, not the whole report (behaviors/evidence are
  * the detail dialog's job, and also live on the screenshots artifact, §5.9).
  */
-export function parseReportOutcome(json: string | null): VerificationReportV1['outcome'] | null {
+export function parseReportOutcome(json: string | null): VerificationReportOutcome | null {
   if (json === null) return null;
   try {
     const outcome = (JSON.parse(json) as { outcome?: unknown }).outcome;
@@ -194,7 +212,7 @@ export function statusSummary(req: VerificationRequest, isAgent: boolean): strin
   }
   if (TERMINAL_STATUSES.has(req.status)) {
     const outcome = parseReportOutcome(req.report_json);
-    if (outcome !== null) return `report outcome: ${outcome.replace('_', ' ')}`;
+    if (outcome !== null) return `report outcome: ${REPORT_OUTCOME_LABEL[outcome]}`;
   }
   if (req.error_message !== null && req.error_message.trim().length > 0) {
     return req.error_message;

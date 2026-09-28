@@ -1379,3 +1379,103 @@ describe('runRunbookBootstrap — the RE-PROVE mode', () => {
     h.db.close();
   });
 });
+
+// ── §A7: prove-only under explore (runbook-optional-verification.md) ─────────
+describe('runRunbookBootstrap — prove-only (§A7, the request explores)', () => {
+  const PROVE_ONLY_ARGS = { ...PROVE_REGISTERED_ARGS, proveOnly: true };
+
+  it('proves the registered draft and reports the pin on a pass — no agent, no write, no commit', async () => {
+    const h = harness({ currentRecord: () => DRAFT_RECORD });
+    const outcome = await runRunbookBootstrap(PROVE_ONLY_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'proven', runbookHash: 'draft-hash', runbookVersion: 5, commitSha: null });
+    expect(h.proofs).toEqual([{ round: 0, runbookHash: 'draft-hash', runbookLocalVersion: 5 }]);
+    expect(h.drafts).toBe(0);
+    expect(h.written).toEqual([]);
+    expect(h.commits).toEqual([]);
+    h.db.close();
+  });
+
+  it('a FAILED proof settles the stamp — no drafting fallback, unlike the pre-explore arm', async () => {
+    const h = harness({ currentRecord: () => DRAFT_RECORD, proofs: [FAIL, PASS] });
+    const outcome = await runRunbookBootstrap(PROVE_ONLY_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'unproven', commitSha: null });
+    expect(outcome.kind === 'unproven' && outcome.detail).toContain('the serve command exited immediately');
+    expect(h.drafts).toBe(0);
+    expect(h.proofs.map((p) => p.round)).toEqual([0]);
+    expect(h.written).toEqual([]);
+    expect(h.commits).toEqual([]);
+    expect(h.stamps.read('run-1', 1, 'web')).toMatchObject({ state: 'failed' });
+    h.db.close();
+  });
+
+  it('with nothing provable (no draft record) or an unenqueueable proof, declines instead of drafting', async () => {
+    const none = harness({ currentRecord: () => null });
+    await expect(runRunbookBootstrap(PROVE_ONLY_ARGS, none.deps)).resolves.toMatchObject({
+      kind: 'declined',
+      reason: 'infrastructure',
+    });
+    expect(none.drafts).toBe(0);
+    expect(none.proofs).toEqual([]);
+    expect(none.stamps.read('run-1', 1, 'web')).toMatchObject({ state: 'failed' });
+    none.db.close();
+
+    const noEnqueue = harness({
+      currentRecord: () => DRAFT_RECORD,
+      enqueueProof: async () => ({ error: 'scheduler-unavailable' }),
+    });
+    await expect(runRunbookBootstrap(PROVE_ONLY_ARGS, noEnqueue.deps)).resolves.toMatchObject({
+      kind: 'declined',
+      reason: 'infrastructure',
+    });
+    expect(noEnqueue.drafts).toBe(0);
+    noEnqueue.db.close();
+  });
+
+  it('stays behind the §10 suppression — a suppressed project proves nothing and claims nothing', async () => {
+    const h = harness({ currentRecord: () => DRAFT_RECORD });
+    h.suppression.suppress({
+      projectId: 1,
+      modality: 'web',
+      inputHash: 'input-a',
+      hostFingerprint: 'host-a',
+      reason: 'not possible on this host',
+    });
+    await expect(runRunbookBootstrap(PROVE_ONLY_ARGS, h.deps)).resolves.toMatchObject({
+      kind: 'declined',
+      reason: 'suppressed',
+    });
+    expect(h.proofs).toEqual([]);
+    expect(h.drafts).toBe(0);
+    expect(h.stamps.read('run-1', 1, 'web')).toBeNull();
+    h.db.close();
+  });
+
+  it('a restarted owner whose registered proof FAILED settles rather than starting a draft round', async () => {
+    const h = harness({ proofs: [FAIL, PASS] });
+    h.stamps.claim({ runId: 'run-1', projectId: 1, modality: 'web', ownerTaskRef: 'TASK-7' });
+    h.stamps.advance({
+      runId: 'run-1',
+      projectId: 1,
+      modality: 'web',
+      ownerTaskRef: 'TASK-7',
+      state: 'proving',
+      round: 0,
+      requestId: 'req-registered',
+      runbookHash: 'draft-hash',
+      runbookVersion: 5,
+    });
+    const outcome = await runRunbookBootstrap(PROVE_ONLY_ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    expect(h.drafts).toBe(0);
+    expect(h.proofs).toEqual([]);
+    h.db.close();
+  });
+
+  it('proveOnly false/absent is the pre-explore derive exactly (a failed registered proof drafts)', async () => {
+    const h = harness({ currentRecord: () => DRAFT_RECORD, proofs: [FAIL, PASS] });
+    const outcome = await runRunbookBootstrap({ ...PROVE_REGISTERED_ARGS, proveOnly: false }, h.deps);
+    expect(outcome).toMatchObject({ kind: 'proven', runbookHash: 'hash-1' });
+    expect(h.drafts).toBe(1);
+    h.db.close();
+  });
+});

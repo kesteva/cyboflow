@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3';
 import {
   listRunAgentTargets,
   readRunAgentTargetOverrides,
+  resolveRunDeployableAgents,
   resolveRunEffectiveAgents,
 } from '../agentOverlayWriter';
 import { createTestDb, seedRun } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
@@ -132,5 +133,30 @@ describe('listRunAgentTargets', () => {
   it('returns [] for an unknown run', () => {
     const { db } = makeRun({ withColumn: true });
     expect(listRunAgentTargets(db, 'nope')).toEqual([]);
+  });
+});
+
+describe('resolveRunDeployableAgents', () => {
+  it('returns the effective agents the frozen definition binds, with their resolved prompts', () => {
+    const { db, runId } = makeRun({ withColumn: true });
+    const agents = resolveRunDeployableAgents(db, runId);
+    const keys = agents.map((a) => a.agentKey);
+    expect(keys).toEqual(expect.arrayContaining(['implement', 'code-review', 'task-verify', 'sprint-verify']));
+    for (const foreign of ['interview', 'context', 'compounder', 'verify-setup']) {
+      expect(keys).not.toContain(foreign);
+    }
+    // The same resolution the Claude overlay writes: the workflow pin rides along.
+    expect(agents.find((a) => a.agentKey === 'implement')?.model).toBe('sonnet');
+  });
+
+  it('returns [] rather than the whole catalogue when the frozen definition cannot be resolved', () => {
+    const { db, runId } = makeRun({ withColumn: true });
+    db.prepare("UPDATE workflows SET spec_json = '{}'").run();
+    expect(resolveRunDeployableAgents(db, runId)).toEqual([]);
+  });
+
+  it('returns [] for an unknown run', () => {
+    const { db } = makeRun({ withColumn: true });
+    expect(resolveRunDeployableAgents(db, 'nope')).toEqual([]);
   });
 });

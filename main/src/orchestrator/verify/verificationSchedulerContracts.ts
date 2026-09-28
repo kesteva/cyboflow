@@ -33,6 +33,7 @@ import type { AgentPreflightResult } from './preflight';
 import type { VerifyCapabilityStore } from './capabilityStore';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
+import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
 import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import { ResourceLeasePool } from './verificationLeases';
 
@@ -541,8 +542,10 @@ export interface VerificationSchedulerDeps {
   portFreeProbe?: (port: number) => Promise<boolean>;
   /**
    * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time
-   * (redesign §5.6). A row whose `enqueued_at` is older than this at drain time —
-   * i.e. it never acquired a lease within the window — is terminalized 'skipped'
+   * (redesign §5.6), measured from max(enqueue, last drain progress) and
+   * hard-capped at ceiling + 2 × AGENT_REQUEST_TIMEOUT_CEILING_MS from enqueue
+   * (queuedAgeDeadline.ts). A row past it at drain time — i.e. it never acquired
+   * a lease within the window — is terminalized 'skipped'
    * (fail-open, concrete lease reason) through the normal delivery path so a
    * merge-gate lane parked at awaiting-verify is never wedged behind a starved
    * request. Defaults to config.queuedAgeCeilingMs (15 min). Tests pass a small
@@ -642,6 +645,14 @@ export interface VerificationSchedulerDeps {
    * it just does so silently.
    */
   capabilityFinding?: CapabilityBreakerFindingFn;
+  /**
+   * §A7 drift finding — files the non-blocking "runbook needs re-proving, lanes
+   * explore meanwhile" notice the bootstrap preflight raises. Injected for the
+   * same standalone-typecheck reason as {@link capabilityFinding}; the concrete
+   * implementation is verdictDelivery's `createExploreStaleProofFinding`.
+   * Absent ⇒ no finding.
+   */
+  staleProofFinding?: (finding: ExploreStaleProofFinding) => void | Promise<void>;
   /**
    * §4 roster — whether this host can capture the screen at all, the ONE gate
    * that decides whether a `native-screen` request is deployable. The intended

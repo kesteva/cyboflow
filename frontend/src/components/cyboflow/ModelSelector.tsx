@@ -22,11 +22,6 @@ import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
 import { groupOmpOptionsByProvider } from './unified/ompModelGrouping';
 import { providerForRuntime } from '../../../../shared/types/agentRuntime';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
-/** The quick-session default model — Opus, per product direction. */
-export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
-
-/** The workflow-launch default model — Opus, matching quick sessions. */
-export { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults';
 
 /**
  * The Ultracode-launch default model — Fable 5.1, per product direction (ultracode

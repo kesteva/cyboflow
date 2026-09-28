@@ -35,7 +35,11 @@ import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
-import { createVerdictDelivery, createCapabilityBreakerFinding } from './orchestrator/verify/verdictDelivery';
+import {
+  createVerdictDelivery,
+  createCapabilityBreakerFinding,
+  createExploreStaleProofFinding,
+} from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
 import { VerifyRunbookStore } from './orchestrator/verify/runbookStore';
@@ -51,6 +55,7 @@ import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore
 import {
   computeVerifyInputHash,
   computeVerifyHostFingerprint,
+  probeHasPackageJson,
 } from './services/visualVerify/verifyDriftProbes';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
@@ -453,6 +458,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     },
     computeInputHash: verifyComputeInputHash,
     hostFingerprint: verifyHostFingerprint,
+    // A0 legacy-NULL compat: a record proven before the fallback input hash
+    // stored NULL for a package.json-less tree; this lets it keep matching.
+    hasPackageJson: probeHasPackageJson,
     logger: cyboflowLogger,
   });
 
@@ -863,6 +871,8 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // actually passed is the only transition into 'proven'.
     runbookStore: verifyRunbookStore,
     capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
+    // §A7 — the "runbook needs re-proving, lanes explore meanwhile" notice.
+    staleProofFinding: createExploreStaleProofFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // Phase 1 modality roster (§4): the live grant probe that decides whether a
     // `native-screen` request may deploy at all. Reuses the capture backend's
     // healthCheck verbatim, exactly as the proposal prescribes ("the retired

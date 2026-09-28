@@ -4,15 +4,22 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type Database from 'better-sqlite3';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import type { ConversationMessage } from '../../../database/models';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
 import { isPermissionMode } from '../../../../../shared/types/workflows';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
+import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
+import type { Logger } from '../../../utils/logger';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import type { ConfigManager } from '../../configManager';
+import type { SessionManager } from '../../sessionManager';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { probeCliVersion, type CliVersionProbeResult } from '../cli/cliVersionProbe';
+import { installAgentOverlay } from '../claude/agentOverlayWriter';
+import { ensureBundleExcluded } from '../claude/workflowBundleInstall';
 import { evaluatePiVersionPolicy, PI_MIN_SUPPORTED_VERSION, PI_TESTED_VERSION } from './piVersions';
 import {
   PI_GATE_ENV_KEYS,
@@ -76,6 +83,19 @@ interface PiJsonEvent {
 export class PiSdkManager extends AbstractCliManager {
   private resolvedExecutablePath: string | null = null;
   private readonly turns = new Map<string, PiTurnState>();
+
+  /**
+   * Optional: used only to write a workflow run's role files (see
+   * installRoleOverlayIfWorkflowSpawn). Every other path runs without it.
+   */
+  constructor(
+    sessionManager: SessionManager,
+    logger?: Logger,
+    configManager?: ConfigManager,
+    private readonly db?: Database.Database,
+  ) {
+    super(sessionManager, logger, configManager);
+  }
 
   protected getCliToolName(): string {
     return 'Pi';
@@ -465,8 +485,40 @@ export class PiSdkManager extends AbstractCliManager {
     if (state.child && !state.child.killed) {
       throw new Error(`[PI] a turn is already running for panel ${panelId}`);
     }
+    // options.worktreePath, not state.cwd: state.cwd has already absorbed the
+    // process.cwd() fallback, which must never receive role files.
+    this.installRoleOverlayIfWorkflowSpawn(options.runId, options.worktreePath);
     await this.runTurn(panelId, sessionId, state.cwd, options.prompt ?? '', options.runId);
     return { resultText: this.lastResultText.get(panelId) ?? null };
+  }
+
+  /**
+   * Write the run's resolved role prompts to `<worktree>/.claude/agents/
+   * cyboflow-<key>.md` — the same files `installAgentOverlay` writes for Claude.
+   * pi has no delegation tool, so it performs every role in-turn; its
+   * runtime-adapter prompt (workflowPromptRenderer) tells it to read the role's
+   * file and follow it. The frontmatter uses Claude's tool names, which the
+   * envelope translates for pi (Glob means `find`).
+   *
+   * Workflow spawns only: a runId, a db handle and an EXPLICIT worktree path
+   * must all be present — never the `process.cwd()` fallback spawnCliProcess
+   * uses when worktreePath is missing, which under `pnpm dev` is the cyboflow
+   * checkout itself. The git exclude is written before the files, and any
+   * failure is logged, never thrown: a role-file problem must not break a turn.
+   */
+  private installRoleOverlayIfWorkflowSpawn(runId: string | undefined, worktreePath: string | undefined): void {
+    if (typeof runId !== 'string' || runId.length === 0) return;
+    if (!this.db) return;
+    if (typeof worktreePath !== 'string' || worktreePath.length === 0) return;
+    try {
+      const loggerLike = this.logger ? makeLoggerLike(this.logger) : undefined;
+      ensureBundleExcluded(worktreePath, [], loggerLike);
+      installAgentOverlay(this.db, runId, worktreePath, loggerLike);
+    } catch (err) {
+      this.logger?.warn(
+        `[PI] role overlay install failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Final assistant text of the most recent turn, for {@link CliSpawnOutcome}. */

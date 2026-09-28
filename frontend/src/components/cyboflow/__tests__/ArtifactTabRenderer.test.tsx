@@ -1731,6 +1731,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_gate',
         verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+        surface: 'artifact:approve-ideas',
       }),
     );
     expect(reviewItemsResolveMutate).toHaveBeenCalledTimes(1);
@@ -1773,6 +1774,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_gate',
         verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'approve' },
+        surface: 'artifact:approve-ideas',
       }),
     );
   });
@@ -1818,6 +1820,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_gate',
         verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+        surface: 'artifact:approve-ideas',
       }),
     );
   });
@@ -2051,6 +2054,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_gate',
         verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+        surface: 'artifact:approve-designs',
       }),
     );
     expect(reviewItemsResolveMutate).toHaveBeenCalledTimes(1);
@@ -2122,6 +2126,7 @@ describe('ArtifactTabRenderer', () => {
         projectId: 1,
         reviewItemId: 'rvw_gate',
         verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+        surface: 'artifact:approve-designs',
       }),
     );
   });

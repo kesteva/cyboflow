@@ -192,6 +192,9 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
   mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
+  requireProvenRunbook: VISUAL_VERIFY_DEFAULTS.requireProvenRunbook,
+  exploreDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.exploreDeadlineFloorMs,
+  mobileDriveEngine: VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
 };
 
 /** The leased pair every row's request gets: the pool's first slot and its driver sidecar. */
@@ -614,6 +617,13 @@ function initScheduler(
     probePath?: string;
     /** A REAL artifacts dir, for the one row that writes a file into it and proves the harness ignores it. */
     artifactsDir?: string;
+    /**
+     * The runbook-optional KILL SWITCH (runbook-optional-verification.md §A1):
+     * `true` restores the pre-explore gate (3) — an unproven build/serve
+     * request skips. Rows that pin THAT contract set it; the default (off)
+     * lets them explore.
+     */
+    requireProvenRunbook?: boolean;
   },
 ): VerificationScheduler {
   const runbookStore = opts.runbookStore;
@@ -624,7 +634,7 @@ function initScheduler(
     backends: {},
     judge: fakeJudge,
     artifactsDirResolver: () => artifactsDir,
-    config: CONFIG,
+    config: opts.requireProvenRunbook === true ? { ...CONFIG, requireProvenRunbook: true } : CONFIG,
     leasePool: new ResourceLeasePool(new Mutex()),
     agentRunner: makeRunner(opts.world),
     capabilityStore: opts.capabilityStore ?? new VerifyCapabilityStore(dbAdapter(dbX)),
@@ -1277,6 +1287,9 @@ describe('§5.4 matrix — injected env fault (chromium removed)', () => {
 // ===========================================================================
 
 describe('§5.4 matrix — runbook drift refuses a proven record', () => {
+  // ROWS 8 + 9 pin the refusal, which since runbook-optional verification
+  // (§A1) is the KILL-SWITCH contract: with the switch off the same drifted
+  // request explores instead — see ROW 8's companion below.
   it("ROW 8: an edited dev script (project input-hash drift) reads 'unproven-draft' and the request skips with the setup CTA", async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
@@ -1289,7 +1302,7 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
 
     const world = makeWorld();
     seedRun(db, 'run-input-drift');
-    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const scheduler = initScheduler(db, { world, runbookStore: store, requireProvenRunbook: true });
     const requestId = await enqueueThroughSeam(scheduler, {
       runId: 'run-input-drift',
       task: composedTask(),
@@ -1315,6 +1328,32 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
     expect(world.deploys).toHaveLength(0);
   });
 
+  it('ROW 8, kill switch OFF: the same drifted request EXPLORES — unpinned, deployed once, never the drift skip', async () => {
+    const io = makeRunbookIo();
+    const store = makeRunbookStore(db, io);
+    await proveModality(store, 'web');
+    io.inputHash = 'inputs-v2';
+
+    const world = makeWorld();
+    seedRun(db, 'run-input-drift-explore');
+    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const requestId = await enqueueThroughSeam(scheduler, {
+      runId: 'run-input-drift-explore',
+      task: composedTask(),
+    });
+    await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
+
+    const row = readRow(db, requestId);
+    // The enqueue seam still declined the pin (the record reads drifted), and
+    // the engine explored instead of skipping on that absence. What the runner
+    // then concluded is the runner's contract, not this row's.
+    expect(row.runbook_hash).toBeNull();
+    expect(row.error_message).not.toBe(VERIFY_RUNBOOK_DRIFTED_REASON);
+    expect(world.deploys).toHaveLength(1);
+    // Nothing about exploring touched the proof: drift is still computed, never written.
+    expect(runbookRecord(db)?.status).toBe('proven');
+  });
+
   it('ROW 9: host-fingerprint drift refuses; a fresh derive + proof restores it and the build/serve task deploys again', async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
@@ -1326,7 +1365,7 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
 
     const world = makeWorld();
     seedRun(db, 'run-host-drift');
-    const scheduler = initScheduler(db, { world, runbookStore: store });
+    const scheduler = initScheduler(db, { world, runbookStore: store, requireProvenRunbook: true });
 
     const demotedId = await enqueueThroughSeam(scheduler, {
       runId: 'run-host-drift',
@@ -1338,10 +1377,15 @@ describe('§5.4 matrix — runbook drift refuses a proven record', () => {
     expect(runbookRecord(db)?.status).toBe('proven');
     expect(world.deploys).toHaveLength(0);
 
-    // RE-PROOF on the new host: a fresh draft (bumping the CAS version so any
-    // in-flight pin against the old revision fails) plus a fresh proof.
+    // RE-PROOF on the new host. Re-registering unchanged content over a proven
+    // record is a no-op (A8: same hash + bindings keeps the record and its CAS
+    // version), so the recovery is a fresh proof against the SAME revision,
+    // re-stamped with this host's provenance.
     const reProof = await proveModality(store, 'web');
-    expect(reProof.version).toBeGreaterThan(firstProof.version);
+    expect(reProof).toEqual(firstProof);
+    expect(
+      store.markProven(1, 'web', reProof.hash, reProof.version, '{"fixture":true}', await store.freshProvenance(LIVE_WORKTREE)),
+    ).toEqual({ ok: true });
     expect(runbookRecord(db)?.status).toBe('proven');
 
     // …and the SAME task now deploys, pinned to the new revision.
