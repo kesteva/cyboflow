@@ -188,6 +188,9 @@ The harness contract appended to this prompt tells you which mode you are in.
     and cdp-app its `serve.cmd` must equal the composed one, and its
     `attestation` is the task's declared channel — or, when none was declared,
     `{ "kind": "serve-binding" }`, the binding a web/cdp-app pass rested on.
+    When your prompt carries a HARNESS NONCE MARKER note, leave the one line
+    the harness added to the entry HTML in place, and don't revert it: the
+    harness attests and records its own marker channel.
     The harness keeps it as an unproven draft that a later request proves; omit
     it on any other outcome.
 

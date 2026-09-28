@@ -57,7 +57,18 @@ the request runs:
   pass that rested on the serve binding alone learns an entry with
   `"attestation": {"kind": "serve-binding"}`, so a project whose app renders no
   attestation nonce still learns and gets pinned; a pinned `serve-binding`
-  entry verifies exactly when the port is bound to its verbatim `serve.cmd`. The lane's next
+  entry verifies exactly when the port is bound to its verbatim `serve.cmd`.
+  An explore **web** request also gets a harness-injected nonce marker: before
+  the agent starts, the harness adds
+  `<meta name="cyboflow-verify-nonce" data-verify-nonce=…>` to the SNAPSHOT's
+  entry HTML (`index.html`, `public/index.html`, `src/index.html` or
+  `src/app.html`; never the repo). When the page in the driver's browser
+  carries it and the serve binding holds, the pass rests on `dom-marker`
+  `meta[name="cyboflow-verify-nonce"]` and learns that channel, and a pinned
+  request from such a runbook injects the marker again. Server-rendered apps
+  (Next, Remix, Nuxt, …), a monorepo package below the root, and ambiguous
+  layouts are skipped, and so is a marker that never showed up: all of them
+  fall back to the serve-binding verdict. The lane's next
   request runs that draft as a learned pin: a pass marks it proven, a failed
   stand-up discards it and re-runs the request in explore. Both events file a
   non-blocking finding naming the commands.
