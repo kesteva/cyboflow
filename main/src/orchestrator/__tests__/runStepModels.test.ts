@@ -419,7 +419,7 @@ describe('resolveRunStepModels', () => {
     expect(result.length).toBeGreaterThan(0);
     for (const info of result) {
       expect(Object.keys(info).sort()).toEqual(
-        ['family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
+        ['agentKey', 'family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
       );
       expect(JSON.stringify(info)).not.toContain('SECRET_SYSTEM_PROMPT_SHOULD_NEVER_LEAK');
     }
@@ -445,7 +445,7 @@ describe('cyboflow.runs.getStepModels', () => {
     expect(opusStep?.label).toBe(AGENT_MODEL_LABELS.opus);
     for (const info of result) {
       expect(Object.keys(info).sort()).toEqual(
-        ['family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
+        ['agentKey', 'family', 'label', 'phaseId', 'stepId', 'stepName'].sort(),
       );
     }
   });

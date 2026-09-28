@@ -72,11 +72,14 @@ export type { EffectiveAgentsResolver, StepModelGates } from './trpc/contracts/e
  * (systemPrompt/tools/mcp*) — this is the wire shape `runs.getStepModels`
  * returns verbatim. `WorkflowStep.id` is unique only WITHIN its phase, so
  * consumers key on `(phaseId, stepId)` — see `stepModelKey` in
- * `shared/types/agents.ts`. */
+ * `shared/types/agents.ts`. `agentKey` is the resolved step agent identifier
+ * (from `resolveStepAgentKey`) — not an internal, since it names nothing
+ * about the agent's configuration, only which one ran. */
 export interface StepModelInfo {
   stepId: string;
   stepName: string;
   phaseId: string;
+  agentKey: string;
   label: string;
   family: ModelFamily;
 }
@@ -226,7 +229,7 @@ export function resolveRunStepModels(
         family = 'auto';
       }
 
-      out.push({ stepId: step.id, stepName: step.name, phaseId: phase.id, label, family });
+      out.push({ stepId: step.id, stepName: step.name, phaseId: phase.id, agentKey, label, family });
     }
   }
 
