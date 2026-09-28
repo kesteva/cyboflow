@@ -1095,6 +1095,26 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
     expect(failed.some((e) => e.status === 'failed' && e.text === 'still there?')).toBe(true);
   });
 
+  it('TASK-300 attempt 2: surfaces an honest "parked" reason immediately, without waiting on the stuck detector', async () => {
+    // The tRPC boundary now catches the SAME shape 'stuck' answers the instant
+    // the message is submitted — reason 'parked' — rather than only after the
+    // StuckDetector's 45-minute staleness grace period has separately flipped
+    // the run to status='stuck'.
+    vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ noOp: true, reason: 'parked' });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'still there?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/no active turn/i);
+    });
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'still there?')).toBe(true);
+  });
+
   it('an ACTIVE monitor still wins (queries the monitor, not the queue path)', async () => {
     // monitor-unify precedence: when an SDK PROGRAMMATIC run has an active monitor,
     // Send routes to monitor.send — the queue path must NOT fire. (The composer's

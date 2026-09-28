@@ -100,6 +100,8 @@ function queueInputReasonMessage(reason: string): string {
       return 'This run is no longer executing — try again once it resumes.';
     case 'stuck':
       return 'This run is stuck — it ended its turn with nothing to answer, so a queued message would never be delivered. Reopen or cancel it from the review queue, then try again.';
+    case 'parked':
+      return 'This run has no active turn and nothing pending to answer right now, so this message would never be delivered. It will show as stuck shortly — reopen or cancel it from the review queue, then try again.';
     case 'not_found':
       return 'Run not found.';
     case 'empty':

@@ -150,6 +150,62 @@ describe('StuckDetector — parked_no_gate rung (TASK-300)', () => {
     expect(events).toHaveLength(0);
   });
 
+  it('does NOT fire on a long, quiet turn that is still genuinely live (visual-verify fix)', async () => {
+    // raw_events recency ALONE cannot tell a truly parked run apart from a run
+    // mid-way through a long tool call that has produced no intermediate
+    // events for well over the staleness window — both look identical to the
+    // SQL scan. hasActiveRunForId is the real-time signal that disambiguates
+    // them; a run it reports as still alive must never be stamped stuck just
+    // because its last event is old.
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-quiet-but-live', 'running');
+    seedRawEvent(db, 'run-quiet-but-live', STALE_AGO);
+
+    const emitter = new EventEmitter();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e) => events.push(e as StuckDetectedEvent));
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(new Set(['run-quiet-but-live'])),
+      emitter,
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(runStatus(db, 'run-quiet-but-live')).toBe('running');
+    expect(events).toHaveLength(0);
+  });
+
+  it('does NOT fire on a freshly started run with no raw_events yet (visual-verify fix)', async () => {
+    // Before the fix, COALESCE(..., 0) treated "zero raw_events" as maximally
+    // stale — a run whose spawn had not yet produced its first SDK message
+    // would satisfy `0 < cutoff` on the very next 60s scan tick regardless of
+    // how young it actually was. The fallback now reads wr.created_at (which
+    // seedInboxRun defaults to "now"), so a fresh run gets the SAME 45-minute
+    // grace period as one with events.
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-brand-new', 'running');
+    // Deliberately no raw_events row at all.
+
+    const emitter = new EventEmitter();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e) => events.push(e as StuckDetectedEvent));
+
+    const detector = new StuckDetector({
+      db: dbAdapter(db),
+      claudeManager: makeClaudeManager(),
+      emitter,
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(runStatus(db, 'run-brand-new')).toBe('running');
+    expect(events).toHaveLength(0);
+  });
+
   it('is idempotent across repeated scans (one event only)', async () => {
     const db = buildReviewInboxDb();
     seedInboxRun(db, 'run-parked', 'running');

@@ -313,6 +313,17 @@ export interface QueueInputRunExecutorLike {
   queueInput(runId: string, text: string): void;
   /** Remove one queued message by text (click-to-reopen — no double delivery). */
   dequeueInput(runId: string, text: string): boolean;
+  /**
+   * True while an execute()/executeProgrammatic call is still live for this
+   * run (mid-turn, or genuinely resting at an open gate). Used by the
+   * mutation's 'parked' check below — status='running' with this false AND no
+   * pending approval/question means no live turn AND no gate is coming for a
+   * buffered message to ever be delivered against, so queueInput must refuse
+   * rather than buffer. The concrete RunExecutor already implements this
+   * (used identically by StuckDetector's live-turn checks), so production
+   * wiring needs no change — only test doubles need the method added.
+   */
+  hasActiveExecution(runId: string): boolean;
 }
 
 export interface QueueInputDeps {
@@ -2881,6 +2892,12 @@ export const runsRouter = router({
    *     otherwise buffer the message with no delivery trigger at all —
    *     honestly refuse instead of silently swallowing it; reopen/cancel it
    *     via the review queue, then send again);
+   *   - running with no live execution AND no pending approval/question →
+   *     { noOp: 'parked' } (TASK-300 attempt 2: the SAME shape 'stuck' answers,
+   *     caught the INSTANT it is submitted rather than waiting on the
+   *     StuckDetector's 45-minute staleness grace period — that period exists
+   *     to avoid escalating a run merely mid-step, but a message submitted
+   *     THIS SECOND has nothing to wait for; there is no drain seam coming);
    *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
    *     (those rested states use runs.nudge / runs.resume / the question gate,
    *     not this queue path);
@@ -2897,7 +2914,7 @@ export const runsRouter = router({
     .input(z.object({ runId: z.string().min(1), text: z.string() }))
     .mutation(async ({ ctx, input }): Promise<
       | { queued: true }
-      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'stuck' | 'empty' }
+      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'stuck' | 'parked' | 'empty' }
     > => {
       if (!queueInputDeps) {
         throw new TRPCError({
@@ -2922,6 +2939,34 @@ export const runsRouter = router({
       }
       if (!['running', 'starting', 'queued'].includes(run.status)) {
         return { noOp: true, reason: 'not_running' };
+      }
+
+      // 'parked' (visual-verify fix, TASK-300 attempt 2): the StuckDetector's
+      // parked_no_gate rung only fires once a run's last raw_events row is
+      // 45 minutes stale — a deliberate grace period so it does not escalate
+      // a run that is merely mid-step. That grace period means a run in
+      // EXACTLY this shape (status='running', no live turn, no gate) can sit
+      // for up to 45 minutes with queueInput still answering `{ queued: true
+      // }`, even though nothing can possibly drain the buffer during that
+      // window. Check the SAME "no live turn, no gate" condition here with NO
+      // staleness grace period — hasActiveExecution is a real-time signal
+      // (not a stale event-recency proxy), so there is no legitimate
+      // in-progress case it could misclassify: a run truly mid-turn, or
+      // resting at a genuine open gate, always reports it true.
+      if (run.status === 'running') {
+        const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
+        if (!hasLiveTurn) {
+          const hasGate = ctx.db
+            .prepare(
+              `SELECT
+                 EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending' AND awaited = 1)
+                   OR EXISTS(SELECT 1 FROM questions WHERE run_id = ? AND status = 'pending') AS hasGate`,
+            )
+            .get(input.runId, input.runId) as { hasGate: number };
+          if (!hasGate.hasGate) {
+            return { noOp: true, reason: 'parked' };
+          }
+        }
       }
 
       queueInputDeps.runExecutor.queueInput(input.runId, input.text);

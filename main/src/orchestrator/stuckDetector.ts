@@ -187,8 +187,21 @@ export class StuckDetector {
     // workflow_runs.updated_at: a step-report / current_step_id write does not
     // always bump updated_at, so keying staleness on it risks misclassifying a
     // run that is genuinely still executing a single long step. A run with
-    // ZERO raw_events rows (COALESCE -> 0) is treated as maximally stale rather
-    // than excluded, matching a run whose spawn produced no events at all.
+    // ZERO raw_events rows falls back to `wr.created_at` (NOT a `0` epoch
+    // sentinel — see fix note below) so it is judged by the SAME 45-minute
+    // staleness window as a run that has emitted events, rather than reading
+    // as instantly maximally-stale.
+    //
+    // FIX (visual-verify, TASK-300 attempt 2): the `0` epoch fallback this
+    // COALESCE used to carry made a run with no raw_events yet — e.g. a spawn
+    // that started seconds ago and has not emitted its first SDK message —
+    // satisfy `0 < unixepoch(cutoff)` immediately, on the VERY NEXT scan tick,
+    // regardless of how young the run actually was. `wr.created_at` restores
+    // the intended 45-minute grace period for that case. The scan loop below
+    // additionally skips any row the live-turn check (`hasActiveRunForId`)
+    // reports as still active — the OTHER half of the same fix, covering a
+    // long-running but genuinely quiet turn (raw_events stale, spawn very much
+    // alive) that this query alone cannot distinguish from a truly parked run.
     this.stmtParkedNoGateRuns = this.db.prepare(
       `SELECT wr.id AS id
          FROM workflow_runs wr
@@ -203,7 +216,7 @@ export class StuckDetector {
           )
           AND COALESCE(
                 (SELECT MAX(unixepoch(re.created_at)) FROM raw_events re WHERE re.run_id = wr.id),
-                0
+                unixepoch(wr.created_at)
               ) < unixepoch(?)`,
     );
     assertTransitionAllowed('running', 'stuck');
@@ -283,6 +296,21 @@ export class StuckDetector {
       // directly instead of keying off a (nonexistent) approvals row.
       const parkedRows = this.stmtParkedNoGateRuns.all(cutoffIso) as ParkedRunRow[];
       for (const row of parkedRows) {
+        // Live-turn guard (visual-verify fix): the SQL above can only see
+        // raw_events recency, which is a STALE proxy for "is a turn actually
+        // running" — a long, quiet SDK turn (a tool call producing no
+        // intermediate events for well over 45 minutes) looks identical to a
+        // genuinely parked run by that measure alone. `hasActiveRunForId` is
+        // the same real-time "is execute()/executeProgrammatic still holding
+        // this run" signal rung 1 (orphan_pty) below uses in the inverse
+        // direction; skip the transition entirely when it reports the run
+        // still alive; TASK-311 covers the one case this deliberately leaves
+        // uncaught — a hung spawn (a detached child keeping a run's SDK
+        // process from ever resolving) that keeps this signal wedged true
+        // forever even though nothing is actually progressing.
+        if (this.claudeManager.hasActiveRunForId(row.id)) {
+          continue;
+        }
         this.transitionRunningToStuck(row.id, { kind: 'parked_no_gate' });
       }
     } catch (err) {
