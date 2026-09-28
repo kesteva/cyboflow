@@ -131,6 +131,7 @@ import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blocki
 import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
+import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -3002,10 +3003,25 @@ async function initializeServices(): Promise<boolean> {
           if (worktreePath === null) return undefined;
           const readHead = async (): Promise<string> =>
             (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+          // `--untracked-files=all` lists files, not collapsed directories, so a new
+          // file inside an already-untracked directory still reads as NEW dirt.
+          const readDirtyPaths = async (): Promise<string[]> =>
+            parsePorcelainPaths(
+              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
+            );
           const startHead = await readHead();
+          // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
+          // not this lane's uncommitted work. A failed read degrades to "unknown"
+          // (newDirtyPaths absent ⇒ every dirty path counts), never to a failure.
+          let startDirty: Set<string> | undefined;
+          try {
+            startDirty = new Set(await readDirtyPaths());
+          } catch {
+            startDirty = undefined;
+          }
           return async () => {
             const endHead = await readHead();
-            const porcelain = await runGitAsync(worktreePath, ['status', '--porcelain']);
+            const dirtyPaths = await readDirtyPaths();
             // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
             // same shared worktree, mid-lane. HEAD then moves for a reason that
             // is not any lane's work — and since the only case that withholds
@@ -3040,7 +3056,14 @@ async function initializeServices(): Promise<boolean> {
                 // Keep the plain comparison.
               }
             }
-            return { headAdvanced, dirty: porcelain.trim().length > 0 };
+            return {
+              headAdvanced,
+              dirty: dirtyPaths.length > 0,
+              dirtyPaths,
+              ...(startDirty !== undefined
+                ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
+                : {}),
+            };
           };
         },
         // Targeted failed→running un-settle for the controller's MONITOR LANE

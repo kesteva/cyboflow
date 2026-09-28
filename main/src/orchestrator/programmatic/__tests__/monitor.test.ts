@@ -2032,12 +2032,12 @@ function laneReq(p: Partial<LaneTriageRequest> = {}): LaneTriageRequest {
 }
 
 describe('MONITOR_LANE_TRIAGE_SCHEMA', () => {
-  it('enforces the four-verdict enum, requires verdict + reason, and forbids extra fields', () => {
+  it('enforces the verdict enum, requires verdict + reason, and forbids extra fields', () => {
     const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<
       string,
       { enum?: string[]; description?: string }
     >;
-    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction']);
+    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept', 'fix_environment']);
     // The enum's own description is what the model reads first, so it must say
     // what append_correction COSTS (nothing) and what give_up is FOR (escalation).
     expect(props.verdict.description).toContain('append_correction');
@@ -2073,6 +2073,32 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('expected the exporter to emit UTC timestamps');
     // The lane's inner chain, in order.
     expect(p).toContain('`implement` → `write-tests` → `code-review` → `task-verify`');
+  });
+
+  it('frames an EARLY consult as steering the final attempt, where give_up means "no steering"', () => {
+    const early = buildLaneTriagePrompt(sprintCtx, history, laneReq({ stage: 'early', attempt: 2 }));
+    expect(early).toContain('about to start its FINAL automatic attempt');
+    expect(early).toContain('AT THIS STAGE it means "no steering"');
+    expect(early).toContain('STRUCTURAL approach');
+    expect(early).not.toContain('has exhausted its automatic budget');
+    const late = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(late).toContain('has exhausted its automatic budget');
+    expect(late).not.toContain('no steering');
+  });
+
+  it('asks the ownership question ONLY for a commit-integrity failure', () => {
+    const ci = buildLaneTriagePrompt(sprintCtx, history, laneReq({ failureKind: 'commit-integrity' }));
+    expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
+    expect(ci).toContain('THIS IS A COMMIT-INTEGRITY FAILURE');
+    const other = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(other).not.toContain('COMMIT-INTEGRITY FAILURE');
+  });
+
+  it('offers accept for every failure kind, with waived items required and defects excluded', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('"accept"');
+    expect(p).toContain('`followUps` is REQUIRED');
+    expect(p).toContain('NEVER waive a correctness, data-loss or security defect');
   });
 
   it('reuses the shared digests (step timeline, lane section, recent conversation)', () => {
@@ -2122,7 +2148,7 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('AUTONOMOUS EXECUTION');
     expect(p).toContain('no human confirmation');
     expect(p).toContain('review queue');
-    expect(p).toContain('rescued at most once');
+    expect(p).toContain('more only while it is converging');
     expect(p).toContain('at or before the failing step');
     // The default target is named explicitly (the first inner step).
     expect(p).toContain('default to the FIRST inner step (`implement`)');
@@ -2142,6 +2168,114 @@ describe('buildLaneTriagePrompt', () => {
 });
 
 describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  it('parses fix_environment only for an action the request lists as available', () => {
+    const environment = { report: 'Dependency folders MISSING: node_modules.', actions: ['install_dependencies' as const] };
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'fix_environment', environmentAction: 'install_dependencies', reason: 'tsc: command not found', targetStepId: 'task-verify' },
+        laneReq({ environment }),
+      ),
+    ).toMatchObject({ verdict: 'fix_environment', action: 'install_dependencies', targetStepId: 'task-verify' });
+    expect(
+      parseLaneTriageOutput({ verdict: 'fix_environment', environmentAction: 'install_dependencies', reason: 'r' }, laneReq()).verdict,
+    ).toBe('give_up');
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'fix_environment', environmentAction: 'rm_rf', reason: 'r' },
+        laneReq({ environment }),
+      ).verdict,
+    ).toBe('give_up');
+  });
+
+  it('shows the environment report and the fix_environment option in the prompt', () => {
+    const environment = { report: 'Dependency folders MISSING: node_modules.', actions: ['install_dependencies' as const] };
+    const p = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ environment }));
+    expect(p).toContain('WORKTREE ENVIRONMENT');
+    expect(p).toContain('Dependency folders MISSING');
+    expect(p).toContain('"fix_environment"');
+    const none = buildLaneTriagePrompt(
+      ctx,
+      { conversation: [], steps: [], lanes: [] },
+      laneReq({ environment: { report: 'No JavaScript lockfile', actions: [] } }),
+    );
+    expect(none).not.toContain('"fix_environment"');
+  });
+
+  it('keeps releaseDependents only when dependents exist, on give_up and append_correction', () => {
+    const dependents = [{ taskRef: 'TASK-274', taskTitle: 'Rail' }];
+    expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'r', releaseDependents: true }, laneReq({ dependents }))).toEqual({
+      verdict: 'give_up',
+      reason: 'r',
+      releaseDependents: true,
+    });
+    expect(
+      parseLaneTriageOutput({ verdict: 'append_correction', reason: 'r', releaseDependents: true }, laneReq({ dependents })),
+    ).toMatchObject({ releaseDependents: true });
+    expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'r', releaseDependents: true }, laneReq())).toEqual({
+      verdict: 'give_up',
+      reason: 'r',
+    });
+  });
+
+  it('lists the waiting lanes in the prompt only when there are some', () => {
+    const dependents = [{ taskRef: 'TASK-274', taskTitle: 'Rail' }];
+    const withDeps = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ dependents }));
+    expect(withDeps).toContain('LANES WAITING ON THIS ONE: **TASK-274** (Rail)');
+    expect(withDeps).toContain('releaseDependents: true');
+    const none = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq());
+    expect(none).not.toContain('LANES WAITING ON THIS ONE');
+  });
+
+  const prior = [{ stepId: 'code-review', failureKind: 'code-review' as const, errorExcerpt: 'race A', guidance: 'fix A' }];
+
+  it('allows a re-drive of an already-rescued lane only when the supervisor attests convergence', () => {
+    const retry = { verdict: 'retry', reason: 'new race B', targetStepId: 'implement', guidance: 'fix B' };
+    expect(parseLaneTriageOutput({ ...retry, progress: 'converging' }, laneReq({ priorRescues: prior })).verdict).toBe(
+      'retry',
+    );
+    const repeating = parseLaneTriageOutput({ ...retry, progress: 'repeating' }, laneReq({ priorRescues: prior }));
+    expect(repeating.verdict).toBe('append_correction');
+    expect(repeating.reason).toContain('did not report it converging');
+    expect(parseLaneTriageOutput(retry, laneReq({ priorRescues: prior })).verdict).toBe('append_correction');
+    // A first rescue needs no attestation.
+    expect(parseLaneTriageOutput(retry, laneReq()).verdict).toBe('retry');
+  });
+
+  it('shows the prior rescues in the prompt', () => {
+    const p = buildLaneTriagePrompt(ctx, { conversation: [], steps: [], lanes: [] }, laneReq({ priorRescues: prior }));
+    expect(p).toContain('THIS LANE WAS ALREADY RESCUED 1 time');
+    expect(p).toContain('race A');
+    expect(p).toContain('progress: "converging"');
+  });
+
+  it('parses accept for a commit-integrity failure', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'accept', reason: 'src/draft.ts belongs to TASK-266' },
+        laneReq({ failureKind: 'commit-integrity', stepId: 'task-verify' }),
+      ),
+    ).toEqual({ verdict: 'accept', reason: 'src/draft.ts belongs to TASK-266' });
+  });
+
+  it('requires named waived items for an accept outside commit-integrity', () => {
+    expect(parseLaneTriageOutput({ verdict: 'accept', reason: 'fine' }, laneReq()).verdict).toBe('give_up');
+    expect(parseLaneTriageOutput({ verdict: 'accept', reason: 'fine', followUps: ['  '] }, laneReq()).verdict).toBe(
+      'give_up',
+    );
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'accept', reason: 'functional criteria met', followUps: [' restyle the disabled button '] },
+        laneReq(),
+      ),
+    ).toEqual({ verdict: 'accept', reason: 'functional criteria met', followUps: ['restyle the disabled button'] });
+  });
+
+  it('downgrades accept with a blank reason to give_up', () => {
+    expect(
+      parseLaneTriageOutput({ verdict: 'accept', reason: '  ' }, laneReq({ failureKind: 'commit-integrity' })).verdict,
+    ).toBe('give_up');
+  });
+
   it('parses a well-formed retry', () => {
     expect(
       parseLaneTriageOutput(

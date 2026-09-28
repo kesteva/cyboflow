@@ -51,12 +51,15 @@ import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
   BuildBreakGroup,
   CommitIntegrityProbe,
+  CommitIntegrityReading,
   ControllerEscalation,
   ControllerHost,
   ControllerResult,
   ControllerStepContext,
   HumanGateDecision,
   LaneFailureKind,
+  LanePriorRescue,
+  LaneTriageStage,
   LaneRescueOutcome,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
@@ -71,6 +74,7 @@ import type {
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
+import { commitIntegrityExcerpt } from './commitIntegrity';
 
 /**
  * Parse a task-verify agent's captured result text for its terminal verdict —
@@ -276,24 +280,31 @@ export const MAX_SYSTEMIC_PAUSES = 10;
 export const MAX_VISUAL_LOOPBACKS = 5;
 
 /**
- * How many times ONE lane may be rescued by the monitor's autonomous lane triage
- * (`ControllerHost.triageLaneFailure`) across a whole walk. ONE: a rescue buys the
- * lane a fresh traversal from an earlier inner step with fresh guidance — if that
- * traversal fails too, the supervisor's read of the problem was wrong and a second
- * round of the same reasoning is not going to find a different answer. The lane
- * then settles 'failed' and reaches the human at the run's gate, which is the
- * outcome that always existed.
+ * HARD ceiling on how many times ONE lane may be rescued by the monitor's
+ * autonomous lane triage (`ControllerHost.triageLaneFailure`) across a whole walk.
+ * The first rescue is unconditional; every LATER one is PROGRESS-GATED: the
+ * request carries the lane's prior rescues, and the brain's parse ladder refuses a
+ * re-drive unless the supervisor attests the lane is CONVERGING (each traversal
+ * surfaced different, real defects and fixed the previous ones). A lane that
+ * repeats the same failure after a rescue therefore still stops after one — the
+ * supervisor's read was wrong and another round of it will not help — while
+ * genuinely hard work that keeps making progress (observed 2026-09-28: three
+ * concurrency lanes each fixed one real race per round and failed on the next)
+ * is not cut off mid-convergence. Sized at the same 3 as FAN_OUT_LANE_ATTEMPT_CAP.
  */
-export const MONITOR_LANE_RESCUE_CAP = 1;
+export const MONITOR_LANE_RESCUE_CAP = 3;
 
 /**
- * How many lane rescues the monitor may spend across a WHOLE walk, however many
- * lanes fail. Bounds the blast radius of a supervisor that has misdiagnosed
- * something run-wide (a broken toolchain, a bad merge base) into rescuing every
- * lane in turn: past this, failures settle as they always did rather than
- * multiplying agent turns against a cause no per-lane guidance can fix.
+ * How many lane rescues the monitor may spend across a WHOLE walk: floor(3 + n/2)
+ * for a sprint of n tasks. Bounds the blast radius of a supervisor that has
+ * misdiagnosed something run-wide (a broken toolchain, a bad merge base) into
+ * rescuing every lane in turn, while scaling with the sprint — a flat 4 was spent
+ * within the first hour of a 14-task sprint (2026-09-28), and the next lane then
+ * failed with its exact fix spelled out in its own FAIL text.
  */
-export const MONITOR_RUN_RESCUE_CAP = 4;
+export function monitorRunRescueCap(taskCount: number): number {
+  return Math.floor(3 + Math.max(0, taskCount) / 2);
+}
 
 /**
  * How many lanes of ONE wave must fail with the SAME error text before the
@@ -371,6 +382,24 @@ type LaneWalkOutcome =
   | { kind: 'failed'; error?: string; persisted: boolean };
 
 /**
+ * What one lane-triage consult resolved to, inside `runFanOut`:
+ *   - 'rescue'      — re-drive from `targetIndex` (state already reset);
+ *   - 'accept'      — proceed past the failing step as if it had passed;
+ *   - 'systemic'    — the consult died on the environment; park, do not fail;
+ *   - 'give_up'     — the supervisor judged the failure genuine;
+ *   - 'unconsulted' — no verdict at all (no seam, caps spent, a throwing consult).
+ * 'give_up' and 'unconsulted' settle identically at every budget-exhaustion
+ * site; only the commit-integrity site tells them apart, because there an
+ * AMBIGUOUS reading with nobody to judge it must not invent a failure.
+ */
+type LaneTriageVerdict =
+  | { kind: 'rescue'; targetIndex: number }
+  | { kind: 'accept'; reason: string }
+  | { kind: 'systemic'; error: string }
+  | { kind: 'give_up' }
+  | { kind: 'unconsulted' };
+
+/**
  * The wave loop's open systemic park: the parked lanes plus what their outcomes
  * said was blocked (origins, and — for step-origin lanes — the providers/runtimes
  * their failed spawns ran on).
@@ -420,8 +449,19 @@ function fanOutPauseInfo(
 interface LaneRescueState {
   /** itemId → rescues spent (capped by MONITOR_LANE_RESCUE_CAP). */
   perItem: Map<string, number>;
-  /** Rescues spent across the walk (capped by MONITOR_RUN_RESCUE_CAP). */
+  /** Rescues spent across the walk (capped by `monitorRunRescueCap(knownItems.size)`). */
   runTotal: number;
+  /**
+   * Every fan-out item this walk has seen — the sprint's task count `n` in the
+   * run budget. A union, because re-resolution filters settled lanes out.
+   */
+  knownItems: Set<string>;
+  /**
+   * itemId → the failures a rescue already answered, oldest first. Handed back to
+   * the supervisor on the lane's next consult so it can judge convergence, which
+   * is what gates every rescue after the first (see MONITOR_LANE_RESCUE_CAP).
+   */
+  history: Map<string, LanePriorRescue[]>;
   /**
    * itemId → the guidance a rescue attached to that lane. STICKY for the life of
    * the lane: the controller threads it into EVERY subsequent inner-step spawn
@@ -432,6 +472,10 @@ interface LaneRescueState {
    * task's rescue into every sibling lane's next spawn of that step.
    */
   guidance: Map<string, string>;
+}
+
+function newLaneRescueState(): LaneRescueState {
+  return { perItem: new Map(), runTotal: 0, knownItems: new Set(), history: new Map(), guidance: new Map() };
 }
 
 /**
@@ -598,7 +642,7 @@ export class WorkflowController {
     // Walk-scoped autonomous LANE-RESCUE state (per-item + per-run caps, plus the
     // sticky per-lane rescue guidance). Created here rather than per fan-out step
     // so both caps bound the WHOLE walk, and threaded into runFanOut by reference.
-    const laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() };
+    const laneRescues: LaneRescueState = newLaneRescueState();
     // The human's most recent gate 'revise', threaded into every step the gate's
     // loopback re-drives. Walk-scoped and STICKY: set when applyGateDecision takes
     // a revise WITH a jump target, carried on every baseCtx from that target
@@ -1519,11 +1563,14 @@ export class WorkflowController {
    * inner step with supervisor guidance — the AUTONOMOUS analogue of the operator
    * rewind above, sharing its `clearStateForRewind` semantics and its refusal to
    * bump `laneAttempt`. Bounded by MONITOR_LANE_RESCUE_CAP (per lane) and
-   * MONITOR_RUN_RESCUE_CAP (per walk). Failures that are NOT budget exhaustion
+   * the run rescue cap (`monitorRunRescueCap`, per walk). Failures that are NOT budget exhaustion
    * never consult: a systemic failure (it has its own park path), an aborted
-   * result, a never-started / cycle lane (`markBlocked`), a lane the
-   * commit-integrity probe caught, and a task-verify output-CONTRACT exhaustion
-   * (a malformed result is not a defect a rescue can reason about).
+   * result, a never-started / cycle lane (`markBlocked`), and a task-verify
+   * output-CONTRACT exhaustion (a malformed result is not a defect a rescue can
+   * reason about). A lane the commit-integrity probe flags DOES consult (failure
+   * kind 'commit-integrity'), with one extra verdict — 'accept' — because there
+   * the question is whether the uncommitted work is even this lane's; see
+   * `checkCommitIntegrity`.
    */
   private async runFanOut(
     runId: string,
@@ -1533,7 +1580,7 @@ export class WorkflowController {
     signal: AbortSignal | undefined,
     systemicPauses: Map<string, number>,
     systemicGiveUps: Set<string>,
-    laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() },
+    laneRescues: LaneRescueState = newLaneRescueState(),
   ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
@@ -1542,17 +1589,29 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
+    for (const item of items) laneRescues.knownItems.add(item);
     // RUN-LEVEL verification posture, resolved ONCE here — BEFORE the first lane
     // is dispatched, so every lane's implement/task-verify runs under a known
     // posture. Resolving it lazily (from the first lane whose enqueue declined)
     // reaches almost nobody: under the rolling pool the set of lanes whose
     // prompts are already composed is permanently cap-sized.
     await this.ensureVerificationPosture(runId);
+    // Environment preflight (fail-soft by contract, belt-and-braces here): repair
+    // what would otherwise fail every lane identically, before any lane burns an
+    // attempt on it.
+    try {
+      await this.host.prepareFanOutEnvironment?.(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `fan-out environment preflight threw (${err instanceof Error ? err.message : String(err)}); dispatching anyway`,
+      );
+    }
     // PARK-EPOCH LATCH (defined ⇒ latched): set to the error text the moment one
     // lane's triage consult dies on a systemic condition. Lanes run concurrently
     // and the consults are serialized on the monitor's send chain, so without it
     // five concurrently-failing lanes make five doomed consults against a dead
-    // quota — and the ones past MONITOR_RUN_RESCUE_CAP get no consult at all and
+    // quota — and the ones past the run rescue cap get no consult at all and
     // settle 'failed' on an environment condition. With it, the first systemic
     // verdict parks every later lane of the same epoch for free.
     //
@@ -1572,12 +1631,42 @@ export class WorkflowController {
      * is re-read AFTER the previous consult resolved. Lanes fail concurrently:
      * without the chain, every lane of a wave that fails before the first
      * consult returns passes the latch check together, four of them burn
-     * MONITOR_RUN_RESCUE_CAP on a monitor whose own turn is dead, and the fifth
+     * the run rescue cap on a monitor whose own turn is dead, and the fifth
      * — refused a consult on a "spent" budget — settles 'failed' on the
      * environment. The monitor already runs consults one at a time, so
      * serializing here costs no wall-clock.
      */
     let triageConsultChain: Promise<unknown> = Promise.resolve();
+    /** Lanes that already had their one EARLY consult (see `consultEarly`). */
+    const earlyConsulted = new Set<string>();
+    /**
+     * FAILED lanes whose dependents the supervisor RELEASED: the lane did not pass
+     * its own gates, but what its dependents build on is committed and works
+     * (observed 2026-09-28: a backend lane failed task-verify on criteria it could
+     * not meet while the procedure its three dependents consume was at HEAD, and
+     * all three were blocked). Dispatch treats a released prerequisite as
+     * satisfied; the lane itself still settles 'failed'.
+     */
+    const releasedPrereqs = new Set<string>();
+    /** The not-yet-settled lanes that list `itemId` as a blocking prerequisite. */
+    const pendingDependentsOf = (itemId: string): string[] =>
+      [...prereqs]
+        .filter(([dependent, ps]) => ps.includes(itemId) && remaining.has(dependent))
+        .map(([dependent]) => dependent);
+
+    /**
+     * SHARED-WORKTREE OWNERSHIP for the commit-integrity probe. Every lane of this
+     * fan-out edits the SAME worktree, so "HEAD did not move and the tree is dirty"
+     * only proves THIS lane left work uncommitted when no other lane was running
+     * alongside it. `activeLanes` is the set of lanes currently walking;
+     * `overlappedLanes` holds every lane that, at any point in its walk, shared the
+     * worktree with another live lane (marked on both sides at dispatch). Observed
+     * live 2026-09-25: a lane whose task was already done made no commit, a
+     * concurrently-running sibling's untracked files made the tree dirty, and the
+     * probe failed the no-op lane.
+     */
+    const activeLanes = new Set<string>();
+    const overlappedLanes = new Set<string>();
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
@@ -1589,7 +1678,8 @@ export class WorkflowController {
      *    fan-out;
      *  - all inner steps ok → mark the lane 'integrated', UNLESS the driver's
      *    optional commit-integrity probe shows the lane committed nothing and left
-     *    the worktree dirty, in which case the lane is failed instead.
+     *    NEW dirt in the worktree — then the monitor judges it, and a lane that
+     *    ran alone with no verdict is failed (see `checkCommitIntegrity`).
      * Returns `{ kind: 'aborted' }` when the signal fired mid-walk so the wave can
      * short out.
      *
@@ -1672,7 +1762,7 @@ export class WorkflowController {
      * rather than charged after it. Lanes run concurrently, and the consult is a
      * slow SDK turn: charging afterwards would let a whole wave of failing lanes
      * pass the cap check together and every one of them get rescued, which is
-     * exactly the runaway MONITOR_RUN_RESCUE_CAP exists to prevent. Reserving is
+     * exactly the runaway the run rescue cap exists to prevent. Reserving is
      * safe because the release path restores the counters exactly, so a give_up
      * still costs nothing — the caps bound INTERVENTION, not consultation.
      *
@@ -1685,23 +1775,27 @@ export class WorkflowController {
       attempt: number,
       failureKind: LaneFailureKind,
       errorExcerpt: string,
-    ): Promise<number | null | { systemic: string }> => {
-      if (!this.host.triageLaneFailure) return null;
+      stage: LaneTriageStage = 'exhausted',
+    ): Promise<LaneTriageVerdict> => {
+      if (!this.host.triageLaneFailure) return { kind: 'unconsulted' };
+      if (stage === 'early') return consultEarly(itemId, failingStepId, attempt, failureKind, errorExcerpt);
       const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
-      if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= MONITOR_RUN_RESCUE_CAP) {
+      const runCap = monitorRunRescueCap(laneRescues.knownItems.size);
+      if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= runCap) {
         this.host.log?.(
           'info',
-          `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${MONITOR_RUN_RESCUE_CAP}); not consulting lane triage`,
+          `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${runCap}); not consulting lane triage`,
         );
-        return null;
+        return { kind: 'unconsulted' };
       }
+      const priorRescues = laneRescues.history.get(itemId) ?? [];
+      const dependents = pendingDependentsOf(itemId);
       // Reserve now, release on every non-rescue arm below (see the docblock).
       laneRescues.perItem.set(itemId, usedForLane + 1);
       laneRescues.runTotal += 1;
-      const releaseReservation = (): null => {
+      const releaseReservation = (): void => {
         laneRescues.perItem.set(itemId, usedForLane);
         laneRescues.runTotal -= 1;
-        return null;
       };
 
       let outcome: LaneRescueOutcome;
@@ -1713,6 +1807,8 @@ export class WorkflowController {
           failureKind,
           errorExcerpt,
           innerStepIds: allowedStepIds,
+          ...(priorRescues.length > 0 ? { priorRescues: [...priorRescues] } : {}),
+          ...(dependents.length > 0 ? { dependents } : {}),
           ...(signal ? { signal } : {}),
         });
       } catch (err) {
@@ -1720,7 +1816,8 @@ export class WorkflowController {
           'warn',
           `fan-out item '${itemId}': lane triage threw (${err instanceof Error ? err.message : String(err)}); failing the lane`,
         );
-        return releaseReservation();
+        releaseReservation();
+        return { kind: 'unconsulted' };
       }
       if (outcome.kind === 'systemic') {
         // The consult itself died on an environment-level condition — it judged
@@ -1731,23 +1828,118 @@ export class WorkflowController {
           'warn',
           `fan-out item '${itemId}': lane triage hit a SYSTEMIC condition (${outcome.error}); parking the fan-out instead of failing the lane`,
         );
-        return { systemic: outcome.error };
+        return { kind: 'systemic', error: outcome.error };
       }
-      if (outcome.kind !== 'rescue') return releaseReservation();
+      if (outcome.kind === 'accept') {
+        // An ACCEPT re-drives nothing, so it spends no rescue budget: the lane
+        // proceeds past the failing step as if it had passed, and the host has
+        // already filed the waived residue as follow-up findings.
+        releaseReservation();
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': ${failureKind} at '${failingStepId}' — monitor ACCEPTED the lane past it (${outcome.reason})`,
+        );
+        return { kind: 'accept', reason: outcome.reason };
+      }
+      if (outcome.kind !== 'rescue') {
+        releaseReservation();
+        if (outcome.releaseDependents === true && dependents.length > 0) {
+          releasedPrereqs.add(itemId);
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': lane will fail, but the monitor RELEASED its dependents (${dependents.join(', ')})`,
+          );
+        }
+        return { kind: 'give_up' };
+      }
       const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
       if (targetIndex < 0) {
         this.host.log?.(
           'warn',
           `fan-out item '${itemId}': lane triage named '${outcome.targetStepId}', which is not one of this fan-out's inner steps; failing the lane`,
         );
-        return releaseReservation();
+        releaseReservation();
+        return { kind: 'give_up' };
+      }
+      if (outcome.free === true) {
+        // An environment fix, not a judgment about the work: refund the run pool
+        // (the per-lane count stays spent, bounding a lane that keeps asking).
+        laneRescues.runTotal -= 1;
       }
       laneRescues.guidance.set(itemId, outcome.guidance);
+      // Only a judgment about the WORK enters the convergence history; an
+      // environment fix says nothing about whether the lane is converging.
+      if (outcome.free !== true) {
+        laneRescues.history.set(itemId, [
+          ...priorRescues,
+          { stepId: failingStepId, failureKind, errorExcerpt, guidance: outcome.guidance },
+        ]);
+      }
       this.host.log?.(
         'warn',
         `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,
       );
-      return targetIndex;
+      return { kind: 'rescue', targetIndex };
+    };
+
+    /**
+     * EARLY consult: a lane is about to start its FINAL automatic attempt (a
+     * code-review / task-verify / inner-step loopback into attempt
+     * FAN_OUT_LANE_ATTEMPT_CAP). Instead of waiting for that attempt to fail too,
+     * the supervisor may steer it now — switch approach (a 'rescue' whose target
+     * and guidance replace the plain loopback), accept the lane (the residue is
+     * waivable), or let the loopback run unchanged (give_up / no verdict). Observed
+     * 2026-09-28: three concurrency lanes each fixed one real race per round and
+     * burned the whole budget before the monitor saw them.
+     *
+     * Spends NO rescue budget and records no rescue history — the loopback
+     * happens either way; this only shapes it. ONE per lane (`earlyConsulted`).
+     */
+    const consultEarly = async (
+      itemId: string,
+      failingStepId: string,
+      attempt: number,
+      failureKind: LaneFailureKind,
+      errorExcerpt: string,
+    ): Promise<LaneTriageVerdict> => {
+      if (!this.host.triageLaneFailure || earlyConsulted.has(itemId)) return { kind: 'unconsulted' };
+      earlyConsulted.add(itemId);
+      let outcome: LaneRescueOutcome;
+      try {
+        outcome = await this.host.triageLaneFailure({
+          itemId,
+          stepId: failingStepId,
+          attempt,
+          failureKind,
+          errorExcerpt,
+          innerStepIds: allowedStepIds,
+          stage: 'early',
+          ...(signal ? { signal } : {}),
+        });
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': early lane triage threw (${err instanceof Error ? err.message : String(err)}); looping back as usual`,
+        );
+        return { kind: 'unconsulted' };
+      }
+      if (outcome.kind === 'systemic') return { kind: 'systemic', error: outcome.error };
+      if (outcome.kind === 'accept') {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': ${failureKind} at '${failingStepId}' — monitor ACCEPTED the lane before its final attempt (${outcome.reason})`,
+        );
+        return { kind: 'accept', reason: outcome.reason };
+      }
+      if (outcome.kind !== 'rescue') return { kind: 'give_up' };
+      const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
+      if (targetIndex < 0) return { kind: 'give_up' };
+      laneRescues.guidance.set(itemId, outcome.guidance);
+      this.host.log?.(
+        'info',
+        `fan-out item '${itemId}': monitor STEERED the final attempt → '${inner[targetIndex].id}'`,
+      );
+      return { kind: 'rescue', targetIndex };
     };
 
     // The park step is NOT an inner-chain id, so the lane-store vocabulary must be
@@ -1886,13 +2078,14 @@ export class WorkflowController {
        * status-guarded to 'failed', so passing it on a not-actually-settled lane
        * is a harmless no-op.
        */
-      const rescueLaneOrNull = async (
+      const triageLane = async (
         failingStepId: string,
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
-      ): Promise<number | null | { systemic: string }> => {
-        const consult = async (): Promise<number | null | { systemic: string }> => {
+        stage: LaneTriageStage = 'exhausted',
+      ): Promise<LaneTriageVerdict> => {
+        const consult = async (): Promise<LaneTriageVerdict> => {
           // The wave already learned the environment is down (see the latch's
           // declaration): park without consulting and without reserving budget.
           // Read INSIDE the serialized turn, so a lane that failed while a
@@ -1902,7 +2095,7 @@ export class WorkflowController {
               'warn',
               `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition; parking without consulting`,
             );
-            return { systemic: systemicTriageLatch };
+            return { kind: 'systemic', error: systemicTriageLatch };
           }
           const verdict = await consultLaneTriage(
             itemId,
@@ -1910,8 +2103,9 @@ export class WorkflowController {
             laneAttempt,
             failureKind,
             errorExcerpt,
+            stage,
           );
-          if (verdict !== null && typeof verdict === 'object') systemicTriageLatch = verdict.systemic;
+          if (verdict.kind === 'systemic') systemicTriageLatch = verdict.error;
           return verdict;
         };
         const turn = triageConsultChain.then(consult, consult);
@@ -1919,15 +2113,156 @@ export class WorkflowController {
           () => undefined,
           () => undefined,
         );
-        const targetIndex = await turn;
-        if (targetIndex === null || typeof targetIndex === 'object') return targetIndex;
-        clearStateForRewind(targetIndex);
+        const verdict = await turn;
+        if (verdict.kind === 'accept') {
+          if (needsRevive) driver.reviveLane?.({ runId, itemId });
+          return verdict;
+        }
+        if (verdict.kind !== 'rescue') return verdict;
+        clearStateForRewind(verdict.targetIndex);
         if (needsRevive) driver.reviveLane?.({ runId, itemId });
-        return targetIndex;
+        return verdict;
       };
 
-      for (let k = 0; k < inner.length; k++) {
+      /**
+       * The budget-exhaustion sites' view of `triageLane`: the inner index to
+       * re-drive from, `'accept'` (proceed past the failing step as if it had
+       * passed — the supervisor waived what is left and filed it as follow-ups),
+       * `{ systemic }` when the consult died on the environment, or null ("settle
+       * this lane 'failed'") for a give_up or no consult at all.
+       */
+      const rescueLaneOrNull = async (
+        failingStepId: string,
+        failureKind: LaneFailureKind,
+        errorExcerpt: string,
+        needsRevive = false,
+      ): Promise<number | 'accept' | null | { systemic: string }> => {
+        const verdict = await triageLane(failingStepId, failureKind, errorExcerpt, needsRevive);
+        if (verdict.kind === 'rescue') return verdict.targetIndex;
+        if (verdict.kind === 'accept') return 'accept';
+        if (verdict.kind === 'systemic') return { systemic: verdict.error };
+        return null;
+      };
+
+      /**
+       * The loopback sites' EARLY consult (see `consultEarly`), made only when the
+       * loopback about to run is the lane's FINAL automatic attempt. Returns the
+       * inner index the final attempt should re-drive from (the supervisor's, in
+       * place of the declared loopback target — its guidance is already stored),
+       * `'accept'`, or null to loop back exactly as before. A systemic consult is
+       * also null: the loopback still runs, and the latch it set parks the next
+       * exhaustion instead.
+       */
+      const steerFinalAttempt = async (
+        failingStepId: string,
+        failureKind: LaneFailureKind,
+        errorExcerpt: string,
+      ): Promise<number | 'accept' | null> => {
+        if (laneAttempt !== FAN_OUT_LANE_ATTEMPT_CAP - 1) return null;
+        const verdict = await triageLane(failingStepId, failureKind, errorExcerpt, false, 'early');
+        if (verdict.kind === 'rescue') return verdict.targetIndex;
+        if (verdict.kind === 'accept') return 'accept';
+        return null;
+      };
+
+      /**
+       * Lane-end commit-integrity check. Every inner step returned ok — but
+       * 'integrated' claims "complete AND committed in the session worktree"
+       * (sprintLaneStore.ts), which step verdicts alone cannot establish: a lane
+       * whose `git commit` was denied by a permission gate reported green with its
+       * changes untracked on disk (observed live).
+       *
+       * Sibling lanes commit into the SAME worktree, so an advanced HEAD is not
+       * proof THIS lane committed, and a clean tree may mean a sibling committed
+       * our work along with its own — both integrate. Only "nothing committed AND
+       * the tree is dirty" is suspicious, and even that is narrowed:
+       *   1. dirt that was already there when the lane started is not this lane's
+       *      (`newDirtyPaths` empty) ⇒ integrate;
+       *   2. otherwise the MONITOR judges it (failure kind 'commit-integrity'): it
+       *      may ACCEPT (the dirt is a sibling's / generated; this lane's work is
+       *      committed or needed no change), RESCUE (re-drive, e.g. "commit your
+       *      changes"), or give up;
+       *   3. with no verdict (no monitor, caps spent) the reading's OWNERSHIP
+       *      decides: a lane that ran alone left that dirt itself ⇒ fail, as the
+       *      probe always did; a lane that overlapped a sibling cannot be blamed
+       *      for dirt it may not own ⇒ integrate with a warning (the probe may
+       *      only withhold a false 'integrated', never invent a failure).
+       */
+      const checkCommitIntegrity = async (): Promise<
+        { kind: 'integrate' } | { kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }
+      > => {
+        if (commitProbe === undefined) return { kind: 'integrate' };
+        let reading: CommitIntegrityReading;
+        try {
+          reading = await commitProbe();
+        } catch (err) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
+          );
+          return { kind: 'integrate' };
+        }
+        if (reading.headAdvanced || !reading.dirty) return { kind: 'integrate' };
+        if (reading.newDirtyPaths !== undefined && reading.newDirtyPaths.length === 0) {
+          this.host.log?.(
+            'info',
+            `fan-out item '${itemId}': made no git commit, but every uncommitted path predates the lane; integrating`,
+          );
+          return { kind: 'integrate' };
+        }
+        const sharedWorktree = overlappedLanes.has(itemId);
+        const lastStepId = inner[inner.length - 1].id;
+        const verdict = await triageLane(
+          lastStepId,
+          'commit-integrity',
+          commitIntegrityExcerpt(reading, sharedWorktree),
+        );
+        if (verdict.kind === 'rescue') return { kind: 'redrive', targetIndex: verdict.targetIndex };
+        if (verdict.kind === 'systemic') {
+          // The lane row has NOT been written 'failed' here: park like the
+          // inner-step arm does.
+          return {
+            kind: 'settled',
+            outcome: { kind: 'systemic', error: verdict.error, origin: 'triage', stepId: lastStepId },
+          };
+        }
+        if (verdict.kind === 'accept') {
+          this.host.log?.(
+            'info',
+            `fan-out item '${itemId}': made no git commit with the worktree dirty, but the monitor ACCEPTED the lane (${verdict.reason}); integrating`,
+          );
+          return { kind: 'integrate' };
+        }
+        if (verdict.kind === 'unconsulted' && sharedWorktree) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': made no git commit and the worktree is dirty, but sibling lanes shared the worktree so the dirt cannot be attributed to this lane; integrating on step verdicts`,
+          );
+          return { kind: 'integrate' };
+        }
+        driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+        this.host.log?.(
+          'error',
+          `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
+        );
+        return { kind: 'settled', outcome: { kind: 'failed', persisted: true } };
+      };
+
+      for (let k = 0; k <= inner.length; k++) {
         if (signal?.aborted) return { kind: 'aborted' };
+        // LANE END (the extra k === inner.length pass): every inner step returned
+        // ok. Run the commit-integrity check here, INSIDE the loop, so a monitor
+        // rescue of a commit-integrity failure can re-drive the lane from an inner
+        // step exactly like every other rescue site (`k = target - 1; continue`).
+        if (k === inner.length) {
+          const laneEnd = await checkCommitIntegrity();
+          if (laneEnd.kind === 'redrive') {
+            k = laneEnd.targetIndex - 1; // The loop's k++ lands on the target next.
+            continue;
+          }
+          if (laneEnd.kind === 'settled') return laneEnd.outcome;
+          break;
+        }
         // Operator LANE REWIND — consult 1 of 3 (IDLE between inner steps). Covers
         // a request that lands while the lane is between turns (mid commit-probe,
         // or in the gap before the next step's lane write). Consulted BEFORE the
@@ -2089,6 +2424,12 @@ export class WorkflowController {
             // so re-driving it as a parked lane would restart at attempt 1 and
             // dedup onto that terminal request. The lane settles failed; a
             // sibling's inner-step systemic still parks the wave.
+            if (rescueTarget === 'accept') {
+              // The supervisor accepted the deliverable despite the gate (e.g. a
+              // behavior the verification environment cannot exercise). The row
+              // was revived; advance exactly as an 'advance' verdict would.
+              continue;
+            }
             if (typeof rescueTarget === 'number') {
               // A MERGE-GATE rescue must advance the verification attempt: the
               // scheduler's enqueue key is `${runId}:${ref}:${attempt}`, and the
@@ -2140,6 +2481,7 @@ export class WorkflowController {
               );
               // 'systemic' is treated like `null` for the same reason as the
               // 'failed' arm above (persisted row + attempt identity).
+              if (rescueTarget === 'accept') continue; // Same as the 'failed' arm above.
               if (typeof rescueTarget === 'number') {
                 // Same verification-attempt advance as the 'failed' arm above —
                 // the refused verdict's request owns the current enqueue key, so
@@ -2257,13 +2599,16 @@ export class WorkflowController {
           }
           const targetIndex = loopbackIndex(innerStep);
           if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+            const steer = await steerFinalAttempt(innerStep.id, 'inner-step', result.error ?? '(no error text)');
+            if (steer === 'accept') continue;
+            const loopTarget = steer ?? targetIndex;
             laneAttempt += 1;
-            loopbackAttemptStepIndex = targetIndex;
+            loopbackAttemptStepIndex = loopTarget;
             this.host.log?.(
               'info',
-              `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+              `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
             );
-            k = targetIndex - 1; // The loop's k++ lands on the target next.
+            k = loopTarget - 1; // The loop's k++ lands on the target next.
             continue;
           }
           // The lane's loopback budget is spent (or it declares no target) — the
@@ -2281,6 +2626,8 @@ export class WorkflowController {
           if (rescueTarget !== null && typeof rescueTarget === 'object') {
             return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
           }
+          // Accepted: treat the step as passed and continue the chain.
+          if (rescueTarget === 'accept') continue;
           if (rescueTarget !== null) {
             k = rescueTarget - 1; // The loop's k++ lands on the target next.
             continue;
@@ -2338,14 +2685,21 @@ export class WorkflowController {
               const signal = verdict === 'blocking' ? 'REVIEW: BLOCKING' : '## Blocking (no trailer)';
               const targetIndex = loopbackIndex(innerStep);
               if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                const steer = await steerFinalAttempt(
+                  innerStep.id,
+                  'code-review',
+                  extractBlockingSection(resultText) ?? resultText,
+                );
+                if (steer === 'accept') continue; // Waived; task-verify still runs.
+                const loopTarget = steer ?? targetIndex;
                 laneAttempt += 1;
-                loopbackAttemptStepIndex = targetIndex;
+                loopbackAttemptStepIndex = loopTarget;
                 pendingLoopbackFeedback = extractBlockingSection(resultText) ?? resultText;
                 this.host.log?.(
                   'info',
-                  `fan-out item '${itemId}': code-review ${signal}; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                  `fan-out item '${itemId}': code-review ${signal}; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
                 );
-                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                k = loopTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }
               // Code-review keeps reporting blocking defects and the loopback
@@ -2361,6 +2715,9 @@ export class WorkflowController {
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
                 return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
               }
+              // Accepted: the remaining blocking entries were waived as
+              // follow-ups; the chain continues (task-verify still runs).
+              if (rescueTarget === 'accept') continue;
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -2423,13 +2780,19 @@ export class WorkflowController {
               // result takes (declared loopback → laneAttempt bump → 3× cap → fail).
               const targetIndex = loopbackIndex(innerStep);
               if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                const steer = await steerFinalAttempt(innerStep.id, 'task-verify', resultText);
+                if (steer === 'accept') {
+                  visualVerifyTask = undefined; // See the exhausted arm below.
+                  continue;
+                }
+                const loopTarget = steer ?? targetIndex;
                 laneAttempt += 1;
-                loopbackAttemptStepIndex = targetIndex;
+                loopbackAttemptStepIndex = loopTarget;
                 this.host.log?.(
                   'info',
-                  `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                  `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[loopTarget].id}' (attempt ${laneAttempt})`,
                 );
-                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                k = loopTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }
               // task-verify keeps returning FAIL and the loopback budget is spent
@@ -2439,6 +2802,13 @@ export class WorkflowController {
               // Nothing is persisted at this arm yet — park, don't fail.
               if (rescueTarget !== null && typeof rescueTarget === 'object') {
                 return { kind: 'systemic', error: rescueTarget.systemic, origin: 'triage', stepId: innerStep.id };
+              }
+              if (rescueTarget === 'accept') {
+                // Accepted past a FAIL: this verdict composed no visual task, so
+                // drop any task a superseded PASS left behind — visual
+                // verification of the accepted lane is one of the waived items.
+                visualVerifyTask = undefined;
+                continue;
               }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
@@ -2515,36 +2885,6 @@ export class WorkflowController {
               }
             }
           }
-        }
-      }
-
-      // Every inner step returned ok — but 'integrated' claims "complete AND
-      // committed in the session worktree" (sprintLaneStore.ts), which step
-      // verdicts alone cannot establish: a lane whose `git commit` was denied by
-      // a permission gate reported green with its changes untracked on disk
-      // (observed live). Consult the probe before making that claim.
-      if (commitProbe !== undefined) {
-        try {
-          const reading = await commitProbe();
-          // Deliberately conservative: sibling lanes commit into the SAME
-          // worktree, so an advanced HEAD is not proof THIS lane committed, and a
-          // clean tree may mean a sibling committed our work along with its own.
-          // Only the unambiguous case — nothing committed at all AND changes still
-          // sitting uncommitted — withholds 'integrated'. Per-lane attribution
-          // would need per-lane commit ranges the fan-out does not have.
-          if (!reading.headAdvanced && reading.dirty) {
-            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-            this.host.log?.(
-              'error',
-              `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
-            );
-            return { kind: 'failed', persisted: true };
-          }
-        } catch (err) {
-          this.host.log?.(
-            'warn',
-            `fan-out item '${itemId}': commit-integrity probe failed (${err instanceof Error ? err.message : String(err)}); integrating on step verdicts alone`,
-          );
         }
       }
 
@@ -2715,18 +3055,28 @@ export class WorkflowController {
     };
 
     /** Wrap a lane walk so a THROW fails that lane alone (never the whole pool). */
-    const runLane = (itemId: string): Promise<[string, LaneWalkOutcome]> =>
-      driveItem(itemId).then(
-        (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
-        (err): [string, LaneWalkOutcome] => [
-          itemId,
-          {
-            kind: 'failed',
-            error: err instanceof Error ? err.message : String(err),
-            persisted: false,
-          },
-        ],
-      );
+    const runLane = (itemId: string): Promise<[string, LaneWalkOutcome]> => {
+      if (activeLanes.size > 0) {
+        overlappedLanes.add(itemId);
+        for (const other of activeLanes) overlappedLanes.add(other);
+      }
+      activeLanes.add(itemId);
+      return driveItem(itemId)
+        .then(
+          (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
+          (err): [string, LaneWalkOutcome] => [
+            itemId,
+            {
+              kind: 'failed',
+              error: err instanceof Error ? err.message : String(err),
+              persisted: false,
+            },
+          ],
+        )
+        .finally(() => {
+          activeLanes.delete(itemId);
+        });
+    };
 
     while (remaining.size > 0 || inFlight.size > 0) {
       // 1 ── Cancellation stops DISPATCH, not the loop: in-flight lanes are drained
@@ -2768,6 +3118,7 @@ export class WorkflowController {
         // re-reads dependencies (and a fan-out whose driver exposes none is
         // untouched).
         const appeared = fresh.filter((id) => !inScope.has(id));
+        for (const id of appeared) laneRescues.knownItems.add(id);
         if (appeared.length > 0) {
           for (const id of fresh) inScope.add(id);
           let freshDeps: Map<string, string[]> | undefined;
@@ -2833,8 +3184,8 @@ export class WorkflowController {
           if (inFlight.has(itemId) || deferred.has(itemId)) continue;
           if (parkPending?.items.has(itemId) === true) continue;
           const ps = prereqs.get(itemId) ?? [];
-          if (ps.some((p) => failed.has(p) || blocked.has(p))) continue;
-          if (!ps.every((p) => integrated.has(p))) continue;
+          if (ps.some((p) => (failed.has(p) && !releasedPrereqs.has(p)) || blocked.has(p))) continue;
+          if (!ps.every((p) => integrated.has(p) || (failed.has(p) && releasedPrereqs.has(p)))) continue;
           const files = expectedFiles?.get(itemId) ?? [];
           if (files.some((filePath) => claimedFiles.has(filePath))) continue;
           for (const filePath of files) claimedFiles.set(filePath, itemId);
@@ -2939,7 +3290,7 @@ export class WorkflowController {
             progressed = false;
             for (const itemId of [...remaining]) {
               const ps = prereqs.get(itemId) ?? [];
-              const dead = ps.find((p) => failed.has(p) || blocked.has(p));
+              const dead = ps.find((p) => (failed.has(p) && !releasedPrereqs.has(p)) || blocked.has(p));
               if (dead === undefined) continue;
               markBlocked(
                 itemId,

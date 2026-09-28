@@ -369,6 +369,20 @@ export interface SupervisorEvent {
 export interface CommitIntegrityReading {
   headAdvanced: boolean;
   dirty: boolean;
+  /**
+   * The paths `git status --porcelain` reports right now. OPTIONAL (a probe that
+   * cannot list them leaves it absent) — evidence for the monitor's
+   * commit-integrity triage, never a decision input on its own.
+   */
+  dirtyPaths?: string[];
+  /**
+   * The subset of `dirtyPaths` that were NOT already dirty when the lane was
+   * dispatched. Lanes share ONE worktree, so dirt that predates the lane (a
+   * failed sibling's leftovers, a pre-existing edit) cannot be this lane's
+   * uncommitted work: an EMPTY list lets the lane integrate. Absent ⇒ the probe
+   * could not tell, and every dirty path counts as possibly this lane's.
+   */
+  newDirtyPaths?: string[];
 }
 
 /** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
@@ -438,7 +452,10 @@ export interface FanOutDriver {
    * would stamp 'integrated'. A lane that ran every inner step green but left
    * HEAD where it was AND the worktree dirty never committed its work — observed
    * live when a `git commit` was denied by a permission gate and the lane still
-   * reported integrated with the changes untracked on disk.
+   * reported integrated with the changes untracked on disk. Lanes share the
+   * worktree, so the reading also lists the dirty paths and which of them are
+   * NEW since lane start: the controller ignores pre-existing dirt and asks the
+   * monitor whose the rest is before failing anything.
    *
    * OPTIONAL and fail-soft at every seam, like `dependencies`/`expectedFiles`:
    * absent, resolving undefined, or throwing (in either half) ⇒ no probe ⇒ the
@@ -472,7 +489,7 @@ export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
  * Canonical HERE (not in monitor.ts) so the controller/host protocol stays free
  * of the monitor brain's heavier import graph; `monitor.ts` re-exports it.
  */
-export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate' | 'commit-integrity';
 
 /**
  * The lane/failure facts the controller already holds when a lane exhausts an
@@ -499,8 +516,39 @@ export interface LaneTriageFailure {
   errorExcerpt: string;
   /** The lane's configured inner chain, in execution order. */
   innerStepIds: readonly string[];
+  /**
+   * The failures earlier rescues of THIS lane already answered, oldest first.
+   * Absent on a lane's first consult. Present ⇒ a re-drive is only allowed when
+   * the supervisor attests the lane is converging (see MONITOR_LANE_RESCUE_CAP).
+   */
+  priorRescues?: LanePriorRescue[];
+  /**
+   * 'exhausted' (the default) — the lane spent its automatic budget and settles
+   * 'failed' unless the supervisor intervenes. 'early' — the lane is about to
+   * start its FINAL automatic attempt; the supervisor may steer or accept it, and
+   * a give_up there means "loop back as usual", never "fail the lane".
+   */
+  stage?: LaneTriageStage;
+  /**
+   * Not-yet-started lanes (item ids) that list this lane as a blocking
+   * prerequisite. Present ⇒ a give_up may RELEASE them (`releaseDependents`).
+   */
+  dependents?: string[];
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
+}
+
+/** When a lane-triage consult happens — see `LaneTriageFailure.stage`. */
+export type LaneTriageStage = 'early' | 'exhausted';
+
+/** One failure an earlier monitor rescue of the same lane answered. */
+export interface LanePriorRescue {
+  stepId: string;
+  failureKind: LaneFailureKind;
+  /** The failure excerpt the supervisor saw at the time. */
+  errorExcerpt: string;
+  /** The guidance that rescue threaded into the re-run. */
+  guidance: string;
 }
 
 /**
@@ -526,9 +574,28 @@ export interface LaneTriageFailure {
  * (a target it cannot locate is treated as a give_up).
  */
 export type LaneRescueOutcome =
-  | { kind: 'give_up' }
+  /**
+   * `releaseDependents` — the lane fails, but what its dependents build on is
+   * committed and works, so they may run instead of settling 'blocked'.
+   */
+  | { kind: 'give_up'; releaseDependents?: boolean }
   | { kind: 'systemic'; error: string }
-  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
+  /**
+   * `free` — the rescue follows an ENVIRONMENT fix (e.g. dependencies were
+   * installed): the lane failed on the worktree, not on its work, so the re-drive
+   * is not charged to the run's rescue pool. It still counts toward the lane's own
+   * MONITOR_LANE_RESCUE_CAP, so a lane cannot loop on it.
+   */
+  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean; free?: boolean }
+  /**
+   * 'accept' — proceed past the failing step as if it had passed. The supervisor
+   * judged the task's substance done and what is left waivable: cosmetic
+   * residue, or checks the environment could not run (a missing toolchain, UI
+   * criteria on a backend task, a simulator that cannot grant a permission). The
+   * host files each waived item as a follow-up finding. For a commit-integrity
+   * failure it means the uncommitted paths are not this lane's work.
+   */
+  | { kind: 'accept'; reason: string };
 
 // ---------------------------------------------------------------------------
 // Adversarial-review LOOP protocol (the supervisor steering each automatic lap)
@@ -1058,6 +1125,13 @@ export interface ControllerHost {
    * controller settles the lane failed exactly as before the seam existed.
    */
   triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
+  /**
+   * Optional PREFLIGHT, awaited once when a fan-out starts, before any lane is
+   * dispatched: repair what would fail EVERY lane the same way (today: a worktree
+   * with no installed dependencies). Must never throw and never fail the run;
+   * absent ⇒ no preflight.
+   */
+  prepareFanOutEnvironment?(runId: string): Promise<void>;
 
   /**
    * Optional REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling.

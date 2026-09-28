@@ -782,6 +782,171 @@ describe('ProgrammaticRunHost', () => {
       expect(fileLaneTriageFinding).not.toHaveBeenCalled();
     });
 
+    // ── accept (commit-integrity only) ──────────────────────────────────────
+
+    it('returns accept and files an audit finding for a commit-integrity accept', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({ verdict: 'accept', reason: 'the untracked draft files are TASK-266 work' }),
+        readLaneTask: () => ({ taskRef: 'TASK-224', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({
+        ...failure,
+        failureKind: 'commit-integrity',
+        errorExcerpt: 'Uncommitted paths that appeared while this lane ran:\n- src/draft.ts',
+      });
+
+      expect(outcome).toEqual({ kind: 'accept', reason: 'the untracked draft files are TASK-266 work' });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor accepted TASK-224 (commit-integrity)');
+      expect(finding.body).toContain('TASK-266 work');
+      expect(finding.body).toContain('src/draft.ts');
+    });
+
+    it('files the audit finding plus one follow-up per waived item for a gate accept', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({
+          verdict: 'accept',
+          reason: 'all functional criteria met',
+          followUps: ['restyle the disabled Address button', 'verify on a real device: shield subtitle'],
+        }),
+        readLaneTask: () => ({ taskRef: 'TASK-299', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({ ...failure, failureKind: 'task-verify', stepId: 'task-verify' });
+
+      expect(outcome).toEqual({ kind: 'accept', reason: 'all functional criteria met' });
+      const titles = fileLaneTriageFinding.mock.calls.map((c) => (c[0] as { title: string }).title);
+      expect(titles).toEqual([
+        'Monitor accepted TASK-299 (task-verify)',
+        'Follow-up for TASK-299: restyle the disabled Address button',
+        'Follow-up for TASK-299: verify on a real device: shield subtitle',
+      ]);
+      const audit = fileLaneTriageFinding.mock.calls[0][0] as { body: string };
+      expect(audit.body).toContain('## Waived');
+    });
+
+    it('passes the EARLY stage to the monitor and files a "steered" finding for its rescue', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const monitor = makeLaneMonitor({ verdict: 'retry', targetStepId: 'implement', guidance: 'restructure', reason: 'r' });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor,
+        readLaneTask: () => ({ taskRef: 'TASK-297', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      await host.triageLaneFailure({ ...failure, stage: 'early' });
+
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({ stage: 'early' });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor steered TASK-297 (inner-step)');
+      expect(finding.body).toContain('FINAL automatic attempt');
+    });
+
+    it('maps dependents to refs for the monitor and audits a release', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const monitor = makeLaneMonitor({ verdict: 'give_up', reason: 'getStepModels is at HEAD', releaseDependents: true });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor,
+        readLaneTask: (id: string) => ({ taskRef: id === 'dep-1' ? 'TASK-274' : 'TASK-273', taskTitle: 'T', taskBody: 'B' }),
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure({ ...failure, dependents: ['dep-1'] });
+
+      expect(outcome).toEqual({ kind: 'give_up', releaseDependents: true });
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({ dependents: [{ taskRef: 'TASK-274', taskTitle: 'T' }] });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor released the lanes waiting on TASK-273');
+      expect(finding.body).toContain('Released: TASK-274');
+    });
+
+    const makeEnv = (ok: boolean) => ({
+      describe: () => 'Dependency folders MISSING: node_modules.',
+      available: () => ['install_dependencies' as const],
+      missingDependencyDirs: () => ['.'],
+      run: vi.fn().mockResolvedValue({ ok, summary: ok ? '`pnpm install` succeeded' : '`pnpm install` failed', detail: 'log' }),
+    });
+
+    it('runs a fix_environment action and returns a FREE rescue on success', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const environmentActions = makeEnv(true);
+      const monitor = makeLaneMonitor({
+        verdict: 'fix_environment',
+        action: 'install_dependencies',
+        targetStepId: 'implement',
+        guidance: 'deps installed; re-run typecheck',
+        reason: 'tsc: command not found',
+      });
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor, environmentActions, fileLaneTriageFinding,
+        readLaneTask: () => ({ taskRef: 'TASK-273', taskTitle: 'T', taskBody: 'B' }),
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      expect(monitor.triageLane.mock.calls[0][0]).toMatchObject({
+        environment: { actions: ['install_dependencies'] },
+      });
+      expect(environmentActions.run).toHaveBeenCalledWith('install_dependencies');
+      expect(outcome).toEqual({
+        kind: 'rescue',
+        targetStepId: 'implement',
+        guidance: 'deps installed; re-run typecheck',
+        adjusted: false,
+        free: true,
+      });
+      expect((fileLaneTriageFinding.mock.calls[0][0] as { title: string }).title).toBe(
+        'Monitor fixed the environment for TASK-273 (install_dependencies)',
+      );
+    });
+
+    it('lets the lane fail when the environment action fails', async () => {
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({
+          verdict: 'fix_environment', action: 'install_dependencies', targetStepId: 'implement', guidance: 'g', reason: 'r',
+        }),
+        environmentActions: makeEnv(false),
+        fileLaneTriageFinding: vi.fn().mockResolvedValue(undefined),
+      });
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
+    it('installs missing dependencies in the fan-out preflight, and files a finding only on failure', async () => {
+      const ok = makeEnv(true);
+      const fileOk = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        environmentActions: ok, fileLaneTriageFinding: fileOk,
+      }).prepareFanOutEnvironment();
+      expect(ok.run).toHaveBeenCalledTimes(1);
+      expect(fileOk).not.toHaveBeenCalled();
+
+      const bad = makeEnv(false);
+      const fileBad = vi.fn().mockResolvedValue(undefined);
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        environmentActions: bad, fileLaneTriageFinding: fileBad,
+      }).prepareFanOutEnvironment();
+      expect((fileBad.mock.calls[0][0] as { title: string }).title).toBe('Dependency install failed before the sprint started');
+
+      const complete = { ...makeEnv(true), missingDependencyDirs: () => [] };
+      await new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), environmentActions: complete,
+      }).prepareFanOutEnvironment();
+      expect(complete.run).not.toHaveBeenCalled();
+    });
+
     // ── append_correction (advisory, no rescue spent) ───────────────────────
 
     const CORRECTION: LaneTriageDecision = {
