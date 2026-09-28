@@ -28,9 +28,9 @@ describe('modelContext', () => {
       expect(modelSupportsContext1M('claude-sonnet-4-6')).toBe(true);
     });
 
-    it('rejects Sonnet 5 — its 1M window is native (no beta)', () => {
-      expect(modelSupportsContext1M('claude-sonnet-5')).toBe(false);
-      // The bare alias resolves to Sonnet 5 before the gate is consulted, so it
+    it('rejects Sonnet 5.5 — its 1M window is native (no beta)', () => {
+      expect(modelSupportsContext1M('claude-sonnet-5-5')).toBe(false);
+      // The bare alias resolves to Sonnet 5.5 before the gate is consulted, so it
       // too is no longer special-cased as beta-needing.
       expect(modelSupportsContext1M('sonnet')).toBe(false);
     });
@@ -61,17 +61,17 @@ describe('modelContext', () => {
       // Opus 5 reaches 1M via the `[1m]` marker on THIS plane (the bare id reports
       // a 200K window under a Claude Code login, contrary to the API docs — see
       // MODEL_ALIAS_TO_ID); the legacy -250k variant still maps to the older
-      // default-window Opus 4.8. Sonnet 5 IS 1M-native, so neither sonnet alias
+      // default-window Opus 4.8. Sonnet 5.5 IS 1M-native, so neither sonnet alias
       // carries a marker.
       expect(resolveModelAlias('opus')).toBe('claude-opus-5-5[1m]');
       expect(resolveModelAlias('opus-250k')).toBe('claude-opus-4-8');
-      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-5');
-      expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-5');
+      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-5-5');
+      expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-5-5');
       expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
     });
 
     it('pins the fable alias to the current Fable snapshot (1M-native, no marker)', () => {
-      // Fable 5.1, like Sonnet 5, is 1M by default — the bare id already reports a
+      // Fable 5.1, like Sonnet 5.5, is 1M by default — the bare id already reports a
       // 1M window, so no [1m] marker and no context-1m beta.
       expect(resolveModelAlias('fable')).toBe('claude-fable-5-1');
       expect(resolveModelAlias('Fable')).toBe('claude-fable-5-1');
@@ -81,7 +81,7 @@ describe('modelContext', () => {
 
     it('matches aliases case/space-insensitively', () => {
       expect(resolveModelAlias('Opus')).toBe('claude-opus-5-5[1m]');
-      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-5');
+      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-5-5');
     });
 
     it('passes through "auto" (the SDK owns model choice)', () => {
@@ -102,7 +102,7 @@ describe('modelContext', () => {
     });
 
     it('the pinned default aliases need no 1M beta', () => {
-      // sonnet→claude-sonnet-5 is 1M-native and opus→claude-opus-5-5[1m] reaches 1M
+      // sonnet→claude-sonnet-5-5 is 1M-native and opus→claude-opus-5-5[1m] reaches 1M
       // via the id marker, so NEITHER needs the Sonnet-4.x beta: the gate returns
       // false for both.
       expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
@@ -130,9 +130,9 @@ describe('modelContext', () => {
       });
     });
 
-    it('Sonnet 5 emits the bare id and no beta (1M is native)', () => {
+    it('Sonnet 5.5 emits the bare id and no beta (1M is native)', () => {
       expect(sdkModelAndBetas(resolveModelAlias('sonnet'))).toEqual({
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         betas: [],
       });
     });
@@ -151,9 +151,9 @@ describe('modelContext', () => {
         model: 'claude-opus-4-8',
         betas: [],
       });
-      // The legacy sonnet-250k alias resolves to Sonnet 5 (1M native) with no beta.
+      // The legacy sonnet-250k alias resolves to Sonnet 5.5 (1M native) with no beta.
       expect(sdkModelAndBetas(resolveModelAlias('sonnet-250k'))).toEqual({
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         betas: [],
       });
     });
@@ -169,9 +169,9 @@ describe('modelContext', () => {
       expect(interactiveModelArg(resolveModelAlias('opus'))).toBe('claude-opus-5-5[1m]');
     });
 
-    it('passes Sonnet 5 through unchanged (no marker to strip)', () => {
-      expect(interactiveModelArg(resolveModelAlias('sonnet'))).toBe('claude-sonnet-5');
-      expect(interactiveModelArg(resolveModelAlias('sonnet-250k'))).toBe('claude-sonnet-5');
+    it('passes Sonnet 5.5 through unchanged (no marker to strip)', () => {
+      expect(interactiveModelArg(resolveModelAlias('sonnet'))).toBe('claude-sonnet-5-5');
+      expect(interactiveModelArg(resolveModelAlias('sonnet-250k'))).toBe('claude-sonnet-5-5');
     });
 
     it('strips a directly-pinned Sonnet 4.x [1m] marker (no CLI 1M-beta path)', () => {
@@ -210,7 +210,7 @@ describe('modelContext', () => {
 
     it('leaves non-guarded / auto / undefined ids untouched even when the predicate says false', () => {
       expect(applyModelAvailabilityFallback('claude-opus-4-8[1m]', noneUsable)).toBe('claude-opus-4-8[1m]');
-      expect(applyModelAvailabilityFallback('claude-sonnet-5', noneUsable)).toBe('claude-sonnet-5');
+      expect(applyModelAvailabilityFallback('claude-sonnet-5-5', noneUsable)).toBe('claude-sonnet-5-5');
       expect(applyModelAvailabilityFallback('auto', noneUsable)).toBe('auto');
       expect(applyModelAvailabilityFallback(undefined, noneUsable)).toBeUndefined();
     });

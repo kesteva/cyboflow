@@ -148,7 +148,7 @@ describe('resolveRunStepModels', () => {
     const inheritStep = result.find((s) => s.stepId === 'inherit-step');
 
     expect(inheritStep).toBeDefined();
-    expect(inheritStep?.label).toBe('Sonnet 5');
+    expect(inheritStep?.label).toBe('Sonnet 5.5');
     expect(inheritStep?.family).toBe('sonnet');
   });
 
@@ -238,7 +238,7 @@ describe('resolveRunStepModels', () => {
     const step = result.find((s) => s.stepId === 'claude-runtime-and-model-step');
 
     expect(step).toBeDefined();
-    expect(step?.label).toBe('Sonnet 5');
+    expect(step?.label).toBe('Sonnet 5.5');
     expect(step?.family).toBe('sonnet');
   });
 

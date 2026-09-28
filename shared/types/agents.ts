@@ -65,7 +65,7 @@ export function isAgentModelAlias(value: unknown): value is AgentModelAlias {
 export const AGENT_MODEL_LABELS: Record<AgentModelAlias, string> = {
   fable: 'Fable 5.1',
   opus: 'Opus 5.5',
-  sonnet: 'Sonnet 5',
+  sonnet: 'Sonnet 5.5',
   haiku: 'Haiku 4.5',
 };
 

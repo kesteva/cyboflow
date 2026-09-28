@@ -272,7 +272,7 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
       model: 'sonnet',
     });
     expect(pinned.model).toBe('sonnet');
-    expect(pinned.stats.model).toBe('Sonnet 5');
+    expect(pinned.stats.model).toBe('Sonnet 5.5');
 
     const reset = await caller.cyboflow.agents.resetOverride({
       projectId: PROJECT_ID,
