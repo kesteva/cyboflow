@@ -35,7 +35,10 @@ import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachi
  * and is not trying to; it stops the clock from being the thing that
  * manufactures one.
  */
-const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
+// Exported (TASK-300 attempt 3): runs.ts's queueInput 'parked' check reuses
+// this SAME threshold as a fallback trigger when hasActiveExecution() alone
+// cannot be trusted — see the comment at that call site.
+export const STALE_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
 
 /** How often the detector scans for stale approvals. */
 const SCAN_INTERVAL_MS = 60_000; // 60 seconds

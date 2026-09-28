@@ -1684,6 +1684,88 @@ describe('cyboflow.runs.queueInput — parked (no wait for the stuck detector)',
 });
 
 // ---------------------------------------------------------------------------
+// cyboflow.runs.queueInput — TASK-300 attempt 3 (visual-verify fix): the
+// observed run's exact shape — hasActiveExecution() STILL reports true (a
+// detached background child kept the executor's promise pending forever
+// after the agent's turn actually ended), so the attempt-2 real-time check
+// alone accepts the message into a buffer nothing will ever drain. Pins the
+// fallback staleness check that treats a run this stale as 'parked' even
+// though the executor insists it is live.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.queueInput — parked despite hasActiveExecution() reporting true (attempt 3)', () => {
+  it('refuses when the executor is reported active but raw_events have been stale for 45+ minutes', async () => {
+    const db = createTestDb({
+      disableForeignKeys: true,
+      includeWorkflowRunTaskColumns: true,
+      includeQuestionsTable: true,
+    });
+    const { runId } = seedRun(db, { status: 'running' });
+    // The agent's final SDK message — a completed turn, no further activity
+    // since — landed long enough ago to cross the 45-minute threshold.
+    const staleTimestamp = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
+       VALUES (?, 'result', '{"is_error":false}', ?)`,
+    ).run(runId, staleTimestamp);
+
+    const queueInput = vi.fn<(id: string, text: string) => void>();
+    setQueueInputDeps({
+      runExecutor: {
+        queueInput,
+        dequeueInput: vi.fn().mockReturnValue(false),
+        // Exactly the observed bug: a detached background child keeps the
+        // executor's spawn promise from ever resolving, so this reports
+        // true forever even though the turn itself is long done.
+        hasActiveExecution: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.queueInput({ runId, text: 'still there?' });
+
+      expect(result).toEqual({ noOp: true, reason: 'parked' });
+      expect(queueInput).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still queues when the executor is active and raw_events are recent', async () => {
+    const db = createTestDb({
+      disableForeignKeys: true,
+      includeWorkflowRunTaskColumns: true,
+      includeQuestionsTable: true,
+    });
+    const { runId } = seedRun(db, { status: 'running' });
+    db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
+       VALUES (?, 'assistant', '{}', ?)`,
+    ).run(runId, new Date().toISOString());
+
+    const queueInput = vi.fn<(id: string, text: string) => void>();
+    setQueueInputDeps({
+      runExecutor: {
+        queueInput,
+        dequeueInput: vi.fn().mockReturnValue(false),
+        hasActiveExecution: vi.fn().mockReturnValue(true),
+      },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.queueInput({ runId, text: 'keep going' });
+
+      expect(result).toEqual({ queued: true });
+      expect(queueInput).toHaveBeenCalledWith(runId, 'keep going');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cyboflow.runs.cancel — git-neutral run Cancel (Phase 4a, router delegation).
 //
 // The handler's full guard matrix is covered in cancelRunHandler.test.ts; here we

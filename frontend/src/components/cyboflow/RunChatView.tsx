@@ -158,9 +158,32 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const pendingSends = usePendingSendStore((s) => (runId != null ? s.byHost[runId] : undefined));
   const reconcilePending = usePendingSendStore((s) => s.reconcile);
   const requestReopenPending = usePendingSendStore((s) => s.requestReopen);
+  const setPendingStatus = usePendingSendStore((s) => s.setStatus);
   useEffect(() => {
     if (runId != null) reconcilePending(runId, messages);
   }, [messages, runId, reconcilePending]);
+
+  // TASK-300 (visual-verify fix): a 'queued' entry accepted by runs.queueInput
+  // is buffered server-side on RunExecutor and delivered at the NEXT turn
+  // boundary — but RunExecutor.teardownRun() unconditionally clears that
+  // buffer when the run's turn ends in failure or cancellation (the drain
+  // seam that would otherwise deliver it is never reached), with no signal
+  // back to the client that the message was dropped. Left alone, the pending
+  // row sits marked 'queued' forever, silently lying about a message that no
+  // longer exists anywhere. Once the run reaches a terminal status, any
+  // still-'queued' entries for it can no longer be delivered — flip them to
+  // 'failed' so PendingSendRow surfaces the loss and offers click-to-reopen
+  // (the text itself survives in the entry, so nothing is actually lost).
+  const runStatus = run?.status;
+  useEffect(() => {
+    if (runId == null || pendingSends == null) return;
+    if (runStatus !== 'completed' && runStatus !== 'failed' && runStatus !== 'canceled') return;
+    for (const entry of pendingSends) {
+      if (entry.status === 'queued') {
+        setPendingStatus(runId, entry.id, 'failed', 'Run ended before this message could be delivered.');
+      }
+    }
+  }, [runId, runStatus, pendingSends, setPendingStatus]);
 
   // -------------------------------------------------------------------------
   // Run artifacts → question-card "open in pane" affordances (#8 / #9).

@@ -160,6 +160,7 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
 import { useQuestionStore } from '../../../stores/questionStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
+import { usePendingSendStore } from '../../../stores/pendingSendStore';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
@@ -175,6 +176,7 @@ beforeEach(() => {
     useActiveRunsStore.setState({ runsByProject: {} });
     useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
     useCenterPaneStore.setState({ bySession: {} });
+    usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
   });
   apiMock.state.fallbackCb = null;
   mockListUnifiedMessages.mockClear();
@@ -596,5 +598,53 @@ describe('RunChatView — model fallback toast', () => {
     });
 
     expect(screen.queryByTestId('session-action-toast')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests — TASK-300 (visual-verify fix): a 'queued' pending-send entry must
+// not be left silently stranded when RunExecutor.teardownRun() clears its
+// server-side buffer on a failed/canceled turn with no signal back to the
+// client. Once the run reaches a terminal status, any still-'queued' entry
+// for it flips to 'failed' so PendingSendRow surfaces the loss instead of
+// claiming forever that the message is still on its way.
+// ---------------------------------------------------------------------------
+
+describe('RunChatView — stranded queued pending-send on run failure/cancellation (TASK-300)', () => {
+  it('flips a queued entry to failed once the run transitions to failed', async () => {
+    seedRun('run-parked', 'sdk');
+    act(() => {
+      usePendingSendStore.getState().addPending('run-parked', 'still there?', 'queued');
+    });
+
+    render(<RunChatView runId="run-parked" />);
+    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalled());
+
+    // Sanity: the entry starts out 'queued', not already 'failed'.
+    expect(usePendingSendStore.getState().byHost['run-parked']?.[0].status).toBe('queued');
+
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { 7: [makeRunRow('run-parked', 'sdk')].map((r) => ({ ...r, status: 'failed' })) },
+      });
+    });
+
+    await waitFor(() => {
+      const entry = usePendingSendStore.getState().byHost['run-parked']?.[0];
+      expect(entry?.status).toBe('failed');
+      expect(entry?.error).toBe('Run ended before this message could be delivered.');
+    });
+  });
+
+  it('leaves a queued entry alone while the run is still running', async () => {
+    seedRun('run-live', 'sdk');
+    act(() => {
+      usePendingSendStore.getState().addPending('run-live', 'keep going', 'queued');
+    });
+
+    render(<RunChatView runId="run-live" />);
+    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalled());
+
+    expect(usePendingSendStore.getState().byHost['run-live']?.[0].status).toBe('queued');
   });
 });

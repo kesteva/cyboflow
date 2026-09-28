@@ -58,6 +58,7 @@ import { isEvalSourcedFinding } from '../../../../../shared/types/reviews';
 import { ADDRESS_REVIEW_FINDINGS_CONTRACT } from '../../programmatic/stepPrompt';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { StepResultStore } from '../../stepResultStore';
+import { STALE_THRESHOLD_MS } from '../../stuckDetector';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { TaskChangeRouter } from '../../taskChangeRouter';
@@ -2957,6 +2958,12 @@ export const runsRouter = router({
    *     StuckDetector's 45-minute staleness grace period — that period exists
    *     to avoid escalating a run merely mid-step, but a message submitted
    *     THIS SECOND has nothing to wait for; there is no drain seam coming);
+   *     ALSO returned (TASK-300 attempt 3) when execution IS reported live but
+   *     raw_events for the run have been stale past that same 45-minute
+   *     threshold — hasActiveExecution() only proves execute() has not
+   *     returned, not that a turn is still producing anything; a detached
+   *     background child the agent spawned can keep that promise pending
+   *     forever after the turn has actually ended;
    *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
    *     (those rested states use runs.nudge / runs.resume / the question gate,
    *     not this queue path);
@@ -3013,16 +3020,48 @@ export const runsRouter = router({
       // in-progress case it could misclassify: a run truly mid-turn, or
       // resting at a genuine open gate, always reports it true.
       if (run.status === 'running') {
-        const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
-        if (!hasLiveTurn) {
-          const hasGate = ctx.db
+        const hasGate = ctx.db
+          .prepare(
+            `SELECT
+               EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending' AND awaited = 1)
+                 OR EXISTS(SELECT 1 FROM questions WHERE run_id = ? AND status = 'pending') AS hasGate`,
+          )
+          .get(input.runId, input.runId) as { hasGate: number };
+        if (!hasGate.hasGate) {
+          const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
+          if (!hasLiveTurn) {
+            return { noOp: true, reason: 'parked' };
+          }
+          // (visual-verify fix, TASK-300 attempt 3): hasActiveExecution() is
+          // "execute()/executeProgrammatic has not returned yet" — NOT "a
+          // turn is actively generating". The observed run reproduced this
+          // gap exactly: the agent's turn ended (its final SDK message is
+          // already the last raw_events row), but a detached background
+          // child it spawned (e.g. `pnpm dev`) inherited stdio and kept the
+          // SDK subprocess's stdout pipe open, so the query() iterator never
+          // drained and execute()'s await never returned — hasActiveExecution
+          // reports true FOREVER even though nothing further will ever be
+          // produced. There is no reliable way to tell that shape apart from
+          // a run legitimately mid-step from this signal alone in real time,
+          // so fall back to the SAME staleness measure (and the SAME 45-
+          // minute threshold) the StuckDetector's parked_no_gate rung already
+          // uses for exactly this ambiguity — reused here so a message
+          // submitted in the up-to-60s gap between crossing that threshold
+          // and the detector's next scan tick is refused immediately rather
+          // than accepted into a buffer nothing will ever drain.
+          // No raw_events yet falls back to the run's own created_at (mirrors
+          // the StuckDetector's parked_no_gate COALESCE) rather than reading
+          // as instantly maximally-stale.
+          const lastActivity = ctx.db
             .prepare(
-              `SELECT
-                 EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending' AND awaited = 1)
-                   OR EXISTS(SELECT 1 FROM questions WHERE run_id = ? AND status = 'pending') AS hasGate`,
+              `SELECT COALESCE(
+                 (SELECT MAX(unixepoch(re.created_at)) FROM raw_events re WHERE re.run_id = wr.id),
+                 unixepoch(wr.created_at)
+               ) AS ts
+               FROM workflow_runs wr WHERE wr.id = ?`,
             )
-            .get(input.runId, input.runId) as { hasGate: number };
-          if (!hasGate.hasGate) {
+            .get(input.runId) as { ts: number | null };
+          if (lastActivity.ts !== null && lastActivity.ts * 1000 < Date.now() - STALE_THRESHOLD_MS) {
             return { noOp: true, reason: 'parked' };
           }
         }
