@@ -77,6 +77,16 @@ const LIVE_TAIL_DEBOUNCE_MS = 150;
 /** Backoff before reopening a subscription the server ended or that errored. */
 const RESUBSCRIBE_DELAY_MS = 1_000;
 
+/**
+ * Poll interval for reconciling a `sending` flag that bootstrap HYDRATED from
+ * `turnState` (as opposed to one this renderer's own `sendMessage` promise is
+ * holding). The subscribe IPC call is async and may not be live server-side
+ * by the time `turnState` resolves, so a terminal envelope for that turn can
+ * be missed entirely — this poll is the backstop that still notices the turn
+ * ended.
+ */
+const HYDRATED_SENDING_RECONCILE_MS = 2_500;
+
 /** Defensive cap on the `liveEvents` buffer, mirroring MAX_EVENTS_PER_PANEL in
  *  panelLiveEventsStore.ts. Stage 1 has exactly one global thread, so unlike
  *  that store's per-panel map this is a single flat array. */
@@ -262,6 +272,20 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
   let initialized = false;
   let cachedUnsubscribe: (() => void) | null = null;
 
+  // TASK-297 reload-hydration reconcile: tracked at this outer level (not
+  // inside `init()`) so `sendMessage` — a sibling method — can cancel a
+  // hydration-driven poll the moment this renderer starts owning `sending`
+  // via its own promise + `finally`.
+  let hydratedSending = false;
+  let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  const stopReconcile = (): void => {
+    hydratedSending = false;
+    if (reconcileTimer !== null) {
+      clearInterval(reconcileTimer);
+      reconcileTimer = null;
+    }
+  };
+
   /** Refetch this thread's proposals and replace the list atomically. */
   const refreshProposals = async (threadId: string): Promise<void> => {
     try {
@@ -298,6 +322,13 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       // Set by `unsubscribe` so a bootstrap that resolves after teardown does
       // not open a subscription nothing will ever close.
       let tornDown = false;
+      // Bumped by `captureLiveEvents` on every terminal envelope (`result` /
+      // `assistant_interrupted`) it sees. Read once before firing the
+      // `turnState` query below and compared after it resolves: if a terminal
+      // envelope landed WHILE the query was in flight, that query's answer is
+      // stale and must not clobber the `sending: false` the envelope already
+      // applied.
+      let terminalEpoch = 0;
 
       /** Debounced onThreadEvent handler: bump the live-tail tick + refetch proposals. */
       const scheduleLiveTailRefresh = (threadId: string): void => {
@@ -351,7 +382,13 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           }
           const next: Partial<AgentThreadState> = {};
           if (events !== s.liveEvents) next.liveEvents = events;
-          if (sawTerminal && s.sending) next.sending = false;
+          if (sawTerminal) {
+            terminalEpoch += 1;
+            if (s.sending) next.sending = false;
+            // The turn this poll was reconciling has now ended via its own
+            // terminal marker — the poll's job is done.
+            stopReconcile();
+          }
           return next;
         });
       };
@@ -363,19 +400,12 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           const thread = await trpc.cyboflow.agentThread.getThread.query();
           set({ thread });
           await refreshProposals(thread.id);
-          // A renderer reload loses the in-memory `sending` flag a live
-          // `sendMessage` call would otherwise be holding — hydrate it from
-          // the server's own record of what is actually in flight, so a turn
-          // that started before this mount still shows Stop, not Send.
-          try {
-            const { inFlight } = await trpc.cyboflow.agentThread.turnState.query({
-              threadId: thread.id,
-            });
-            if (!tornDown) set({ sending: inFlight });
-          } catch (err: unknown) {
-            console.warn('[agentThreadStore] turnState hydration failed:', err);
-          }
           if (tornDown) return;
+          // Open the live tail BEFORE querying `turnState` below: a terminal
+          // envelope (`result` / `assistant_interrupted`) for a turn that
+          // ends while that query is still in flight must be observable by
+          // the epoch check below, and the subscription can only see it once
+          // it is actually open.
           threadEventSub = openResilientSubscription<unknown[]>(
             'onThreadEvent',
             (handlers) =>
@@ -387,6 +417,51 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
               },
             },
           );
+
+          // A renderer reload loses the in-memory `sending` flag a live
+          // `sendMessage` call would otherwise be holding — hydrate it from
+          // the server's own record of what is actually in flight, so a turn
+          // that started before this mount still shows Stop, not Send.
+          const epochBeforeQuery = terminalEpoch;
+          try {
+            const { inFlight } = await trpc.cyboflow.agentThread.turnState.query({
+              threadId: thread.id,
+            });
+            if (tornDown) return;
+            // The subscribe IPC call above is itself async and may not be
+            // live server-side yet, so it can still miss the terminal event
+            // for THIS query's answer — the epoch check only catches the
+            // envelope having already arrived by now. Trust the query's
+            // answer only when nothing terminal has landed in the meantime.
+            if (terminalEpoch !== epochBeforeQuery) return;
+            set({ sending: inFlight });
+            if (inFlight) {
+              // Reconcile: this renderer holds no `sendMessage` promise for
+              // this turn, so nothing else will ever flip `sending` back to
+              // false except a terminal envelope arriving (handled above) or
+              // this poll noticing the server itself has gone idle.
+              hydratedSending = true;
+              reconcileTimer = setInterval(() => {
+                void (async () => {
+                  if (tornDown || !hydratedSending) return;
+                  try {
+                    const result = await trpc.cyboflow.agentThread.turnState.query({
+                      threadId: thread.id,
+                    });
+                    if (tornDown || !hydratedSending) return;
+                    if (!result.inFlight) {
+                      set({ sending: false });
+                      stopReconcile();
+                    }
+                  } catch (err: unknown) {
+                    console.warn('[agentThreadStore] turnState reconcile failed:', err);
+                  }
+                })();
+              }, HYDRATED_SENDING_RECONCILE_MS);
+            }
+          } catch (err: unknown) {
+            console.warn('[agentThreadStore] turnState hydration failed:', err);
+          }
         } catch (err: unknown) {
           console.error('[agentThreadStore] init bootstrap failed:', err);
         } finally {
@@ -412,6 +487,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
 
       const unsubscribe = (): void => {
         tornDown = true;
+        stopReconcile();
         if (refetchTimer !== null) {
           clearTimeout(refetchTimer);
           refetchTimer = null;
@@ -441,6 +517,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       const pendingHint = get().pendingContextHint;
       const contextHint = opts?.contextHint ?? pendingHint ?? undefined;
       if (pendingHint !== null) set({ pendingContextHint: null });
+      // This renderer is about to own `sending` via its own promise +
+      // `finally` below — cancel any hydration-driven reconcile poll left
+      // over from bootstrap so the two mechanisms never race each other.
+      stopReconcile();
       // A new turn starts the live tail clean — a prior turn's trailing
       // envelopes (if any survived without a `result`, e.g. a cancelled turn)
       // must not bleed into this one's progressive render.

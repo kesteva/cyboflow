@@ -230,6 +230,98 @@ describe('init()', () => {
     expect(useAgentThreadStore.getState().sending).toBe(false);
     warnSpy.mockRestore();
   });
+
+  it('opens the onThreadEvent subscription BEFORE querying turnState (so a terminal event during the query is observable)', async () => {
+    const order: string[] = [];
+    mockOnThreadEventSubscribe = vi.fn().mockImplementation(() => {
+      order.push('subscribe');
+      return { unsubscribe: mockOnThreadEventUnsubscribe };
+    });
+    mockTurnStateQuery = vi.fn().mockImplementation(() => {
+      order.push('turnState');
+      return Promise.resolve({ inFlight: false });
+    });
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(mockTurnStateQuery).toHaveBeenCalled());
+
+    expect(order).toEqual(['subscribe', 'turnState']);
+  });
+
+  it('ignores a stale turnState inFlight:true answer when a terminal event already arrived while the query was in flight (attempt-3 regression: subscription used to open AFTER turnState, so this race was unobservable)', async () => {
+    let resolveTurnState: ((v: { inFlight: boolean }) => void) | undefined;
+    mockTurnStateQuery = vi.fn().mockReturnValue(
+      new Promise<{ inFlight: boolean }>((resolve) => {
+        resolveTurnState = resolve;
+      }),
+    );
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(mockOnThreadEventSubscribe).toHaveBeenCalled());
+
+    // The turn ends WHILE turnState is still in flight.
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeResultEnvelope()]);
+
+    // The query's stale answer arrives after the turn already ended.
+    resolveTurnState?.({ inFlight: true });
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().loading).toBe(false));
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+    // No reconcile poll should have started off a discarded, stale answer.
+    expect(mockTurnStateQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles a hydrated `sending` flag by polling turnState until it reports idle, when no terminal event ever arrives on this renderer', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    mockTurnStateQuery = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve({ inFlight: calls === 1 });
+    });
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+    expect(mockTurnStateQuery).toHaveBeenCalledTimes(2);
+
+    // The poll must have stopped — no further calls on continued elapsed time.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockTurnStateQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('negative control: keeps polling (and `sending` stays true) while turnState genuinely still reports the turn in flight', async () => {
+    vi.useFakeTimers();
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+    expect(mockTurnStateQuery.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+    expect(mockTurnStateQuery.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('stops the reconcile poll on teardown', async () => {
+    vi.useFakeTimers();
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+
+    const teardown = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+    const callsBeforeTeardown = mockTurnStateQuery.mock.calls.length;
+
+    teardown();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(mockTurnStateQuery.mock.calls.length).toBe(callsBeforeTeardown);
+  });
 });
 
 // ---------------------------------------------------------------------------
