@@ -409,8 +409,23 @@ export const ADDRESS_REVIEW_STEP_ID = 'address-review';
  * (stepPrompt.ts) verbatim — the SAME contract the programmatic
  * `address-review` step follows — rather than inventing a second, driftable
  * copy of the same instructions.
+ *
+ * Unlike the programmatic `address-review` STEP — which is always followed by
+ * the workflow's own human-review step, so the sign-off gate reopens itself —
+ * this message is the agent's ENTIRE instruction for the turn: nothing else
+ * re-opens the gate afterward. The trailing sentence below is the same
+ * instruction `handoverRunHandler`'s final-gate handover brief gives at
+ * handover time ("re-open the final sign-off gate yourself via
+ * AskUserQuestion... do NOT self-approve, and do NOT merge to main
+ * yourself") — repeated here rather than assumed-recalled, since this message
+ * may land long after that original brief scrolled out of the agent's
+ * effective context.
  */
-const ADDRESS_REVIEW_CHAT_MESSAGE = `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}`;
+const ADDRESS_REVIEW_CHAT_MESSAGE =
+  `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}` +
+  `\n\nOnce you have worked through every finding above, re-open the final sign-off gate yourself via ` +
+  `AskUserQuestion, exactly as this workflow's instructions describe for that gate. Do NOT self-approve, ` +
+  `and do NOT merge to main yourself.`;
 
 let rewindRunDeps: RewindRunDeps | null = null;
 
@@ -434,9 +449,18 @@ export function setRewindRunDeps(deps: RewindRunDeps): void {
  * but the run DOES have a live agent to hand the request to via chat — the
  * card renders its button ENABLED for this one reason (see ReviewItemCard's
  * ADDRESS_REVIEW_DISABLED_TOOLTIP / the enabled-anyway carve-out) while every
- * other reason keeps the button disabled.
+ * other reason keeps the button disabled. `'orchestrated'` (TASK-299) is the
+ * one OTHER new reason: a run that was orchestrated from birth (never handed
+ * over) — no DAG step to rewind AND no chat-delivery path either, so it keeps
+ * the button disabled, distinctly from the false `'completed'` copy it used
+ * to get.
  */
-export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progress' | 'handed_over';
+export type AddressReviewIneligibleReason =
+  | 'completed'
+  | 'no_step'
+  | 'in_progress'
+  | 'handed_over'
+  | 'orchestrated';
 
 /**
  * `addressReviewFindings`'s result: rewindRunHandler's own shape, PLUS the
@@ -3149,32 +3173,40 @@ export const runsRouter = router({
    * disabled (with an explanatory tooltip) instead of letting the human click
    * it and hit a `noOp` reason.
    *
-   * `eligible: false` carries a `reason`:
-   *   - 'completed'  — the run is not programmatic, not found, or not in one
-   *     of rewindRunHandler's REWINDABLE_STATUSES (running / awaiting_review /
-   *     failed / paused) — i.e. it already completed, was canceled, or never
-   *     started walking a DAG at all.
-   *   - 'no_step'    — the run's FROZEN definition (resolveRunFrozenSpec, the
-   *     same source of truth rewindRunHandler validates against — never the
-   *     live workflows.spec_json) has no `address-review` step (e.g. a quick
-   *     session, compound, or launch/planner run — only sprint/ship carry one).
-   *   - 'in_progress' — `address-review` IS the run's live current step
-   *     (status 'running'): a previous click (or the flow itself) already has
-   *     the step working through the pending findings. Rewinding again would
-   *     abort and restart that repair mid-flight — rewindRunHandler allows
-   *     target === current — so the CTA reads as "already addressing" instead.
-   *     Every eval-finding card for the run shares this verdict, which is what
-   *     makes the action effectively once-per-run across sibling cards.
-   *   - 'handed_over' — the run was flipped programmatic -> orchestrated by
-   *     migration 081's handover seam (`handed_over_at` is set). A rewind is
-   *     genuinely wrong here (there is no DAG left for it to re-enter), but the
-   *     run's agent is sitting live in chat, so THIS reason is the one
-   *     `eligible: false` case ReviewItemCard renders with the button still
-   *     ENABLED — clicking it delivers the stock request into that chat
-   *     instead of calling `addressReviewFindings`'s rewind path (TASK-299).
-   *
-   * A missing run row is folded into 'completed' — there is nothing to rewind
-   * either way, and the eligibility check has no narrower reason to report.
+   * Checked in this order (TASK-299 attempt 2 — a truly terminal status and a
+   * flow with no `address-review` step disable the CTA even for a handed-over
+   * run; the earlier ordering let `'handed_over'` short-circuit both):
+   *   1. missing row, or a genuinely TERMINAL status (`canceled` / `failed` /
+   *      `completed`) → 'completed' — a handed-over run whose status has
+   *      since gone terminal has no live chat left to deliver into either.
+   *   2. the run's FROZEN definition (resolveRunFrozenSpec, the same source of
+   *      truth rewindRunHandler validates against — never the live
+   *      workflows.spec_json) has no `address-review` step (e.g. a quick
+   *      session, compound, or launch/planner run — only sprint/ship carry
+   *      one) → 'no_step', for a handed-over run exactly as for a
+   *      programmatic one: the stock chat message's findings contract has
+   *      nothing to reopen in that flow shape.
+   *   3. handed-over (`execution_model = 'orchestrated'` AND `handed_over_at`
+   *      set, by migration 081's handover seam) → 'handed_over'. A rewind is
+   *      genuinely wrong here (there is no DAG left for it to re-enter), but
+   *      the run's agent is sitting live in chat, so THIS is the one
+   *      `eligible: false` case ReviewItemCard renders with the button still
+   *      ENABLED — clicking it delivers the stock request into that chat
+   *      instead of calling `addressReviewFindings`'s rewind path.
+   *   4. orchestrated from BIRTH (never handed over) → 'orchestrated' — no DAG
+   *      step to rewind and no chat-delivery path either; unlike 'completed'
+   *      this never claims a possibly still-running run has finished.
+   *   5. programmatic but not in one of rewindRunHandler's REWINDABLE_STATUSES
+   *      (running / awaiting_review / failed / paused) → 'completed' — i.e.
+   *      it already completed, was canceled, or never started walking a DAG.
+   *   6. `address-review` IS the run's live current step (status 'running') →
+   *      'in_progress': a previous click (or the flow itself) already has the
+   *      step working through the pending findings. Rewinding again would
+   *      abort and restart that repair mid-flight — rewindRunHandler allows
+   *      target === current — so the CTA reads as "already addressing"
+   *      instead. Every eval-finding card for the run shares this verdict,
+   *      which is what makes the action effectively once-per-run across
+   *      sibling cards.
    */
   canAddressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -3189,19 +3221,22 @@ export const runsRouter = router({
       if (!row) {
         return { eligible: false, reason: 'completed' };
       }
-      // Checked BEFORE the programmatic/REWINDABLE_STATUSES fold below: a
-      // handed-over run's execution_model is 'orchestrated', which that fold
-      // would otherwise collapse into the same false 'completed' verdict the
-      // bug report's whole premise is about.
-      if (isHandedOverRun(row)) {
-        return { eligible: false, reason: 'handed_over' };
-      }
-      if (row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
+      // Checked BEFORE the handed-over / orchestrated branches below: a run
+      // that has genuinely reached a terminal status is done — 'completed' is
+      // TRUE for it regardless of whether it was ever handed over (a
+      // handed-over run whose status has since flipped to terminal has no
+      // live chat left to deliver into either).
+      if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(row.status)) {
         return { eligible: false, reason: 'completed' };
       }
-      if (isAddressReviewInProgress(row)) {
-        return { eligible: false, reason: 'in_progress' };
-      }
+      // Checked BEFORE isHandedOverRun / the programmatic fold below: the
+      // stock chat message's findings contract ("reopen the sign-off gate...")
+      // presumes a flow shaped like sprint/ship — a handed-over run whose
+      // ORIGINAL flow never had an address-review step (e.g. Launch/Planner's
+      // approve-plan handover) gets the same 'no_step' disable an ordinary
+      // programmatic run without one already gets below, rather than an
+      // enabled button that sends a request the agent has no established
+      // contract for.
       const frozen = resolveRunFrozenSpec(ctx.db, input.runId);
       const definition = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
       const hasAddressReviewStep = Boolean(
@@ -3209,6 +3244,26 @@ export const runsRouter = router({
       );
       if (!hasAddressReviewStep) {
         return { eligible: false, reason: 'no_step' };
+      }
+      // Checked BEFORE the programmatic/REWINDABLE_STATUSES fold below: a
+      // handed-over run's execution_model is 'orchestrated', which that fold
+      // would otherwise collapse into the same false 'completed' verdict the
+      // bug report's whole premise is about.
+      if (isHandedOverRun(row)) {
+        return { eligible: false, reason: 'handed_over' };
+      }
+      if (row.execution_model !== 'programmatic') {
+        // Orchestrated from BIRTH (no handover stamp) — there is no DAG step
+        // to rewind and, unlike a handed-over run, no chat-delivery path
+        // either. 'completed' would be a lie (the run may be actively
+        // running); this reason names the real cause instead.
+        return { eligible: false, reason: 'orchestrated' };
+      }
+      if (!REWINDABLE_STATUSES.has(row.status)) {
+        return { eligible: false, reason: 'completed' };
+      }
+      if (isAddressReviewInProgress(row)) {
+        return { eligible: false, reason: 'in_progress' };
       }
       return { eligible: true };
     }),

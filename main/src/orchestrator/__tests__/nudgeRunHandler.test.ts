@@ -113,7 +113,7 @@ describe('nudgeRunHandler — guard matrix', () => {
     db.close();
   });
 
-  it('non-idle status (running) → { noOp: not_idle }', async () => {
+  it('non-idle status (running) → { noOp: not_idle } when hasActiveExecution is unwired', async () => {
     const db = makeDb();
     const { runId } = seedRun(db, { status: 'running' });
     setSession(db, runId, 'sess-1');
@@ -123,6 +123,42 @@ describe('nudgeRunHandler — guard matrix', () => {
       runExecutor: makeFakeExecutor(),
     });
     expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+    db.close();
+  });
+
+  it('non-idle status (running) → { noOp: not_idle } when hasActiveExecution reports a turn IS in flight (TASK-299)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    setSession(db, runId, 'sess-1');
+    const executor = { ...makeFakeExecutor(), hasActiveExecution: () => true };
+    const result = await nudgeRunHandler(runId, 'hi', {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: executor,
+    });
+    expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+    expect(executor.execute).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("a PARKED 'running' run (hasActiveExecution() === false, no live turn) is treated as idle and delivers (TASK-299)", async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    setSession(db, runId, 'sess-1');
+    const executor = { ...makeFakeExecutor(), hasActiveExecution: () => false };
+
+    const result = await nudgeRunHandler(runId, 'please address the findings', {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: executor,
+    });
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingNudge).toHaveBeenCalledWith(runId, 'please address the findings');
+    expect(executor.execute).toHaveBeenCalledWith(runId);
+    // Already 'running' — no flip was attempted; the status is unchanged.
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('running');
     db.close();
   });
 

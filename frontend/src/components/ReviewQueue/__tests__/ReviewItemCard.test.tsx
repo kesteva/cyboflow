@@ -1324,6 +1324,16 @@ describe('ReviewItemCard', () => {
     );
   });
 
+  it("the Address button renders disabled with the accurate 'orchestrated' tooltip for a live run orchestrated from birth, never the false completed copy", async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'orchestrated' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'This run is driven by a live agent, not a workflow step — chat with it directly instead',
+    );
+  });
+
   it('a canAddressReviewFindings transport failure renders disabled with an "unavailable" tooltip, never the false "Run already completed" (rvw_898ebd7f)', async () => {
     mockCanAddressReviewFindings.mockRejectedValueOnce(new Error('boom'));
     render(<ReviewItemCard item={makeEvalFinding()} />);

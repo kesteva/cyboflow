@@ -161,7 +161,9 @@ function seedHandedOverRun(db: Database.Database): { runId: string; workflowId: 
   return { runId, workflowId };
 }
 
-function makeFakeNudgeExecutor(): NudgeRunDeps['runExecutor'] & { setPendingNudgeCalls: Array<[string, string]>; executeCalls: string[] } {
+function makeFakeNudgeExecutor(opts?: {
+  hasActiveExecution?: boolean;
+}): NudgeRunDeps['runExecutor'] & { setPendingNudgeCalls: Array<[string, string]>; executeCalls: string[] } {
   const setPendingNudgeCalls: Array<[string, string]> = [];
   const executeCalls: string[] = [];
   return {
@@ -173,6 +175,9 @@ function makeFakeNudgeExecutor(): NudgeRunDeps['runExecutor'] & { setPendingNudg
     execute: async (runId: string) => {
       executeCalls.push(runId);
     },
+    ...(opts?.hasActiveExecution !== undefined
+      ? { hasActiveExecution: () => opts.hasActiveExecution as boolean }
+      : {}),
   };
 }
 
@@ -424,7 +429,7 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       });
     });
 
-    it("is ineligible ('completed') for a non-programmatic (orchestrated) run", async () => {
+    it("is ineligible ('orchestrated'), not the false 'completed', for a non-programmatic (orchestrated) run", async () => {
       db = makeDb();
       const { runId } = seedSprintRun(db);
       setExecutionModel(db, runId, 'orchestrated');
@@ -432,7 +437,7 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
 
       const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
 
-      expect(result).toEqual({ eligible: false, reason: 'completed' });
+      expect(result).toEqual({ eligible: false, reason: 'orchestrated' });
     });
 
     // -- TASK-299: handed-over runs -----------------------------------------
@@ -447,7 +452,7 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       expect(result).toEqual({ eligible: false, reason: 'handed_over' });
     });
 
-    it("stays ('completed') for a run that was orchestrated from BIRTH — handed_over_at was never stamped", async () => {
+    it("is ineligible ('orchestrated'), NOT the false 'completed', for a live run orchestrated from BIRTH — handed_over_at was never stamped", async () => {
       db = makeDb();
       const { runId } = seedSprintRun(db, { status: 'awaiting_review' });
       setExecutionModel(db, runId, 'orchestrated');
@@ -456,7 +461,36 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
 
       const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
 
+      expect(result).toEqual({ eligible: false, reason: 'orchestrated' });
+    });
+
+    it("is ineligible ('completed'), NOT 'handed_over', for a handed-over run whose status has since gone terminal", async () => {
+      db = makeDb();
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = ?").run(runId);
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
       expect(result).toEqual({ eligible: false, reason: 'completed' });
+    });
+
+    it("is ineligible ('no_step'), NOT 'handed_over', for a handed-over run whose frozen flow never had an address-review step", async () => {
+      db = makeDb();
+      const { runId } = seedRun(db, { status: 'awaiting_review', workflowName: 'quick' });
+      setExecutionModel(db, runId, 'orchestrated');
+      db.prepare(
+        "UPDATE workflow_runs SET handed_over_at = '2026-09-22T17:44:07.000Z', claude_session_id = 'sess-1' WHERE id = ?",
+      ).run(runId);
+      const workflow = db.prepare('SELECT workflow_id FROM workflow_runs WHERE id = ?').get(runId) as {
+        workflow_id: string;
+      };
+      setWorkflowSpec(db, workflow.workflow_id, NO_ADDRESS_REVIEW_SPEC);
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.canAddressReviewFindings({ runId });
+
+      expect(result).toEqual({ eligible: false, reason: 'no_step' });
     });
   });
 
@@ -503,10 +537,78 @@ describe('cyboflow.runs.addressReviewFindings / canAddressReviewFindings', () =>
       expect(nudgedRunId).toBe(runId);
       expect(nudgedText).toContain('cyboflow_list_run_findings');
       expect(nudgedText).toContain('## Findings contract (address-review)');
+      // The stock message also carries the sign-off-reopen instruction: unlike
+      // the programmatic step, nothing else re-opens the gate for a
+      // handed-over run once the findings are addressed.
+      expect(nudgedText).toContain('re-open the final sign-off gate');
+      expect(nudgedText).toContain('AskUserQuestion');
       // The rewind path (not_programmatic) was never reached.
       expect(rewindExecutor.executeCalls).toEqual([]);
       const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
       expect(row.status).toBe('running');
+    });
+
+    it('delivers to a PARKED handed-over run resting in status=running (no live turn) — the exact shape reproduced against the real run', async () => {
+      // The reported run never reaches awaiting_review: it parks at its final
+      // human gate in status='running' because that gate has no drain seam of
+      // its own. Without nudgeRunHandler's parked-running carve-out this would
+      // refuse `not_idle` forever.
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET status = 'running' WHERE id = ?").run(runId);
+
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: makeFakeExecutor(),
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor({ hasActiveExecution: false });
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      expect(result).toEqual({ delivered: true, viaChat: true });
+      expect(nudgeExecutor.executeCalls).toEqual([runId]);
+      // The row was already 'running' — no flip was needed or attempted.
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('running');
+    });
+
+    it('refuses (not_idle) a handed-over run in status=running whose turn IS actually live', async () => {
+      db = makeDb();
+      addReviewItemsTable(db);
+      const { runId } = seedHandedOverRun(db);
+      db.prepare("UPDATE workflow_runs SET status = 'running' WHERE id = ?").run(runId);
+
+      setRewindRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: makeFakeExecutor(),
+        emitRunStatusChanged: () => {},
+        listStepResults: () => [],
+        deleteStepResults: () => 0,
+      });
+      const nudgeExecutor = makeFakeNudgeExecutor({ hasActiveExecution: true });
+      setNudgeRunDeps({
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: nudgeExecutor,
+      });
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+      const result = await caller.cyboflow.runs.addressReviewFindings({ runId });
+
+      expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+      expect(nudgeExecutor.executeCalls).toEqual([]);
     });
 
     it('still refuses (blocked) when a DIFFERENT, non-eval blocking item is pending', async () => {

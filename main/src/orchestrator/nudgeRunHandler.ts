@@ -43,6 +43,18 @@ import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachi
 export interface NudgeRunExecutorLike {
   setPendingNudge(runId: string, text: string): void;
   execute(runId: string): Promise<void>;
+  /**
+   * Optional real-time "is a turn actually in flight" signal (RunExecutor's
+   * concrete method — structurally satisfied for free by every real caller;
+   * test fakes may omit it). Consulted ONLY when the run's status is
+   * `'running'` (never `'awaiting_review'`, whose guard is unaffected) to
+   * recognize a PARKED running run — one that never drained to
+   * `awaiting_review` because the step it is resting on (e.g. a handed-over
+   * run's final human gate) has no drain seam of its own, even though its
+   * SDK turn has genuinely ended (TASK-299). Omitted or returning `true` keeps
+   * today's behavior: `'running'` is refused `not_idle`.
+   */
+  hasActiveExecution?(runId: string): boolean;
 }
 
 /**
@@ -128,11 +140,15 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
  *   1. trim(text) empty            → { noOp: 'empty' }
  *   2. run row missing             → { noOp: 'not_found' }
  *   3. status terminal             → { noOp: 'terminal' }
- *   4. status !== awaiting_review  → { noOp: 'not_idle' }
+ *   4. status !== awaiting_review AND not a PARKED `running` run (status ===
+ *      'running' with `hasActiveExecution(runId) === false` — TASK-299) →
+ *      { noOp: 'not_idle' }
  *   5. pending blocking review     → { noOp: 'blocked' }
  *   6. claude_session_id null      → { noOp: 'no_session' }
- *   7. guarded UPDATE → running; 0 rows changed → { noOp: 'race' }
- *      (awaiting_review → running is legal — stateMachine ALLOWED_TRANSITIONS.)
+ *   7. a run already `running` (the parked case) skips straight to delivery;
+ *      otherwise the guarded UPDATE flips awaiting_review → running, and 0
+ *      rows changed → { noOp: 'race' } (that edge is legal per
+ *      stateMachine ALLOWED_TRANSITIONS).
  *
  * Then OUTSIDE the queue guard: setPendingNudge(runId, text) + execute(runId).
  * With the default `deliveredAt: 'drain'` the handler awaits the full drain
@@ -174,7 +190,14 @@ export async function nudgeRunHandler(
     if (TERMINAL_STATUSES.has(row.status)) {
       return { ok: false as const, reason: 'terminal' as const };
     }
-    if (row.status !== 'awaiting_review') {
+    // A run PARKED in `running` (never drained to awaiting_review — e.g. a
+    // handed-over run resting at its final human gate, which has no drain
+    // seam of its own) is treated the same as an idle run IFF the executor
+    // confirms no turn is actually in flight for it. Anything else (a genuine
+    // mid-turn run, or `hasActiveExecution` unwired) keeps today's refusal.
+    const isParkedRunning =
+      row.status === 'running' && runExecutor.hasActiveExecution?.(runId) === false;
+    if (row.status !== 'awaiting_review' && !isParkedRunning) {
       return { ok: false as const, reason: 'not_idle' as const };
     }
     // `ignoreBlockingReviewItemId` excludes the gate(s) the caller is answering
@@ -190,9 +213,14 @@ export async function nudgeRunHandler(
       return { ok: false as const, reason: 'no_session' as const };
     }
 
-    // Guarded flip: only succeeds while still parked in awaiting_review, so a
-    // concurrent transition (merge / dismiss / approval cycle) that already
-    // moved the run loses cleanly here (changes === 0 → race).
+    // A run already parked in `running` needs no flip — go straight to
+    // delivery. Otherwise, guarded flip: only succeeds while still parked in
+    // awaiting_review, so a concurrent transition (merge / dismiss / approval
+    // cycle) that already moved the run loses cleanly here (changes === 0 →
+    // race).
+    if (row.status === 'running') {
+      return { ok: true as const };
+    }
     const flip = db.transaction(() => {
       // The raw UPDATE stays inlined because transitions.ts is db-coupled SERVICES
       // code this module may not import at runtime — but VALIDATION no longer needs

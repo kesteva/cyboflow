@@ -436,6 +436,7 @@ const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<AddressReviewIneligibleReason, str
   in_progress: 'Address review is already running for this run',
   unavailable: 'Could not check eligibility — try again',
   handed_over: 'This run was handed over to a live agent — Address sends the request into its chat',
+  orchestrated: 'This run is driven by a live agent, not a workflow step — chat with it directly instead',
 };
 
 /** Shown instead of the ordinary tooltip once a handed-over run's chat delivery has fired. */
