@@ -218,7 +218,15 @@ export function resolveRunStepModels(
       if (target.source === 'run') {
         label = runModelLabel(runModel, runProvider);
         family = inheritedFamily(runModel, runProvider);
-      } else if (target.source === 'pin' && target.model !== undefined) {
+      } else if (
+        target.source === 'pin' &&
+        target.model !== undefined &&
+        // A non-Claude pin of '' or 'auto' is not a pin at all — the same
+        // "no concrete model" values `inheritedFamily` treats as unpinned.
+        // Route those to the unpinned/provider-default branch below instead
+        // of labeling the literal string 'auto' as a family:'other' model.
+        (target.provider === 'claude' || (target.model !== '' && target.model !== 'auto'))
+      ) {
         ({ label, family } =
           target.provider === 'claude' ? claudePinLabel(target.model) : { label: target.model, family: 'other' });
       } else {

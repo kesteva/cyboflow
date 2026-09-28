@@ -73,6 +73,12 @@ const TEST_SPEC = {
         { id: 'codex-runtime-only-step', name: 'Codex runtime only', agent: 'codex-runtime-only-agent' },
         // `human: true` with a non-'human' agent — still a gate, omitted.
         { id: 'flagged-human-step', name: 'Flagged human', agent: 'opus-agent', human: true },
+        // Non-Claude runtime pinned with providerModel 'auto' — a pin that
+        // names no concrete model and must resolve as UNPINNED (family
+        // 'auto'), not as a literal model string named "auto".
+        { id: 'codex-auto-pin-step', name: 'Codex auto pin', agent: 'codex-agent-auto-providerModel' },
+        // Same, with providerModel '' instead of 'auto'.
+        { id: 'codex-empty-pin-step', name: 'Codex empty pin', agent: 'codex-agent-empty-providerModel' },
       ],
     },
   ],
@@ -129,6 +135,18 @@ const FAKE_EFFECTIVE_AGENTS: EffectiveAgent[] = [
   }),
   effectiveAgent({ agentKey: 'provider-model-only-agent', model: null, providerModel: 'gpt-5.6-sol' }),
   effectiveAgent({ agentKey: 'codex-runtime-only-agent', model: null, runtime: 'codex-sdk' }),
+  effectiveAgent({
+    agentKey: 'codex-agent-auto-providerModel',
+    model: null,
+    runtime: 'codex-sdk',
+    providerModel: 'auto',
+  }),
+  effectiveAgent({
+    agentKey: 'codex-agent-empty-providerModel',
+    model: null,
+    runtime: 'codex-sdk',
+    providerModel: '',
+  }),
   // 'inherit-agent' deliberately absent — a step whose agentKey has no
   // effective-agent row at all must still resolve (fully inherits).
 ];
@@ -365,8 +383,34 @@ describe('resolveRunStepModels', () => {
         'claude-runtime-and-model-step',
         'provider-model-only-step',
         'codex-runtime-only-step',
+        'codex-auto-pin-step',
+        'codex-empty-pin-step',
       ].sort(),
     );
+  });
+
+  it('a non-Claude runtime pin with providerModel "auto" resolves as UNPINNED (family "auto"), never as a literal "auto" model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-auto-pin', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-auto-pin', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-auto-pin-step');
+
+    expect(step?.family).toBe('auto');
+    expect(step?.label).not.toBe('auto');
+    expect(step?.label).toBe('Codex SDK');
+  });
+
+  it('a non-Claude runtime pin with providerModel "" resolves as UNPINNED (family "auto"), never as a literal "" model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-empty-pin', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-empty-pin', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-empty-pin-step');
+
+    expect(step?.family).toBe('auto');
+    expect(step?.label).not.toBe('');
+    expect(step?.label).toBe('Codex SDK');
   });
 
   it('produces stepIds identical to what getPhaseState would flatten for the same fixture', async () => {
