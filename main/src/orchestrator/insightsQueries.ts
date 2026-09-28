@@ -391,6 +391,7 @@ function zeroRollup(runId: string): RunUsageRollup {
     // workflow_runs read; the token-only aggregation paths leave them null.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
@@ -423,6 +424,7 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
     // run_usage carries no timestamps; selectRunUsageRollups stamps them.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
@@ -816,30 +818,44 @@ interface RunTimestampRow {
   runId: string;
   startedAt: string | null;
   endedAt: string | null;
+  gateReachedAt: string | null;
+}
+
+/** Runtime-timestamp triple returned per run by {@link fetchRunTimestamps}. */
+interface RunTimestamps {
+  startedAt: string | null;
+  endedAt: string | null;
+  gateReachedAt: string | null;
 }
 
 /**
- * Bulk-fetch `started_at` / `ended_at` for `runIds`, returned as a runId→{ISO,
- * ISO} map. One indexed IN() lookup per chunk over `workflow_runs`; runs with no
- * row are simply absent (the caller leaves their rollup timestamps null). Both
- * columns are normalized to ISO-8601 via `toIso`.
+ * Bulk-fetch `started_at` / `ended_at` / `gate_reached_at` for `runIds`,
+ * returned as a runId→{ISO, ISO, ISO} map. One indexed IN() lookup per chunk
+ * over `workflow_runs`; runs with no row are simply absent (the caller leaves
+ * their rollup timestamps null). All three columns are normalized to ISO-8601
+ * via `toIso`.
  */
 function fetchRunTimestamps(
   db: DatabaseLike,
   runIds: readonly string[],
-): Map<string, { startedAt: string | null; endedAt: string | null }> {
-  const out = new Map<string, { startedAt: string | null; endedAt: string | null }>();
+): Map<string, RunTimestamps> {
+  const out = new Map<string, RunTimestamps>();
   if (runIds.length === 0) return out;
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
     const rows = db
       .prepare(
-        `SELECT id AS runId, started_at AS startedAt, ended_at AS endedAt
+        `SELECT id AS runId, started_at AS startedAt, ended_at AS endedAt,
+                gate_reached_at AS gateReachedAt
          FROM workflow_runs
          WHERE id IN (${placeholders(ids.length)})`,
       )
       .all(...ids) as RunTimestampRow[];
     for (const row of rows) {
-      out.set(row.runId, { startedAt: toIso(row.startedAt), endedAt: toIso(row.endedAt) });
+      out.set(row.runId, {
+        startedAt: toIso(row.startedAt),
+        endedAt: toIso(row.endedAt),
+        gateReachedAt: toIso(row.gateReachedAt),
+      });
     }
   }
   return out;
@@ -898,6 +914,7 @@ export function selectRunUsageRollups(
     if (ts !== undefined) {
       rollup.startedAt = ts.startedAt;
       rollup.endedAt = ts.endedAt;
+      rollup.gateReachedAt = ts.gateReachedAt;
     }
     return rollup;
   });

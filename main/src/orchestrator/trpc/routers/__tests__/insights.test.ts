@@ -231,6 +231,7 @@ describe('cyboflow.insights.runUsage', () => {
     assistantMessageCount: 4,
     startedAt: '2026-07-01T10:00:00.000Z',
     endedAt: '2026-07-01T10:05:00.000Z',
+    gateReachedAt: null,
   };
 
   it('returns the single rollup when the helper produces one (wrapped in a single-element array)', async () => {
@@ -266,6 +267,7 @@ describe('cyboflow.insights.runUsage', () => {
       assistantMessageCount: 0,
       startedAt: null,
       endedAt: null,
+      gateReachedAt: null,
     });
   });
 

@@ -32,6 +32,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
+import { stampArmGateReachedAt } from './experimentStore';
 
 /** Statuses at which a run's output is stable enough to grade. */
 const HEALTHY_STATUSES = new Set<string>(['awaiting_review', 'completed']);
@@ -132,6 +133,17 @@ export function handleTerminalStatusEvent(
   // Experiment-tagged: reconcile the experiment status + attempt the pairwise
   // comparison on ANY settled status (a failed/canceled arm still completes it).
   if (tag.e !== null) {
+    // Stamp this ARM's own gate_reached_at (keyed on event.runId, not the
+    // experiment) BEFORE reconcile — reconcile is a conjunction over BOTH arms
+    // and must never be the thing that decides one arm's own timestamp.
+    try {
+      stampArmGateReachedAt(deps.db, event.runId, event.status);
+    } catch (err) {
+      deps.logger?.warn?.('[pairwise] gate_reached_at stamp failed (swallowed)', {
+        runId: event.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     try {
       deps.reconcile(tag.e);
     } catch (err) {

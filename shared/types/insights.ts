@@ -127,6 +127,17 @@ export interface RunUsageRollup {
    * so the panel renders elapsed = now - startedAt until close-out stamps it).
    */
   endedAt: string | null;
+  /**
+   * `workflow_runs.gate_reached_at` as an ISO-8601 string (migration 145); the
+   * instant an experiment arm first lands on its FINAL human-review gate
+   * (awaiting_review AND settled-for-grading — see experimentStore.
+   * isArmSettledForGrading), stamped once and never overwritten. Null for a run
+   * that never reaches a terminal gate, and for every run predating this column.
+   * PREFERRED over `endedAt` for displaying an experiment arm's runtime: a run
+   * resting at the gate can wait a long time for human review before `endedAt`
+   * is ever stamped, and that wait is not part of the arm's own work.
+   */
+  gateReachedAt: string | null;
 }
 
 /** Per-workflow usage aggregate over the runs that have usage data. */

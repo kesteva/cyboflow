@@ -132,6 +132,7 @@ function zeroedRunUsageRollup(runId: string): RunUsageRollup {
     // No run row (or none matched) → no runtime timestamps to report.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
