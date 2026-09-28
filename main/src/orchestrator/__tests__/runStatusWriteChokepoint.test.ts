@@ -171,9 +171,9 @@ const FROZEN_RAW_WRITERS: ReadonlyMap<string, { count: number; reason: string }>
   [
     'orchestrator/stuckDetector.ts',
     {
-      count: 1,
+      count: 2,
       reason:
-        'awaiting_review -> stuck. The detector is injected a DatabaseLike and may not import the db-coupled helper; the edge is asserted once at statement-prepare time.',
+        'awaiting_review -> stuck, plus running -> stuck (TASK-300, the parked_no_gate rung: a run with no live turn and no open gate of any kind). The detector is injected a DatabaseLike and may not import the db-coupled helper; each edge is asserted once at statement-prepare time.',
     },
   ],
   [

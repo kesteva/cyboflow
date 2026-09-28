@@ -118,7 +118,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('does not fire scan before start()', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -140,7 +140,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('fires scan once after 60001ms', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -170,7 +170,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('stop() clears the interval and no further scans fire', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -204,7 +204,7 @@ describe('StuckDetector scheduling', () => {
 
 describe('StuckDetector staleness filter', () => {
   it('only evaluates approvals older than STALE_THRESHOLD_MS', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -255,7 +255,7 @@ describe('StuckDetector staleness filter', () => {
     // as older than the cutoff on identical calendar dates whatever the times
     // were, so a seconds-old approval was classified stale and its run stamped
     // 'stuck'. The 45-minute threshold never applied to that writer at all.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
 
     seedRun(rawDb, 'run-fresh-sqlite-fmt', 'awaiting_review');
@@ -299,7 +299,7 @@ describe('StuckDetector staleness filter', () => {
   it('still evaluates a genuinely stale CURRENT_TIMESTAMP-format approval', async () => {
     // The normalization must not overshoot into ignoring the old format: a row
     // in the space spelling that really is past the threshold stays detectable.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
 
     seedRun(rawDb, 'run-stale-sqlite-fmt', 'awaiting_review');
@@ -336,7 +336,7 @@ describe('StuckDetector staleness filter', () => {
 
 describe('StuckDetector classification: orphan_pty', () => {
   it('returns orphan_pty when claudeManager has no active run', () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -380,7 +380,7 @@ describe('StuckDetector classification: stale_socket (retired)', () => {
     // This pins the retirement: the exact fixture that used to yield
     // stale_socket — a live run, stale awaited approval, no socket, nothing
     // else wrong — must now yield null.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -411,7 +411,7 @@ describe('StuckDetector classification: stale_socket (retired)', () => {
 
 describe('StuckDetector classification: self_deadlock', () => {
   it('returns self_deadlock when the same run has another pending approval', () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -446,7 +446,7 @@ describe('StuckDetector classification: self_deadlock', () => {
 
 describe('StuckDetector classification: cross_run_deadlock', () => {
   it('returns cross_run_deadlock when another run is awaiting_review with its OWN stale approval', () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -486,7 +486,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     // "another run exists" test stamped a healthy run whose human was simply
     // still deciding. The conflicting run here is at rest with no approval of
     // its own — there is no deadlock to report.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -514,7 +514,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
   it('does NOT stamp when the only other blocked run holds an UN-AWAITED ask', () => {
     // Migration 111 shape: the omp-sdk gate hung up, the row is still
     // answerable, but nobody is blocked on it. It is not evidence of a wedge.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -541,7 +541,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
   });
 
   it('scan() ignores an UN-AWAITED stale approval entirely', () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -569,7 +569,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
   it('does NOT stamp when the other run\'s approval is NOT yet stale', () => {
     // The conflicting run is genuinely blocked, but only just — it has not
     // crossed the staleness boundary, so it is not evidence of a deadlock.
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -602,7 +602,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
 
 describe('StuckDetector status guard', () => {
   it('does not transition a run that is already canceled', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -649,7 +649,7 @@ describe('StuckDetector status guard', () => {
 
 describe('StuckDetector idempotency', () => {
   it('emits runs:stuck exactly once across three scan ticks', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -693,7 +693,7 @@ describe('StuckDetector seam-error telemetry (seam B)', () => {
     const seamCalls: Array<{ seam: string; tags?: Record<string, string> }> = [];
     setSeamErrorSink((seam, _error, tags) => seamCalls.push({ seam, tags }));
 
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -725,7 +725,7 @@ describe('StuckDetector seam-error telemetry (seam B)', () => {
 
 describe('StuckDetector error isolation', () => {
   it('a scan error does not stop subsequent scans', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -777,7 +777,7 @@ describe('StuckDetector error isolation', () => {
 
 describe('StuckDetector event emission shape', () => {
   it('emits runs:stuck with the correct StuckDetectedEvent payload', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const rawDb = createTestDb({ includeStuckDetectedAt: true, includeQuestionsTable: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();

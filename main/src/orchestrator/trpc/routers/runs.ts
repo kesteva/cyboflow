@@ -53,7 +53,9 @@ import { isRuntimeMixOrchestratedError } from '../../../../../shared/types/execu
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
-import { countPendingBlockingReviewItems } from '../../reviewItemListing';
+import { countPendingBlockingReviewItems, selectPendingBlockingItemRows } from '../../reviewItemListing';
+import { isEvalSourcedFinding } from '../../../../../shared/types/reviews';
+import { ADDRESS_REVIEW_FINDINGS_CONTRACT } from '../../programmatic/stepPrompt';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { StepResultStore } from '../../stepResultStore';
 import { ApprovalRouter } from '../../approvalRouter';
@@ -75,6 +77,7 @@ import {
   nudgeRunHandler,
   type NudgeRunDeps,
   type NudgeRunResult,
+  type NudgeNoOpReason,
 } from '../../nudgeRunHandler';
 import {
   answerRecoveryGateHandler,
@@ -401,28 +404,55 @@ export function setRewindRunDeps(deps: RewindRunDeps): void {
   rewindRunDeps = deps;
 }
 
-/** `canAddressReviewFindings`'s ineligibility reasons (mirrored by ReviewItemCard's tooltip copy). */
-export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progress';
+/**
+ * `canAddressReviewFindings`'s ineligibility reasons (mirrored by
+ * ReviewItemCard's tooltip copy). `'handed_over'` is not really "ineligible" —
+ * the rewind action itself stays refused (rewindRunHandler's `not_programmatic`),
+ * but the run DOES have a live agent to hand the request to via chat — the
+ * card renders its button ENABLED for this one reason (see ReviewItemCard's
+ * ADDRESS_REVIEW_DISABLED_TOOLTIP / the enabled-anyway carve-out) while every
+ * other reason keeps the button disabled.
+ */
+export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progress' | 'handed_over';
 
 /**
- * `addressReviewFindings`'s result: rewindRunHandler's own shape plus the
- * mutation's one extra `noOp` reason (`'in_progress'` — address-review is
- * already the live current step, so the request is refused rather than
- * restarting in-flight repair work).
+ * `addressReviewFindings`'s result: rewindRunHandler's own shape, PLUS the
+ * mutation's own `noOp` reason (`'in_progress'` — address-review is already
+ * the live current step, so the request is refused rather than restarting
+ * in-flight repair work), PLUS the handed-over-run chat-delivery outcomes
+ * (TASK-299): `{ delivered: true; viaChat: true }` on success, or a `noOp`
+ * carrying `nudgeRunHandler`'s own refusal reasons (minus `'empty'` — the
+ * stock message is a non-empty constant, so that arm is unreachable here).
  */
-export type AddressReviewFindingsResult = RewindRunResult | { noOp: true; reason: 'in_progress' };
+export type AddressReviewFindingsResult =
+  | RewindRunResult
+  | { noOp: true; reason: 'in_progress' }
+  | { delivered: true; viaChat: true }
+  | { noOp: true; reason: Exclude<NudgeNoOpReason, 'empty'> };
 
 interface AddressReviewRunRow {
   status: string;
   execution_model: string | null;
   current_step_id: string | null;
+  handed_over_at: string | null;
 }
 
 /** The pre-flight columns both address-review procedures read (never `any`). */
 function readAddressReviewRunRow(db: DatabaseLike, runId: string): AddressReviewRunRow | undefined {
   return db
-    .prepare('SELECT status, execution_model, current_step_id FROM workflow_runs WHERE id = ?')
+    .prepare('SELECT status, execution_model, current_step_id, handed_over_at FROM workflow_runs WHERE id = ?')
     .get(runId) as AddressReviewRunRow | undefined;
+}
+
+/**
+ * True for a run that migration 081's `handoverRunHandler` converted from
+ * programmatic to orchestrated (TASK-299) — the exact pair the handover seam
+ * stamps together, so this is never true for a run that was orchestrated from
+ * birth (that one keeps today's disabled behaviour: `readAddressReviewRunRow`'s
+ * caller falls through to the ordinary `'completed'` ineligibility below it).
+ */
+function isHandedOverRun(row: AddressReviewRunRow): boolean {
+  return row.execution_model === 'orchestrated' && row.handed_over_at !== null;
 }
 
 /**
@@ -2846,9 +2876,14 @@ export const runsRouter = router({
    * PERMITTED only while the run is mid-flight (running / starting / queued):
    *   - terminal (completed/failed/canceled) → { noOp: 'terminal' } (a failed run
    *     uses runs.reopen; a completed run is done);
-   *   - awaiting_review / paused / awaiting_input / stuck → { noOp: 'not_running' }
-   *     (those rested states use runs.nudge / runs.resume / the question gate, not
-   *     this queue path);
+   *   - stuck → { noOp: 'stuck' } (TASK-300: a run the StuckDetector has already
+   *     classified as parked with no live turn and no gate to answer would
+   *     otherwise buffer the message with no delivery trigger at all —
+   *     honestly refuse instead of silently swallowing it; reopen/cancel it
+   *     via the review queue, then send again);
+   *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
+   *     (those rested states use runs.nudge / runs.resume / the question gate,
+   *     not this queue path);
    *   - blank-after-trim text → { noOp: 'empty' } (nothing to deliver).
    *
    * ctx.db-direct status guard (no handler module): pure status check + a single
@@ -2862,7 +2897,7 @@ export const runsRouter = router({
     .input(z.object({ runId: z.string().min(1), text: z.string() }))
     .mutation(async ({ ctx, input }): Promise<
       | { queued: true }
-      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'empty' }
+      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'stuck' | 'empty' }
     > => {
       if (!queueInputDeps) {
         throw new TRPCError({
@@ -2881,6 +2916,9 @@ export const runsRouter = router({
       if (!run?.status) return { noOp: true, reason: 'not_found' };
       if (['completed', 'failed', 'canceled'].includes(run.status)) {
         return { noOp: true, reason: 'terminal' };
+      }
+      if (run.status === 'stuck') {
+        return { noOp: true, reason: 'stuck' };
       }
       if (!['running', 'starting', 'queued'].includes(run.status)) {
         return { noOp: true, reason: 'not_running' };

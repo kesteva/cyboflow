@@ -60,7 +60,7 @@ import * as path from 'path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setSetPermissionModeDeps, setSessionSettleDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setSetPermissionModeDeps, setSessionSettleDeps } from '../runs';
 import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
 import type { SessionAgentPermissionModeDeps } from '../../../sessionPermissionMode';
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
@@ -1540,6 +1540,54 @@ describe('cyboflow.runs.nudge', () => {
 
       expect(result).toEqual({ noOp: true, reason: 'not_idle' });
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.queueInput — TASK-300: honest refusal for a stuck run
+//
+// The mutation already refused a terminal run and a rested (awaiting_review /
+// paused / awaiting_input) run before this change; this pins the NEW arm —
+// once the StuckDetector's parked_no_gate rung (stuckDetectorParkedNoGate.test.ts)
+// has flipped a run to 'stuck', queueInput must NOT silently buffer the text
+// into a run nothing will ever drain — it must say so.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.queueInput — stuck run', () => {
+  it('refuses a stuck run with an honest reason instead of buffering the message', async () => {
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'stuck' });
+
+    const queueInput = vi.fn<(id: string, text: string) => void>();
+    setQueueInputDeps({ runExecutor: { queueInput, dequeueInput: vi.fn().mockReturnValue(false) } });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.queueInput({ runId, text: 'still there?' });
+
+      expect(result).toEqual({ noOp: true, reason: 'stuck' });
+      expect(queueInput).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still queues normally for a run that is genuinely running', async () => {
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'running' });
+
+    const queueInput = vi.fn<(id: string, text: string) => void>();
+    setQueueInputDeps({ runExecutor: { queueInput, dequeueInput: vi.fn().mockReturnValue(false) } });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.queueInput({ runId, text: 'keep going' });
+
+      expect(result).toEqual({ queued: true });
+      expect(queueInput).toHaveBeenCalledWith(runId, 'keep going');
     } finally {
       db.close();
     }
