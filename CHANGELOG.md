@@ -6,6 +6,44 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-09-28
+
+### Added
+
+- **Learned verification runbooks.** A passing explore run now records the recipe it used as a
+  runbook draft. The lane's own next request promotes that draft, so the project gets a proven
+  runbook without a separate setup flow. (The 0.4.5 notes listed this, but it first ships here.)
+- **Xcode 27 drive for iOS verification.** Mobile verifications drive the app through Xcode's
+  DeviceInteraction rung. The rung has its own probe, health row and approval action, and its
+  sessions are serialised when more than one simulator slot exists. (Also listed in the 0.4.5
+  notes, also first shipping here.)
+- **Serve binding as an attestation channel.** A web or cdp-app runbook can declare the serve
+  binding as its channel, and a pass resting on it can be learned as a recipe.
+- **Monitor lane rescue.** The monitor is consulted before a lane's last automatic attempt, not only
+  after it fails. It can accept a lane past a failing gate (the waived items become follow-ups),
+  release dependents whose needs already landed, and repair the worktree environment. Missing
+  dependencies are installed before a sprint dispatches. The rescue budget scales with the sprint.
+- **Usage accounting v1.** Run usage goes through one per-provider formula. Codex usage is counted
+  per response, including collaboration child threads, and past runs are backfilled at boot.
+
+### Changed
+
+- **Sonnet picker alias → Sonnet 5.5** (`claude-sonnet-5-5`), with the Agent SDK bumped to 0.3.284
+  (bundled CLI 2.1.284).
+
+### Fixed
+
+- The commit-integrity probe no longer fails a lane for a sibling lane's uncommitted changes.
+- A cancelled run keeps its usage, and a resumed Codex thread's usage is counted.
+- Codex child agents are priced by their role's model.
+- A `package.json` script with only an env-var prefix is accepted as a runbook command.
+- Xcode drive hardening: long-path sockets move under a per-user root that the boot sweep cleans.
+  The approval scaffold path refuses symlinks. A session whose start outcome is unknown is ended.
+  A mobile row keeps its simulator lease until an aborted runner has torn down.
+- Explore-mode fixes: the host-env strip is confined to explore runs. Learned recipes keep their
+  paths inside the snapshot and match leased ports by value. A draft is kept on a failure only when
+  the harness saw the surface stand up.
+
 ## [0.4.5] — 2026-09-26
 
 ### Added
