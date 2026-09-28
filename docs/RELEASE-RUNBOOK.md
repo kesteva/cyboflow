@@ -82,20 +82,35 @@ mirror the app never reads.**
 
 ## 0. The tag-driven release (the default path)
 
-Bump, commit, tag, push. CI does the rest.
+Bump the **dev build you tested**, tag, push. CI does the rest.
+
+The release commit is a pure version bump built directly on the commit the dev
+channel already shipped and you smoke-tested — not on local `main`, which may
+have picked up merges since. Because the tagged commit's diff is only the four
+manifests' `"version"` lines plus `CHANGELOG.md`, the workflow reuses its
+parent's green Code Quality run instead of re-running the suite.
 
 ```bash
-OLD=0.4.2 NEW=0.4.3
+OLD=0.4.5 NEW=0.4.6
+SHA=<commit of the dev build you tested>   # app footer, or the dev-release run summary
+git fetch origin
+git merge-base --is-ancestor "$SHA" origin/main || echo "NOT ON origin/main — stop"
+WT="$(mktemp -d)/release"; git worktree add --detach "$WT" "$SHA" && cd "$WT"
 for f in package.json frontend/package.json main/package.json shared/package.json; do
   sed -i '' "s/\"version\": \"$OLD\"/\"version\": \"$NEW\"/" "$f"
 done
-# Edit CHANGELOG.md per §2 (the "## [$OLD]" heading must survive the edit).
+# Edit CHANGELOG.md per §2 from `git log vOLD..$SHA` (the "## [$OLD]" heading must survive).
 git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
 git commit -m "chore: release $NEW"
-git tag -a "v$NEW" -m "v$NEW"
-git push origin main
-git push origin "v$NEW"              # NOT --follow-tags: it skips lightweight tags silently
+REL=$(git rev-parse HEAD)
+git tag -a "v$NEW" -m "v$NEW" "$REL"
+# Land ONLY the bump on origin/main (unpushed local work stays local):
+if [ "$(git rev-parse origin/main)" = "$SHA" ]; then git push origin "$REL:refs/heads/main"
+else git checkout -q --detach origin/main && git merge --no-ff --no-edit "$REL" \
+       && git push origin HEAD:refs/heads/main; fi
+git push origin "v$NEW"              # AFTER main; NOT --follow-tags: it skips lightweight tags silently
 git ls-remote --tags origin "refs/tags/v$NEW" | grep -q . || echo "TAG DID NOT ARRIVE"
+cd - && git worktree remove "$WT" && git merge --no-edit "v$NEW"   # local main catches up
 gh run watch "$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
@@ -105,9 +120,12 @@ What the workflow enforces, so you do not have to:
 - **all four** `package.json` files already say that version, and `CHANGELOG.md`
   has its `## [X.Y.Z]` section — a forgotten bump fails before anything builds;
 - the commit is an ancestor of `origin/main`;
-- **this SHA's Code Quality run went green.** The main push starts it seconds
-  before the tag push, so the gate is usually still running when the tag lands —
-  the workflow waits up to 45 min for it. A red or cancelled gate stops the release.
+- **the gate SHA's Code Quality run went green.** For a pure version bump the
+  gate SHA is the bump's parent — the dev-tested commit, already green, so this
+  returns at once. For anything else (a stray manifest edit, an extra file, a
+  merge commit as the tag) it is the tagged SHA itself, and the workflow waits
+  up to 45 min for that run. The "Resolve + assert" log line names which one it
+  used. A red or cancelled gate stops the release.
 
 Push the tag as its own command. `git push --follow-tags` pushes only
 **annotated** tags; with a lightweight `git tag v0.4.3` it pushes main alone and
