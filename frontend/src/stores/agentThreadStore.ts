@@ -321,18 +321,38 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       const captureLiveEvents = (values: readonly unknown[]): void => {
         set((s) => {
           let events = s.liveEvents;
+          // A turn that settled on a DIFFERENT renderer than the one currently
+          // mounted (e.g. after a reload mid-turn — `sending` was hydrated from
+          // `turnState`, not from a live `sendMessage` promise this renderer is
+          // holding) has no `finally` block here to clear `sending`. The live
+          // tail's own terminal envelopes are therefore the only signal this
+          // renderer will ever see, so a `result` (normal completion / error)
+          // or an `assistant_interrupted` marker must clear it directly.
+          let sawTerminal = false;
           for (const value of values) {
             if (!isThreadStreamEnvelope(value)) continue;
             if (value.type === 'result') {
               events = [];
+              sawTerminal = true;
               continue;
+            }
+            if (
+              value.type === 'system' &&
+              typeof value.payload === 'object' &&
+              value.payload !== null &&
+              (value.payload as { subtype?: unknown }).subtype === 'assistant_interrupted'
+            ) {
+              sawTerminal = true;
             }
             events =
               events.length >= MAX_LIVE_EVENTS
                 ? [...events.slice(events.length - MAX_LIVE_EVENTS + 1), value]
                 : [...events, value];
           }
-          return events === s.liveEvents ? {} : { liveEvents: events };
+          const next: Partial<AgentThreadState> = {};
+          if (events !== s.liveEvents) next.liveEvents = events;
+          if (sawTerminal && s.sending) next.sending = false;
+          return next;
         });
       };
 

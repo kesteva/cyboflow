@@ -753,6 +753,40 @@ describe('AgentThreadService', () => {
       const rows = h.store.listEvents(thread.id);
       expect(rows.map((r) => r.eventType)).toEqual(['user', 'result']);
     });
+
+    it('an interrupt landing during the pre-turn daily compact cancels the WHOLE send, not just the compact — the requested turn never spawns', async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      // Day two's first turn opens with a compact spawn (same spawn identity as
+      // every other turn on this thread) that hangs until aborted.
+      h.manager.queueHang('sess-1');
+      const sendPromise = h.service.sendMessage(thread.id, 'day two — the actual ask');
+      await Promise.resolve();
+
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: true });
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // Only the compact spawn ran. Without the fix, `applyDailyRetention`'s
+      // fail-soft catch would swallow the abort and `sendMessage` would go on
+      // to spawn "day two — the actual ask" anyway — exactly the turn the
+      // click was meant to stop.
+      expect(h.manager.calls).toHaveLength(2);
+      expect(h.manager.calls[1].prompt).toBe(COMPACT_PROMPT);
+
+      const rows = h.store.listEvents(thread.id);
+      // No 'result' row (no real turn ran, no error), and the interrupted
+      // marker is recorded once.
+      expect(rows.filter((r) => r.eventType === 'result')).toHaveLength(0);
+      const interrupted = rows.filter((r) => r.eventType === 'system');
+      expect(interrupted).toHaveLength(1);
+      expect(JSON.parse(interrupted[0].payloadJson).subtype).toBe('assistant_interrupted');
+    });
   });
 
   describe('isTurnInFlight', () => {

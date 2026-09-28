@@ -81,6 +81,15 @@ function makeResultEnvelope(): StreamEvent {
   } as StreamEvent;
 }
 
+/** The Stop control's terminal marker (TASK-297) — same wrapper shape. */
+function makeInterruptedEnvelope(): StreamEvent {
+  return {
+    type: 'system',
+    payload: { type: 'system', subtype: 'assistant_interrupted' },
+    timestamp: '2026-09-21T00:00:00.000Z',
+  } as StreamEvent;
+}
+
 function makeProposal(overrides: Partial<AgentProposal> & { id: string }): AgentProposal {
   return {
     id: overrides.id,
@@ -346,6 +355,39 @@ describe('onThreadEvent live-tail', () => {
 
     await sendPromise;
     expect(useAgentThreadStore.getState().liveEvents).toEqual([]);
+  });
+
+  it('clears `sending` on a terminal result envelope even with no live sendMessage call on this renderer (a reload mid-turn: sending was hydrated from turnState, never from a promise this renderer holds)', async () => {
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeResultEnvelope()]);
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+  });
+
+  it('clears `sending` on an assistant_interrupted marker with no live sendMessage call on this renderer', async () => {
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeInterruptedEnvelope()]);
+
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+  });
+
+  it('a non-terminal envelope does not clear `sending` (still mid-turn)', async () => {
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } })]);
+
+    expect(useAgentThreadStore.getState().sending).toBe(true);
   });
 });
 

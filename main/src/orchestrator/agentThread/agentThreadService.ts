@@ -431,6 +431,21 @@ export class AgentThreadService {
     // (compact-daily) — so re-read the thread afterwards; the stored id always
     // reflects the live conversation.
     await this.applyDailyRetention(thread, model, runtime);
+    // `applyDailyRetention`'s own compact spawn shares this thread's spawn
+    // identity, so a Stop clicked WHILE it is compacting aborts that spawn —
+    // and `applyDailyRetention` is fail-soft by design (a failed compact must
+    // never block the day's real turn), so it swallows that abort internally
+    // and returns normally. Left unchecked, `sendMessage` would then go on to
+    // spawn the actual requested turn anyway: Stop would silently cancel only
+    // the invisible compaction and let the turn the user meant to interrupt
+    // run regardless. `interruptTurn` sets `pendingInterrupts` BEFORE calling
+    // abort and nothing clears it during compaction, so its presence here
+    // means the interrupt landed before the real turn ever started — treat
+    // the whole `sendMessage` call as interrupted and stop here.
+    if (this.pendingInterrupts.delete(threadId)) {
+      this.recordInterrupted(threadId);
+      return;
+    }
     thread = this.deps.store.getThread(threadId) ?? thread;
 
     const resumeSessionId = thread.claudeSessionId ?? undefined;
