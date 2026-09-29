@@ -45,6 +45,8 @@ import * as net from 'net';
 export interface PreToolUsePayload {
   tool_name?: unknown;
   tool_input?: unknown;
+  /** The session's LIVE permission mode — it follows a shift+tab in the TUI. */
+  permission_mode?: unknown;
 }
 
 /** The verdict written to stdout, matching the SDK hook's hookSpecificOutput. */
@@ -128,6 +130,21 @@ function denyResult(reason?: string): ShellHookResult {
     },
     exitCode: 2,
   };
+}
+
+/**
+ * Live modes in which the human handed gating to `claude` itself. The spawn
+ * installs this hook only for gated modes (interactiveSettingsWriter skips it
+ * for the same three), but a shift+tab in the TUI switches mode mid-session
+ * without re-spawning — so the hook re-checks the mode `claude` reports on
+ * every call rather than trusting the spawn-time choice. Answering here would
+ * pre-empt the auto-mode classifier.
+ */
+const SELF_GATED_MODES: ReadonlySet<string> = new Set(['auto', 'dontAsk', 'bypassPermissions']);
+
+/** Stand aside (no verdict) when the live mode gates natively. */
+export function deferToLiveMode(payload: PreToolUsePayload): boolean {
+  return typeof payload.permission_mode === 'string' && SELF_GATED_MODES.has(payload.permission_mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +333,11 @@ export async function main(): Promise<void> {
   }
 
   const payload = await readStdinPayload(process.stdin);
+  if (deferToLiveMode(payload)) {
+    stderrLogger.debug(`[Cyboflow PreToolUse hook] live mode ${String(payload.permission_mode)} gates natively — no verdict`);
+    // Exit 0 with NO stdout is "no decision": claude's own permission flow runs.
+    process.exit(0);
+  }
   const result = await runShellHook({
     socketPath,
     runId,
