@@ -623,6 +623,37 @@ export interface VerificationRunProvenance {
   driveEngineUsed?: 'xcode' | 'maestro' | 'none';
   /** Why the drive engine (or attestation) degraded, when it did. */
   degradeReason?: string;
+  /**
+   * Mobile + xcode rung only (§B5): the runner-held record of every capture
+   * the harness took through Xcode DeviceInteraction, and every pinned launch.
+   * A `pass` behaviour counts only when it cites one of these captures.
+   */
+  captureLedger?: VerificationCaptureLedger;
+}
+
+/** One entry of {@link VerificationCaptureLedger}: a harness capture, or a pinned `mobile-launch`. */
+export type VerificationCaptureLedgerEntry =
+  | {
+      kind: 'capture';
+      seq: number;
+      name: string;
+      verb: string;
+      /** sha256 of the capture's copy in the artifacts dir; `null` when the copy failed. */
+      sha256: string | null;
+      file: string | null;
+      applicationState: string;
+      foregroundBundleId: string | null;
+      pid: number | null;
+      activated: boolean;
+      at: string;
+    }
+  | { kind: 'launch'; seq: number; pid: number; at: string };
+
+/** The §B5 capture ledger, persisted verbatim as {@link VerificationRunProvenance.captureLedger}. */
+export interface VerificationCaptureLedger {
+  version: 1;
+  appBundleId: string;
+  entries: VerificationCaptureLedgerEntry[];
 }
 
 /** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
@@ -772,6 +803,17 @@ export function parseMobileAppSpec(
  *   - `'file-identity'`   — the degenerate pre-live path (`target.htmlPath`):
  *     identity BY CONSTRUCTION, because the runner itself writes/owns the
  *     path being opened. No live process, no nonce, nothing to race.
+ *   - `'serve-binding'`   — `web` / `cdp-app` (runbook-optional-verification.md
+ *     §A1.2): no channel probe at all — the harness's own serve-identity
+ *     binding IS the proof. The probed port's listener must be in the process
+ *     group the driver started for the task's VERBATIM composed `serve.cmd`, so
+ *     a task declaring it without a `serve.cmd` can never verify. The WEAKEST
+ *     port-mediated channel (identity rests on the port binding alone; a
+ *     composed command that deliberately fronts another server is the accepted
+ *     gap), but no weaker than a nonce channel in practice: the agent holds the
+ *     nonce, so the binding is what ties any served surface to the deliverable.
+ *     Recordable in a runbook entry so a web project that renders no nonce can
+ *     learn (§A5) and be pinned.
  *
  * See {@link isAttestationSpec} for the runtime guard.
  */
@@ -781,10 +823,11 @@ export type AttestationSpec =
   | { kind: 'cdp-token'; expression: string; expected: string }
   | { kind: 'window-identity'; titlePattern: string; app: string }
   | { kind: 'bundle-identity'; bundleId: string }
-  | { kind: 'file-identity' };
+  | { kind: 'file-identity' }
+  | { kind: 'serve-binding' };
 
 /**
- * The six AttestationSpec `kind` literals, for iteration (tests, UI, the roster
+ * The seven AttestationSpec `kind` literals, for iteration (tests, UI, the roster
  * table) without re-listing the union by hand.
  */
 export const ATTESTATION_KINDS: readonly AttestationSpec['kind'][] = [
@@ -794,9 +837,10 @@ export const ATTESTATION_KINDS: readonly AttestationSpec['kind'][] = [
   'window-identity',
   'bundle-identity',
   'file-identity',
+  'serve-binding',
 ] as const;
 
-/** True for one of AttestationSpec's six `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
+/** True for one of AttestationSpec's seven `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
 function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
   return (
     value === 'http-endpoint' ||
@@ -804,7 +848,8 @@ function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
     value === 'cdp-token' ||
     value === 'window-identity' ||
     value === 'bundle-identity' ||
-    value === 'file-identity'
+    value === 'file-identity' ||
+    value === 'serve-binding'
   );
 }
 
@@ -832,6 +877,7 @@ export function isAttestationSpec(v: unknown): v is AttestationSpec {
     case 'bundle-identity':
       return isNonEmptyString(v.bundleId);
     case 'file-identity':
+    case 'serve-binding':
       return true;
   }
 }
@@ -2366,10 +2412,16 @@ export interface VerificationRunbookState {
    * not earn the same amount of trust, and someone deciding whether to keep a
    * machine-authored runbook has no other way to find out which happened.
    *
+   * `'learned'` (docs/proposals/runbook-optional-verification.md §A5) means
+   * the harness LEARNED it from a passing explore request's own recipe and the
+   * lane's next ordinary request proved it by executing it verbatim — the
+   * least-reviewed of the three: no human and no drafting agent ever saw it as
+   * a runbook, and that proof is the only validation it ever got.
+   *
    * `null` for every record registered before the distinction existed. Honestly
    * unknown, and a reader must not guess `'setup-flow'` for it.
    */
-  origin: 'setup-flow' | 'lane-bootstrap' | null;
+  origin: 'setup-flow' | 'lane-bootstrap' | 'learned' | null;
 }
 
 /** Per-modality health: outcome stats plus the capability ledger and runbook record for that modality. */
@@ -2440,8 +2492,9 @@ export interface VerifyProjectSetupRow {
   /** Modalities whose runbook is proven here, in {@link VERIFICATION_MODALITIES} order. */
   provenModalities: VerificationModality[];
   /**
-   * True when at least one PROVEN runbook here was derived by a lane bootstrap
-   * rather than by the Verify Setup flow (migration 105 `origin`).
+   * True when at least one PROVEN runbook here was derived by a lane bootstrap,
+   * or learned from a passing explore request (§A5), rather than by the Verify
+   * Setup flow (migration 105 `origin`).
    *
    * A single boolean rather than a per-modality map because it drives one
    * sentence in the setup list, and the question it answers is binary: is any
@@ -2511,7 +2564,15 @@ export type VerifyProbeId =
   | 'browser-driving'
   | 'screen-recording'
   | 'accessibility'
-  | 'mobile-simulator';
+  | 'mobile-simulator'
+  /**
+   * The Xcode 27 DeviceInteraction drive rung (runbook-optional-verification.md
+   * §B2): mcpbridge present, Xcode ≥ 27, an iOS 27+ runtime, headless mode on,
+   * and this app's binary approved. Spawn-free — it never starts the bridge.
+   * A host without it still verifies mobile apps (the rung degrades to Maestro
+   * or observe-only); the row says why the drive rung is not Xcode's.
+   */
+  | 'xcode-mcp';
 
 /**
  * The outcome of one probe.
@@ -2540,7 +2601,48 @@ export type VerifyProbeFix =
   | 'provision-chromium'
   | 'request-accessibility'
   | 'open-screen-recording-settings'
+  /**
+   * §B8: open cyboflow's own scaffold project through the Xcode bridge so
+   * Xcode shows its approval prompt while the user is present, then SHOW (never
+   * run) the exact `sudo xcrun mcp-server approve …` command.
+   */
+  | 'approve-xcode-access'
   | null;
+
+/**
+ * What the §B8 "Approve Xcode access" action did and what the user can do
+ * next. The command strings are for DISPLAY: the app never runs them (they
+ * need sudo, and approving is the user's decision).
+ */
+export interface XcodeAccessApproval {
+  /**
+   * - `prompted`         — Xcode was asked to open the scaffold, which is what
+   *                        raises its approval prompt; the re-read status decides
+   *                        whether the grant landed;
+   * - `approved`         — after the attempt, the status shows a live grant;
+   * - `bridge-refused`   — the bridge answered but refused (e.g. the prompt was
+   *                        declined) — the commands below are the fallback;
+   * - `unavailable`      — no bridge on this host (off macOS, Xcode < 27).
+   */
+  outcome: 'prompted' | 'approved' | 'bridge-refused' | 'unavailable';
+  detail: string;
+  /**
+   * `sudo xcrun mcp-server approve <id> --for-24-hours`, when the status names
+   * an id to approve; `null` when none is known (Xcode's own prompt is then the
+   * only path).
+   */
+  approveCommand: string | null;
+  /**
+   * The `--always` form — offered ONLY for a signed (packaged) build, and only
+   * as an explicit opt-in shown next to {@link disclosure}. `null` otherwise.
+   * Never `--unsafe-always-allow-all-agents`.
+   */
+  durableApproveCommand: string | null;
+  /** What approving grants, in plain words. Always shown with either command. */
+  disclosure: string;
+  /** The one folder cyboflow ever causes to be approved. */
+  scaffoldPath: string;
+}
 
 /** One row of the health panel's probe table. */
 export interface VerifyProbeRow {

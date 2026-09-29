@@ -194,10 +194,9 @@ describe('makeCodexVerificationAgentQuery', () => {
     expect(thread.approvalPolicy).toBe('never');
     expect(thread.ephemeral).toBe(true);
     expect(thread.developerInstructions).toBe(SYSTEM_PROMPT);
-    // Hermetic in config terms — NO cyboflow MCP server attached; the only
-    // config key keeps the shell tool out of login shells, so the
-    // dependency-guard PATH shim stays ahead of /opt/homebrew/bin.
-    expect(thread.config).toEqual({ allow_login_shell: false });
+    // Hermetic in config terms — NO cyboflow MCP server attached, and with no
+    // explore mode no login-shell switch either: no `config` at all.
+    expect('config' in thread).toBe(false);
 
     const turn = asRecord(client.requests.find((r) => r.method === 'turn/start')?.params);
     expect(turn.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
@@ -209,6 +208,37 @@ describe('makeCodexVerificationAgentQuery', () => {
     const props = asRecord(outputSchema.properties);
     const buildLog = asRecord(props.buildLogExcerpt);
     expect(buildLog.type).toContain('null');
+  });
+
+  describe('the login-shell switch is EXPLORE ONLY (§A1.4 — it protects the explore-only PATH shim)', () => {
+    async function threadConfigFor(guards: { executionMode?: 'explore' | 'pinned' | 'legacy' } | undefined): Promise<Record<string, unknown>> {
+      const clients: FakeClient[] = [];
+      const factory = (options: CodexAppServerClientOptions): FakeClient => {
+        const client = new FakeClient(options, (method, _params, current) => {
+          if (method === 'account/read') return accountResponse();
+          if (method === 'model/list') return modelResponse();
+          if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+          if (method === 'turn/start') {
+            emitSuccessTurn(current, JSON.stringify(validReport()));
+            return { turn: { id: 'turn-1' } };
+          }
+          throw new Error(`unexpected method ${method}`);
+        });
+        clients.push(client);
+        return client;
+      };
+      const query = makeCodexVerificationAgentQuery(undefined, undefined, { clientFactory: factory, resolveExecutable: executable });
+      await query({ ...baseArgs, ...(guards !== undefined ? { guards } : {}) });
+      return asRecord(clients[0]?.requests.find((r) => r.method === 'thread/start')?.params);
+    }
+
+    it('explore: the shell tool stays out of login shells, so the shim stays ahead of /opt/homebrew/bin', async () => {
+      expect((await threadConfigFor({ executionMode: 'explore' })).config).toEqual({ allow_login_shell: false });
+    });
+
+    it.each(['pinned', 'legacy'] as const)('%s: no config — the thread starts exactly as before the feature', async (executionMode) => {
+      expect('config' in (await threadConfigFor({ executionMode }))).toBe(false);
+    });
   });
 
   it('strips strict-schema nulls so a schema-compliant Codex pass survives report normalization', async () => {

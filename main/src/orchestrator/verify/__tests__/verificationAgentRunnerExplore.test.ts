@@ -246,6 +246,7 @@ function mobileDeps(opts: { maestro: boolean }): VerificationAgentRunnerMobileDe
     deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
     derivedDataDir: '/data/verify-mobile/vr-1/DerivedData',
     requestDir: '/data/verify-mobile/vr-1',
+    recordXcodeSessionKey: async () => {},
     dispose: async () => {},
   };
   return {
@@ -604,6 +605,43 @@ describe('evaluateAttestationFloorForMode', () => {
   it('explore: no declared channel stays uncapped', () => {
     expect(evaluateAttestationFloorForMode('explore', unserved, null, null, null).kind).toBe('uncapped');
   });
+
+  describe('a DECLARED serve-binding (§A1.2): the binding is the probe, in every mode', () => {
+    const SB: AttestationSpec = { kind: 'serve-binding' };
+    const sbServed = makeTask({ attestation: SB, serve: { cmd: SERVE_CMD } });
+    const sbUnserved = makeTask({ attestation: SB });
+    const boundProbe: HarnessAttestationResult = { verified: true, kind: 'serve-binding', detail: 'serve-binding: bound' };
+    const unboundProbe = (b: Extract<ServeBindingResult, { bound: false }>): HarnessAttestationResult => ({
+      verified: false,
+      kind: 'serve-binding',
+      detail: `${SERVE_BINDING_FAILED_PREFIX} [${b.failure}]: ${b.detail}`,
+    });
+
+    it.each(['pinned', 'legacy', 'explore'] as const)('%s: a held binding verifies as serve-binding', (mode) => {
+      expect(evaluateAttestationFloorForMode(mode, sbServed, SB, boundProbe, bound)).toEqual({
+        kind: 'verified',
+        channel: 'serve-binding',
+        detail: 'serve-binding: bound',
+      });
+    });
+
+    it('pinned: a foreign listener or an unbound serve is missing — the declared-channel rule (a pass fails)', () => {
+      expect(evaluateAttestationFloorForMode('pinned', sbServed, SB, unboundProbe(foreign), foreign).kind).toBe('missing');
+      expect(evaluateAttestationFloorForMode('pinned', sbServed, SB, unboundProbe(noPid), noPid).kind).toBe('missing');
+    });
+
+    it('explore: a foreign listener is foreign; an unbound serve is missing (capped)', () => {
+      expect(evaluateAttestationFloorForMode('explore', sbServed, SB, unboundProbe(foreign), foreign).kind).toBe('foreign');
+      expect(evaluateAttestationFloorForMode('explore', sbServed, SB, unboundProbe(noPid), noPid).kind).toBe('missing');
+    });
+
+    it.each(['pinned', 'legacy', 'explore'] as const)('%s: no composed serve.cmd can never verify — capped with the reason', (mode) => {
+      // Even a (mis-wired) verified probe cannot lift it: there is nothing to bind.
+      const floor = evaluateAttestationFloorForMode(mode, sbUnserved, SB, boundProbe, bound);
+      expect(floor.kind).toBe('uncapped');
+      expect(floor.detail).toContain('composed no serve.cmd');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -778,6 +816,22 @@ describe('verifyHarnessContract(provider, mode)', () => {
   it('only explore asks for recipeJson content', () => {
     expect(flat(verifyHarnessContract('claude', 'explore'))).toContain('ONE portable-runbook entry for VERIFY_MODALITY');
     expect(flat(VERIFY_HARNESS_CONTRACT)).not.toContain('ONE portable-runbook entry');
+  });
+
+  it('a binding-only pass records serve-binding in its recipe rather than omitting it (§A5)', () => {
+    for (const provider of ['claude', 'codex'] as const) {
+      const explore = flat(verifyHarnessContract(provider, 'explore'));
+      expect(explore).toContain('rested on the serve binding alone, so record { "kind": "serve-binding" }');
+      expect(explore).not.toContain('otherwise omit recipeJson');
+    }
+  });
+
+  it('every mode names the serve-binding self-check as harness-verified', () => {
+    for (const mode of ['pinned', 'explore'] as const) {
+      const text = flat(verifyHarnessContract('claude', mode));
+      expect(text).toContain('"$VERIFY_DRIVER" attest binding');
+      expect(text).toContain('"serve-binding" → attest binding (that channel is harness-verified');
+    }
   });
 });
 
@@ -991,11 +1045,18 @@ describe('VerificationAgentRunner.run — explore binds ONLY the record\'s lever
 });
 
 describe("VerificationAgentRunner.run — the host's CYBOFLOW_DIR (§A1.3)", () => {
-  it.each(['legacy', 'pinned', 'explore'] as const)('%s: blanked in the agent env the serve children inherit', async (executionMode) => {
+  it('explore: blanked in the agent env the serve children inherit', async () => {
+    vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(query.mock.calls[0][0].env.CYBOFLOW_DIR).toBe('');
+  });
+
+  it.each(['legacy', 'pinned'] as const)('%s: left alone — the agent inherits the host value as before the feature', async (executionMode) => {
     vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
     const { runner, query } = makeRunner();
     await runner.run(makeReq({ executionMode }));
-    expect(query.mock.calls[0][0].env.CYBOFLOW_DIR).toBe('');
+    expect(query.mock.calls[0][0].env).not.toHaveProperty('CYBOFLOW_DIR');
   });
 
   it('a lever re-binding it wins: the request data dir, never the blank', async () => {
@@ -1058,11 +1119,19 @@ describe('VerificationAgentRunner.run — explore-only structural guards (§A1.4
 });
 
 describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4, F8)', () => {
-  it.each(['legacy', 'pinned', 'explore'] as const)('%s: prepended in front of the harness PATH', async (executionMode) => {
+  it('explore: prepended in front of the harness PATH', async () => {
+    const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
+    const { runner, query } = makeRunner({ materializeDependencyGuardShim: shim });
+    await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(query.mock.calls[0][0].env.PATH).toBe(['/artifacts/.driver/dep-guard/vr-explore-1/bin', FAKE_SHELL_PATH].join(delimiter));
+  });
+
+  it.each(['legacy', 'pinned'] as const)('%s: never materialized — the harness PATH exactly as before the feature', async (executionMode) => {
     const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
     const { runner, query } = makeRunner({ materializeDependencyGuardShim: shim });
     await runner.run(makeReq({ executionMode }));
-    expect(query.mock.calls[0][0].env.PATH).toBe(['/artifacts/.driver/dep-guard/vr-explore-1/bin', FAKE_SHELL_PATH].join(delimiter));
+    expect(shim).not.toHaveBeenCalled();
+    expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
   });
 
   it('is materialized per request with the driver wrapper\'s own interpreter, and never NODE_PATH', async () => {
@@ -1075,13 +1144,6 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
       nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
       executionMode: 'explore',
     });
-  });
-
-  it.each(['legacy', 'pinned'] as const)('%s: the shim is told the request mode for its deny message', async (executionMode) => {
-    const shim = vi.fn(async () => ({ binDir: null }));
-    const { runner } = makeRunner({ materializeDependencyGuardShim: shim });
-    await runner.run(makeReq({ executionMode }));
-    expect(shim).toHaveBeenCalledWith(expect.objectContaining({ executionMode }));
   });
 
   describe('Codex explore needs the shim: it is the ONLY dependency guard there (§A1.4)', () => {
@@ -1114,6 +1176,19 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
       expect(result).toMatchObject({ status: 'skipped', deployed: false, errorMessage: CODEX_EXPLORE_NO_GUARD_MESSAGE });
     });
 
+    it('a legacy Codex run (the kill switch) sees none of the explore guards: no shim, no host-env blank, the mode for the seam', async () => {
+      vi.stubEnv('CYBOFLOW_DIR', '/Users/dev/.cyboflow_test');
+      const shim = vi.fn(async () => ({ binDir: '/artifacts/.driver/dep-guard/vr-explore-1/bin' }));
+      const { runner, codexQuery } = makeRunner({ ...codexAgent(), materializeDependencyGuardShim: shim });
+      await runner.run(makeReq({ executionMode: 'legacy' }));
+      expect(shim).not.toHaveBeenCalled();
+      const args = codexQuery.mock.calls[0][0];
+      expect(args.env.PATH).toBe(FAKE_SHELL_PATH);
+      expect(args.env).not.toHaveProperty('CYBOFLOW_DIR');
+      // The Codex seam keys its explore-only `allow_login_shell: false` on this.
+      expect(args.guards).toEqual({ executionMode: 'legacy' });
+    });
+
     it('Codex pinned/legacy and Claude explore keep the fail-soft and deploy', async () => {
       for (const executionMode of ['pinned', 'legacy'] as const) {
         const { runner, codexQuery } = makeRunner({ ...codexAgent(), materializeDependencyGuardShim: async () => ({ binDir: null }) });
@@ -1132,14 +1207,15 @@ describe('VerificationAgentRunner.run — the dependency-guard PATH shim (§A1.4
     expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
   });
 
-  it('a THROWING shim is fail-soft: logged, and the request still deploys and passes', async () => {
+  it('a THROWING shim is fail-soft on Claude explore: logged, and the request still deploys', async () => {
     const { runner, query, warn } = makeRunner({
       materializeDependencyGuardShim: async () => {
         throw new Error('EACCES');
       },
     });
-    const result = await runner.run(makeReq());
-    expect(result.status).toBe('passed');
+    const result = await runner.run(makeReq({ executionMode: 'explore' }));
+    expect(result.deployed).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0][0].env.PATH).toBe(FAKE_SHELL_PATH);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('dependency-guard PATH shim threw'),
@@ -1535,5 +1611,157 @@ describe('VerificationAgentRunner.run — explore web with NO declared channel (
     const { runner } = makeRunner(servedBy(SERVE_CMD));
     const result = await runner.run(makeReq({ executionMode: 'pinned', task: noChannel() }));
     expect(result.status).toBe('low_confidence');
+  });
+});
+
+describe('VerificationAgentRunner.run — a DECLARED serve-binding channel (§A1.2)', () => {
+  const SB: AttestationSpec = { kind: 'serve-binding' };
+  const declared = (overrides: Partial<VerificationTaskV1> = {}) =>
+    makeTask({ attestation: SB, serve: { cmd: SERVE_CMD }, ...overrides });
+
+  it.each(['pinned', 'explore'] as const)('%s: a bound composed serve passes without probing any channel', async (executionMode) => {
+    const { runner, attest } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(makeReq({ executionMode, task: declared() }));
+    expect(attest).not.toHaveBeenCalled();
+    expect(result.status).toBe('passed');
+  });
+
+  it('pinned: a FOREIGN listener fails the pass as a missing attestation (the pinned rule)', async () => {
+    const { runner } = makeRunner(foreignListener);
+    const result = await runner.run(makeReq({ executionMode: 'pinned', task: declared() }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('[port-owner]');
+  });
+
+  it('pinned: an unbound serve (nothing recorded) fails the pass as a missing attestation', async () => {
+    const { runner } = makeRunner();
+    const result = await runner.run(makeReq({ executionMode: 'pinned', task: declared() }));
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain('[serve-pid]');
+  });
+
+  it.each(['pinned', 'explore'] as const)('%s: no composed serve.cmd is capped at low_confidence with the reason', async (executionMode) => {
+    const { runner } = makeRunner(servedBy(SERVE_CMD));
+    const result = await runner.run(
+      makeReq({ executionMode, task: makeTask({ attestation: SB, target: { url: 'http://127.0.0.1:1/' } }) }),
+    );
+    expect(result.status).toBe('low_confidence');
+    expect(result.errorMessage).toContain('composed no serve.cmd');
+  });
+
+  it('explore: behaves as the undeclared binding-only pass — bound passes, foreign fails, unbound caps', async () => {
+    const cases: Array<[Partial<VerificationAgentRunnerDeps>, string]> = [
+      [servedBy(SERVE_CMD), 'passed'],
+      [foreignListener, 'failed'],
+      [{}, 'low_confidence'],
+    ];
+    for (const [deps, status] of cases) {
+      const declaredRun = await makeRunner(deps).runner.run(makeReq({ executionMode: 'explore', task: declared() }));
+      const undeclaredRun = await makeRunner(deps).runner.run(
+        makeReq({ executionMode: 'explore', task: declared({ attestation: undefined }) }),
+      );
+      expect(declaredRun.status).toBe(status);
+      expect(undeclaredRun.status).toBe(status);
+      expect(declaredRun.foreignSurface).toBe(undeclaredRun.foreignSurface);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §A5 — the runner validates a passing explore request's recipe
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner — §A5 recipe validation on a passing explore run', () => {
+  const servedTask = makeTask({ serve: { cmd: SERVE_CMD } });
+  const RECIPE = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD }, attestation: HTTP_SPEC });
+  const PKG = JSON.stringify({ scripts: { build: 'vite build', preview: 'vite preview' } });
+
+  function recipeRunner(report: VerificationReportV1, extra: Partial<VerificationAgentRunnerDeps> = {}) {
+    const readTextFile = vi.fn(async (path: string) => (path === join('/snap', 'package.json') ? PKG : null));
+    const made = makeRunner({ ...servedBy(SERVE_CMD), readTextFile, ...extra });
+    made.query.mockImplementation(async () => outcome(report));
+    return { ...made, readTextFile };
+  }
+
+  it('a passed explore run with a valid recipe carries the learnable entry, read against the SNAPSHOT package.json', async () => {
+    const { runner, readTextFile } = recipeRunner(validReport({ recipeJson: RECIPE }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: true, entry: { serve: { cmd: SERVE_CMD } } });
+    expect(readTextFile).toHaveBeenCalledWith(join('/snap', 'package.json'));
+  });
+
+  it('an invalid recipe is carried as a rejection and the verdict is unaffected', async () => {
+    const bad = JSON.stringify({ build: ['pnpm install'], serve: { cmd: SERVE_CMD }, attestation: HTTP_SPEC });
+    const { runner } = recipeRunner(validReport({ recipeJson: bad }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: false });
+  });
+
+  it('a literal of THIS request\'s leased port is refused', async () => {
+    const leaky = JSON.stringify({ serve: { cmd: SERVE_CMD }, build: ['pnpm run build --port 29260'], attestation: HTTP_SPEC });
+    const { runner } = recipeRunner(validReport({ recipeJson: leaky }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.learnedRecipe).toMatchObject({ ok: false, reason: expect.stringContaining('leased port 29260') });
+  });
+
+  it('nothing is validated for a pinned or legacy pass, a non-passing explore run, or a mutated snapshot', async () => {
+    const pinned = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'pinned', task: servedTask }),
+    );
+    expect(pinned.status).toBe('passed');
+    expect(pinned.learnedRecipe).toBeUndefined();
+
+    const legacy = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'legacy', task: servedTask }),
+    );
+    expect(legacy.learnedRecipe).toBeUndefined();
+
+    const failing = await recipeRunner(validReport({ recipeJson: RECIPE, outcome: 'fail', behaviors: [failedB1] })).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask }),
+    );
+    expect(failing.status).not.toBe('passed');
+    expect(failing.learnedRecipe).toBeUndefined();
+
+    const mutated = await recipeRunner(validReport({ recipeJson: RECIPE }), { checkSnapshotMutated: async () => true }).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask }),
+    );
+    expect(mutated.status).toBe('low_confidence');
+    expect(mutated.learnedRecipe).toBeUndefined();
+
+    const fallback = await recipeRunner(validReport({ recipeJson: RECIPE })).runner.run(
+      makeReq({ executionMode: 'explore', task: servedTask, snapshotSha: null }),
+    );
+    expect(fallback.learnedRecipe).toBeUndefined();
+  });
+
+  it('a binding-only pass (no declared channel) learns a serve-binding recipe — recorded or filled in', async () => {
+    const noChannel = makeTask({ attestation: undefined, serve: { cmd: SERVE_CMD } });
+    const recorded = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD }, attestation: { kind: 'serve-binding' } });
+    const omitted = JSON.stringify({ build: ['pnpm run build'], serve: { cmd: SERVE_CMD } });
+    for (const recipeJson of [recorded, omitted]) {
+      const { runner, attest } = recipeRunner(validReport({ recipeJson }));
+      const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel }));
+      expect(attest).not.toHaveBeenCalled();
+      expect(result.status).toBe('passed');
+      expect(result.learnedRecipe).toMatchObject({ ok: true, entry: { attestation: { kind: 'serve-binding' } } });
+    }
+  });
+
+  it('a binding-only pass refuses a recipe claiming a nonce channel the harness never verified', async () => {
+    const noChannel = makeTask({ attestation: undefined, serve: { cmd: SERVE_CMD } });
+    const { runner } = recipeRunner(validReport({ recipeJson: RECIPE }));
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: noChannel }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toMatchObject({ ok: false, reason: expect.stringContaining('"serve-binding"') });
+  });
+
+  it('a passed explore run with no recipe carries nothing', async () => {
+    const { runner } = recipeRunner(validReport());
+    const result = await runner.run(makeReq({ executionMode: 'explore', task: servedTask }));
+    expect(result.status).toBe('passed');
+    expect(result.learnedRecipe).toBeUndefined();
   });
 });

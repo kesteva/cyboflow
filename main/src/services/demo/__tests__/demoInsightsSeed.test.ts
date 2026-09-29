@@ -50,7 +50,8 @@ function createDb(): Database.Database {
       run_id TEXT NOT NULL,
       event_type TEXT NOT NULL,
       payload_json TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      dedup_key TEXT
     );
     CREATE TABLE run_usage (
       run_id TEXT PRIMARY KEY,
@@ -62,7 +63,10 @@ function createDb(): Database.Database {
       cost_usd REAL,
       num_turns INTEGER,
       assistant_message_count INTEGER NOT NULL DEFAULT 0,
-      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      -- migration 146
+      accounting_version INTEGER NOT NULL DEFAULT 0,
+      coverage TEXT NOT NULL DEFAULT 'legacy'
     );
     CREATE TABLE review_items (
       id TEXT PRIMARY KEY,

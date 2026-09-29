@@ -89,6 +89,15 @@ function createDb(): Database.Database {
     CREATE UNIQUE INDEX idx_raw_events_dedup
       ON raw_events(dedup_key)
       WHERE dedup_key IS NOT NULL;
+    -- migration 146: the invocation <-> Codex turn link.
+    CREATE TABLE codex_invocation_turns (
+      agent_invocation_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      codex_turn_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (agent_invocation_id, codex_turn_id)
+    );
   `);
   db.prepare("INSERT INTO workflow_runs (id, updated_at) VALUES ('run-1', CURRENT_TIMESTAMP)").run();
   return db;
@@ -158,6 +167,24 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
           turnId: 'turn-1',
           completedAtMs: 20,
           item: { type: 'agentMessage', id: 'message-1', text: 'Done from Codex.' },
+        },
+      });
+      // The per-response usage source the root agent_result is counted from.
+      client.notify({
+        method: 'rawResponse/completed',
+        params: {
+          threadId: 'codex-thread-1',
+          turnId: 'turn-1',
+          responseId: 'response-1',
+          usage: {
+            totalTokens: 17,
+            inputTokens: 10,
+            cachedInputTokens: 3,
+            cacheWriteInputTokens: 0,
+            outputTokens: 7,
+            reasoningOutputTokens: 2,
+          },
+          usageMetadata: null,
         },
       });
       client.notify({
@@ -591,6 +618,7 @@ describe('CodexSdkManager app-server runtime', () => {
         .all(CODEX_RAW_NOTIFICATION_EVENT_TYPE) as Array<{ payloadJson: string }>;
       expect(rawNotifications.map((row) => JSON.parse(row.payloadJson).method)).toEqual([
         'item/completed',
+        'rawResponse/completed',
         'thread/tokenUsage/updated',
         'turn/completed',
       ]);

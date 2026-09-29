@@ -202,6 +202,19 @@ describe('CodexRawNotificationSink', () => {
       expect(parsed.params.tokenUsage.total).toBe(250);
     });
 
+    it('never dedups rawResponse/completed — usage accounting sums every row', () => {
+      const db = makeDb();
+      const sink = new CodexRawNotificationSink(db);
+      const usage = { inputTokens: 10, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 2, reasoningOutputTokens: 0, totalTokens: 12 };
+
+      sink.persist(RUN_ID, { method: 'rawResponse/completed', params: { threadId: 't', turnId: 'turn-a', responseId: 'r1', usage } });
+      sink.persist(RUN_ID, { method: 'rawResponse/completed', params: { threadId: 't', turnId: 'turn-a', responseId: 'r2', usage } });
+
+      const rows = diffRows(db);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.dedup_key === null)).toBe(true);
+    });
+
     it('leaves non-snapshot methods append-only with a NULL key', () => {
       const db = makeDb();
       const sink = new CodexRawNotificationSink(db);

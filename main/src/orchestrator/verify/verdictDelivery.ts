@@ -54,6 +54,7 @@ import type { CapabilityBreakerFindingFn, OnVerdict } from './verificationSchedu
 import { VERIFY_NO_RUNBOOK_REASON, runbookDeclineForSkipReason } from './verificationScheduler';
 import { bootstrapRemedyText } from './bootstrapEligibility';
 import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
+import type { RunbookLearningFinding } from './learnedRunbook';
 import type {
   CaptureOrigin,
   VerdictV1,
@@ -1023,6 +1024,55 @@ export function createExploreStaleProofFinding(deps: {
       });
     } catch (err) {
       logger?.error('[verdictDelivery] explore stale-proof finding failed (fail-soft)', {
+        projectId,
+        runId,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+}
+
+/**
+ * §A5 "learn from success" notices — the concrete sink behind
+ * `VerificationSchedulerDeps.runbookLearningFinding`: a recipe was LEARNED as
+ * an unproven draft, a learned recipe was PROMOTED to proven, or a recipe could
+ * not be learned over a committed entry and is offered as a SUGGESTED one
+ * (docs/proposals/runbook-optional-verification.md §A5 "Review surface").
+ *
+ * NON-BLOCKING by construction: learning never gates a lane, it only changes
+ * how later verifications stand the project up, and a human deciding whether
+ * to keep a machine-authored recipe needs to see the exact commands and the
+ * request they came from. `createIfNoPending` on the caller's stable
+ * `dedupeKey` keeps a replay or restart from filing one twice. Fail-soft like
+ * {@link createExploreStaleProofFinding}: the verdict it rode in on is already
+ * written.
+ */
+export function createRunbookLearningFinding(deps: {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+}): (finding: RunbookLearningFinding) => Promise<void> {
+  const { db, logger } = deps;
+  return async ({ projectId, runId, modality, title, body, dedupeKey, severity }) => {
+    try {
+      const taskId = resolveRunTaskId(db, runId, logger);
+      await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title,
+        body,
+        blocking: false,
+        audience: 'human',
+        severity,
+        source: dedupeKey,
+        entityType: taskId ? 'task' : null,
+        entityId: taskId ?? null,
+        runId,
+        payload: { kind: 'finding', category: 'visual-regression' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      logger?.error('[verdictDelivery] runbook-learning finding failed (fail-soft)', {
         projectId,
         runId,
         modality,

@@ -52,7 +52,9 @@ const RUN_USAGE_DDL = `
     cost_usd                REAL,
     num_turns               INTEGER,
     assistant_message_count INTEGER NOT NULL DEFAULT 0,
-    computed_at             DATETIME DEFAULT CURRENT_TIMESTAMP
+    computed_at             DATETIME DEFAULT CURRENT_TIMESTAMP,
+    accounting_version      INTEGER NOT NULL DEFAULT 0,
+    coverage                TEXT NOT NULL DEFAULT 'legacy'
   )
 `;
 
@@ -99,11 +101,16 @@ function seedUsage(
       },
     },
   });
+  // The result's usage is the query's token source (accounting v1); the
+  // assistant row only counts as the outer message.
   seedEvent(db, runId, 'result', {
     type: 'result',
     subtype: 'success',
     total_cost_usd: opts.cost,
     num_turns: opts.turns,
+    usage: { input_tokens: opts.input, output_tokens: opts.output },
+    modelUsage: { 'claude-sonnet-5': { inputTokens: opts.input, outputTokens: opts.output } },
+    cyboflow_process_instance_id: `proc-${runId}`,
   });
 }
 
@@ -115,6 +122,8 @@ interface RunUsageRow {
   cost_usd: number | null;
   num_turns: number | null;
   assistant_message_count: number;
+  accounting_version: number;
+  coverage: string;
 }
 
 function readRunUsage(db: Database.Database, runId: string): RunUsageRow | null {
@@ -143,6 +152,9 @@ describe('backfillRunUsageRollups', () => {
       expect(row?.cost_usd).toBe(0.5);
       expect(row?.num_turns).toBe(3);
       expect(row?.assistant_message_count).toBe(1);
+      // Written through the shared writer: the fold version and coverage land too.
+      expect(row?.accounting_version).toBe(1);
+      expect(row?.coverage).toBe('complete');
     },
   );
 

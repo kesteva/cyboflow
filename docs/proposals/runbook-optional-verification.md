@@ -1,6 +1,6 @@
 # Runbook-optional verification + the Xcode 27 DeviceInteraction drive engine (Stage 3)
 
-Status: DESIGN v2, 2026-09-24, green-brook.
+Status: IMPLEMENTED (2026-09-26, green-brook). Parts A and B are built; the "As built" notes under A5 and B2–B8 record where the code differs from the design text, and where they disagree the notes win. Design v2 dated 2026-09-24.
 
 v1 went through a four-lens adversarial review (regression safety, feasibility, Stage 3 engine, thesis completeness). The review raised 36 blocking or major findings, and all 36 survived an independent skeptic pass. They are folded in below and cited by their IDs: RS-n, F-n, B-n and T-n (the thesis lens).
 
@@ -105,6 +105,23 @@ These are unconditional bug fixes that ignore the switch:
   - **Mobile `bundle-identity`** that verifies may reach `passed`. The hash is harness-owned.
   - **Serve binding alone** (decided 2026-09-25, after the live smoke). When the task declared no channel, `passed` is allowed if it composed a `serve.cmd` and the binding holds: the port's listener is in the process group the driver started, and that group runs the verbatim composed command. Without this, a runbook-less web deliverable could never pass. The accepted gap is a composed command that deliberately fronts another server. A foreign listener still fails, and an unbound serve stays capped. Pinned rows are unchanged.
   - **Explore mobile** with no declared channel probes an implicit `bundle-identity` built from `app.bundleId`.
+
+**As built (2026-09-28): `serve-binding` is a declarable channel.** `{ "kind": "serve-binding" }` (no fields) joined `AttestationSpec`, for `web` and `cdp-app` only.
+- **Runbook parser:** accepted only on a web or cdp-app entry that carries a `serve`. `mobile` still requires `bundle-identity`, and `native-screen` refuses it.
+- **Floor, every mode:** there is no channel probe. The serve binding is the probe: it verifies iff the leased port's listener is the driver's serve group running the verbatim composed `serve.cmd`. A pinned foreign or unbound listener is `missing` (a pass fails), as for any declared channel whose binding breaks. In explore a foreign listener fails and an unbound one caps. A declaration with no composed `serve.cmd` caps at `low_confidence` in every mode, with the reason in the detail.
+- **Explore:** a task that declares `serve-binding` gets the same pass verdict as the undeclared binding-only pass above.
+- **Driver:** `"$VERIFY_DRIVER" attest binding` is the self-check. It reports ok, saying the channel is harness-verified, once a serve was started through the driver, and fails only when none was.
+- **Why it is safe to record:** the nonce channels are weaker than they look, because the agent holds the nonce and chooses what the driver serves. The binding is what actually ties a served surface to the deliverable. A pinned `serve-binding` entry therefore asserts nothing the explore pass it was learned from did not, and the accepted gap is unchanged: a composed command that deliberately fronts another server.
+
+**As built (2026-09-28): the harness-injected web nonce marker** (`webNonceMarker.ts`). An app never renders `VERIFY_ATTEST_NONCE` on its own, so the harness puts the nonce where the page will carry it.
+- **Injection:** after the snapshot is provisioned and before the agent starts, the harness adds `<meta name="cyboflow-verify-nonce" content=… data-verify-nonce=…>` right after `<head>` in the snapshot's one entry HTML file: `index.html`, `public/index.html`, `src/index.html` or `src/app.html`. The repo never sees it.
+  - It skips server-rendered frameworks (Next, Nuxt, Remix, React Router's framework mode, Astro, Gatsby), no candidate, more than one candidate, anything but exactly one `<head>`, and a symlinked entry file.
+  - When it applies: web only, with a composed classic `serve.cmd`. Either an explore task declared nothing or `serve-binding` (the marker is an upgrade), or a task declared the marker spec itself, in any mode.
+- **Floor:** the effective spec becomes `dom-marker` `meta[name="cyboflow-verify-nonce"]`, probed by the existing channel through its `data-verify-nonce` attribute. In explore it reaches `passed` only with the full serve binding, like any port-mediated channel. An upgrade never makes a verdict worse: unless the marker verifies, or the binding finds a foreign listener, the request gets the binding-only verdict it had before.
+- **Mutation check:** `git diff HEAD` excludes the marked file. The marked file counts as unmutated while it holds exactly the injected content, or was put back to HEAD.
+- **Prompt:** the user prompt gets a HARNESS NONCE MARKER note naming the file, so the agent does not revert the edit it sees in `git status`.
+- **Learning:** a pass that verified the marker records `{ "kind": "dom-marker", "selector": "meta[name=\"cyboflow-verify-nonce\"]" }`, replacing whatever the agent wrote. The pinned request composed from that runbook injects the marker again, and there a marker that does not verify fails like any declared channel.
+- **What it adds, and what it does not:** it proves the page in the driver's browser was built from this snapshot's files, which rules out a stale server, the developer's own dev server, or a serve that fronts another directory. The nonce stays in the agent's env: the agent can read the injected file anyway, so withholding it would only break the driver's `attest dom` self-check. The serve binding is still what ties the surface to the harness's own serve.
 
 #### A1.3 Levers in explore (F8, T-F4)
 - **Lever source.** With no pin, resolve the best record for (project, modality): proven, otherwise any `unproven-draft` of any origin. Pass **only its `levers`** to `resolveLeverEnv`, which already applies the name pattern, the deny list and harness-wins. Its build/serve reach the agent as hints in the EXPLORE block, together with its notes.
@@ -249,6 +266,26 @@ A rejection means nothing is learned. The verdict is unaffected.
   - orchestrated: `verdictDelivery` reaches `applyMergeGateVerdict`;
   - programmatic: `visualVerifyGate` resolves from the row.
 
+**As built (2026-09-26): where the code differs from the text above.**
+- **Validation runs in the runner** (`learnedRecipe.ts`, called before teardown). Only the runner holds the snapshot's `package.json`, the leased ports and UDID, and the snapshot path. It attaches `learnedRecipe` to the result, and the engine decides eligibility and writes.
+- **Stricter validation.** Two extra checks:
+  - web/cdp-app: the recipe's `serve.cmd` must equal the composed `serve.cmd` the binding verified;
+  - mobile: `app.bundleId` must equal the attested one.
+  - all: the recipe's `attestation.kind` must be the channel the floor verified for this pass, and a pass with no verified channel never learns. A web/cdp-app pass that rested on the serve binding (A1.2) learns a `serve-binding` entry (2026-09-28; at first such a pass never learned, because no runbook entry could carry that channel). A recipe that omits `attestation` on such a pass is filled in with `{ "kind": "serve-binding" }`, since the harness knows what it verified. A recipe naming a nonce channel the harness did not verify is refused.
+  - mobile path values: `-project`/`-workspace` must be relative with no `$`/`` ` ``/`~` expansion and no `..` segment; `-derivedDataPath` must be exactly the DerivedData lever, and `-clonedSourcePackagesDirPath` the lever or a `..`-free path beneath it.
+
+  "No step may write outside the snapshot or `$VERIFY_DATA_DIR`" is enforced as "no absolute path in any command".
+- **First writer wins** is decided before any write. A `draft` of origin `learned` with no committed entry is skipped rather than handed to the store. The store's CAS enforces the same rule.
+- **A drifted proven learned record is not replaced.** The store's CAS matches only `unproven-draft` learned rows, as specified, so the "may replace after a failed reprove" clause is not implemented. A7's reprove owns that record.
+- **Learned-record drift:** a committed file that declares the modality is `content-drifted` only when its hash differs from the learned record's. A byte-identical file is the learned runbook itself.
+- **Learned-pin exits:**
+  - A pre-deploy harness skip (preflight, provisioning, no resolvable agent) keeps the draft and delivers normally, because the recipe never ran. It is not treated as "anything else".
+  - "Surface stood up" is a harness fact, not the report's word: on a learned pin's `fail` the runner runs the attestation floor's identity/binding probe off the verdict path and carries `surfaceVerified`; only `true` keeps the draft (`file-identity` counts only on a bare `target.htmlPath`), anything else discards.
+  - The "anything else" re-dispatch keeps the row's modality and its (merged) task, so the learned commands ride along as explore hints. This includes a learned pin's `wrong_environment`.
+- **Provenance:** the learned entry's `notes` records the source request, and the promotion finding reads it back. Because `notes` is part of the portable hash, two runs reporting the same recipe learn distinct hashes (first writer wins anyway).
+- **`readRow`** selects `origin` through a widen-then-fall-back ladder, so a pre-107 DB still reads its records.
+- **`registerDraft`'s A8 no-op** returns `unchanged: true`. Both callers (the MCP register tool and the lane bootstrap) then skip `setOrigin`.
+
 ### A6. Run posture
 When explore is on, `verificationPosture` no longer declines **`mobile-flow`** runs for runbook absence. It still declines `native-desktop` runs, because native-screen is pinned-only. Host-capability declines are unchanged. The mid-run posture flip still fires on host declines; the claim that it becomes unreachable was false (F12).
 
@@ -294,7 +331,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
 
 ### A11. Breaker reset (T-F6)
 - Extend the `recordHealthyOutcome` condition (`agentEngine.ts:~1299`) to cover a deployed `low_confidence` that has at least one behaviour `pass`/`fail`. An `unverifiable` with no exercised behaviour does not reset it.
-- Update the `capabilityRunbookKey` doc: unpinned rows, explore runs included, share the `''` bucket.
+- Update the `capabilityRunbookKey` doc: unpinned rows and every explore run share the `''` bucket. The key follows the EFFECTIVE mode, resolved before the capability gates: only a `pinned` run keys on its pin hash, so an explore run whose pin went stale (drifted/demoted) neither reads nor writes the dead revision's bucket.
 
 ### Report-contract widening (F6): one work item, touching
 - **`shared/types/visualVerification.ts`:** the outcome union plus a single exported `VERIFICATION_REPORT_OUTCOMES` constant; the normalizer validates `wrong_environment{neededModality, diagnosis, app?}`, `unverifiable{diagnosis}` and `recipeJson` (string only), and applies the A4 coercion with `coerced: true`.
@@ -354,6 +391,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - `sudo xcrun mcp-server enable`;
   - "Approve Xcode access" (B8);
   - the grant's expiry time.
+- **As built.** The probe is composed once in `mobileComposition.ts` and shared by the runner, the health row (`xcodeMcpHealth.xcodeProbeRow`) and the B8 re-read. The row maps `available` → `ok` (detail names the grant expiry), `approval-required`/`expiring` → `missing` with the approve button, `unavailable` → `missing` with no button and each failed check's remedy in the detail, `inconclusive` → `inconclusive` (the button only when the grant itself could not be read). In the runner, `'xcode-mcp'` is an **advisory** preflight row (`ok: true` always) that records the engine decision, so it survives into `preflight_json` for a request that ends with no report. It never fails preflight: degrade, never skip.
 
 ### B3. Engine selection
 - **Config:** `VisualVerifyConfig.mobileDriveEngine: 'auto'|'xcode'|'maestro'|'none'` (default `'auto'`). Floor it in `configManager.getVisualVerifyConfig` and extend the resolved config.
@@ -366,6 +404,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
   - keep the drive coercion keyed strictly on `'none'`.
 - When xcode is selected, `mobileSimulatorSession.acquire` requires runtime major ≥ 27 (`minRuntimeMajor`).
 - **Concurrency:** assumes `mobileSimSlots=1` (the default). If it is raised, add a count-1 `verify:xcode` lease that leaves the row *queued* on a miss. Never degrade the rung on contention.
+- **As built.** Selection lives in `xcode/driveEngineSelection.ts` (`intendXcode` before acquire, `finalizeDriveEngine` after) and `mobileDriveRung.ts`. An `acquire` with the iOS 27 floor that finds no such runtime is retried once without it and records `xcode-unavailable`. The `verify:xcode` lease (`mobileGates.ts`) is taken only when the clamped slot count is > 1 and the row's engine is `auto`/`xcode` — that engine is read from the LIVE config once per row and handed to the runner on the request (`mobileDriveEngine`), so the lease decision and the rung driven never disagree; it rides the slot lease's handle, so the agent engine's existing release paths free both.
 
 ### B4. Lifecycle (runner mobile arm)
 1. Acquire the simulator (existing flow).
@@ -373,7 +412,7 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    - Mint `sessionIdentifier = 'Cyboflow Verify ' + randomBytes(16).hex`. Keep it only in runner memory; log the requestId ↔ (hash of the key), never the key itself.
    - **Write the key into the owner marker** (`owner.json`) *before* StartSession.
    - Spawn one bridge: resolved `xcrun` with `['mcpbridge']`, never a shell.
-   - `DeviceInteractionStartSession`. Require `deviceUUID === udid`; otherwise EndSession and degrade.
+   - `DeviceInteractionStartSession`. Require `deviceUUID === udid`; otherwise EndSession and degrade. (As built: compared case-insensitively.)
 3. **Drive socket.**
    - Location: `<dataDir>/sockets/xd-<16hex>.sock` inside a 0700 dir. If `sun_path` would exceed 103 bytes, use a 0700 `mkdtemp` under a short tmpdir. Assert the length.
    - Never pre-unlink; fail on EADDRINUSE. Do not change the umask.
@@ -398,17 +437,29 @@ When explore is on, `verificationPosture` no longer declines **`mobile-flow`** r
    | `mobile-flow` | Refused under xcode (exit 2), with a message pointing at `mobile-interact` |
 
    Commit a real `hierarchy.txt` fixture from this host plus parser tests.
+
+   **As built** (`xcode/xcodeDriveSession.ts`, `driver/mobileCommands.ts`):
+   - An unresolved or ambiguous `mobile-tap` target exits `MOBILE_EXIT_TARGET_UNRESOLVED = 5`. A target whose element carries `activationBundleId` is refused (exit 2) with a pointer to `mobile-activate`.
+   - A Synthesize whose `hierarchyPath` is missing gets ONE capture-only retry (the tool's own "AX transient, retry" note), never a re-sent command.
+   - Every capture is copied into the artifacts dir by name; its hierarchy is copied to `xcode-hierarchy/<name>.txt` and returned so the agent can read labels.
+   - **Grammar, UNMEASURED:** only `t x y` and `type <text>` were exercised live. The swipe (`s x1 y1 x2 y2 dur`) and home-button (`b home`) spellings come from single-letter tokens recovered from the framework's disassembly (the skill text's keywords are Swift small-string immediates `strings` drops). They live in one builder each; the live smoke must confirm them.
+   - Off the xcode rung each verb keeps one meaning: `mobile-capture` is a simctl screenshot, `--at` / `--from/--to` render as Maestro point flows, and `mobile-interact`/`mobile-activate` are refused.
 6. **Pid pinning** (B-5).
    - Under xcode, `mobile-launch` reports its parsed `simctl launch` pid to the runner over the socket. That pid becomes the pin and is logged as a `launch` ledger event.
    - Before each Synthesize the runner checks `isProcessAlive(pin)`.
    - After each Synthesize it parses the `Application, pid: N` line in the `Application bundle identifier: $VERIFY_APP_BUNDLE_ID` block.
    - The verb fails without activating or retrying if the pin is dead, the block is missing, the pid differs, or the state is not `Running`. It exits `MOBILE_EXIT_APP_EXITED = 4` and prints `app-exited pid=<pin> state=<s>` plus the `logsPath` tail.
+   - **Deviation (measured, B0 transcripts):** a NON-workspace session's `applicationState` describes the workspace "run application", which does not exist — it reads `NotRun` even while the driven app is on screen. "State must be `Running`" would fail every verb, so the pin rests on `isProcessAlive(pin)` plus the block's pid, and only a positive `Crashed` state counts. `mobile-press home` alone is exempt from "the block must exist" (backgrounding the app is its purpose); its pid must still be alive, and the next verb (normally `mobile-activate`) is strict again.
 7. **Mid-run bridge errors** ("Session with that key doesn't exist", "Target device doesn't match…", "isn't approved") → verb exit 2, which is `not_testable`.
 8. **`finally`** runs after attestation and before the simulator is disposed. Each step is independent, has a bounded timeout (~10 s), and is **not** bound to `controller.signal`, which the `finally` aborts first:
    1. `DeviceInteractionEndSession`
    2. bridge SIGTERM, then SIGKILL
    3. close and unlink the socket
 9. **Sweep.** When `sweepStaleSimulators` finds a dead-owner marker carrying a session key, it spawns one bridge and calls `EndSession(key)` best-effort (short timeout; ignore "doesn't exist" and "isn't approved") before `destroyDevice`. Sweep stale `xd-*` sockets at boot. The claim "device deletion ends a session" is UNVERIFIED until the smoke measures it.
+   **As built (post-review):**
+   - When the deadline or a cancel detaches a mobile row's runner mid-teardown, the scheduler keeps the row's simulator slot (and the `verify:xcode` lease riding it) until the runner settles, bounded at 5 min (`mobileTeardownHold.ts`); a same-id requeue is neither nudged nor re-leased until then. The runner also races its agent query against the abort, so a query that ignores the signal cannot keep it out of this `finally`.
+   - A StartSession that fails WITHOUT a definitive refusal (timeout, lost or malformed answer, bridge death) may still have created the session, so `openXcodeDriveSession` ends it by the minted key — on a fresh bridge if the first died — before degrading. When that cannot be proven (EndSession neither succeeded nor said the key does not exist), the key is copied into a sibling `verify-mobile/<requestId>.xcode-<hash>/owner.json` that dispose leaves behind, so the boot sweep still ends it.
+   - The long-path socket fallback is a stable per-user root `/tmp/cfxd-<uid>/` (0700, ownership-checked, a symlink refused) instead of a per-request `mkdtemp`, and the boot sweep scans it alongside `<dataDir>/sockets`, removing only `xd-*` sockets no listener answers.
 
 **Threat model** (F11, B-2, B-7). The drive socket is an **ergonomics, audit and ledger boundary, not a security boundary.**
 - Xcode approval is keyed on the binary that spawns the bridge.
@@ -429,6 +480,8 @@ The runner records every capture in memory:
 
 The ledger is persisted in `provenance.captureLedger`.
 
+**As built** (`xcode/xcodePassEvidence.ts`): the cited screenshots are re-hashed from the artifacts dir at validation time, so a capture the agent overwrote no longer matches its ledger entry. The cap is applied after `mapReportToResult` through the same `capPassedAtLowConfidence` fold an undeclared channel uses, with the per-behaviour reasons in `errorMessage`. It never fails a request.
+
 ### B6. Maestro `JAVA_HOME`
 The harness login shell resolves `java` to the macOS stub `/usr/bin/java`, so `maestro test --help` fails and the rung silently becomes `none`. This was measured: with `JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home`, `--udid` resolves.
 
@@ -438,6 +491,8 @@ The toolchain resolves a JDK home in this order:
 3. `/usr/local/opt/openjdk*/…`
 
 It exports `JAVA_HOME` for the probe and for the agent env.
+
+**As built:** the agent env gets `JAVA_HOME` (and `$JAVA_HOME/bin` first on PATH) whenever a pinnable Maestro resolved for the request — i.e. whenever Maestro is, or could have been, the rung.
 
 ### B7. Tests and live smoke
 - **Unit tests:**
@@ -463,6 +518,12 @@ It exports `JAVA_HOME` for the probe and for the agent env.
 - Never use `--unsafe-always-allow-all-agents`.
 - The only folder cyboflow ever causes to be approved is the scaffold.
 - Offer durable trust only as an explicit opt-in, with that disclosure.
+- **As built** (`services/visualVerify/xcodeMcpHealth.ts`, tRPC `verificationRequests.approveXcodeAccess`, the Verify health panel):
+  - The `<id>` is the status's pending-request id when one exists (its key is unmeasured), else our own `permittedAgents[].id`; it is shown only when it is a plain identifier. With no id, the panel points at Xcode's own prompt.
+  - The `--always` command is returned only for a packaged (signed) build, and the panel hides it behind an explicit "show the durable command" click.
+  - The scaffold is a minimal target-less `project.pbxproj`; whether Xcode opens it cleanly is for the live smoke to confirm.
+  - Concurrent clicks share one attempt, so a double click cannot raise two prompts.
+  - The scaffold path stays fixed, but every component under `<dataDir>/` is refused when it is a symlink or not ours, `project.pbxproj` is written through an `O_EXCL|O_NOFOLLOW` temp file renamed into place, and the project's realpath must equal `<realpath(dataDir)>/xcode-approval/CyboflowApproval.xcodeproj` right before `XcodeOpenWorkspace` (post-review).
 
 ### B9. Docs
 - Correct `mobile-verification-tier.md` §3, §11 and §16 against the Xcode 27 dump. §16's Stage 3 becomes "drive/observe rung shipped; Xcode-built 3b rejected with evidence".

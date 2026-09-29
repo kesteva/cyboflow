@@ -132,12 +132,22 @@ interface HarnessOpts {
   records?: Partial<Record<VerificationModality, ExploreRunbookRecord>>;
 }
 
-/** A `runbookStore` whose `getCurrent` answers from `records` — the only store method the gate reads. */
+/**
+ * A `runbookStore` answering from `records` — `getCurrent` (the explore lever
+ * source) and `getByHash` (the §A5 learned-pin check, a hit only when the
+ * row's pin IS the record's hash): the only store methods the gate reads.
+ */
 function fakeRunbookStore(records: Partial<Record<VerificationModality, ExploreRunbookRecord>>): VerifyRunbookStore {
   return {
     getCurrent: (_projectId: number, modality: VerificationModality) => {
       const record = records[modality];
       return record ? { ...record, version: 1 } : null;
+    },
+    getByHash: (_projectId: number, modality: VerificationModality, hash: string) => {
+      const record = records[modality];
+      return record && record.hash === hash
+        ? { runbook: record.runbook, version: 1, status: record.status, origin: record.origin }
+        : null;
     },
   } as unknown as VerifyRunbookStore;
 }
@@ -557,7 +567,7 @@ function liveOn(): ResolvedVisualVerifyConfig {
   return { ...VISUAL_VERIFY_DEFAULTS, agentSlots: 1, devServerPorts: [PORT], requireProvenRunbook: true };
 }
 
-type Outcome = { skip: string } | { mode: 'legacy' | 'explore'; exploreRecord?: ExploreRunbookRecord };
+type Outcome = { skip: string } | { mode: 'legacy' | 'explore' | 'pinned'; exploreRecord?: ExploreRunbookRecord };
 
 interface GateCase {
   name: string;
@@ -565,6 +575,8 @@ interface GateCase {
   task: VerificationTaskV1;
   records?: Partial<Record<VerificationModality, ExploreRunbookRecord>>;
   status?: VerifyRunbookStatusDetail;
+  /** The row's pin columns. */
+  pin?: { hash: string; version: number };
   on: Outcome;
   off: Outcome;
 }
@@ -600,6 +612,19 @@ const GATE_CASES: GateCase[] = [
     // A learned draft is just a draft: it never unlocks gate 3 by itself.
     on: { skip: VERIFY_NO_RUNBOOK_REASON },
     off: { mode: 'explore', exploreRecord: LEARNED_DRAFT },
+  },
+  {
+    // §A5: the row's pin names an unproven LEARNED draft — its promotion proof.
+    // Switch off, that is §A1's third pinned case; switch on, no learned pin is
+    // honoured and the unproven pin meets today's gate 3.
+    name: 'a row pinned to a learned draft',
+    modality: 'web',
+    task: SERVE_TASK,
+    records: { web: { ...LEARNED_DRAFT, hash: 'p'.repeat(64), origin: 'learned' } },
+    pin: { hash: 'p'.repeat(64), version: 3 },
+    status: DRAFT_STATUS,
+    on: { skip: VERIFY_NO_RUNBOOK_REASON },
+    off: { mode: 'pinned' },
   },
   {
     name: 'a cdp-app task with no levers anywhere',
@@ -657,7 +682,7 @@ describe('AgentEngine — gate (3) is an execution-mode selector (§A1)', () => 
         mobileToolchainProbe: async () => true,
         ...(route === 'live config' ? { liveConfig: liveOn } : {}),
       },
-      { task: c.task, killSwitch: route === 'config', records: c.records ?? {} },
+      { task: c.task, killSwitch: route === 'config', records: c.records ?? {}, ...(c.pin ? { pin: c.pin } : {}) },
     );
     h.gate.modality = c.modality;
     const { work } = await h.engine.processAgentRow(row(), INPUT);
@@ -758,6 +783,50 @@ describe('AgentEngine — gate (3) is an execution-mode selector (§A1)', () => 
     expect(req).not.toHaveProperty('runbookHash');
     expect(req).not.toHaveProperty('runbookLocalVersion');
     expect(req.exploreRecord).toEqual(LEARNED_DRAFT);
+  });
+
+  it('a stale pin neither reads nor feeds its dead revision’s breaker: it explores past a suppressed pin bucket and settles into the shared unpinned bucket', async () => {
+    const readKeys: string[] = [];
+    const recordHealthyOutcome = vi.fn();
+    const store = {
+      markUnsupported: vi.fn(),
+      getActiveSuppression: (_p: number, _m: string, key: string) => {
+        readKeys.push(key);
+        return key === PIN.hash ? { reason: 'old revision tripped 3x' } : null;
+      },
+      recordEnvFailure: vi.fn(() => ({ tripped: false })),
+      recordHealthyOutcome,
+    } as unknown as VerifyCapabilityStore;
+    h = harness(
+      { capabilityStore: store, runbookStatus: async () => DRIFTED_STATUS },
+      { task: SERVE_TASK, pin: PIN, records: { web: LEARNED_DRAFT } },
+    );
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    expect(onlyRequest(h).executionMode).toBe('explore');
+    expect(readKeys).toEqual(['']);
+    expect(terminal(h.db).status).toBe('passed');
+    expect(recordHealthyOutcome).toHaveBeenCalledWith(1, 'web', '');
+  });
+
+  it('a pin still reading proven keeps its own bucket on both sides', async () => {
+    const readKeys: string[] = [];
+    const recordHealthyOutcome = vi.fn();
+    const store = {
+      markUnsupported: vi.fn(),
+      getActiveSuppression: (_p: number, _m: string, key: string) => {
+        readKeys.push(key);
+        return null;
+      },
+      recordEnvFailure: vi.fn(() => ({ tripped: false })),
+      recordHealthyOutcome,
+    } as unknown as VerifyCapabilityStore;
+    h = harness({ capabilityStore: store, runbookStatus: async () => PROVEN_STATUS }, { task: SERVE_TASK, pin: PIN });
+    await (await h.engine.processAgentRow(row(), INPUT)).work;
+
+    expect(onlyRequest(h).executionMode).toBe('pinned');
+    expect(readKeys).toEqual([PIN.hash]);
+    expect(recordHealthyOutcome).toHaveBeenCalledWith(1, 'web', PIN.hash);
   });
 
   it('…and SKIPS with the drift reason with the switch on', async () => {

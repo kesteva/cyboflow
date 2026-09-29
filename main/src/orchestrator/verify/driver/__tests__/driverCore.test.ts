@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Browser } from 'playwright';
 import {
+  ATTEST_KIND_BY_CHANNEL,
   attestFilePath,
   createDefaultDriverDeps,
   MOBILE_CDP_REFUSAL,
@@ -1753,6 +1754,43 @@ describe.skipIf(process.platform === 'win32')('attest bundle', () => {
     const parsed = parseArgv(['attest', 'nonsense']);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) expect(parsed.message).toContain('http|dom|cdp|window|bundle');
+  });
+});
+
+describe('attest binding — serve-binding is harness-verified (§A1.2)', () => {
+  it('parses with no arguments, rejects any, and maps to serve-binding', () => {
+    expect(parseArgv(['attest', 'binding'])).toEqual({ ok: true, command: { kind: 'attest', channel: 'binding' } });
+    expect(parseArgv(['attest', 'binding', '/__verify__'])).toMatchObject({ ok: false });
+    expect(ATTEST_KIND_BY_CHANNEL.binding).toBe('serve-binding');
+    expect(USAGE).toContain('attest binding');
+  });
+
+  it('reports ok — the rest is the harness\'s — once a serve was started through the driver, with no browser', async () => {
+    const calls = freshCalls();
+    const out: string[] = [];
+    const deps = makeDeps(calls, { stdout: (line) => out.push(line), readPidFile: vi.fn(async () => 4242) });
+
+    const code = await runDriverCommand(['attest', 'binding'], { ...ENV, VERIFY_MODALITY: 'web' }, deps);
+
+    expect(code).toBe(0);
+    expect(deps.readPidFile).toHaveBeenCalledWith(servePidFilePath(ENV.VERIFY_ARTIFACTS_DIR));
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: true, kind: 'serve-binding' });
+    expect(record.detail).toContain('harness-verified');
+    expect(record.detail).toContain('4242');
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+  });
+
+  it('fails with an actionable message when no serve was started through the driver', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+
+    const code = await runDriverCommand(['attest', 'binding'], { ...ENV, VERIFY_MODALITY: 'web' }, deps);
+
+    expect(code).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: false, kind: 'serve-binding' });
+    expect(record.detail).toContain('$VERIFY_DRIVER serve');
   });
 });
 

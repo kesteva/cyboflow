@@ -34,6 +34,7 @@ import type { VerifyCapabilityStore } from './capabilityStore';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
 import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
+import type { RunbookLearningFindingFn } from './learnedRunbook';
 import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import { ResourceLeasePool } from './verificationLeases';
 
@@ -654,6 +655,13 @@ export interface VerificationSchedulerDeps {
    */
   staleProofFinding?: (finding: ExploreStaleProofFinding) => void | Promise<void>;
   /**
+   * §A5 "learn from success" notices (recipe learned / learned recipe promoted
+   * / suggested runbook entry). Injected for the same standalone-typecheck
+   * reason as {@link capabilityFinding}; the concrete implementation is
+   * verdictDelivery's `createRunbookLearningFinding`. Absent ⇒ no finding.
+   */
+  runbookLearningFinding?: RunbookLearningFindingFn;
+  /**
    * §4 roster — whether this host can capture the screen at all, the ONE gate
    * that decides whether a `native-screen` request is deployable. The intended
    * (and index.ts-wired) implementation is the retired capture backend's
@@ -724,6 +732,20 @@ export interface ProvenRunbookRevision {
   hash: string;
   version: number;
   entry: VerifyRunbookModalityEntry;
+}
+
+/**
+ * The arguments of the two enqueue-side revision resolvers
+ * ({@link VerificationScheduler.resolveProvenRunbook} and its §A5 twin
+ * `resolveLearnedDraft`). `probePath` is the caller's own worktree when it has
+ * one (skips the run-row lookup); absent ⇒ the run's worktree, else the
+ * project root.
+ */
+export interface RunbookRevisionArgs {
+  projectId: number;
+  runId: string;
+  modality: VerificationModality;
+  probePath?: string;
 }
 
 /** The §3.4 circuit-breaker notice seam — see {@link VerificationSchedulerDeps.capabilityFinding}. */

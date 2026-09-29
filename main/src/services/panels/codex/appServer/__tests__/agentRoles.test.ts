@@ -17,6 +17,7 @@ import type { EffectiveAgent } from '../../../../../orchestrator/agents/effectiv
 import { makeSpyLogger } from '../../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import {
   _resetCodexAgentRolePruneForTesting,
+  codexAgentRoleModels,
   materializeCodexAgentRoles,
   pruneStaleCodexAgentRoleFiles,
   renderCodexAgentRoleToml,
@@ -360,5 +361,21 @@ describe('pruneStaleCodexAgentRoleFiles', () => {
     const logger = makeSpyLogger();
     expect(pruneStaleCodexAgentRoleFiles(path.join(dir, 'missing'), logger)).toBe(0);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('codexAgentRoleModels', () => {
+  it('maps each registered role to its pinned Codex model, null when it inherits, and skips unregistered agents', () => {
+    const pinned = agent({ agentKey: 'architecture', runtime: 'codex-sdk', providerModel: 'gpt-5.6-sol' });
+    const inherits = agent({ agentKey: 'context', model: 'opus' });
+    const dropped = agent({ agentKey: 'tasks', runtime: 'codex-sdk', providerModel: 'gpt-5.6-luna' });
+    const roles = {
+      'cyboflow-architecture': { description: 'a', config_file: '/a.toml' },
+      'cyboflow-context': { description: 'c', config_file: '/c.toml' },
+    };
+    expect(codexAgentRoleModels([pinned, inherits, dropped], roles)).toEqual({
+      'cyboflow-architecture': 'gpt-5.6-sol',
+      'cyboflow-context': null,
+    });
   });
 });

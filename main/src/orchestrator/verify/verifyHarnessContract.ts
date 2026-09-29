@@ -25,6 +25,7 @@ import type {
   VerificationTaskV1,
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../shared/types/verifyRunbook';
+import { HARNESS_NONCE_MARKER_SELECTOR } from './webNonceMarker';
 
 // ---------------------------------------------------------------------------
 // The contract head, in pieces. Concatenated in order, the PINNED pieces are
@@ -59,6 +60,7 @@ Environment (already set for your Bash tool):
     "$VERIFY_DRIVER" attest dom <selector>
     "$VERIFY_DRIVER" attest cdp <expression> <expected>
     "$VERIFY_DRIVER" attest window <titlePattern>
+    "$VERIFY_DRIVER" attest binding
   All driver commands act on ONE persistent browser page across invocations.
 `;
 
@@ -175,7 +177,9 @@ ATTESTATION (the harness proves identity; you cannot):
 const HEAD_SELF_CHECK_THROUGH_NATIVE = `- The attest subcommands are SELF-CHECK aids, and worth running: kind "http-endpoint"
   → attest http <urlPath>; "dom-marker" → attest dom <selector>; "cdp-token" →
   attest cdp <expression> <expected>; "window-identity" → attest window
-  <titlePattern>. A failure tells you your serve step is wrong (a stale process, the
+  <titlePattern>; "serve-binding" → attest binding (that channel is harness-verified:
+  the harness binds the leased port to the serve "$VERIFY_DRIVER serve" started, so
+  the self-check only confirms you started one). A failure tells you your serve step is wrong (a stale process, the
   user's own app, a missing marker route) while you can still fix it and re-serve —
   which is exactly when that information is useful. Running one is never what makes
   the attestation count, and skipping one never makes it fail.
@@ -200,8 +204,19 @@ MOBILE (VERIFY_MODALITY "mobile") — an iOS Simulator leased for this request a
 - Observe with "$VERIFY_DRIVER" mobile-screenshot <name>. "$VERIFY_DRIVER" mobile-openurl
   <url> is NAVIGATION, not driving — available on both arms below.
 - DRIVING is keyed on VERIFY_MOBILE_DRIVE. "maestro": mobile-tap / mobile-type /
-  mobile-swipe / mobile-press / mobile-flow <yaml>. "none": every drive command is
-  refused, so a behavior you cannot exercise without driving MUST be "not_testable".
+  mobile-swipe / mobile-press / mobile-flow <yaml>. "xcode": the harness drives through
+  Xcode DeviceInteraction — mobile-capture <name> (observe; mobile-screenshot is a
+  capture too), mobile-tap <label-or-id> | --at <x> <y>, mobile-swipe <dir> | --from
+  x1 y1 --to x2 y2, mobile-type, mobile-press home|enter, mobile-interact "<raw>",
+  mobile-activate (after mobile-press home, or when something covers the app);
+  mobile-flow is refused. Drive-verb exit codes: 2 = refused, or the Xcode session
+  was lost mid-run — the behavior is "not_testable" with the refusal line; 4 = the
+  app EXITED (crash or relaunch) — evidence about the app, so a behavior that crashed
+  it is "fail"; 5 = the tap target matched nothing or several controls (the refusal
+  lists the candidates) — retry with an identifier or --at <x> <y>. A "pass" must
+  cite a screenshot the driver captured of the app under test. "none": every drive
+  command is refused, so a behavior you cannot exercise without driving MUST be
+  "not_testable".
 - Attestation ("bundle-identity") is harness-owned here too: it re-hashes the installed
   app itself after your session. Install THROUGH the driver or there is nothing to attest.
 
@@ -259,11 +274,29 @@ EXPLORE MODE — this project has no proven verification runbook for this modali
   fixed product. bundle-identity proves only that the installed app is the one staged
   in DerivedData; it does NOT make a build sound however it was produced, so never
   claim it does.
-- recipeJson: once the deliverable is up, return the exact commands that stood it up
-  as ONE portable-runbook entry for VERIFY_MODALITY, serialized to a JSON string — its
-  "build" array, its "serve" ({ "cmd", "attach"?, "readyWhen"? }) or, for mobile, its
-  "app", and its "attestation". Describe what actually ran, with \${PORT} and the
-  VERIFY_* names in place of every leased value (never a literal port, UDID or path).
+- recipeJson: only when you are reporting "pass", return the exact commands that stood
+  the deliverable up as ONE portable-runbook entry for VERIFY_MODALITY, serialized to
+  a JSON string: { "build": [...], "serve": { "cmd", "attach"?, "readyWhen"? } (web,
+  cdp-app) or "app" (mobile), "attestation", "levers"? }. The harness validates it and
+  stores it as an unproven draft that a later request must prove before anyone relies
+  on it. A recipe that breaks any rule below is dropped (your verdict is unaffected):
+    - web / cdp-app: "serve.cmd" is the task's composed serve.cmd, character for
+      character — the only serve a pass can rest on. Keep \${PORT},
+      "$VERIFY_DRIVER_PORT" and "$VERIFY_DATA_DIR" spelled as levers.
+    - mobile: each build step is one xcodebuild invocation with the options allowed
+      above, "$VERIFY_DERIVED_DATA" only as the -derivedDataPath /
+      -clonedSourcePackagesDirPath value, and "$VERIFY_SIM_UDID" for the device.
+      "app.bundleId" is the bundle id that was installed.
+    - never a literal port, UDID, snapshot path or any other absolute path, and no
+      dependency install or rebuild.
+    - "attestation" is the channel the task declared (mobile: bundle-identity on
+      app.bundleId). A web / cdp-app pass with no channel declared rested on the serve
+      binding alone, so record { "kind": "serve-binding" } — never a channel the task
+      did not declare (the harness refuses a recipe naming one it did not verify).
+      When the task prompt carries a HARNESS NONCE MARKER note, the harness records
+      its own marker channel instead, whatever you write here.
+    - "levers" (optional) names the env vars the app reads, e.g.
+      { "dataDirEnv": "CYBOFLOW_DIR" }; without it, the levers bound for this run apply.
 `;
 
 const RULES_LABEL = `
@@ -508,10 +541,31 @@ function composeExploreHints(hints: VerifyExploreHints): string {
 }
 
 /**
- * Compose the agent's user prompt from the task: the JSON payload plus a short
- * framing, and — explore only (§A1.3) — the EXPLORE HINTS block after it.
+ * The note for a snapshot the harness stamped with its nonce marker
+ * (`webNonceMarker.ts`). The agent sees a modified tracked file in `git status`;
+ * without this it might "clean up" the one edit the attestation reads.
  */
-export function composeVerifyUserPrompt(task: VerificationTaskV1, explore?: VerifyExploreHints): string {
+function composeNonceMarkerNote(marker: { relPath: string }): string {
+  return [
+    `HARNESS NONCE MARKER — the harness added one line to ${marker.relPath} in this snapshot:`,
+    `<meta name="cyboflow-verify-nonce" …> carrying this request's nonce. After you finish, it reads that marker`,
+    `from the page in your driver browser (dom-marker ${HARNESS_NONCE_MARKER_SELECTOR}) to confirm the page was`,
+    'built from this snapshot. Leave the edit in place (do not revert, reformat or commit it; it is exempt from',
+    'the mutation check), serve the composed command so the page comes from this entry file, and leave the',
+    'browser on a page of the app. In a recipe, the harness records this channel itself.',
+  ].join('\n');
+}
+
+/**
+ * Compose the agent's user prompt from the task: the JSON payload plus a short
+ * framing, and — explore only (§A1.3) — the EXPLORE HINTS block after it, and
+ * the HARNESS NONCE MARKER note when the harness stamped the snapshot.
+ */
+export function composeVerifyUserPrompt(
+  task: VerificationTaskV1,
+  explore?: VerifyExploreHints,
+  nonceMarker?: { relPath: string },
+): string {
   const lines = [
     'Verify the following composed task. Build/serve/drive/screenshot/judge it, then',
     'return the structured VerificationReportV1 (see the harness contract).',
@@ -522,6 +576,7 @@ export function composeVerifyUserPrompt(task: VerificationTaskV1, explore?: Veri
     '```',
   ];
   if (explore !== undefined) lines.push('', composeExploreHints(explore));
+  if (nonceMarker !== undefined) lines.push('', composeNonceMarkerNote(nonceMarker));
   return lines.join('\n');
 }
 

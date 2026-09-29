@@ -23,6 +23,7 @@ import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter'
 import { DELIVERED_RUN_OUTCOMES_SQL_IN } from '../../../shared/types/cyboflow';
 import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
+import { writeRunUsageRow } from './runUsageRollup';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -945,7 +946,8 @@ export interface RunUsageBackfillResult {
  * Uses the FORCE-SCAN rollup helper for the same reason rollupRunUsage does its
  * DELETE first: the materialized-first reader would happily return the row we
  * are trying to create. Batched — one scan for every candidate, one
- * transaction — rather than N per-run round trips.
+ * transaction — rather than N per-run round trips. Rows go through the shared
+ * `writeRunUsageRow`, so each records the fold version and coverage.
  *
  * `INSERT OR IGNORE` (not REPLACE): if a row appeared between the SELECT and the
  * write, the existing one wins. This can only ever ADD a missing row, never
@@ -972,37 +974,11 @@ export function backfillRunUsageRollups(
     if (rows.length === 0) return empty;
 
     const runIds = rows.map((r) => r.runId);
-    const rollups = selectRunUsageRollupsFromRawEvents(db, runIds);
+    const rollups = selectRunUsageRollupsFromRawEvents(db, runIds, logger);
 
     const tx = db.transaction(() => {
-      const stmt = db.prepare(
-        `INSERT OR IGNORE INTO run_usage (
-           run_id,
-           input_tokens,
-           output_tokens,
-           cache_read_tokens,
-           cache_creation_tokens,
-           total_tokens,
-           cost_usd,
-           num_turns,
-           assistant_message_count
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
       let written = 0;
-      for (const rollup of rollups) {
-        const info = stmt.run(
-          rollup.runId,
-          rollup.inputTokens,
-          rollup.outputTokens,
-          rollup.cacheReadTokens,
-          rollup.cacheCreationTokens,
-          rollup.totalTokens,
-          rollup.costUsd,
-          rollup.numTurns,
-          rollup.assistantMessageCount,
-        ) as { changes: number };
-        written += info.changes;
-      }
+      for (const rollup of rollups) written += writeRunUsageRow(db, rollup, 'ignore');
       return written;
     });
 

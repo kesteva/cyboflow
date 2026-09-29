@@ -275,7 +275,7 @@ describe('resolveRunTypeBaseline', () => {
         baseline: c.baseline,
       })),
     ).toEqual([
-      { field: 'model', baseline: 'Sonnet 5 · 1M' },
+      { field: 'model', baseline: 'Sonnet 5.5 · 1M' },
       { field: 'agentRuntime', baseline: 'Claude Interactive (CLI)' },
     ]);
   });
@@ -466,7 +466,7 @@ describe('agentRuntimeOptions', () => {
 
 describe('runTypeValueLabel', () => {
   it('labels every known value from the same maps the pickers use', () => {
-    expect(runTypeValueLabel('model', 'sonnet')).toBe('Sonnet 5 · 1M');
+    expect(runTypeValueLabel('model', 'sonnet')).toBe('Sonnet 5.5 · 1M');
     expect(runTypeValueLabel('substrate', 'interactive')).toBe('Interactive terminal');
     expect(runTypeValueLabel('agentRuntime', 'codex-pty')).toBe('Codex (CLI)');
     expect(runTypeValueLabel('permissionMode', 'dontAsk')).toBe("Don't ask");

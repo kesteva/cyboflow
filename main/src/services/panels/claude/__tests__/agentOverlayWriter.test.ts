@@ -158,10 +158,10 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
       tools: ['Read', 'Edit'],
       enabledMcps: [],
       systemPrompt: ensureResultSection('Do the work.'),
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
     });
     // model is rendered last, after tools, inside the frontmatter fence.
-    expect(pinnedMd).toMatch(/tools:[^\n]*\nmodel: claude-sonnet-5\n---/);
+    expect(pinnedMd).toMatch(/tools:[^\n]*\nmodel: claude-sonnet-5-5\n---/);
   });
 });
 
@@ -284,7 +284,7 @@ describe('agentOverlayWriter — installAgentOverlay integration (AC-P1-6)', () 
       'model: claude-opus-5-5\n',
     );
     expect(fs.readFileSync(agentFile(worktree, 'sonnet-helper'), 'utf8')).toContain(
-      'model: claude-sonnet-5\n',
+      'model: claude-sonnet-5-5\n',
     );
     // An inherit-model agent emits NO model line.
     expect(fs.readFileSync(agentFile(worktree, 'inherit-helper'), 'utf8')).not.toMatch(/^model:/m);
@@ -500,7 +500,7 @@ describe('agentOverlayWriter — workflow agent configs (workflow-scoped)', () =
 
     const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
     expect(md).toContain('model: claude-opus-5-5\n');
-    expect(md).not.toContain('model: claude-sonnet-5');
+    expect(md).not.toContain('model: claude-sonnet-5-5');
 
     db.close();
   });
@@ -622,7 +622,7 @@ describe('agentOverlayWriter — workflow agent configs (workflow-scoped)', () =
 
     const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
     expect(md).toContain('model: claude-haiku-4-5\n'); // the FROZEN config wins
-    expect(md).not.toContain('model: claude-sonnet-5'); // NOT the live spec
+    expect(md).not.toContain('model: claude-sonnet-5-5'); // NOT the live spec
 
     db.close();
   });

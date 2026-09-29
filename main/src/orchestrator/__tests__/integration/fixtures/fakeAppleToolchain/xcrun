@@ -20,6 +20,9 @@
 #   simctl terminate <udid> <bundleId>
 #   simctl io <udid> screenshot <out>            readiness loop + mobile-screenshot
 #   simctl openurl <udid> <url>
+#   mcpbridge                                    Stage 3 (§B7): execs fakeMcpbridge.mjs under
+#                                                $FAKE_NODE, a stdio JSON-RPC bridge whose mode
+#                                                is $FAKE_APPLE_STATE/mcpbridge-mode
 #
 # ALL state lives under $FAKE_APPLE_STATE, which the test owns:
 #   fail-boot            present  -> boot/bootstatus exit non-zero
@@ -29,6 +32,8 @@
 #   pids/<udid>          the live `sleep` pid standing in for the launched app
 #   pids/all             every pid ever launched, so the suite can reap them
 #   udid-seq             the udid counter
+#   ios27                present  -> `simctl list -j` also offers an iOS 27.0 runtime
+#                                   (the xcode rung's minRuntimeMajor floor)
 set -u
 
 : "${FAKE_APPLE_STATE:?fake xcrun: FAKE_APPLE_STATE is not set}"
@@ -61,6 +66,23 @@ kill_device_pid() {
   fi
 }
 
+ios27_runtime() {
+  [ -f "$STATE/ios27" ] || return 0
+  cat <<JSON
+,
+    {
+      "name": "iOS 27.0",
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0",
+      "version": "27.0",
+      "platform": "iOS",
+      "isAvailable": true,
+      "supportedDeviceTypes": [
+        { "name": "iPhone 17 Pro", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro", "productFamily": "iPhone" }
+      ]
+    }
+JSON
+}
+
 emit_full_list() {
   # Two runtimes so `compareSimVersions` has something to order, and two device
   # types per runtime so `pickNewestIPhone` has something to pick. The flat
@@ -89,7 +111,7 @@ emit_full_list() {
         { "name": "iPhone 16e", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16e", "productFamily": "iPhone" },
         { "name": "iPhone 17 Pro", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro", "productFamily": "iPhone" }
       ]
-    }
+    }$(ios27_runtime)
   ],
   "devicetypes": [
     { "name": "iPhone 6s Plus", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-6s-Plus", "productFamily": "iPhone" },
@@ -119,7 +141,16 @@ emit_devices_list() {
 }
 
 tool="${1:-}"
-[ "$tool" = "simctl" ] || die "fake xcrun: unsupported tool \"$tool\"" 64
+case "$tool" in
+  simctl) ;;
+  mcpbridge)
+    # Stage 3: the bridge is a long-lived stdio JSON-RPC server. `exec` so the
+    # runner's SIGTERM/SIGKILL reach the fake itself, exactly as they would the
+    # real `mcpbridge` child of `xcrun`.
+    exec "${FAKE_NODE:-node}" "${FAKE_MCPBRIDGE_JS:?fake xcrun: FAKE_MCPBRIDGE_JS is not set}"
+    ;;
+  *) die "fake xcrun: unsupported tool \"$tool\"" 64 ;;
+esac
 shift
 
 sub="${1:-}"

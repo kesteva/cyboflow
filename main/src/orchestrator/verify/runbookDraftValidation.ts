@@ -59,7 +59,7 @@ export type RunbookDraftValidation = { ok: true } | { ok: false; rejection: Runb
  * on every verification of this project from then on. Redirection is refused on
  * the same grounds.
  */
-const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|&`<>]|\$\(|\n|\r)/;
+export const SHELL_COMPOSITION_PATTERN = /(&&|\|\||[;|&`<>]|\$\(|\n|\r)/;
 
 /**
  * Package-manager prefixes whose next non-flag token names a script.
@@ -96,11 +96,35 @@ const PROJECT_REDIRECTING_FLAGS = new Set([
 ]);
 
 /**
+ * The only values a leading env assignment may take: a harness lever, bare,
+ * braced or double-quoted. Anything else (a literal, a path, a second
+ * expansion) is a behaviour change the manifest does not document.
+ */
+const LEVER_VALUE_PATTERN =
+  /^(?:\$\{?(?:PORT|VERIFY_PORT|VERIFY_DRIVER_PORT|VERIFY_DATA_DIR)\}?|"\$\{?(?:PORT|VERIFY_PORT|VERIFY_DRIVER_PORT|VERIFY_DATA_DIR)\}?")$/;
+
+/** Env names a lever assignment may never set: they change how the runtime itself loads or resolves code. */
+const FORBIDDEN_ASSIGNMENT_NAME = /^(?:PATH|NODE_OPTIONS|NODE_PATH|LD_\w*|DYLD_\w*|npm_config_\w*|NPM_CONFIG_\w*)$/;
+
+/** True when `token` is `NAME=<lever>` — a leased value bound into the script's environment. */
+export function isLeverAssignment(token: string): boolean {
+  const eq = token.indexOf('=');
+  if (eq <= 0) return false;
+  const name = token.slice(0, eq);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || FORBIDDEN_ASSIGNMENT_NAME.test(name)) return false;
+  return LEVER_VALUE_PATTERN.test(token.slice(eq + 1));
+}
+
+/**
  * The script name a command invokes, or `null` when it does not resolve to one.
  *
- * Recognizes `<pm> [run] <script> [args…]`. Everything else — a bare binary, an
- * `npx`/`pnpm dlx` invocation, a shell chain, an env-var prefix — returns null
- * and is reported as undeclared. Being conservative is the point: a false
+ * Recognizes `[LEVER_ASSIGNMENT…] <pm> [run] <script> [args…]`. Everything else
+ * — a bare binary, an `npx`/`pnpm dlx` invocation, a shell chain, any other
+ * env-var prefix — returns null and is reported as undeclared. A leading
+ * assignment is skipped only when its value is exactly one harness lever
+ * ({@link isLeverAssignment}): `PORT=${PORT} npm run dev` and
+ * `CYBOFLOW_DIR="$VERIFY_DATA_DIR" pnpm electron .` are the shapes task-verify
+ * composes, and they bind a leased value, not arbitrary behaviour. Being conservative is the point: a false
  * rejection costs a project one trip through Verify Setup, where a human writes
  * the command; a false acceptance is an unreviewed command the harness then runs
  * on every verification forever.
@@ -111,10 +135,12 @@ export function scriptNameForCommand(command: string): string | null {
   if (SHELL_COMPOSITION_PATTERN.test(trimmed)) return null;
 
   const tokens = trimmed.split(/\s+/);
-  const pm = tokens[0];
-  if (!PACKAGE_MANAGERS.has(pm)) return null;
+  let start = 0;
+  while (start < tokens.length && isLeverAssignment(tokens[start])) start += 1;
+  const pm = tokens[start];
+  if (pm === undefined || !PACKAGE_MANAGERS.has(pm)) return null;
 
-  let idx = 1;
+  let idx = start + 1;
   while (idx < tokens.length && VALUELESS_PM_FLAGS.has(tokens[idx])) idx += 1;
   if (idx < tokens.length && tokens[idx] === 'run') idx += 1;
   const candidate = tokens[idx];

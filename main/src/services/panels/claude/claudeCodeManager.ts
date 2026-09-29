@@ -713,6 +713,8 @@ export interface SpawnEventsSink {
     runId: string,
   ): void;
   dispose(runId?: string): void;
+  /** Stamps the SDK process id on persisted events (RawEventsSink); optional. */
+  setProcessInstanceId?(processInstanceId: string | null): void;
 }
 
 export interface ClaudeSpawnOptions extends LaneSpawnEnv {
@@ -2068,6 +2070,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
         abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
         try {
           const query = await loadSdkQuery();
+          // One SDK process per query(): modelUsage is cumulative per process, so
+          // the usage fold (usageFold.ts) segments on this stamped id.
+          this.pipelines.get(spawnKey)?.sink.setProcessInstanceId?.(randomUUID());
           const q = query({ prompt: promptInput.stream, options: { ...activeOptions, abortController } });
           for await (const event of q) {
             if (firstEventTimer) {

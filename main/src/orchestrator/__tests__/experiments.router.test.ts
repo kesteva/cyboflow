@@ -56,7 +56,7 @@ function buildDb(): Database.Database {
     '006_cyboflow_schema.sql', '011_workflow_step_tracking.sql', '014_native_tasks.sql',
     '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '026_run_usage_spec_hash_revisions.sql',
     '028_idea_attachments.sql', '043_run_evals.sql', '069_run_eval_jury.sql',
-    '085_review_item_audience.sql',
+    '071_raw_events_dedup.sql', '085_review_item_audience.sql', '146_usage_accounting_v1.sql',
   ]) db.exec(readFileSync(join(migDir, f), 'utf-8'));
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
@@ -69,6 +69,8 @@ function buildDb(): Database.Database {
   // Migration 022's soft batch link + sprint_batch_tasks (lanes), so decide's
   // clone->original lane remap (remapWinnerSeedLane) has real rows to rewrite.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT;');
+  // Migration 145: gate_reached_at, selected by insightsQueries.fetchRunTimestamps.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN gate_reached_at DATETIME;');
   db.exec(`CREATE TABLE sprint_batch_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, task_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued', current_step_id TEXT, run_id TEXT, error_message TEXT,

@@ -250,12 +250,16 @@ export interface RunbookBootstrapDeps {
    * the bootstrap commit, in a worktree five lanes are writing to concurrently.
    */
   commitPaths: (worktreePath: string, paths: string[], message: string) => Promise<string>;
-  /** `VerifyRunbookStore.registerDraft` — CAS'd, returns the pin or an error. */
+  /**
+   * `VerifyRunbookStore.registerDraft` — CAS'd, returns the pin or an error.
+   * `unchanged` marks A8's no-op over an identical proven record, which keeps
+   * its own origin (the caller skips its `setOrigin` re-stamp).
+   */
   registerDraft: (
     projectId: number,
     worktreePath: string,
     modality: VerificationModality,
-  ) => Promise<{ hash: string; version: number } | { error: string }>;
+  ) => Promise<{ hash: string; version: number; unchanged?: true } | { error: string }>;
   /**
    * `VerifyRunbookStore.getCurrent` — the (project, modality) record AS IT
    * STANDS, content and pin together. The `'reprove'` mode's whole input (F4 /
@@ -1065,8 +1069,9 @@ async function bootstrap(
     // Migration 105 provenance: a human deciding whether to trust this record
     // must be able to see that a lane derived it mid-sprint rather than a human
     // reviewing it at a gate. Both are proven by the same engine-enforced run;
-    // they did not earn the same amount of trust.
-    deps.setOrigin(projectId, modality, 'lane-bootstrap');
+    // they did not earn the same amount of trust. Skipped on A8's no-op: that
+    // record is already proven under its own provenance, and nothing was written.
+    if (registered.unchanged !== true) deps.setOrigin(projectId, modality, 'lane-bootstrap');
 
     deps.stamps.advance({
       runId,

@@ -13,8 +13,8 @@
  *
  * SEAM CONTRACT — WHY "AT TERMINATION" IS CORRECT
  * -----------------------------------------------
- * `selectRunUsageRollups` reads only `assistant` + `result` raw_events for the
- * run. Those events are PERSISTED into raw_events by the SDK→bridge pipeline
+ * The usage fold reads only the run's usage raw_events (assistant / result /
+ * provider result / subagent usage rows). Those events are PERSISTED into raw_events by the SDK→bridge pipeline
  * (RawEventsSink, driven by ClaudeCodeManager's EventRouter) BEFORE the run's
  * terminal lifecycle transition fires:
  *   - on a clean drain, the SDK `query()` iterator is fully consumed (every
@@ -25,7 +25,7 @@
  *   - on failure/cancel, whatever events DID land are already persisted; the
  *     run simply has fewer (or no) usage events, and the scan reflects exactly
  *     what was captured. A zeroed rollup for a run that produced no usage events
- *     is the correct, intended result (selectRunUsageRollups seeds a zero row
+ *     is the correct, intended result (the rollup helpers seed a zero row
  *     for the requested id).
  * Calling the rollup AFTER the terminal transition's event flush is therefore a
  * read over a frozen, complete-for-this-run slice of raw_events.
@@ -45,23 +45,21 @@
  * list so it takes its DEFAULT (CURRENT_TIMESTAMP) on every replace — the column
  * always reflects the most recent materialization.
  *
- * WRITER MUST NEVER CONSUME ITS OWN OUTPUT (the DELETE-before-scan)
- * ----------------------------------------------------------------
+ * WRITER MUST NEVER CONSUME ITS OWN OUTPUT (force-scan + DELETE-first)
+ * ---------------------------------------------------------------------
  * `selectRunUsageRollups` is a TWO-TIER read (migration 026): it PREFERS an
- * existing materialized `run_usage` row over the raw_events scan, falling back to
- * the scan only for runs WITHOUT a row. That two-tier behavior is correct for the
- * Insights READ path — but it is poison for THIS WRITER. If we called it with a
- * prior row still present, tier-1 would hand back the writer's OWN stale row and
- * we would REPLACE it with identical values: every re-terminal seam (per-turn
- * re-drain, resume-then-drain, fail-after-drain) would freeze the rollup at its
- * first-seam value and never fold in the raw_events that landed since. To keep the
- * writer honest we DELETE the run's row FIRST, so the very `selectRunUsageRollups`
- * call below misses tier-1 and falls through to a fresh tier-2 raw_events scan —
- * the full, current, this-run slice. (If the run never had a row, the DELETE is a
- * harmless no-op.) The DELETE + INSERT are not wrapped in a transaction on
- * purpose: a crash in the narrow window between them leaves the run with NO
- * materialized row, which the Insights read path simply recovers from via its own
- * tier-2 fallback — strictly better than leaving a stale row behind.
+ * existing materialized `run_usage` row over the raw_events scan. That is correct
+ * for the Insights READ path but poison for THIS WRITER: tier-1 would hand back
+ * the writer's OWN stale row and every re-terminal seam (per-turn re-drain,
+ * resume-then-drain, fail-after-drain) would freeze the rollup at its first-seam
+ * value. The writer therefore computes through the force-scan sibling
+ * `selectRunUsageRollupsFromRawEvents`, which always folds the full, current
+ * raw_events slice under the CURRENT accounting version (usageFold.ts), and
+ * stamps that version and the run's coverage on the row. It still DELETEs the
+ * prior row first: the DELETE + INSERT are not wrapped in a transaction on
+ * purpose, so a crash between them leaves NO materialized row, which the Insights
+ * read path recovers from via its own tier-2 fold — strictly better than leaving
+ * a stale row (possibly at an older accounting version) behind.
  *
  * FAIL-SOFT CONTRACT
  * ------------------
@@ -78,19 +76,65 @@
  * main/src/services/*. Only DatabaseLike + LoggerLike + the pure query helper.
  */
 import type { DatabaseLike, LoggerLike } from './types';
-import { selectRunUsageRollups } from './insightsQueries';
+import type { RunUsageRollup } from '../../../shared/types/insights';
+import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
+
+/**
+ * Write one rollup into `run_usage` — the single INSERT both writers share
+ * (this module's per-run seam and runRecovery's boot backfill), so every row
+ * records the fold version and coverage that produced it (migration 146).
+ * `onConflict` 'replace' re-materializes; 'ignore' only ever ADDS a missing row.
+ * `computed_at` is deliberately absent so it takes its DEFAULT on every write.
+ * Returns the statement's `changes` count.
+ */
+export function writeRunUsageRow(
+  db: DatabaseLike,
+  rollup: RunUsageRollup,
+  onConflict: 'replace' | 'ignore',
+): number {
+  const info = db
+    .prepare(
+      `INSERT OR ${onConflict === 'replace' ? 'REPLACE' : 'IGNORE'} INTO run_usage (
+         run_id,
+         input_tokens,
+         output_tokens,
+         cache_read_tokens,
+         cache_creation_tokens,
+         total_tokens,
+         cost_usd,
+         num_turns,
+         assistant_message_count,
+         accounting_version,
+         coverage
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      rollup.runId,
+      rollup.inputTokens,
+      rollup.outputTokens,
+      rollup.cacheReadTokens,
+      rollup.cacheCreationTokens,
+      rollup.totalTokens,
+      // cost_usd / num_turns are nullable in run_usage — pass the rollup's
+      // null-or-number through verbatim (null distinguishes "no result carried it").
+      rollup.costUsd,
+      rollup.numTurns,
+      rollup.assistantMessageCount,
+      rollup.accountingVersion,
+      rollup.coverage,
+    ) as { changes?: number } | undefined;
+  return info?.changes ?? 0;
+}
 
 /**
  * Compute and persist (upsert) the token/cost rollup for a single terminated run.
  *
- * DELETEs any prior `run_usage` row for the run FIRST (so the writer never reads
- * back its own stale output — see the module header), then computes the rollup
- * via `selectRunUsageRollups(db, [runId])[0]`, which now misses the materialized
- * tier and performs the fresh raw_events scan the Insights view would do on the
- * fly, and writes it into `run_usage` with `INSERT OR REPLACE` so a re-terminal
+ * DELETEs any prior `run_usage` row for the run FIRST (see the module header),
+ * then computes the rollup via the force-scan
+ * `selectRunUsageRollupsFromRawEvents(db, [runId], logger)[0]` and writes it
+ * with {@link writeRunUsageRow} (`INSERT OR REPLACE`) so a re-terminal
  * transition or a resumed run re-rolling up overwrites the prior row
- * idempotently. `computed_at` is omitted from the column list so it takes its
- * DEFAULT on each write.
+ * idempotently.
  *
  * Synchronous + `void`: it is fired at a lifecycle seam where the caller does
  * not await a result, and it must not surface errors — see the fail-soft
@@ -104,56 +148,29 @@ import { selectRunUsageRollups } from './insightsQueries';
  */
 export function rollupRunUsage(db: DatabaseLike, runId: string, logger?: LoggerLike): void {
   try {
-    // Drop any prior materialized row FIRST so the selectRunUsageRollups call
-    // below cannot read it back from the helper's tier-1 (materialized) path and
-    // REPLACE the row with its own stale values. With the row gone, the helper
-    // misses tier-1 and falls through to a fresh tier-2 raw_events scan — the
-    // full, current slice for this run. A missing row here is a no-op DELETE; a
-    // crash between this DELETE and the INSERT below is fail-soft (Insights'
-    // read path re-derives from raw_events). See the module header.
+    // Drop any prior materialized row FIRST: a crash between this DELETE and the
+    // INSERT below leaves no row, which Insights' read path re-derives from
+    // raw_events — never a stale one. A missing row here is a no-op DELETE. See
+    // the module header.
     db.prepare(`DELETE FROM run_usage WHERE run_id = ?`).run(runId);
 
-    // selectRunUsageRollups always returns an array of length runIds.length with
-    // a (possibly zeroed) row for the requested id, so [0] is non-null here. The
-    // `?? null` guard is purely defensive against a future signature change.
-    const rollup = selectRunUsageRollups(db, [runId])[0] ?? null;
+    // The force-scan helper always returns one (possibly zeroed) row per
+    // requested id, so [0] is non-null here. The `?? null` guard is purely
+    // defensive against a future signature change. The logger receives the
+    // fold's diagnostics (usageFold.ts).
+    const rollup = selectRunUsageRollupsFromRawEvents(db, [runId], logger)[0] ?? null;
     if (rollup === null) {
       // Should be unreachable (the helper seeds a zero row per requested id), but
       // bail without writing rather than INSERTing a half-formed row.
-      logger?.warn('[runUsageRollup] selectRunUsageRollups returned no row (skipping upsert)', {
+      logger?.warn('[runUsageRollup] selectRunUsageRollupsFromRawEvents returned no row (skipping upsert)', {
         runId,
       });
       return;
     }
 
-    // INSERT OR REPLACE keyed on run_id (PK). Column order matches migration 026's
-    // run_usage definition; computed_at is deliberately absent so it takes its
-    // DEFAULT (CURRENT_TIMESTAMP) on every (re-)materialization.
-    db.prepare(
-      `INSERT OR REPLACE INTO run_usage (
-         run_id,
-         input_tokens,
-         output_tokens,
-         cache_read_tokens,
-         cache_creation_tokens,
-         total_tokens,
-         cost_usd,
-         num_turns,
-         assistant_message_count
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      rollup.runId,
-      rollup.inputTokens,
-      rollup.outputTokens,
-      rollup.cacheReadTokens,
-      rollup.cacheCreationTokens,
-      rollup.totalTokens,
-      // cost_usd / num_turns are nullable in run_usage — pass the rollup's
-      // null-or-number through verbatim (null distinguishes "no result carried it").
-      rollup.costUsd,
-      rollup.numTurns,
-      rollup.assistantMessageCount,
-    );
+    // INSERT OR REPLACE keyed on run_id (PK); computed_at takes its DEFAULT
+    // (CURRENT_TIMESTAMP) on every (re-)materialization.
+    writeRunUsageRow(db, rollup, 'replace');
   } catch (err) {
     // Fail-soft: a rollup failure (missing table on an un-migrated DB, FK
     // violation on a since-deleted run, etc.) must never break the run

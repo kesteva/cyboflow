@@ -10,35 +10,23 @@
  * this file must NOT import from 'electron', 'better-sqlite3', 'fs', or any
  * concrete service in main/src/services/*. Only DatabaseLike + shared types.
  *
- * Token/cost aggregation contract (see the shared file's header for the full
- * substrate caveat):
- *   - Token sums come from primary/provider assistant payloads and synthetic
- *     `subagent_usage` payloads' `message.usage`. We never add `result.usage`
- *     tokens — `result` events restate per-turn totals and summing both
- *     double-counts (FIND-class double-count guard).
- *   - `numTurns` comes from `result` payloads' `num_turns`, SUMMED across
- *     results — it is per-QUERY, not cumulative (verified against the raw DB).
- *   - `costUsd`: `result.total_cost_usd` is CUMULATIVE PER SDK PROCESS, not
- *     per query — a resumed run reuses the same `session_id` and restarts the
- *     counter at 0. For `event_type === 'result'` payloads carrying a string
- *     `session_id`, we LADDER instead of sum: track a running max per
- *     `(runId, session_id)` "segment" and only add a segment's max into
- *     `costUsd` once a NEW segment (i.e. a new underlying process) is
- *     detected, via a cost-decrease or a broken cumulative-output-token
- *     invariant (see the `scanRawEventRollups` doc for the exact test).
- *     Everything else — `agent_result` (OMP reports per-turn cost) and any
- *     `result` without a string `session_id` — keeps the old SUM behavior.
- *     Null when no result ever carried the field.
+ * Token/cost aggregation contract: every run-usage read — the tier-2 scan, the
+ * writer's force-scan, the materialized tier's per-model split, and the daily
+ * model chart — folds a run's raw_events through the ONE shared fold in
+ * usageFold.ts (`foldRunUsage`), which owns the token sources, the cost ladder
+ * (`result.total_cost_usd` is cumulative per SDK process) and the coverage rules.
+ * A run whose materialized `run_usage.accounting_version` predates the current
+ * `ACCOUNTING_VERSION` is re-derived with the legacy fold wherever a read folds it
+ * again (per-model split, daily chart), so it stays consistent with its row.
  *
- * Materialized-row contract (migration 026): a `run_usage` row, when present,
- * is the precomputed projection of the same `assistant`/`result` scan above —
- * written once at run finalization. The two read-heavy rollup paths
+ * Materialized-row contract (migration 026 + 146): a `run_usage` row, when
+ * present, is the fold's output written at run finalization, stamped with the
+ * fold version and coverage. The two read-heavy rollup paths
  * (`selectRunUsageRollups` / `selectWorkflowUsageStats`) prefer it and skip the
- * token/cost raw_events scan for any run that has one, falling back to the live
- * usage scan ONLY for runs without a materialized row (historic runs, runs still
- * in flight). Model identity is never materialized, so reads still perform a
- * narrow assistant-event scan for `payload.message.model` (or the provider-
- * neutral `agent_assistant` shape's top-level `payload.model`).
+ * token/cost fold for any run that has one, falling back to the live fold ONLY
+ * for runs without a materialized row (historic runs, runs still in flight).
+ * Model identity is never materialized, so reads still fold the run's raw_events
+ * for model cardinality and the per-model split.
  * The WRITER of that row (`rollupRunUsage` in runUsageRollup.ts) must NOT use the
  * materialized-first read — it would read back its own stale row on each
  * re-materialization and freeze the values. It takes the force-scan sibling
@@ -47,7 +35,18 @@
  * SQLite DATETIME columns are stored as 'YYYY-MM-DD HH:MM:SS' (space-separated,
  * UTC). `toIso` below normalizes them to ISO-8601 strings for the tRPC boundary.
  */
-import type { DatabaseLike } from './types';
+import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
+import {
+  ACCOUNTING_VERSION,
+  UNKNOWN_MODEL,
+  USAGE_FOLD_EVENT_TYPES,
+  foldRunUsage,
+  usageFoldModeForVersion,
+  type RunUsageFold,
+  type UsageFoldMode,
+  type UsageFoldRow,
+  type UsageTokens,
+} from './usageFold';
 import type {
   WorkflowRunStats,
   RunUsageRollup,
@@ -64,7 +63,7 @@ import type {
   RunEvalDimension,
   RunEvalJurySlot,
 } from '../../../shared/types/insights';
-import { parseSourceStep } from '../../../shared/types/insights';
+import { isUsageCoverage, parseSourceStep } from '../../../shared/types/insights';
 import { isAgentProvider } from '../../../shared/types/agentRuntime';
 import type {
   VariantStats,
@@ -146,17 +145,6 @@ function placeholders(n: number): string {
  * workflow on the same screen.
  */
 export const DAILY_USAGE_DEFAULT_WINDOW_DAYS = 30;
-
-/** Event kinds whose nested `message.usage` contributes assistant-side tokens. */
-const ASSISTANT_USAGE_EVENT_TYPES = [
-  'assistant',
-  'agent_assistant',
-  'subagent_usage',
-] as const;
-
-function isAssistantUsageEventType(eventType: string): boolean {
-  return ASSISTANT_USAGE_EVENT_TYPES.some((candidate) => candidate === eventType);
-}
 
 /** Narrow an unknown JSON value to a plain object (not array, not null). */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -302,13 +290,12 @@ export function selectWorkflowRunStats(
 // 2. selectRunUsageRollups
 // ---------------------------------------------------------------------------
 
-interface RawEventUsageRow {
+/** One raw_events usage row for the shared fold, tagged with its run. */
+interface UsageFoldQueryRow extends UsageFoldRow {
   runId: string;
-  eventType: string;
-  payloadJson: string;
 }
 
-/** Shape of a migration-026 `run_usage` row (SELECT * column names). */
+/** Shape of a migration-026 `run_usage` row (+ migration 146's accounting columns). */
 interface RunUsageMaterializedRow {
   run_id: string;
   input_tokens: number;
@@ -319,57 +306,16 @@ interface RunUsageMaterializedRow {
   cost_usd: number | null;
   num_turns: number | null;
   assistant_message_count: number;
+  accounting_version: number;
+  coverage: string;
 }
 
 /** Max ids per IN-list chunk; keeps us well under SQLite's parameter ceiling. */
 const RUN_ID_CHUNK_SIZE = 400;
 
-/** Per-model token accumulator (keyed by model id) backing `RunUsageRollup.perModelUsage`. */
-interface ModelUsageAccumulator {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-}
-
-/**
- * Fold one assistant `message.usage` object into a model's running accumulator
- * in `buckets`, creating the bucket lazily. `model` is the {@link bucketModelId}
- * resolution ('unknown' when the event carried none).
- */
-function foldModelUsage(
-  buckets: Map<string, ModelUsageAccumulator>,
-  model: string,
-  usage: Record<string, unknown>,
-): void {
-  const bucket = buckets.get(model) ?? {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-  };
-  bucket.inputTokens += asNumber(usage.input_tokens);
-  bucket.outputTokens += asNumber(usage.output_tokens);
-  bucket.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
-  bucket.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
-  buckets.set(model, bucket);
-}
-
-/**
- * Model id used as the per-model bucket key for `perModelUsage` — 'unknown' when
- * the event carried none (mirrors the `DailyModelUsagePoint` scan's UNKNOWN_MODEL
- * sentinel convention below). Unlike `recordRunModel`'s exact-one-vs-many
- * resolution, this key is NOT skipped for blank/'unknown' — perModelUsage aims to
- * conserve the full token total across its buckets.
- */
-function bucketModelId(eventType: string, payload: Record<string, unknown>): string {
-  const raw = assistantEventModel(eventType, payload);
-  return typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : 'unknown';
-}
-
-/** Flatten a model→accumulator map into the `RunUsageRollup.perModelUsage` array shape. */
-function perModelUsageArray(buckets: Map<string, ModelUsageAccumulator>): RunUsageRollup['perModelUsage'] {
-  return Array.from(buckets.entries()).map(([model, b]) => ({ model, ...b }));
+/** Flatten a fold's model→tokens map into the `RunUsageRollup.perModelUsage` array shape. */
+function perModelUsageArray(perModel: ReadonlyMap<string, UsageTokens>): RunUsageRollup['perModelUsage'] {
+  return Array.from(perModel.entries()).map(([model, b]) => ({ model, ...b }));
 }
 
 /** A freshly-zeroed rollup for a run id with no usage data in either tier. */
@@ -387,20 +333,23 @@ function zeroRollup(runId: string): RunUsageRollup {
     costUsd: null,
     numTurns: null,
     assistantMessageCount: 0,
+    accountingVersion: ACCOUNTING_VERSION,
+    coverage: 'complete',
     // Runtime timestamps are folded in by selectRunUsageRollups from a single
     // workflow_runs read; the token-only aggregation paths leave them null.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
 /**
  * Map a materialized `run_usage` row to a `RunUsageRollup`. The persisted
- * columns are the precomputed projection of the same assistant/result scan the
- * fallback performs, so the mapping is one-to-one (cost_usd / num_turns stay
- * null when the run never reported them). `totalTokens` is re-derived from
- * input + output rather than trusting the stored `total_tokens` so a corrupt
- * materialized total can never desync from the contract's definition.
+ * columns are the fold's own output, so the mapping is one-to-one (cost_usd /
+ * num_turns stay null when the run never reported them). `totalTokens` is
+ * re-derived from input + output rather than trusting the stored `total_tokens`
+ * so a corrupt materialized total can never desync from the contract's
+ * definition. An unrecognized coverage string reads as 'legacy'.
  */
 function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup {
   const inputTokens = asNumber(row.input_tokens);
@@ -408,7 +357,7 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
   return {
     runId: row.run_id,
     // `run_usage` deliberately has no model columns. selectRunUsageRollups
-    // resolves these fields from assistant-side raw_events at read time.
+    // resolves these fields from the run's raw_events at read time.
     model: null,
     multiModel: false,
     perModelUsage: [],
@@ -420,101 +369,146 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
     costUsd: typeof row.cost_usd === 'number' && Number.isFinite(row.cost_usd) ? row.cost_usd : null,
     numTurns: typeof row.num_turns === 'number' && Number.isFinite(row.num_turns) ? row.num_turns : null,
     assistantMessageCount: asNumber(row.assistant_message_count),
+    accountingVersion: asNumber(row.accounting_version),
+    coverage: isUsageCoverage(row.coverage) ? row.coverage : 'legacy',
     // run_usage carries no timestamps; selectRunUsageRollups stamps them.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
-/** Model-resolution projection accumulated from assistant-side raw events. */
-interface RunModelResolution {
-  model: string | null;
-  multiModel: boolean;
-  /** Per-model token buckets, folded alongside model identity (see bucketModelId). */
-  perModelUsage: Map<string, ModelUsageAccumulator>;
+/** Map a fold result to a `RunUsageRollup` (timestamps are stamped by the caller). */
+function rollupFromFold(runId: string, fold: RunUsageFold): RunUsageRollup {
+  return {
+    runId,
+    model: fold.model,
+    multiModel: fold.multiModel,
+    perModelUsage: perModelUsageArray(fold.perModel),
+    inputTokens: fold.inputTokens,
+    outputTokens: fold.outputTokens,
+    cacheReadTokens: fold.cacheReadTokens,
+    cacheCreationTokens: fold.cacheCreationTokens,
+    totalTokens: fold.totalTokens,
+    costUsd: fold.costUsd,
+    numTurns: fold.numTurns,
+    assistantMessageCount: fold.assistantMessageCount,
+    accountingVersion: fold.accountingVersion,
+    coverage: fold.coverage,
+    startedAt: null,
+    endedAt: null,
+    gateReachedAt: null,
+  };
 }
 
 /**
- * Fold one reported model id into an exact-one-vs-many run resolution.
+ * Bulk-read every usage-fold row (see USAGE_FOLD_EVENT_TYPES) for `runIds`,
+ * grouped per run in raw_events id order. `windowArg`, when given, tags each row
+ * with whether it lies inside `datetime('now', windowArg)` (the daily chart's
+ * window; the fold still sees every row of the run).
  *
- * The `'unknown'` sentinel (persisted by dynamic subagent usage when model
- * discovery fails — see dynamicWorkflowTracker's subagent snapshot) and
- * blank/whitespace-only strings are NOT model identities: folding them in
- * would flip a single-model run to multiModel and wrongly suppress the
- * computed-cost path, so they are skipped entirely.
+ * Perf note: a per-run INDEX SEARCH via idx_raw_events_run_id (run_id, id), with
+ * the ORDER BY served by the index; keep that index (006_cyboflow_schema.sql)
+ * if this query shape changes.
  */
-function recordRunModel(target: { model: string | null; multiModel: boolean }, value: unknown): void {
-  if (typeof value !== 'string' || target.multiModel) return;
-  const trimmed = value.trim();
-  if (trimmed === '' || trimmed === 'unknown') return;
-  if (target.model === null) {
-    target.model = trimmed;
-  } else if (target.model !== trimmed) {
-    target.model = null;
-    target.multiModel = true;
-  }
-}
-
-/** Read the model id from legacy SDK or provider-neutral assistant payloads. */
-function assistantEventModel(eventType: string, payload: Record<string, unknown>): unknown {
-  if (isRecord(payload.message)) return payload.message.model;
-  return eventType === 'agent_assistant' ? payload.model : undefined;
-}
-
-/**
- * Resolve model cardinality for materialized rollups. Token/cost values still
- * come exclusively from `run_usage`; only model identity is read from
- * assistant/provider raw events so no schema column or migration is required.
- *
- * Perf note: this is the ONE raw_events read the materialized fast path makes
- * (a deliberate carve-out from "materialized hits never load raw_events").
- * The query is a per-run INDEX SEARCH via idx_raw_events_run_id (run_id, id)
- * — verified with EXPLAIN QUERY PLAN — with the ORDER BY served by the index;
- * keep that index (006_cyboflow_schema.sql) if this query shape changes.
- */
-function fetchMaterializedRunModels(
+function fetchUsageFoldRows(
   db: DatabaseLike,
   runIds: readonly string[],
-): Map<string, RunModelResolution> {
-  const out = new Map<string, RunModelResolution>();
-  for (const id of runIds) out.set(id, { model: null, multiModel: false, perModelUsage: new Map() });
-  if (runIds.length === 0) return out;
-
+  windowArg?: string,
+): Map<string, UsageFoldRow[]> {
+  const out = new Map<string, UsageFoldRow[]>();
+  for (const id of runIds) out.set(id, []);
+  const windowColumn = windowArg === undefined ? '1' : `(created_at >= datetime('now', ?))`;
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
-    const rows = db
-      .prepare(
-        `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
-         FROM raw_events
-         WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN (${placeholders(ASSISTANT_USAGE_EVENT_TYPES.length)})
-         ORDER BY run_id, id`,
-      )
-      .all(...ids, ...ASSISTANT_USAGE_EVENT_TYPES) as RawEventUsageRow[];
-
+    const stmt = db.prepare(
+      `SELECT run_id AS runId, id, event_type AS eventType, payload_json AS payloadJson,
+              dedup_key AS dedupKey, created_at AS createdAt, ${windowColumn} AS inWindow
+       FROM raw_events
+       WHERE run_id IN (${placeholders(ids.length)})
+         AND event_type IN (${placeholders(USAGE_FOLD_EVENT_TYPES.length)})
+       ORDER BY run_id, id`,
+    );
+    const params: unknown[] = windowArg === undefined ? [] : [windowArg];
+    params.push(...ids, ...USAGE_FOLD_EVENT_TYPES);
+    const rows = stmt.all(...params) as Array<Omit<UsageFoldQueryRow, 'inWindow'> & { inWindow: number }>;
     for (const row of rows) {
-      const target = out.get(row.runId);
-      if (target === undefined) continue;
-      let payload: unknown;
-      try {
-        payload = JSON.parse(row.payloadJson);
-      } catch {
-        continue;
-      }
-      if (!isRecord(payload)) continue;
-      recordRunModel(target, assistantEventModel(row.eventType, payload));
-
-      // Per-model token breakdown (perModelUsage): folded from the SAME
-      // assistant-type rows already fetched for model resolution above — this
-      // query already covers every assistant-type event for the run, so no
-      // extra raw_events read is needed to also aggregate tokens per model.
-      const message = payload.message;
-      if (!isRecord(message)) continue;
-      const usage = message.usage;
-      if (!isRecord(usage)) continue;
-      foldModelUsage(target.perModelUsage, bucketModelId(row.eventType, payload), usage);
+      out.get(row.runId)?.push({
+        id: row.id,
+        eventType: row.eventType,
+        payloadJson: row.payloadJson,
+        dedupKey: row.dedupKey,
+        createdAt: String(row.createdAt),
+        inWindow: row.inWindow === 1,
+      });
     }
   }
   return out;
+}
+
+/**
+ * Fold each of `runIds` through the shared usage fold. `modeFor` picks the
+ * legacy or current rules per run; provider-result rows that name no model are
+ * labelled from the run's `workflow_runs` provider columns
+ * (see {@link providerResultModelLabel}).
+ */
+function foldRuns(
+  db: DatabaseLike,
+  runIds: readonly string[],
+  modeFor: (runId: string) => UsageFoldMode,
+  logger?: Pick<LoggerLike, 'warn'>,
+  windowArg?: string,
+): Map<string, RunUsageFold> {
+  const out = new Map<string, RunUsageFold>();
+  if (runIds.length === 0) return out;
+  const rowsByRun = fetchUsageFoldRows(db, runIds, windowArg);
+  // Looked up lazily, once per run: only provider-result usage with no model
+  // needs the run's provider columns, and most runs never ask.
+  let providerStmt: PreparedStatement | null = null;
+  for (const runId of runIds) {
+    let runRow: RunProviderRow | undefined | null = null;
+    const resolveRunRow = (): RunProviderRow | undefined => {
+      if (runRow === null) {
+        providerStmt ??= db.prepare(
+          `SELECT id, model, agent_runtime AS agentRuntime, agent_provider AS agentProvider
+           FROM workflow_runs WHERE id = ?`,
+        );
+        runRow = providerStmt.get(runId) as RunProviderRow | undefined;
+      }
+      return runRow;
+    };
+    out.set(
+      runId,
+      foldRunUsage(rowsByRun.get(runId) ?? [], {
+        mode: modeFor(runId),
+        fallbackModelLabel: (provider) => providerResultModelLabel(resolveRunRow(), provider),
+        logger,
+        runId,
+      }),
+    );
+  }
+  return out;
+}
+
+/**
+ * Resolve model cardinality and the per-model split for materialized rollups.
+ * Token/cost totals still come exclusively from `run_usage`; the per-model split
+ * is the shared fold over the run's raw_events, under the rules the row was
+ * written with (a pre-v1 row keeps the legacy fold), so it sums to the row.
+ *
+ * Perf note: this is the ONE raw_events read the materialized fast path makes
+ * (a deliberate carve-out from "materialized hits never load raw_events").
+ */
+function applyMaterializedRunModels(db: DatabaseLike, materialized: ReadonlyMap<string, RunUsageRollup>): void {
+  const folds = foldRuns(db, Array.from(materialized.keys()), (runId) =>
+    usageFoldModeForVersion(materialized.get(runId)?.accountingVersion ?? null),
+  );
+  for (const [runId, fold] of folds) {
+    const rollup = materialized.get(runId);
+    if (rollup === undefined) continue;
+    rollup.model = fold.model;
+    rollup.multiModel = fold.multiModel;
+    rollup.perModelUsage = perModelUsageArray(fold.perModel);
+  }
 }
 
 /**
@@ -534,7 +528,7 @@ function fetchMaterializedRollups(
       .prepare(
         `SELECT run_id, input_tokens, output_tokens, cache_read_tokens,
                 cache_creation_tokens, total_tokens, cost_usd, num_turns,
-                assistant_message_count
+                assistant_message_count, accounting_version, coverage
          FROM run_usage
          WHERE run_id IN (${placeholders(ids.length)})`,
       )
@@ -546,267 +540,21 @@ function fetchMaterializedRollups(
   return out;
 }
 
-/** Per-`(runId, session_id)` cost-ladder segment state — see scanRawEventRollups doc. */
-interface CostLadderSegment {
-  /** Carried alongside the map key so the final flush needs no key-parsing
-   *  (a session_id could itself contain the key's separator). */
-  runId: string;
-  /** This segment's most recently observed `total_cost_usd`. */
-  lastCost: number;
-  /** This segment's running max `total_cost_usd` — flushed into costUsd when the segment ends. */
-  segMaxCost: number;
-  /**
-   * This segment's most recently observed `Σ modelUsage[*].outputTokens` —
-   * null until a result carries a COMPLETE counter set (see
-   * resultModelUsageOutputTokens), so an unavailable total can never be
-   * mistaken for a total of zero.
-   */
-  lastOutTotal: number | null;
-}
-
 /**
- * Σ `modelUsage[*].outputTokens` for a `result` payload (camelCase SDK field,
- * cumulative per process), or null when the counters are NOT comparable:
- * `modelUsage` absent / not an object / empty, or any model entry without a
- * finite `outputTokens`. Null must stay distinct from 0 — an empty
- * `modelUsage` (the SDK fixtures emit one) folded to 0 would satisfy the
- * ladder's "total grew by less than this query's output" test on EVERY result
- * and restore the per-result overcount the ladder exists to remove.
- * Used only by the cost ladder's token-increment invariant (see doc above);
- * mirrors the `modelUsage[*].contextWindow` reads in liveContextUsage.ts /
- * runContextUsageListing.ts.
- */
-function resultModelUsageOutputTokens(payload: Record<string, unknown>): number | null {
-  const modelUsage = payload.modelUsage;
-  if (!isRecord(modelUsage)) return null;
-  const entries = Object.values(modelUsage);
-  if (entries.length === 0) return null;
-  let total = 0;
-  for (const modelData of entries) {
-    if (!isRecord(modelData)) return null;
-    const outputTokens = modelData.outputTokens;
-    if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null;
-    total += outputTokens;
-  }
-  return total;
-}
-
-/**
- * Live raw_events scan for the runs WITHOUT a materialized row — the original
- * Phase-1 aggregation, now scoped to the fallback cohort. Seeds a zeroed rollup
- * for every requested id, then folds in assistant-side usage + `result`
- * payloads in (run_id, id) order so cost/turn SUMs are deterministic.
- *
- * Parsing rules (all guarded against malformed JSON, which is skipped silently):
- *   - assistant → message.usage.{input,output,cache_read,cache_creation}_tokens
- *     (each optional). `assistantMessageCount` increments ONLY when a `usage`
- *     object is present.
- *   - subagent_usage → the same nested message.usage token fields, WITHOUT
- *     incrementing assistantMessageCount (it is a cumulative agent snapshot,
- *     not a primary assistant message).
- *   - result → num_turns (SUMmed; null when never present, per-query).
- *     total_cost_usd is SUMmed too UNLESS the event is a `result` with a
- *     string `session_id` — SDK results restart their cumulative counter on
- *     every process resume (same `session_id`, `total_cost_usd` back to
- *     ~0), so a plain sum overcounts a run with any resume. For that laddered
- *     cohort we track, per `(runId, session_id)` segment: `lastCost` (this
- *     segment's most recent cost), `segMaxCost` (its running max — a result
- *     can occasionally under-report vs. the previous one without a real
- *     process restart) and `lastOutTotal` (the most recent
- *     `Σ modelUsage[*].outputTokens`, 0 when `modelUsage` is absent/empty). A
- *     new result starts a NEW segment when EITHER `cost < lastCost` (equal
- *     costs stay in the same segment — never double count) OR the
- *     cumulative-output-token invariant breaks: `outTotal < lastOutTotal +
- *     usage.output_tokens` (a continuing process's cumulative output total
- *     always grows by at least this query's own output tokens; a restarted
- *     process fails that unless the old segment was smaller than this
- *     query's tokens, the conservative direction). The token test only runs
- *     when both `modelUsage` and `usage.output_tokens` are present as finite
- *     numbers on this row; otherwise only the cost-decrease test applies. On
- *     a new segment, `segMaxCost` is flushed into `costUsd` and the segment
- *     resets to this result's cost; otherwise `segMaxCost = max(segMaxCost,
- *     cost)`. Every still-open segment is flushed into `costUsd` once the row
- *     scan completes. `agent_result` (OMP's per-turn cost) and any `result`
- *     without a string `session_id` are unaffected and keep the plain SUM.
- *   - result.usage → token fallback used only when the run has no assistant usage
- *     blocks. Codex reports turn usage on its terminal result, while Claude
- *     normally reports it on assistant messages; the fallback avoids both zeroed
- *     Codex totals and double-counting Claude totals.
+ * Live raw_events fold for the runs WITHOUT a materialized row, and for the
+ * writer. Always the CURRENT accounting version — the token sources, the cost
+ * ladder and the coverage rules are documented in usageFold.ts. Seeds a zeroed
+ * rollup for every requested id.
  */
 function scanRawEventRollups(
   db: DatabaseLike,
   runIds: readonly string[],
+  logger?: Pick<LoggerLike, 'warn'>,
 ): Map<string, RunUsageRollup> {
   const acc = new Map<string, RunUsageRollup>();
-  const resultUsageFallback = new Map<string, {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    messageCount: number;
-  }>();
-  // Cost-ladder segment state, keyed by `${runId}::${session_id}` — see the
-  // doc above. A given runId's rows are always processed together (one chunk,
-  // ORDER BY run_id, id), so a single map spanning every chunk is safe; the
-  // final flush loop below drains whatever segments are still open.
-  const costSegments = new Map<string, CostLadderSegment>();
-  // Per-model buckets, seeded per requested run id so every run (even those with
-  // no usage) gets a (possibly empty) perModelUsage array below.
-  const modelBuckets = new Map<string, Map<string, ModelUsageAccumulator>>();
-  for (const id of runIds) {
-    acc.set(id, zeroRollup(id));
-    modelBuckets.set(id, new Map());
-  }
-  if (runIds.length === 0) return acc;
-
-  for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
-    const rows = db
-      .prepare(
-        `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
-         FROM raw_events
-         WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN (${placeholders(ASSISTANT_USAGE_EVENT_TYPES.length)}, 'result', 'agent_result')
-         ORDER BY run_id, id`,
-      )
-      .all(...ids, ...ASSISTANT_USAGE_EVENT_TYPES) as RawEventUsageRow[];
-
-    for (const row of rows) {
-      const target = acc.get(row.runId);
-      if (target === undefined) continue; // defensive — should always exist
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(row.payloadJson);
-      } catch {
-        continue; // malformed JSON — skip silently
-      }
-      if (!isRecord(payload)) continue;
-
-      if (isAssistantUsageEventType(row.eventType)) {
-        // Model resolution is independent of whether this particular assistant
-        // message carried usage; all assistant/provider events identify the
-        // model(s) that participated in the run.
-        recordRunModel(target, assistantEventModel(row.eventType, payload));
-        const message = payload.message;
-        if (!isRecord(message)) continue;
-        const usage = message.usage;
-        if (!isRecord(usage)) continue; // no usage object → not counted
-
-        target.inputTokens += asNumber(usage.input_tokens);
-        target.outputTokens += asNumber(usage.output_tokens);
-        target.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
-        target.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
-        if (row.eventType !== 'subagent_usage') {
-          target.assistantMessageCount += 1;
-        }
-        const buckets = modelBuckets.get(row.runId);
-        if (buckets !== undefined) {
-          foldModelUsage(buckets, bucketModelId(row.eventType, payload), usage);
-        }
-      } else {
-        // result/agent_result: num_turns is always SUMmed (per-query; null
-        // stays null until the first numeric value lands).
-        if (typeof payload.num_turns === 'number' && Number.isFinite(payload.num_turns)) {
-          target.numTurns = (target.numTurns ?? 0) + payload.num_turns;
-        }
-        const hasFiniteCost =
-          typeof payload.total_cost_usd === 'number' && Number.isFinite(payload.total_cost_usd);
-        if (hasFiniteCost && row.eventType === 'result' && typeof payload.session_id === 'string') {
-          // Laddered cohort: total_cost_usd is cumulative PER SDK PROCESS, not
-          // per query, so a plain sum overcounts any resumed process. Track a
-          // running max per (runId, session_id) "segment" and only fold a
-          // segment's max into costUsd once a new segment (a fresh process) is
-          // detected — see the doc above scanRawEventRollups for the exact test.
-          const cost = payload.total_cost_usd as number;
-          const segmentKey = `${row.runId}::${payload.session_id}`;
-          const resultUsage = payload.usage;
-          const hasOutputTokensField =
-            isRecord(resultUsage) &&
-            typeof resultUsage.output_tokens === 'number' &&
-            Number.isFinite(resultUsage.output_tokens);
-          // null ⇒ this result's counters are not comparable; the token test is
-          // skipped for it and the segment's last comparable total is kept (the
-          // invariant still holds across a skipped result because the counter
-          // is cumulative).
-          const outTotal = resultModelUsageOutputTokens(payload);
-          const outputTokensThisResult = hasOutputTokensField
-            ? (resultUsage as Record<string, unknown>).output_tokens as number
-            : 0;
-
-          const segment = costSegments.get(segmentKey);
-          if (segment === undefined) {
-            // First result ever seen for this segment — open it; nothing to
-            // flush yet (there is no prior segment).
-            costSegments.set(segmentKey, { runId: row.runId, lastCost: cost, segMaxCost: cost, lastOutTotal: outTotal });
-          } else {
-            const isNewSegment =
-              cost < segment.lastCost ||
-              (outTotal !== null &&
-                segment.lastOutTotal !== null &&
-                hasOutputTokensField &&
-                outTotal < segment.lastOutTotal + outputTokensThisResult);
-            if (isNewSegment) {
-              target.costUsd = (target.costUsd ?? 0) + segment.segMaxCost;
-              costSegments.set(segmentKey, { runId: row.runId, lastCost: cost, segMaxCost: cost, lastOutTotal: outTotal });
-            } else {
-              segment.lastCost = cost;
-              segment.segMaxCost = Math.max(segment.segMaxCost, cost);
-              if (outTotal !== null) segment.lastOutTotal = outTotal;
-            }
-          }
-        } else if (hasFiniteCost) {
-          // agent_result (OMP's per-turn cost), or a `result` with no string
-          // session_id: unchanged SUM behavior.
-          target.costUsd = (target.costUsd ?? 0) + (payload.total_cost_usd as number);
-        }
-        const usage = payload.usage;
-        if (isRecord(usage)) {
-          const fallback = resultUsageFallback.get(row.runId) ?? {
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheCreationTokens: 0,
-            messageCount: 0,
-          };
-          fallback.inputTokens += asNumber(usage.input_tokens);
-          fallback.outputTokens += asNumber(usage.output_tokens);
-          fallback.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
-          fallback.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
-          fallback.messageCount += 1;
-          resultUsageFallback.set(row.runId, fallback);
-        }
-      }
-    }
-  }
-
-  // Flush every still-open cost-ladder segment — the last process a run's
-  // (runId, session_id) pair was in never triggers a "new segment" boundary,
-  // so its running max is only added here.
-  for (const segment of costSegments.values()) {
-    const target = acc.get(segment.runId);
-    if (target === undefined) continue; // defensive — should always exist
-    target.costUsd = (target.costUsd ?? 0) + segment.segMaxCost;
-  }
-
-  for (const rollup of acc.values()) {
-    const fallback = resultUsageFallback.get(rollup.runId);
-    if (rollup.assistantMessageCount === 0 && fallback !== undefined) {
-      // Before subagent_usage existed these targets were necessarily zero.
-      // Add instead of replace so a provider whose PRIMARY usage arrives only
-      // on agent_result keeps any independently captured subagent snapshots.
-      rollup.inputTokens += fallback.inputTokens;
-      rollup.outputTokens += fallback.outputTokens;
-      rollup.cacheReadTokens += fallback.cacheReadTokens;
-      rollup.cacheCreationTokens += fallback.cacheCreationTokens;
-      rollup.assistantMessageCount = fallback.messageCount;
-    }
-    rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
-    // Note: the result.usage fallback folded above carries no model identity
-    // (a terminal `result` payload is not attributed to a specific assistant
-    // turn's model), so it is never reflected in perModelUsage — a run that hit
-    // ONLY that fallback path resolves to model=null/multiModel=false (see
-    // recordRunModel) and an empty perModelUsage, consistent with each other.
-    rollup.perModelUsage = perModelUsageArray(modelBuckets.get(rollup.runId) ?? new Map());
+  for (const id of runIds) acc.set(id, zeroRollup(id));
+  for (const [runId, fold] of foldRuns(db, runIds, () => 'current', logger)) {
+    acc.set(runId, rollupFromFold(runId, fold));
   }
   return acc;
 }
@@ -816,30 +564,44 @@ interface RunTimestampRow {
   runId: string;
   startedAt: string | null;
   endedAt: string | null;
+  gateReachedAt: string | null;
+}
+
+/** Runtime-timestamp triple returned per run by {@link fetchRunTimestamps}. */
+interface RunTimestamps {
+  startedAt: string | null;
+  endedAt: string | null;
+  gateReachedAt: string | null;
 }
 
 /**
- * Bulk-fetch `started_at` / `ended_at` for `runIds`, returned as a runId→{ISO,
- * ISO} map. One indexed IN() lookup per chunk over `workflow_runs`; runs with no
- * row are simply absent (the caller leaves their rollup timestamps null). Both
- * columns are normalized to ISO-8601 via `toIso`.
+ * Bulk-fetch `started_at` / `ended_at` / `gate_reached_at` for `runIds`,
+ * returned as a runId→{ISO, ISO, ISO} map. One indexed IN() lookup per chunk
+ * over `workflow_runs`; runs with no row are simply absent (the caller leaves
+ * their rollup timestamps null). All three columns are normalized to ISO-8601
+ * via `toIso`.
  */
 function fetchRunTimestamps(
   db: DatabaseLike,
   runIds: readonly string[],
-): Map<string, { startedAt: string | null; endedAt: string | null }> {
-  const out = new Map<string, { startedAt: string | null; endedAt: string | null }>();
+): Map<string, RunTimestamps> {
+  const out = new Map<string, RunTimestamps>();
   if (runIds.length === 0) return out;
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
     const rows = db
       .prepare(
-        `SELECT id AS runId, started_at AS startedAt, ended_at AS endedAt
+        `SELECT id AS runId, started_at AS startedAt, ended_at AS endedAt,
+                gate_reached_at AS gateReachedAt
          FROM workflow_runs
          WHERE id IN (${placeholders(ids.length)})`,
       )
       .all(...ids) as RunTimestampRow[];
     for (const row of rows) {
-      out.set(row.runId, { startedAt: toIso(row.startedAt), endedAt: toIso(row.endedAt) });
+      out.set(row.runId, {
+        startedAt: toIso(row.startedAt),
+        endedAt: toIso(row.endedAt),
+        gateReachedAt: toIso(row.gateReachedAt),
+      });
     }
   }
   return out;
@@ -869,15 +631,7 @@ export function selectRunUsageRollups(
 
   // Tier 1: materialized rows win outright.
   const materialized = fetchMaterializedRollups(db, runIds);
-  const materializedModels = fetchMaterializedRunModels(db, Array.from(materialized.keys()));
-  for (const [id, modelResolution] of materializedModels) {
-    const rollup = materialized.get(id);
-    if (rollup !== undefined) {
-      rollup.model = modelResolution.model;
-      rollup.multiModel = modelResolution.multiModel;
-      rollup.perModelUsage = perModelUsageArray(modelResolution.perModelUsage);
-    }
-  }
+  applyMaterializedRunModels(db, materialized);
 
   // Tier 2: scan usage/result raw_events only for ids that lack a materialized
   // row (materialized ids already received the narrower model-only scan above).
@@ -898,6 +652,7 @@ export function selectRunUsageRollups(
     if (ts !== undefined) {
       rollup.startedAt = ts.startedAt;
       rollup.endedAt = ts.endedAt;
+      rollup.gateReachedAt = ts.gateReachedAt;
     }
     return rollup;
   });
@@ -978,13 +733,15 @@ export function selectSessionRunTokenTotals(
  *
  * @param db     - Narrow DatabaseLike surface.
  * @param runIds - Run ids to roll up (order of the result mirrors this list).
+ * @param logger - Receives the fold's diagnostics (usageFold.ts).
  */
 export function selectRunUsageRollupsFromRawEvents(
   db: DatabaseLike,
   runIds: string[],
+  logger?: Pick<LoggerLike, 'warn'>,
 ): RunUsageRollup[] {
   if (runIds.length === 0) return [];
-  const scanned = scanRawEventRollups(db, runIds);
+  const scanned = scanRawEventRollups(db, runIds, logger);
   // scanRawEventRollups already seeds a zeroed rollup per requested id, so the
   // `?? zeroRollup(id)` is purely defensive; emit in the caller's order.
   return runIds.map((id) => scanned.get(id) ?? zeroRollup(id));
@@ -2573,41 +2330,14 @@ export function selectRotationDashboardRows(
 // 9. selectDailyModelUsage
 // ---------------------------------------------------------------------------
 
-interface DailyModelUsageRow {
-  runId: string;
-  eventType: string;
-  payloadJson: string;
-  createdAt: string;
-}
-
-/** Per-(day, model) accumulator mutated in place while folding raw_events rows. */
+/** Per-(day, model) accumulator mutated in place while folding contributions. */
 interface DailyModelBucket {
   inputTokens: number;
   outputTokens: number;
   assistantMessageCount: number;
 }
 
-/** Model id reported when an assistant message carried no `message.model`. */
-const UNKNOWN_MODEL = 'unknown';
-
-/**
- * Terminal-event kinds scanned for the {@link selectDailyModelUsage} result-usage
- * FALLBACK (TASK-290) — mirrors the `result`/`agent_result` reach of
- * `scanRawEventRollups`'s own result-usage fallback (see its doc comment). Kept
- * separate from `ASSISTANT_USAGE_EVENT_TYPES` because these events restate
- * per-turn totals and are folded in ONLY for a run that reported no assistant-side
- * usage at all (never alongside it — see `resultFallbackModelLabel` callers below).
- */
-const RESULT_USAGE_EVENT_TYPES = ['result', 'agent_result'] as const;
-
-/** One raw `result`/`agent_result` row scanned for the fallback candidate pass. */
-interface ResultUsageRow {
-  runId: string;
-  payloadJson: string;
-  createdAt: string;
-}
-
-/** `workflow_runs` provider columns needed to label a fallback bucket. */
+/** `workflow_runs` provider columns needed to label a provider-result bucket. */
 interface RunProviderRow {
   id: string;
   model: string | null;
@@ -2616,9 +2346,9 @@ interface RunProviderRow {
 }
 
 /**
- * Bucket label for a run's result-usage fallback (TASK-290): Codex/OMP runs
- * report turn usage on the terminal `result`/`agent_result` event rather than on
- * an assistant message, so `message.model` is never available for them — without
+ * Bucket label for a run's result-usage (TASK-290): Codex/OMP runs report turn
+ * usage on the terminal `result`/`agent_result` event rather than on an
+ * assistant message, so `message.model` is never available for them — without
  * this, every such run's tokens fell into the 'unknown' bucket even though
  * `workflow_runs` already knows which provider ran it.
  *
@@ -2628,18 +2358,31 @@ interface RunProviderRow {
  * `'<provider>:<model-or-runtime>'` so the chart legend can tell a Codex/OMP
  * bucket apart from a same-named Claude one at a glance.
  *
- * A `null`/blank provider (a deleted/unjoined run — should not happen since the
- * caller only calls this for ids it just fetched) or the `'claude'` provider
- * fall back to `UNKNOWN_MODEL`: Claude runs are excluded from this fallback path
- * entirely by the caller's assistant-usage guard (see selectDailyModelUsage), so
- * reaching 'claude' here would itself be a bug — never silently mislabel it as a
- * real Claude bucket.
+ * A `null`/blank provider or the `'claude'` provider fall back to
+ * `UNKNOWN_MODEL`: never silently mislabel provider-result usage as a real
+ * Claude bucket.
  */
 function resultFallbackModelLabel(row: RunProviderRow): string {
   const provider = row.agentProvider?.trim() || null;
   if (provider === null || provider === 'claude') return UNKNOWN_MODEL;
   const modelPart = row.model?.trim() || row.agentRuntime?.trim() || provider;
   return `${provider}:${modelPart}`;
+}
+
+/**
+ * The fold's `fallbackModelLabel` for one run: the label for provider-result
+ * usage whose rows name no model. `provider` is the row's own `provider` field.
+ * When it names the run's own provider (or is absent) the run's pinned model /
+ * runtime completes the label; a different provider — a Codex step inside a
+ * Claude-primary run — gets only its provider, since the run's model pin belongs
+ * to the other runtime.
+ */
+function providerResultModelLabel(runRow: RunProviderRow | undefined, provider: string | null): string {
+  if (runRow === undefined) return provider === null ? UNKNOWN_MODEL : `${provider}:${provider}`;
+  if (provider === null || provider === (runRow.agentProvider?.trim() || null)) {
+    return resultFallbackModelLabel(runRow);
+  }
+  return resultFallbackModelLabel({ id: runRow.id, model: null, agentRuntime: null, agentProvider: provider });
 }
 
 /**
@@ -2652,41 +2395,25 @@ const DAY_MODEL_SEP = ' ';
 
 /**
  * Per-(day, model) token buckets for the usage chart at the top of the
- * Statistics section, scanned over the last `days` days of assistant-side
- * usage raw_events.
+ * Statistics section, over the last `days` days.
  *
- * Window: rows are kept when `raw_events.created_at >= datetime('now', '-N days')`
- * -- the bind value is the string `-${days} days`, so the lookback is parameterized,
- * not string-concatenated. `days` is clamped to [1, 365] inside the helper. When
- * `projectId` is non-null the scan joins through `workflow_runs`/`workflows` and
- * restricts to that project; null aggregates every project.
+ * The buckets come from the SAME fold as `run_usage` (usageFold.ts), so a run's
+ * buckets sum to its rollup: every run with any usage row inside the window
+ * (`raw_events.created_at >= datetime('now', '-N days')`, the bind value
+ * `-${days} days`, `days` clamped to [1, 365]) is folded WHOLE — segments and
+ * deltas need the run's earlier rows — and only the contributions from rows
+ * inside the window are kept. Each run is folded under the rules its
+ * materialized `run_usage.accounting_version` was written with (no row ⇒ the
+ * current version), exactly like the materialized per-model read.
  *
- * Parsing mirrors the other raw_events scan helpers (see scanRawEventRollups):
- *   - usage is read from `payload.message.usage` ({input_tokens, output_tokens,
- *     cache_read_input_tokens?, cache_creation_input_tokens?} -- any number may be
- *     absent). A row with no usable usage object is skipped (NOT counted).
- *   - model is `payload.message.model` (string), falling back to 'unknown'.
- *   - malformed JSON is skipped silently.
- *
- * Buckets are keyed by (day, model) where `day` is the UTC date slice of
- * `created_at` (the first 10 chars of SQLite's 'YYYY-MM-DD HH:MM:SS' UTC form).
- * `totalTokens` = inputTokens + outputTokens (cache EXCLUDED, matching the
- * RunUsageRollup convention). Primary/provider assistant events and synthetic
- * `subagent_usage` snapshots are scanned; `result`/`agent_result` events (which
- * restate per-turn totals) are excluded from THIS pass by the WHERE clause so
- * their totals can never be double-counted against a run's own assistant usage.
- * Synthetic snapshots do not increment `assistantMessageCount`. The result is
- * sorted by `day` ASC then `model` ASC; days with no usage emit no bucket.
- *
- * TASK-290 result-usage fallback: Codex/OMP runs report turn usage on the
- * terminal `result`/`agent_result` event, never on an assistant message, so a
- * run with no assistant-side usage in this window is given a SECOND pass over
- * `result`/`agent_result` rows (see `resultFallbackModelLabel`) and its tokens
- * are bucketed under a `<provider>:<model-or-runtime>` label resolved from
- * `workflow_runs` (never 'unknown' when the run's provider is known). A run that
- * DID report assistant-side usage in this window is fully excluded from this
- * second pass — the fallback and the primary scan are mutually exclusive per run,
- * so a Claude run carrying both never double-counts.
+ * When `projectId` is non-null only that project's runs are scanned; null
+ * aggregates every project. `day` is the UTC date slice of the contributing
+ * row's `created_at`; `model` is the model the fold attributed the tokens to
+ * (provider-result usage with no model is labelled `<provider>:<model-or-runtime>`
+ * from `workflow_runs`, see {@link resultFallbackModelLabel}). `totalTokens` =
+ * inputTokens + outputTokens (cache EXCLUDED, matching the RunUsageRollup
+ * convention). Sorted by `day` ASC then `model` ASC; days with no usage emit no
+ * bucket.
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - When non-null, restricts to that project; null = all.
@@ -2701,177 +2428,59 @@ export function selectDailyModelUsage(
   // '-N days' is the datetime() modifier; bound as a parameter (the helper never
   // concatenates `days` into the SQL text).
   const windowArg = `-${clampedDays} days`;
-  const eventTypePlaceholders = placeholders(ASSISTANT_USAGE_EVENT_TYPES.length);
+  const eventTypePlaceholders = placeholders(USAGE_FOLD_EVENT_TYPES.length);
 
-  // The project scope is an optional JOIN through workflow_runs -> workflows; when
-  // projectId is null we skip the joins entirely (a flat raw_events scan).
-  const sql =
+  // The project scope is an optional JOIN through workflow_runs; when projectId
+  // is null we skip the join entirely (a flat raw_events scan).
+  const runIdSql =
     projectId === null
-      ? `SELECT e.run_id AS runId, e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
+      ? `SELECT DISTINCT e.run_id AS runId
          FROM raw_events e
          WHERE e.event_type IN (${eventTypePlaceholders})
            AND e.created_at >= datetime('now', ?)`
-      : `SELECT e.run_id AS runId, e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
+      : `SELECT DISTINCT e.run_id AS runId
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
          WHERE e.event_type IN (${eventTypePlaceholders})
            AND e.created_at >= datetime('now', ?)
            AND r.project_id = ?`;
-
-  const stmt = db.prepare(sql);
-  const rows = (
+  const runIdStmt = db.prepare(runIdSql);
+  const runIds = (
     projectId === null
-      ? stmt.all(...ASSISTANT_USAGE_EVENT_TYPES, windowArg)
-      : stmt.all(...ASSISTANT_USAGE_EVENT_TYPES, windowArg, projectId)
-  ) as DailyModelUsageRow[];
+      ? runIdStmt.all(...USAGE_FOLD_EVENT_TYPES, windowArg)
+      : runIdStmt.all(...USAGE_FOLD_EVENT_TYPES, windowArg, projectId)
+  ).map((r) => (r as { runId: string }).runId);
+
+  const versions = new Map<string, number>();
+  for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
+    const rows = db
+      .prepare(
+        `SELECT run_id AS runId, accounting_version AS accountingVersion
+         FROM run_usage
+         WHERE run_id IN (${placeholders(ids.length)})`,
+      )
+      .all(...ids) as Array<{ runId: string; accountingVersion: number }>;
+    for (const row of rows) versions.set(row.runId, row.accountingVersion);
+  }
+
+  const folds = foldRuns(
+    db,
+    runIds,
+    (runId) => usageFoldModeForVersion(versions.get(runId) ?? null),
+    undefined,
+    windowArg,
+  );
 
   // Accumulate per (day, model); the key joins both on DAY_MODEL_SEP.
   const buckets = new Map<string, DailyModelBucket>();
-  // Runs that contributed at least one token via an assistant-side usage event
-  // in this window — the result-usage fallback below is folded in ONLY for runs
-  // NOT in this set (never alongside their own assistant usage — the
-  // double-count guard mirrored from scanRawEventRollups's assistantMessageCount
-  // check).
-  const runsWithAssistantTokens = new Set<string>();
-
-  for (const row of rows) {
-    let payload: unknown;
-    try {
-      payload = JSON.parse(row.payloadJson);
-    } catch {
-      continue; // malformed JSON -- skip silently
-    }
-    if (!isRecord(payload)) continue;
-    const message = payload.message;
-    if (!isRecord(message)) continue;
-    const usage = message.usage;
-    if (!isRecord(usage)) continue; // no usage object -> not counted
-
-    const model = typeof message.model === 'string' ? message.model : UNKNOWN_MODEL;
-    // SQLite DATETIME is 'YYYY-MM-DD HH:MM:SS' UTC; the first 10 chars are the day.
-    const day = row.createdAt.slice(0, 10);
-    const key = `${day}${DAY_MODEL_SEP}${model}`;
-
-    const bucket = buckets.get(key) ?? {
-      inputTokens: 0,
-      outputTokens: 0,
-      assistantMessageCount: 0,
-    };
-    bucket.inputTokens += asNumber(usage.input_tokens);
-    bucket.outputTokens += asNumber(usage.output_tokens);
-    // Only a REAL assistant message suppresses the result-usage fallback below —
-    // a subagent_usage-only run (e.g. a Codex/OMP step whose only "assistant-side"
-    // signal is a cumulative subagent snapshot) must still fall through to its
-    // result.usage, exactly like scanRawEventRollups's own fallback guard, which
-    // keys off assistantMessageCount (never incremented by subagent_usage) rather
-    // than "any usage event seen."
-    if (row.eventType !== 'subagent_usage') {
-      bucket.assistantMessageCount += 1;
-      runsWithAssistantTokens.add(row.runId);
-    }
-    buckets.set(key, bucket);
-  }
-
-  // TASK-290 result-usage fallback: Codex/OMP runs report turn usage on the
-  // terminal `result`/`agent_result` event rather than on an assistant message,
-  // so they never hit the loop above and their tokens vanished from this chart
-  // even though `selectRunUsageRollups` already counted them into the
-  // per-workflow cards via the same fallback (see scanRawEventRollups). Scanned
-  // as a SEPARATE query (not merged into the query above) so a DB whose
-  // raw_events happen to have no 'result'/'agent_result' rows in this window —
-  // every existing fixture but the new ones below — never pays for the extra
-  // WHERE branch or the targeted workflow_runs lookup that follows.
-  const resultEventTypePlaceholders = placeholders(RESULT_USAGE_EVENT_TYPES.length);
-  const resultSql =
-    projectId === null
-      ? `SELECT e.run_id AS runId, e.payload_json AS payloadJson, e.created_at AS createdAt
-         FROM raw_events e
-         WHERE e.event_type IN (${resultEventTypePlaceholders})
-           AND e.created_at >= datetime('now', ?)`
-      : `SELECT e.run_id AS runId, e.payload_json AS payloadJson, e.created_at AS createdAt
-         FROM raw_events e
-         JOIN workflow_runs r ON r.id = e.run_id
-         WHERE e.event_type IN (${resultEventTypePlaceholders})
-           AND e.created_at >= datetime('now', ?)
-           AND r.project_id = ?`;
-  const resultStmt = db.prepare(resultSql);
-  const resultRows = (
-    projectId === null
-      ? resultStmt.all(...RESULT_USAGE_EVENT_TYPES, windowArg)
-      : resultStmt.all(...RESULT_USAGE_EVENT_TYPES, windowArg, projectId)
-  ) as ResultUsageRow[];
-
-  // Fold each result row's usage into a per-(runId, day) staging accumulator —
-  // NOT yet into `buckets`, since the model-id bucket key depends on the run's
-  // provider/model, resolved in bulk below only for runs that turn out to need it.
-  const fallbackByRunAndDay = new Map<
-    string,
-    { runId: string; day: string; inputTokens: number; outputTokens: number; messageCount: number }
-  >();
-  for (const row of resultRows) {
-    let payload: unknown;
-    try {
-      payload = JSON.parse(row.payloadJson);
-    } catch {
-      continue; // malformed JSON -- skip silently
-    }
-    if (!isRecord(payload)) continue;
-    const usage = payload.usage;
-    if (!isRecord(usage)) continue; // no usage object -> not counted
-
-    const day = row.createdAt.slice(0, 10);
-    const staging = fallbackByRunAndDay.get(`${row.runId}${DAY_MODEL_SEP}${day}`) ?? {
-      runId: row.runId,
-      day,
-      inputTokens: 0,
-      outputTokens: 0,
-      messageCount: 0,
-    };
-    staging.inputTokens += asNumber(usage.input_tokens);
-    staging.outputTokens += asNumber(usage.output_tokens);
-    staging.messageCount += 1;
-    fallbackByRunAndDay.set(`${row.runId}${DAY_MODEL_SEP}${day}`, staging);
-  }
-
-  // Only runs that never contributed assistant-side tokens in this window are
-  // eligible — a Claude run that reports usage on BOTH assistant messages and its
-  // terminal result must count the result's numbers exactly zero times here.
-  const fallbackEligibleRunIds = Array.from(
-    new Set(
-      Array.from(fallbackByRunAndDay.values())
-        .map((s) => s.runId)
-        .filter((runId) => !runsWithAssistantTokens.has(runId)),
-    ),
-  );
-
-  if (fallbackEligibleRunIds.length > 0) {
-    const fallbackEligibleRunIdSet = new Set(fallbackEligibleRunIds);
-    const providerRows = db
-      .prepare(
-        `SELECT id, model, agent_runtime AS agentRuntime, agent_provider AS agentProvider
-         FROM workflow_runs
-         WHERE id IN (${placeholders(fallbackEligibleRunIds.length)})`,
-      )
-      .all(...fallbackEligibleRunIds) as RunProviderRow[];
-    const providerById = new Map(providerRows.map((r) => [r.id, r]));
-
-    for (const staging of fallbackByRunAndDay.values()) {
-      if (!fallbackEligibleRunIdSet.has(staging.runId)) continue;
-      const providerRow = providerById.get(staging.runId);
-      // Defensive: the run vanished between the raw_events scan and this lookup
-      // (deleted mid-read) — skip rather than mislabel it 'unknown'.
-      if (providerRow === undefined) continue;
-
-      const model = resultFallbackModelLabel(providerRow);
-      const key = `${staging.day}${DAY_MODEL_SEP}${model}`;
-      const bucket = buckets.get(key) ?? {
-        inputTokens: 0,
-        outputTokens: 0,
-        assistantMessageCount: 0,
-      };
-      bucket.inputTokens += staging.inputTokens;
-      bucket.outputTokens += staging.outputTokens;
-      bucket.assistantMessageCount += staging.messageCount;
+  for (const fold of folds.values()) {
+    for (const c of fold.contributions) {
+      if (!c.inWindow) continue;
+      const key = `${c.day}${DAY_MODEL_SEP}${c.model}`;
+      const bucket = buckets.get(key) ?? { inputTokens: 0, outputTokens: 0, assistantMessageCount: 0 };
+      bucket.inputTokens += c.inputTokens;
+      bucket.outputTokens += c.outputTokens;
+      bucket.assistantMessageCount += c.assistantMessageCount;
       buckets.set(key, bucket);
     }
   }

@@ -302,6 +302,62 @@ export function surfaceProbeMayFire(type: VerificationType, task: EnqueueResolva
 }
 
 /**
+ * §A2 — a `mobile-flow` request is `mobile` by its TYPE, so it matches its own
+ * shape and never reaches the surface rung; yet with no `app` block the runner
+ * can only refuse it (MOBILE_NO_APP_BLOCK). When no PROVEN mobile record exists
+ * to supply the app at injection, read it off the project's Xcode files instead.
+ * The rung's own preconditions still hold here: a task naming a surface of its
+ * own (any `serve`, `target.url` or `target.htmlPath`) is never talked out of
+ * it, and a project with a cdp-app or web record is never probed.
+ * Returns null — keep the declared path — on any miss, a named surface, a
+ * web-axis record, a proven mobile record, an app already present, no tree to
+ * read, or any throw (fail-soft, like the rung).
+ */
+async function inferMobileFlowApp<T extends EnqueueResolvableTask | null>(args: {
+  type: VerificationType;
+  task: T;
+  projectId: number;
+  runId: string;
+  probePath?: string;
+  surfaceRoot?: string;
+  logger?: LoggerLike;
+}): Promise<EnqueueModalityResolution<T> | null> {
+  const { task, logger } = args;
+  const surfaceRoot = args.surfaceRoot ?? args.probePath;
+  if (args.type !== 'mobile-flow' || task === null || task.app !== undefined || surfaceRoot === undefined) return null;
+  if (task.serve !== undefined) return null;
+  if ((task.target?.url?.trim() ?? '').length > 0 || (task.target?.htmlPath?.trim() ?? '').length > 0) return null;
+  try {
+    const scheduler = VerificationScheduler.tryGetInstance();
+    if (scheduler === null) return null;
+    if (await webAxisRecordPresent(scheduler, args)) return null;
+    const proven = await scheduler.resolveProvenRunbook({
+      projectId: args.projectId,
+      runId: args.runId,
+      modality: 'mobile',
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+    });
+    if (proven !== null) return null;
+    const found = await probeProjectSurface(surfaceRoot);
+    logger?.info('[resolveEnqueueModality] project surface probe for an app-less mobile-flow', {
+      projectId: args.projectId,
+      runId: args.runId,
+      result: found.kind,
+      detail: found.detail,
+    });
+    if (found.kind !== 'ios-app') return null;
+    return { modality: 'mobile', task: withInferredApp(task as NonNullable<T>, found.app) };
+  } catch (err) {
+    logger?.debug('[resolveEnqueueModality] mobile-flow surface probe unavailable; keeping the declaration', {
+      projectId: args.projectId,
+      runId: args.runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Resolve the modality this enqueue runs under.
  *
  *   1. A declaration that MATCHES the task's own shape wins outright, with no
@@ -364,6 +420,8 @@ export async function resolveEnqueueModality<T extends EnqueueResolvableTask | n
   const keep = (modality: VerificationModality): EnqueueModalityResolution<T> => ({ modality, task });
 
   if (declared !== null && declared === shape) {
+    const inferred = await inferMobileFlowApp(args);
+    if (inferred !== null) return inferred;
     logger?.info('[resolveEnqueueModality] modality declared by the request', {
       projectId: args.projectId,
       runId: args.runId,
@@ -717,13 +775,24 @@ export async function prepareVerificationEnqueue(args: {
    */
   const tryInject = async (
     candidate: VerificationModality,
-  ): Promise<{ revision: ProvenRunbookRevision; merged: VerificationTaskV1 } | null> => {
-    const revision = await scheduler.resolveProvenRunbook({
+  ): Promise<{ revision: ProvenRunbookRevision; merged: VerificationTaskV1; learned: boolean } | null> => {
+    const revisionArgs = {
       projectId: args.projectId,
       runId: args.runId,
       modality: candidate,
       ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
-    });
+    };
+    // §A5 PROMOTION VIA A LEARNED PIN. With no proven record, an unproven
+    // LEARNED draft (a recipe a passing explore request reported) is merged and
+    // pinned exactly like a proven revision: the lane's OWN ordinary request
+    // executes it verbatim, and its verdict is the promotion proof — passed ⇒
+    // the engine flips the draft proven; a recipe that cannot stand the
+    // deliverable up ⇒ the draft is discarded and the row explores. The pin is
+    // an ordinary one (no proof flag), so both seams persist it unchanged and
+    // the row keeps the lane key, the budget and full delivery. The scheduler
+    // answers null with the kill switch on.
+    const proven = await scheduler.resolveProvenRunbook(revisionArgs);
+    const revision = proven ?? (await scheduler.resolveLearnedDraft(revisionArgs));
     if (revision === null) return null;
     const merged = mergeRunbookIntoTask(task, revision.entry, candidate);
     if (resolveTaskModality(args.type, merged) !== candidate) {
@@ -736,7 +805,7 @@ export async function prepareVerificationEnqueue(args: {
       });
       return null;
     }
-    return { revision, merged };
+    return { revision, merged, learned: proven === null };
   };
 
   let modality = resolved;
@@ -770,7 +839,7 @@ export async function prepareVerificationEnqueue(args: {
     return { ok: false, error: forbiddenCommandError(fromRunbook, 'runbook') };
   }
 
-  logger?.debug('[prepareVerificationEnqueue] injected a proven runbook revision', {
+  logger?.debug(`[prepareVerificationEnqueue] injected a ${injected.learned ? 'LEARNED (promotion)' : 'proven'} runbook revision`, {
     projectId: args.projectId,
     runId: args.runId,
     modality,

@@ -481,7 +481,7 @@ function parseTurnEnvelope(params: unknown): { threadId: string; turnId: string 
   return { threadId: params.threadId as string, turnId: params.turn.id as string };
 }
 
-function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
+export function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
   if (
     !isRecord(value)
     || !isFiniteNumber(value.totalTokens)
@@ -506,7 +506,7 @@ function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
   };
 }
 
-function parseThreadTokenUsageUpdated(
+export function parseThreadTokenUsageUpdated(
   params: unknown,
 ): ThreadTokenUsageUpdatedNotification | null {
   if (

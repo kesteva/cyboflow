@@ -48,6 +48,17 @@ describe('visual-verify prompt', () => {
     expect(sprint).not.toContain("re-derives the real\nattestation verdict from the driver's own state");
   });
 
+  it('keeps `confidence` numeric and leaves the identity floor to the harness', () => {
+    // `confidence` is a finite number in the report schema; telling the agent to
+    // set it to a STATUS string makes normalization reject a valid report.
+    expect(sprint).not.toMatch(/`confidence`[^.]*\b(?:at|to)\s+`(?:low_confidence|passed|failed|unverifiable)`/);
+    expect(sprint).toMatch(/`confidence`\s+\(a number from 0 to 1\)/);
+    expect(sprint).toMatch(/the harness\s+applies the final identity floor/);
+    // …including the two explore-only floors the agent must not pre-empt.
+    expect(sprint).toMatch(/composed serve ran\s+verbatim and bound to its port/);
+    expect(sprint).toMatch(/implicit\s+`bundle-identity`/);
+  });
+
   it('still tells the agent where a launch_failed excerpt comes from', () => {
     // The serve moved into the driver, so its output moved too — an agent that
     // cannot find the log reports `launch_failed` with nothing in it.

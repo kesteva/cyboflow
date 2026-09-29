@@ -216,3 +216,35 @@ describe('composeMobileVerification on darwin', () => {
     expect(logged).toBeGreaterThan(0);
   });
 });
+
+describe('composeMobileVerification — the Stage 3 xcode rung (§B2, §B8)', () => {
+  it('off darwin builds nothing: no runner deps, no approve action, an inconclusive row, no spawn', async () => {
+    const { composition, calls } = compose('linux');
+    expect(composition.xcode).toBeNull();
+    expect(composition.approveXcodeAccess).toBeNull();
+    const row = await composition.xcodeProbeRow();
+    expect(row).toMatchObject({ id: 'xcode-mcp', state: 'inconclusive', fix: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('on darwin the row and the runner read ONE spawn-free probe — never `xcrun mcpbridge`', async () => {
+    const { composition, calls } = compose('darwin', (command, args) => {
+      if (command === 'xcrun' && args[0] === '--find') {
+        return ok('/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge\n');
+      }
+      if (command === 'xcodebuild') return ok('Xcode 27.0\nBuild version 27A266a\n');
+      if (command === 'xcrun' && args[0] === 'mcp-server') return ok(JSON.stringify({ permission: { enabled: false } }));
+      if (command === 'xcrun' && args[0] === 'simctl') return ok(JSON.stringify({ runtimes: [] }));
+      return fail(127);
+    });
+    expect(composition.xcode).not.toBeNull();
+    expect(composition.approveXcodeAccess).not.toBeNull();
+    const row = await composition.xcodeProbeRow();
+    expect(row).toMatchObject({ id: 'xcode-mcp', state: 'missing' });
+    const first = calls.length;
+    expect((await composition.xcode?.probe())?.outcome).toBe('unavailable');
+    // The 60 s memo is shared: the runner's read re-spawned nothing.
+    expect(calls.length).toBe(first);
+    expect(calls.some((c) => c.command === 'xcrun' && c.args[0] === 'mcpbridge')).toBe(false);
+  });
+});

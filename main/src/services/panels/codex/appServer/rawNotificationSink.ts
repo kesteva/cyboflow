@@ -22,8 +22,14 @@ const NON_PERSISTED_DELTA_METHODS: ReadonlySet<string> = new Set([
  *   - turn/diff/updated        68 MB over 3,739 rows for 138 turns — the FULL
  *                              working-tree diff re-sent per update (one turn
  *                              logged 113 snapshots growing 70 KB -> 95 KB).
- *   - thread/tokenUsage/updated 7 MB over 16,795 rows — a cumulative per-turn
- *                              counter sampled ~25x per turn.
+ *   - thread/tokenUsage/updated 7 MB over 16,795 rows — `last` is one model
+ *                              request's usage and `total` is cumulative per
+ *                              thread per app-server process, re-sent ~25x per
+ *                              turn. Keeping only the newest row per turn loses
+ *                              the per-request history, so usage accounting never
+ *                              reads it: the exact per-request source is the
+ *                              append-only rawResponse/completed, which is NOT
+ *                              in this map.
  *   - account/rateLimits/updated 5 MB over 16,800 rows carrying just 276
  *                              distinct payloads — an account-wide gauge
  *                              re-persisted on every event tick.

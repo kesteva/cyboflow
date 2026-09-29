@@ -16,11 +16,13 @@ name: Stable release
 # not. That keeps buildInfo.gitCommit, the artifact names, the manifests and the
 # git tag all naming the same thing.
 #
-# GATE: a stable release must not ship from an ungated commit, so the version
-# job waits for THIS SHA's Code Quality run to conclude. The runbook pushes
-# main and then the tag as separate commands seconds apart (NOT --follow-tags,
-# which skips lightweight tags silently), so that run is usually still in
-# flight when the tag arrives — waiting is the normal path, not an error.
+# GATE: a stable release must not ship from an ungated commit. The runbook
+# builds the release commit as a pure version bump (four manifests' "version"
+# lines + CHANGELOG.md) directly on the commit the dev channel already built
+# and the user tested, so the version job gates on THAT parent's green Code
+# Quality run instead of re-running the suite on a diff no test can see. A
+# tagged commit that is anything more than that bump falls back to waiting for
+# its own run (the main push starts it seconds before the tag arrives).
 #
 # ORDER OF OPERATIONS: a tag push runs the workflow file AS IT EXISTS AT THE
 # TAG, not the one on main — so this file must already be in main's history
@@ -107,18 +109,46 @@ jobs:
           grep -qE "^## \[${version//./\\.}\]" CHANGELOG.md \
             || { echo "::error::CHANGELOG.md has no '## [$version]' section"; exit 1; }
 
+          # Which SHA's Code Quality verdict authorises this release. When the
+          # tagged commit is a pure version bump on top of an already-gated
+          # commit (the dev build that was tested), re-running the whole suite
+          # on it proves nothing new: the gate is inherited from the parent.
+          # "Pure" is checked strictly: one parent, only the four manifests +
+          # CHANGELOG.md changed, and every manifest hunk is the version line.
+          # CHANGELOG.md is read by nothing in the build. Anything else in the
+          # diff falls back to gating the tagged SHA itself.
+          gate_sha="$sha" gate_reason="tagged commit"
+          if [ "$(git rev-list --no-walk --count --min-parents=2 "$sha")" = 0 ] \
+             && parent=$(git rev-parse -q --verify "$sha^"); then
+            allowed=$'CHANGELOG.md\nfrontend/package.json\nmain/package.json\npackage.json\nshared/package.json'
+            extra=$(git diff --name-only "$parent" "$sha" | grep -vxF "$allowed" || true)
+            stray=$(git diff -U0 "$parent" "$sha" -- package.json frontend/package.json main/package.json shared/package.json \
+              | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' \
+              | grep -vE '^[+-][[:space:]]*"version": "[^"]*",?$' || true)
+            if [ -z "$extra" ] && [ -z "$stray" ]; then
+              gate_sha="$parent" gate_reason="version-bump parent (the dev-tested commit)"
+            else
+              echo "Not a pure version bump — gating the tagged commit itself"
+              [ -n "$extra" ] && echo "  other files: $extra"
+              [ -n "$stray" ] && echo "  non-version manifest lines: $stray"
+            fi
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "gate_sha=$gate_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Stable release $version from ${sha:0:9} (tag $tag)"
+          echo "Stable release $version from ${sha:0:9} (tag $tag); gate = ${gate_sha:0:9}, the $gate_reason"
 
-      # The tag push follows the main push by seconds, so this SHA's Code
-      # Quality run is usually seconds old and still running. Wait for it.
+      # Normally the gate SHA is the version bump's parent — the commit the
+      # dev channel already built from a green run — so this returns at once.
+      # Otherwise it is the tagged SHA, whose run the main push started
+      # seconds earlier and is usually still in flight. Wait for it.
       - name: Wait for the Code Quality gate
         if: ${{ !inputs.allow_unverified_gate }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.resolve.outputs.sha }}
+          SHA: ${{ steps.resolve.outputs.gate_sha }}
         run: |
           set -euo pipefail
           API="repos/${{ github.repository }}/actions/workflows/quality.yml/runs?head_sha=$SHA"

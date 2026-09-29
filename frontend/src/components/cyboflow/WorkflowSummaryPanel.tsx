@@ -41,7 +41,7 @@ const SUBMIT_DELAY_MS = 300;
 /**
  * Tolerance for the per-model breakdown SHORTFALL check on a multi-model run.
  * `usage.perModelUsage` is folded from a live raw_events scan (see
- * insightsQueries.ts `fetchMaterializedRunModels`), while the run-level token
+ * insightsQueries.ts `applyMaterializedRunModels`), while the run-level token
  * totals used here come from the durable `run_usage` row (`rollupFromMaterializedRow`)
  * — so on a PARTIALLY pruned run the per-model sum can fall short of the
  * authoritative total even when 2+ models still resolve (multiModel stays
@@ -503,6 +503,13 @@ export function WorkflowSummaryPanel({
     const byLabel = new Map<string, ModelGroup>();
     const order: string[] = [];
     for (const step of stepModels) {
+      // Fan-out inner steps (a sprint's per-task lane chain, e.g. TASK-298's
+      // header row) describe a different axis than this run's phase/step
+      // pipeline — folding them in would inflate/duplicate the chip-sum count
+      // TASK-275's tests pin against the run's non-human step total. Excluded
+      // here, not upstream, so `runs.getStepModels` stays the one resolver
+      // both surfaces read verbatim.
+      if (step.fanOutStepId !== undefined) continue;
       let group = byLabel.get(step.label);
       if (group === undefined) {
         group = { label: step.label, family: step.family, steps: [] };
@@ -770,7 +777,7 @@ export function WorkflowSummaryPanel({
           <p className="text-xs text-text-muted">
             Which model each step was configured to run. Not a per-step cost split — the cost
             above is reported per run and cannot be attributed to individual steps. Human review
-            gates are excluded.
+            gates and per-task sprint-lane steps are excluded.
           </p>
           <div className="mt-3 space-y-3">
             {modelGroups.map((group) => (

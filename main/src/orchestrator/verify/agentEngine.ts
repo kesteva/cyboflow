@@ -9,6 +9,7 @@
  * probes, and DB are the same injected seams the scheduler already took.
  */
 import type { DatabaseLike, LoggerLike } from '../types';
+import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
 import {
   parseVerificationTaskV1,
   requireProvenRunbookEngaged,
@@ -17,6 +18,7 @@ import {
 } from '../../../../shared/types/visualVerification';
 import type {
   MobileAppSpec,
+  MobileDriveEngine,
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationExecutionMode,
@@ -35,7 +37,7 @@ import type {
 } from './verificationAgentRunner';
 import { classifyVerificationFailure } from './failureClassifier';
 import type { VerifyCapabilityStore } from './capabilityStore';
-import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
+import { isLearnedPinRecord, type VerifyRunbookStatusDetail, type VerifyRunbookStore } from './runbookStore';
 import { declineForRunbookStatus, taskDerivesEnvironment, taskHasRunnableSurface } from './bootstrapEligibility';
 import type { CapabilityBreakerFindingFn } from './verificationSchedulerContracts';
 import { raceWithAbort, verifyAgentSlot } from './verificationLeases';
@@ -48,10 +50,17 @@ import {
   skipReasonForRunbookDecline,
 } from './verificationSkipReasons';
 import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
+import { MobileTeardownHolds, trackSettle, type TrackedSettle } from './mobileTeardownHold';
 import { isBindableLeverName } from './runbookLevers';
 import { probeProjectSurface, tagInferredApp } from './projectSurfaceProbe';
 import type { VerificationRequestRow } from './verificationRequestRows';
 import type { TerminalDelivery } from './terminalDelivery';
+import {
+  classifyLearnedPinExit,
+  learnFromExploreSuccess,
+  learnedPromotionFinding,
+  type RunbookLearningFindingFn,
+} from './learnedRunbook';
 
 /** The §3.2 runbook-status resolver the scheduler is composed with (VerificationSchedulerDeps.runbookStatus). */
 export type RunbookStatusResolver = (
@@ -113,6 +122,15 @@ export function isExploreEligible(
  * the runner never produced would read as a check that ran; source `'runner'`
  * with no `failure_class` of its own never feeds the §3.1 classifier.
  */
+/**
+ * The capability-ledger key for an EFFECTIVE execution mode: the pin hash for a
+ * `pinned` run, `''` (the shared unpinned bucket, §A11) for `explore` and
+ * `legacy` — see {@link AgentEngine.capabilityRunbookKey}.
+ */
+export function capabilityKeyForMode(pinHash: string, mode: VerificationExecutionMode): string {
+  return mode === 'pinned' ? pinHash : '';
+}
+
 function executionModeEvidence(mode: VerificationExecutionMode): VerificationFailureEvidence {
   return { source: 'runner', check: 'execution-mode', detail: mode };
 }
@@ -183,6 +201,12 @@ export interface AgentEngineDeps {
   mobileToolchainProbe?: () => Promise<boolean>;
   runbookStatus: RunbookStatusResolver;
   runbookStore?: VerifyRunbookStore;
+  /**
+   * §A5 — files the non-blocking "recipe learned" / "learned recipe promoted" /
+   * "suggested runbook entry" notices (verdictDelivery's
+   * `createRunbookLearningFinding`). Absent ⇒ learning still happens, silently.
+   */
+  learningFinding?: RunbookLearningFindingFn;
   /** The terminal-write + delivery chokepoint every exit of the engine goes through. */
   delivery: TerminalDelivery;
   /** The scheduler's in-flight AbortController registry, SHARED BY REFERENCE (cancelForRun reaches in). */
@@ -199,6 +223,8 @@ export interface AgentEngineDeps {
   isProjectBudgetExhausted: (projectId: number) => boolean;
   incrementJudgeCallsUsed: (id: string) => void;
   portFromLease: (name: string | null) => number | null;
+  /** X-1 — the hard bound on holding a detached mobile runner's lease; defaults to `MOBILE_TEARDOWN_HOLD_BOUND_MS` (mobileTeardownHold.ts). */
+  mobileTeardownHoldMs?: number;
 }
 
 /**
@@ -232,6 +258,7 @@ export class AgentEngine {
   private readonly mobileToolchainProbe?: () => Promise<boolean>;
   private readonly runbookStatus: RunbookStatusResolver;
   private readonly runbookStore?: VerifyRunbookStore;
+  private readonly learningFinding?: RunbookLearningFindingFn;
   private readonly delivery: TerminalDelivery;
   private readonly inFlight: Map<string, AbortController>;
   private readonly agentGateColumnsForRow: AgentEngineDeps['agentGateColumnsForRow'];
@@ -241,6 +268,8 @@ export class AgentEngine {
   private readonly isProjectBudgetExhausted: (projectId: number) => boolean;
   private readonly incrementJudgeCallsUsed: (id: string) => void;
   private readonly portFromLease: (name: string | null) => number | null;
+  /** X-1 — mobile rows whose detached runner is still tearing down, each holding its simulator lease. */
+  private readonly teardownHolds: MobileTeardownHolds;
 
   constructor(deps: AgentEngineDeps) {
     this.db = deps.db;
@@ -260,6 +289,7 @@ export class AgentEngine {
     this.mobileToolchainProbe = deps.mobileToolchainProbe;
     this.runbookStatus = deps.runbookStatus;
     this.runbookStore = deps.runbookStore;
+    this.learningFinding = deps.learningFinding;
     this.delivery = deps.delivery;
     this.inFlight = deps.inFlight;
     this.agentGateColumnsForRow = deps.agentGateColumnsForRow;
@@ -269,6 +299,10 @@ export class AgentEngine {
     this.isProjectBudgetExhausted = deps.isProjectBudgetExhausted;
     this.incrementJudgeCallsUsed = deps.incrementJudgeCallsUsed;
     this.portFromLease = deps.portFromLease;
+    this.teardownHolds = new MobileTeardownHolds({
+      ...(deps.mobileTeardownHoldMs !== undefined ? { boundMs: deps.mobileTeardownHoldMs } : {}),
+      ...(deps.logger !== undefined ? { logger: deps.logger } : {}),
+    });
   }
 
   /** Read the request's `task_json` / `snapshot_sha` (migration 078); fail-soft to nulls. */
@@ -324,18 +358,20 @@ export class AgentEngine {
    *
    * `''` — migration 095's column default — is the genuinely-UNPINNED bucket:
    * degenerate pre-live requests that derive no environment, every legacy row
-   * from before 096, and every unpinned EXPLORE run
+   * from before 096, and every EXPLORE run
    * (docs/proposals/runbook-optional-verification.md §A1/§A11). It is a real
    * key, not a fallback for "we could not be bothered to look": those requests
    * share a capability story precisely because none of them runs a pinned
-   * revision's commands. The key is the row's pin COLUMN, not the mode, so the
-   * gate-(2) read (which runs before gate 3 picks a mode) and the settle-time
-   * write can never disagree — the one row that sees the difference is an
-   * explore run whose stale pin stopped reading proven, and it stays in its
-   * pin's bucket on both sides.
+   * revision's commands. The key therefore follows the EFFECTIVE execution
+   * mode, not the pin column: an explore run whose stale pin stopped reading
+   * proven runs none of that revision's commands, so it neither consults the
+   * dead revision's breaker nor feeds it — it lands in `''` with every other
+   * explore run. Gate (2) reads with the mode {@link evaluateAgentGates}
+   * resolves BEFORE it, and settlement writes with the mode the row ran under,
+   * which is the same answer, so the read and the write can never disagree.
    */
-  private capabilityRunbookKey(requestId: string): string {
-    return this.runbookPinForRow(requestId).hash ?? '';
+  private capabilityRunbookKey(requestId: string, mode: VerificationExecutionMode): string {
+    return capabilityKeyForMode(this.runbookPinForRow(requestId).hash ?? '', mode);
   }
 
   /**
@@ -484,6 +520,10 @@ export class AgentEngine {
    *     says the gate cost more than the guessing it retired. So (3) is now a
    *     SELECTOR:
    *       - a proof row ⇒ `'pinned'`, exempt from 3a and 3 as before;
+   *       - KILL SWITCH OFF + a LEARNED PIN (§A5: the row's pin names an
+   *         unproven draft of origin `'learned'`) ⇒ `'pinned'`: the row is that
+   *         draft's promotion proof. Not an exemption — with the switch on the
+   *         caller never reports one, and the row is gated as below;
    *       - KILL SWITCH OFF + an explore-eligible modality
    *         ({@link isExploreEligible}) + no usable pin (none, or one whose
    *         record no longer reads `proven` in the probe tree) ⇒ `'explore'`:
@@ -501,8 +541,11 @@ export class AgentEngine {
     task: VerificationTaskV1,
     modality: VerificationModality,
     setupProof: boolean,
-    /** This row's ledger key — see {@link capabilityRunbookKey}; non-empty iff the row carries a pin. */
-    runbookHash: string,
+    /**
+     * The row's own pin COLUMN (`''` when unpinned). NOT the ledger key: the key
+     * is derived from it and the effective mode below — see {@link capabilityRunbookKey}.
+     */
+    pinHash: string,
     /**
      * Migration 107 — a LANE-DRIVEN bootstrap proof. Exempt from gate (3) on the
      * identical §3.6 reasoning that exempts `setupProof`: this request exists to
@@ -518,7 +561,40 @@ export class AgentEngine {
      * read ONCE for this row from the live config by the caller.
      */
     requireProvenRunbook: boolean,
+    /**
+     * §A5 — the row's pin names an unproven LEARNED draft
+     * ({@link isLearnedPinRecord}); resolved by the caller only with the
+     * switch off. Such a row is the draft's promotion proof and runs PINNED
+     * (§A1's table: "a learned pin"). This is the selector's answer, not a
+     * gate-3 EXEMPTION: with the switch on the caller never sets it, so the
+     * row meets today's gate 3 exactly like any unproven pin.
+     */
+    learnedPin = false,
   ): Promise<string | AgentExecutionSelection> {
+    // (0) Resolve the EFFECTIVE mode's explore half first (§A1/§A11): the
+    // ledger key of gates (1)/(2) depends on it. A proof row is always pinned —
+    // it executes the draft it exists to prove — and so is a learned pin.
+    const pinned: AgentExecutionSelection = { mode: 'pinned', exploreRecord: null };
+    const hasPin = pinHash.length > 0;
+    // The pin's status, when the explore branch already had to read it — reused
+    // below so one row costs one probe of its tree, as before.
+    let pinStatus: VerifyRunbookStatusDetail | null = null;
+    let explore: AgentExecutionSelection | null = null;
+    if (!setupProof && !bootstrapProof && !requireProvenRunbook && !learnedPin) {
+      const record = modality === 'native-screen' ? null : this.exploreRecordFor(row.project_id, modality);
+      if (isExploreEligible(modality, record)) {
+        // A pin that drifted (or was demoted) since enqueue explores instead of
+        // skipping. One still reading proven is NOT selected here: "pinned:
+        // today's contract, unchanged" (§A1) includes gate 3a, so it falls
+        // through to the path below exactly as with the switch on.
+        if (hasPin) pinStatus = await this.runbookStatusForRow(row, modality);
+        if (pinStatus?.status !== 'proven') explore = { mode: 'explore', exploreRecord: record };
+      }
+    }
+    // Only an effective PINNED run keys on its pin; explore (a stale pin
+    // included) and legacy share `''` — see capabilityRunbookKey.
+    const runbookHash = capabilityKeyForMode(pinHash, explore?.mode ?? (hasPin ? 'pinned' : 'legacy'));
+
     // (1) Modalities with no executable path on the agent engine (§3.3), plus the
     // probe-conditional native-screen lane (§4).
     const unsupportedDetail = await this.unsupportedModalityDetail(modality);
@@ -535,25 +611,11 @@ export class AgentEngine {
       return `verification suppressed for ${modality}: ${suppression.reason}`;
     }
 
-    // (3) The execution-mode selector (runbook-optional-verification.md §A1).
-    // A proof run is always pinned: it executes the draft it exists to prove.
-    const pinned: AgentExecutionSelection = { mode: 'pinned', exploreRecord: null };
+    // (3) The execution-mode selector (runbook-optional-verification.md §A1),
+    // whose explore half step (0) already resolved.
     if (setupProof || bootstrapProof) return pinned;
-    const hasPin = runbookHash.length > 0;
-    // The pin's status, when the explore branch already had to read it — reused
-    // below so one row costs one probe of its tree, as before.
-    let pinStatus: VerifyRunbookStatusDetail | null = null;
-    if (!requireProvenRunbook) {
-      const record = modality === 'native-screen' ? null : this.exploreRecordFor(row.project_id, modality);
-      if (isExploreEligible(modality, record)) {
-        // A pin that drifted (or was demoted) since enqueue explores instead of
-        // skipping. One still reading proven is NOT returned here: "pinned:
-        // today's contract, unchanged" (§A1) includes gate 3a, so it falls
-        // through to the path below exactly as with the switch on.
-        if (hasPin) pinStatus = await this.runbookStatusForRow(row, modality);
-        if (pinStatus?.status !== 'proven') return { mode: 'explore', exploreRecord: record };
-      }
-    }
+    if (!requireProvenRunbook && learnedPin) return pinned;
+    if (explore !== null) return explore;
 
     // The §3.2 degrade path, unchanged — the kill switch is on, the modality
     // cannot explore (native-screen; cdp-app with no data-dir lever), or the row
@@ -654,6 +716,16 @@ export class AgentEngine {
       );
       return { work: null };
     }
+    // X-1 — this request id's previous attempt is still tearing down its
+    // simulator (a same-id §A5 requeue): leasing it now would share its
+    // request dir with a runner that is about to delete it. Stay queued; the
+    // hold nudges the drain when that teardown settles.
+    if (this.teardownHolds.isHeld(row.id)) {
+      this.logger?.debug('[VerificationScheduler] previous attempt still tearing down; leaving queued', {
+        requestId: row.id,
+      });
+      return { work: null };
+    }
 
     const task = this.taskForAgentRow(row.id, input);
 
@@ -669,14 +741,20 @@ export class AgentEngine {
     // the kill switch that picks the mode and the explore floor that sizes its
     // deadline come from the same snapshot, never from the boot-time `config`.
     const live = this.liveConfig?.() ?? this.config;
+    // §A5 — a row pinned to an unproven LEARNED draft is that draft's
+    // promotion proof. Resolved ONCE here, and only with the kill switch off:
+    // with it on no learned pin is honoured and the row is gated as before.
+    const learnedPin =
+      !gate.setupProof && !gate.bootstrapProof && !requireProvenRunbookEngaged(live) && this.isLearnedPin(row, modality);
     const gateResult = await this.evaluateAgentGates(
       row,
       task,
       modality,
       gate.setupProof,
-      this.capabilityRunbookKey(row.id),
+      this.runbookPinForRow(row.id).hash ?? '',
       gate.bootstrapProof,
       requireProvenRunbookEngaged(live),
+      learnedPin,
     );
     if (typeof gateResult === 'string') {
       await this.delivery.markTerminalAndDeliver(
@@ -716,6 +794,10 @@ export class AgentEngine {
       leasePool: this.leasePool,
       modality,
       mobileSimSlots: this.config.mobileSimSlots,
+      // §B3 — the SAME live snapshot as every other per-row knob: the lease
+      // decision and the rung the runner drives must read one value, or a
+      // Settings flip lets two rows open Xcode sessions side by side.
+      mobileDriveEngine: live.mobileDriveEngine,
       devServerPorts: this.config.devServerPorts,
       portFromLease: (name) => this.portFromLease(name),
       requestId: row.id,
@@ -779,8 +861,22 @@ export class AgentEngine {
         gate.bootstrapProof,
         selection,
         live.exploreDeadlineFloorMs,
+        learnedPin,
+        live.mobileDriveEngine,
       ),
     };
+  }
+
+  /**
+   * §A5 — does this row's pin name an unproven LEARNED draft? Read by hash
+   * through the store (`getByHash` carries `origin`), so a draft discarded or
+   * re-registered since enqueue no longer counts and the row falls to the
+   * ordinary stale-pin handling. `false` with no store or no pin.
+   */
+  private isLearnedPin(row: VerificationRequestRow, modality: VerificationModality): boolean {
+    const hash = this.runbookPinForRow(row.id).hash;
+    if (hash === null || !this.runbookStore) return false;
+    return isLearnedPinRecord(this.runbookStore.getByHash(row.project_id, modality, hash));
   }
 
   /**
@@ -870,6 +966,10 @@ export class AgentEngine {
     selection: AgentExecutionSelection,
     /** The live `exploreDeadlineFloorMs`, applied only when `selection.mode` is `'explore'` (§A1.1). */
     exploreFloorMs: number,
+    /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
+    learnedPin = false,
+    /** §B3 — the live engine the lease decision used; handed to the runner so it drives with the same value. */
+    mobileDriveEngine?: MobileDriveEngine,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
@@ -903,6 +1003,9 @@ export class AgentEngine {
     }
 
     let batchLease: LeaseHandle | null = null;
+    // X-1 — the runner's own settlement, observed so the `finally` can tell a
+    // detached (still-tearing-down) mobile runner from one that finished.
+    let runner: TrackedSettle | null = null;
     try {
       // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
       // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
@@ -1017,13 +1120,16 @@ export class AgentEngine {
         // shape alone could disagree with the one that just decided whether this
         // request may touch the screen at all.
         modality,
+        ...(modality === 'mobile' && mobileDriveEngine !== undefined ? { mobileDriveEngine } : {}),
         signal: controller.signal,
       };
 
       // ABORT-BOUNDED (R1 #1a): a runner that never settles can no more hang the
       // drain than a hung capture — race it against the deadline/cancel signal.
+      const running = this.agentRunner!.run(req);
+      runner = trackSettle(running);
       const result = await raceWithAbort(
-        this.agentRunner!.run(req),
+        running,
         controller.signal,
         'agent',
         this.logger,
@@ -1045,6 +1151,13 @@ export class AgentEngine {
       }
 
       if (controller.signal.aborted) {
+        // §A5 — a learned recipe that ran out the deadline did not stand the
+        // deliverable up: discard it and re-dispatch the row once in explore.
+        // A cancel is not a verdict on the recipe and keeps its own path.
+        if (learnedPin && timedOut && (await this.exitLearnedPin(row, modality, 'timeout')) !== 'declined') {
+          requeued = true;
+          return;
+        }
         await this.delivery.markTerminalAndDeliver(
           row,
           'timeout',
@@ -1071,6 +1184,7 @@ export class AgentEngine {
         bootstrapProof,
         task,
         selection.mode,
+        learnedPin,
       );
       requeued = settled === 'requeued';
     } catch (err) {
@@ -1094,6 +1208,11 @@ export class AgentEngine {
       if (timedOut && !setupProof) {
         this.incrementJudgeCallsUsed(row.id);
       }
+      // §A5 — the same learned-recipe deadline exit as the post-race branch.
+      if (learnedPin && timedOut && (await this.exitLearnedPin(row, modality, 'timeout')) !== 'declined') {
+        requeued = true;
+        return;
+      }
       await this.delivery.markTerminalAndDeliver(
         row,
         aborted ? 'timeout' : 'skipped',
@@ -1115,10 +1234,20 @@ export class AgentEngine {
       if (portLease !== null && leasedPort !== null) {
         await this.releaseOrQuarantinePort(portLease, leasedPort);
       }
-      // The mobile slot releases UNCONDITIONALLY too, and for the screen lease's
-      // reason: the per-request simulator is created and destroyed inside the
-      // runner, so nothing this deployment leaves behind can occupy the slot.
-      mobileLease?.release();
+      // The mobile slot is created and destroyed inside the runner, so it frees
+      // once the RUNNER is done with it — which, after an abort detached it, is
+      // later than now (X-1): hand it to a teardown hold that releases it (and
+      // nudges) when the runner settles, bounded. Otherwise release it here.
+      let heldForTeardown = false;
+      if (mobileLease !== null && runner !== null && !runner.isSettled()) {
+        heldForTeardown = true;
+        this.teardownHolds.hold(row.id, runner, () => {
+          mobileLease.release();
+          this.nudge();
+        });
+      } else {
+        mobileLease?.release();
+      }
       // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
       // port (which a leaked dev server can keep genuinely occupied past
       // teardown), the display is not a resource this deployment can leave dirty
@@ -1128,8 +1257,9 @@ export class AgentEngine {
       agentLease.release();
       // §A3 — only now, with every lease back in the pool and the in-flight
       // controller gone, can the requeued row be drained again; nudging before
-      // the release would find its own slot/port/simulator still held.
-      if (requeued) this.nudge();
+      // the release would find its own slot/port/simulator still held. A held
+      // mobile row is nudged by its teardown hold instead (X-1).
+      if (requeued && !heldForTeardown) this.nudge();
     }
   }
 
@@ -1196,7 +1326,19 @@ export class AgentEngine {
     task: VerificationTaskV1,
     /** Gate (3)'s mode for this row (§A1). */
     mode: VerificationExecutionMode,
+    /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
+    learnedPin = false,
   ): Promise<'settled' | 'requeued'> {
+    // §A5 LEARNED-PIN EXITS, ahead of the A3 channel: for a promotion proof,
+    // a `wrong_environment` is just one more way the recipe failed to stand the
+    // deliverable up. `'discard'` drops the draft and re-dispatches the row once
+    // in explore (the budget A3 uses — see exitLearnedPin); `'promote'`,
+    // `'keep'` and `'deliver'` settle through the ordinary path below, which
+    // flips a passing proof to proven before it delivers.
+    if (learnedPin && classifyLearnedPinExit(result) === 'discard') {
+      const exit = await this.exitLearnedPin(row, modality, this.learnedFailureDetail(result));
+      if (exit !== 'declined') return exit === 'requeued' ? 'requeued' : 'settled';
+    }
     if (result.redispatch !== undefined) {
       return this.settleWrongEnvironment(row, input, task, result, result.redispatch, modality, mode, {
         setupProof,
@@ -1283,9 +1425,23 @@ export class AgentEngine {
     //
     // Flipping first makes "the row is terminal" mean "the record has already
     // been decided", which is what every reader assumed it meant.
-    if ((setupProof || bootstrapProof) && status === 'passed') {
+    // §A5 — a LEARNED PIN's pass is the second (and only other) way in: the
+    // lane's ordinary request executed the learned draft verbatim and passed.
+    // The kill switch is re-read LIVE for it (Codex A5 review F4): flipped on
+    // mid-run, the verdict still lands but the draft stays unproven and no
+    // promotion finding is filed. Setup/bootstrap proofs are unaffected.
+    let promoted = false;
+    let learnedPromotes = learnedPin;
+    if (learnedPin && status === 'passed' && requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)) {
+      learnedPromotes = false;
+      this.logger?.info('[VerificationScheduler] kill switch engaged mid-run; learned draft NOT promoted (verdict unaffected)', {
+        requestId: row.id,
+        modality,
+      });
+    }
+    if ((setupProof || bootstrapProof || learnedPromotes) && status === 'passed') {
       try {
-        await this.recordRunbookProof(row, modality, result, snapshotSha);
+        promoted = await this.recordRunbookProof(row, modality, result, snapshotSha);
       } catch (err) {
         // Swallowed deliberately: the verdict below is the load-bearing act, and
         // a proof-recording failure may not prevent it from being written.
@@ -1330,9 +1486,49 @@ export class AgentEngine {
       result,
       classified?.failureClass ?? null,
       evidenceDetail,
-      this.capabilityRunbookKey(row.id),
+      this.capabilityRunbookKey(row.id, mode),
     );
+
+    if (learnedPin && promoted) await this.fileLearnedPromotion(row, modality);
+
+    // §A5 LEARN FROM SUCCESS — after the verdict is written, never before it,
+    // and never able to change it. Only a terminal `passed` EXPLORE request
+    // learns (the floor verified the surface and the snapshot is unmutated —
+    // either would have capped it); never low_confidence, unverifiable,
+    // wrong_environment or fail, never pinned or legacy. The runner validated
+    // the recipe (`learnedRecipe`); the kill switch is re-read LIVE so a flip
+    // mid-run stops learning at once.
+    if (
+      mode === 'explore' &&
+      status === 'passed' &&
+      snapshotSha !== null &&
+      result.learnedRecipe?.ok === true &&
+      !requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)
+    ) {
+      await this.learnFromSuccess(row, modality, result.learnedRecipe);
+    }
     return 'settled';
+  }
+
+  /** §A5 — hand a validated explore recipe to {@link learnFromExploreSuccess} (fail-soft). */
+  private async learnFromSuccess(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    recipe: Extract<NonNullable<VerificationAgentRunResult['learnedRecipe']>, { ok: true }>,
+  ): Promise<void> {
+    if (!this.runbookStore) return;
+    const worktreePath = this.worktreePathForRun(row.run_id);
+    await learnFromExploreSuccess({
+      store: this.runbookStore,
+      status: this.runbookStatus,
+      worktreePath,
+      probePath: worktreePath ?? this.projectPathFor(row.project_id),
+      row,
+      modality,
+      recipe: { entry: recipe.entry, ...(recipe.levers !== undefined ? { levers: recipe.levers } : {}) },
+      ...(this.learningFinding ? { finding: this.learningFinding } : {}),
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
   }
 
   /**
@@ -1528,6 +1724,104 @@ export class AgentEngine {
   }
 
   /**
+   * §A5 — the "anything else" exit of a LEARNED-PIN request: the learned
+   * recipe could not be shown to stand the deliverable up (build_failed,
+   * launch_failed, an identity failure, a timeout, low_confidence,
+   * unverifiable, a runbook mismatch, wrong_environment — see
+   * `classifyLearnedPinExit`). Three steps:
+   *
+   *   1. CAS-DISCARD the draft the row pinned (`discardLearnedDraft` on the
+   *      row's hash + version, this row excepted from the live-pin guard) so
+   *      the next passing explore run can learn afresh. A record that moved
+   *      since (relearned, re-registered, promoted) is someone else's and
+   *      survives; another live request still pinning it keeps it too.
+   *   2. CLEAR THE ROW'S PIN COLUMNS and requeue it, in the SAME guarded
+   *      UPDATE A3 uses (`WHERE status='running'`, SQLite's own
+   *      `CURRENT_TIMESTAMP`, no attempt bump, no terminal): with no pin the
+   *      re-drain's gate (3) selects EXPLORE, and the lane gets that verdict.
+   *   3. Stamp A3's engine-only {@link REDISPATCHED_FROM_KEY} marker, so the
+   *      ONE-SHOT BUDGET IS SHARED with `wrong_environment`: the explore
+   *      re-run can never itself be re-dispatched.
+   *
+   * `'declined'` when the budget is already spent (the row carries the marker)
+   * or there is no stored task to carry it — the caller then settles the
+   * result through the ordinary path. `'cancelled'` when a cancel sweep won
+   * the requeue race and owns the row. The task itself is carried unchanged:
+   * it is the SAME row re-dispatched, so the learned build/serve it was
+   * merged with ride along as explore HINTS.
+   */
+  private async exitLearnedPin(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    why: string,
+  ): Promise<'requeued' | 'cancelled' | 'declined'> {
+    const stored = parseRawTaskObject(this.agentColumnsForRow(row.id).taskJson);
+    if (stored === null || stored[REDISPATCHED_FROM_KEY] !== undefined) return 'declined';
+    const pin = this.runbookPinForRow(row.id);
+    const discarded =
+      pin.hash !== null && pin.version !== null
+        ? (this.runbookStore?.discardLearnedDraft(row.project_id, modality, pin.hash, pin.version, row.id) ?? null)
+        : null;
+    const changes = this.db
+      .prepare(
+        `UPDATE verification_requests
+         SET status='queued', runbook_hash=NULL, runbook_local_version=NULL, task_json=?,
+             leased_at=NULL, enqueued_at=CURRENT_TIMESTAMP
+         WHERE id=? AND status='running'`,
+      )
+      .run(JSON.stringify({ ...stored, [REDISPATCHED_FROM_KEY]: modality }), row.id).changes;
+    this.logger?.info('[VerificationScheduler] learned recipe failed its promotion — draft discarded, request explores (§A5)', {
+      requestId: row.id,
+      modality,
+      why,
+      runbookHash: pin.hash,
+      runbookLocalVersion: pin.version,
+      discarded: discarded === null ? null : discarded.ok ? 'discarded' : discarded.error,
+      requeued: changes === 1,
+    });
+    return changes === 1 ? 'requeued' : 'cancelled';
+  }
+
+  /** §A5 — a one-line account of why a learned-pin request failed its promotion, for the log. */
+  private learnedFailureDetail(result: VerificationAgentRunResult): string {
+    if (result.redispatch !== undefined) return `wrong_environment (needs ${result.redispatch.modality})`;
+    const outcome = result.report?.outcome;
+    return `${result.status}${outcome !== undefined ? `/${outcome}` : ''}${result.errorMessage ? `: ${result.errorMessage}` : ''}`;
+  }
+
+  /**
+   * §A5 review surface — the learned-pin request just PROMOTED its draft to
+   * proven: file the non-blocking notice naming the exact commands, now read
+   * back off the proven record (its entry notes carry the request it was
+   * learned from). Fail-soft; the verdict is already written.
+   */
+  private async fileLearnedPromotion(row: VerificationRequestRow, modality: VerificationModality): Promise<void> {
+    try {
+      const pin = this.runbookPinForRow(row.id);
+      const record = pin.hash !== null ? (this.runbookStore?.getByHash(row.project_id, modality, pin.hash) ?? null) : null;
+      if (pin.hash === null || record === null) return;
+      this.logger?.info('[VerificationScheduler] learned verification recipe promoted to proven (§A5)', {
+        requestId: row.id,
+        modality,
+        runbookHash: pin.hash,
+      });
+      await this.learningFinding?.(
+        learnedPromotionFinding({
+          row,
+          modality,
+          hash: pin.hash,
+          entry: record.runbook.modalities[modality as VerifyRunbookModality],
+        }),
+      );
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] learned-promotion finding failed (fail-soft)', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * §A2/§A3: a `mobile` re-dispatch with no `app` on the report or the task
    * runs the project surface probe (`projectSurfaceProbe.ts`) over the run's
    * worktree (the deploy that just returned required one) to infer the bundle
@@ -1660,9 +1954,9 @@ export class AgentEngine {
     modality: VerificationModality,
     result: VerificationAgentRunResult,
     snapshotSha: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const store = this.runbookStore;
-    if (!store) return;
+    if (!store) return false;
     if (snapshotSha === null) {
       this.logger?.warn(
         '[VerificationScheduler] setup proof refused: it ran in the dirty-worktree fallback (§5.3), so the record stays a draft',
@@ -1673,7 +1967,7 @@ export class AgentEngine {
           provisionMode: result.provisionMode ?? null,
         },
       );
-      return;
+      return false;
     }
     const pin = this.runbookPinForRow(row.id);
     if (pin.hash === null || pin.version === null) {
@@ -1681,7 +1975,7 @@ export class AgentEngine {
         requestId: row.id,
         modality,
       });
-      return;
+      return false;
     }
     try {
       const proofJson = JSON.stringify({
@@ -1752,7 +2046,7 @@ export class AgentEngine {
           inputHashObserved: fresh !== undefined ? fresh.inputHash !== null : null,
           probePath,
         });
-        return;
+        return true;
       }
       this.logger?.warn('[VerificationScheduler] setup proof could not be recorded (verdict unaffected)', {
         requestId: row.id,
@@ -1769,6 +2063,7 @@ export class AgentEngine {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    return false;
   }
 
   /**

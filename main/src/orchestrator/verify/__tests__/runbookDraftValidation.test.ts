@@ -85,6 +85,9 @@ describe('scriptNameForCommand', () => {
     ['pnpm dev --port ${PORT}', 'dev'],
     ['pnpm --silent run dev', 'dev'],
     ['  pnpm   run   preview  ', 'preview'],
+    ['PORT=${PORT} npm run dev', 'dev'],
+    ['PORT=$VERIFY_PORT HOST=${PORT} pnpm dev', 'dev'],
+    ['CYBOFLOW_DIR="$VERIFY_DATA_DIR" pnpm electron', 'electron'],
   ])('resolves `%s` to the script `%s`', (command, expected) => {
     expect(scriptNameForCommand(command)).toBe(expected);
   });
@@ -98,7 +101,12 @@ describe('scriptNameForCommand', () => {
     ['a ; chain', 'pnpm run build; pnpm run preview'],
     ['a pipe', 'pnpm run build | tee log'],
     ['a subshell', 'pnpm run $(cat which-script)'],
-    ['an env-var prefix', 'PORT=5173 pnpm run dev'],
+    ['an env-var prefix with a literal value', 'PORT=5173 pnpm run dev'],
+    ['an env-var prefix with a non-lever expansion', 'PORT=$HOME pnpm run dev'],
+    ['a lever value with a suffix', 'DATA="$VERIFY_DATA_DIR/x" pnpm run dev'],
+    ['NODE_OPTIONS set to a lever', 'NODE_OPTIONS=${PORT} pnpm run dev'],
+    ['DYLD_ set to a lever', 'DYLD_INSERT_LIBRARIES=$VERIFY_DATA_DIR pnpm run dev'],
+    ['only assignments, no command', 'PORT=${PORT}'],
     ['a flag in the script position', 'pnpm --version'],
     ['a value-taking pm flag that shifts the script position', 'pnpm --filter web dev'],
   ])('does NOT resolve %s', (_label, command) => {

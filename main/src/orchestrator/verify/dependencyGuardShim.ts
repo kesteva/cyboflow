@@ -15,7 +15,8 @@
  * either denies it (stderr + exit 126) or prints the path of the REAL tool
  * binary found further down PATH; the wrapper then `exec`s that binary itself. The
  * caller (a sibling module — see verificationAgentRunner.ts) prepends the
- * returned `binDir` onto the agent's PATH for BOTH runtimes and in EVERY mode
+ * returned `binDir` onto the agent's PATH for BOTH runtimes on EXPLORE runs only
+ * — pinned and legacy keep the pre-explore PATH, so the kill switch restores it
  * (defence in depth, not a sandbox — see below): on Claude it sits behind
  * `canUseTool`, which already denies the same commands, so the shim there is
  * redundant-on-purpose; on Codex it is the ONLY guard.
@@ -24,7 +25,8 @@
  * (adversarial-review fix). Because pnpm/npm only PREPEND `node_modules/.bin`
  * to a script's PATH, the shim also sits in front of every package-manager
  * call NESTED inside a project script — calls no enqueue check or
- * `canUseTool` ever saw, in pinned and legacy requests too. The first cut ran
+ * `canUseTool` ever saw (and, when this was written, in pinned and legacy
+ * requests too). The first cut ran
  * `FORBIDDEN_DEP_COMMAND_PATTERN` over the joined argv there, and that
  * pattern's `\b` verb match accepts `:`, `-` and `.` as boundaries, so a
  * `build` script running `pnpm ci:prepare`, a `pnpm update-snapshots` or a
@@ -54,7 +56,7 @@
  *
  * WHY THE WRAPPER EXECS AND guard.js ONLY DECIDES (adversarial-review fix). The
  * first cut had guard.js `spawnSync` the real tool and wait on it. Because the
- * shim sits in front of EVERY mode — pinned and legacy included — that changed
+ * shim sits in front of every command an explore request runs, that changed
  * what a caller's pid IS: `pnpm dev & … kill $!` (or `timeout 60 pnpm build`)
  * signalled the guard's node process, which died without forwarding, and the
  * real dev server or build carried on ORPHANED — holding the leased port past

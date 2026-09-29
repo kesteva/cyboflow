@@ -14,6 +14,7 @@ import type {
   NativeGrantProbe,
   VerificationModality,
   VerifyProbeRow,
+  XcodeAccessApproval,
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
@@ -334,6 +335,19 @@ export interface VerifyHostProbesLike {
    * so no state of this row has an action behind it.
    */
   mobileSimulator?: () => Promise<VerifyProbeRow>;
+  /**
+   * The `'xcode-mcp'` row (runbook-optional-verification.md §B2), already
+   * folded by `mobileComposition` for the same standalone-typecheck reason as
+   * {@link mobileSimulator}. The router keeps the fail-open discipline over it.
+   */
+  xcodeMcp?: () => Promise<VerifyProbeRow>;
+  /**
+   * §B8 "Approve Xcode access": opens cyboflow's scaffold project through the
+   * Xcode bridge from the main process (raising Xcode's prompt while the user is
+   * present), then returns the commands to SHOW. Never runs sudo. Absent off
+   * macOS.
+   */
+  approveXcodeAccess?: () => Promise<XcodeAccessApproval>;
 }
 
 /**

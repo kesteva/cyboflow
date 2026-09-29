@@ -35,7 +35,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access, readFile, realpath, rm, lstat } from 'node:fs/promises';
 import { createReadStream, readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, delimiter, join } from 'node:path';
@@ -52,9 +52,9 @@ import {
   type VerificationType,
   type AttestationSpec,
   type MobileAppSpec,
+  type MobileDriveEngine,
   type VerificationExecutionMode,
   type VerificationRunProvenance,
-  DEFAULT_MOBILE_PRODUCT_GLOB,
   UNVERIFIABLE_COERCION_NOTE,
   normalizeVerificationReportV1,
   resolveTaskModality,
@@ -71,7 +71,16 @@ import {
   type ProvisionSnapshotOptions,
 } from './snapshotProvisioner';
 import { runAgentPreflight, type AgentPreflightResult } from './preflight';
-import type { PinnedRunbookRecord } from './runbookStore';
+import { isLearnedPinRecord, type PinnedRunbookRecord } from './runbookStore';
+import { validateLearnedRecipe, type LearnedRecipeValidation } from './learnedRecipe';
+import {
+  HARNESS_NONCE_MARKER_SPEC,
+  injectNonceMarker,
+  isHarnessNonceMarkerSpec,
+  type NonceMarkerFs,
+  type NonceMarkerInjection,
+} from './webNonceMarker';
+import { probeLearnedPinSurface } from './learnedRunbook';
 import type {
   VerifyRunbookModality,
   VerifyRunbookModalityEntry,
@@ -103,6 +112,15 @@ import {
   type MobileAttestationContext,
 } from './harnessAttestation';
 import type { MobileSimulatorHandle, MobileSimulatorSessionFactory } from './mobileSimulatorSession';
+import {
+  acquireMobileSimulator,
+  buildMobileDriveEnv,
+  planXcodeIntent,
+  type MobileXcodeDeps,
+} from './mobileDriveRung';
+import type { MobileDriveRung } from './xcode/driveEngineSelection';
+import type { XcodeDriveSession } from './xcode/xcodeDriveSession';
+import { XCODE_LEDGER_CAP_MESSAGE, xcodePassEvidenceReasons } from './xcode/xcodePassEvidence';
 import type { XcodeToolchainBackend } from '../../services/visualVerify/xcodeToolchainBackend';
 import {
   composeVerifyUserPrompt,
@@ -112,6 +130,7 @@ import {
 } from './verifyHarnessContract';
 import { materializeDependencyGuardShim, type DependencyGuardShimOptions } from './dependencyGuardShim';
 import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
+import { raceWithAbort } from './verificationLeases';
 
 // The contract text moved to its own module when it became mode-conditional
 // (runbook-optional-verification.md §A1.1); re-exported so every existing
@@ -175,7 +194,8 @@ export interface VerificationAgentQueryArgs {
    *     lifecycle is harness-owned).
    *   - `executionMode`: the request's resolved mode, which the dependency
    *     deny message keys on (explore and pinned tell the agent different
-   *     things about who owns the dependency tree). Carried in every mode; it
+   *     things about who owns the dependency tree), and the Codex seam turns
+   *     login shells off on it for explore only. Carried in every mode; it
    *     refuses nothing by itself.
    */
   guards?: { denyProcessKill?: boolean; denySimctlLifecycle?: boolean; executionMode?: VerificationExecutionMode };
@@ -346,6 +366,15 @@ export interface VerificationAgentRequest {
    * Drives {@link reclassifyInferredAppFailure}. Absent ⇒ false.
    */
   appInferred?: boolean;
+  /**
+   * §B3 — the `mobileDriveEngine` the scheduler resolved from the LIVE config
+   * for this row, and already used to decide whether the row took the count-1
+   * `verify:xcode` lease. The runner drives with THIS value rather than
+   * re-reading the knob, so a Settings flip between lease and deploy can never
+   * put an unleased row on the xcode rung. Absent ⇒ the live knob (fakes, and
+   * callers that took no lease decision).
+   */
+  mobileDriveEngine?: MobileDriveEngine;
   /** The scheduler's per-request deadline/cancel signal. */
   signal: AbortSignal;
 }
@@ -468,6 +497,25 @@ export interface VerificationAgentRunResult {
    * `'deliverable'`.
    */
   foreignSurface?: boolean;
+  /**
+   * §A5 "learn from success" — the harness's validation of the recipe a
+   * PASSING EXPLORE request reported (`report.recipeJson`), present only on
+   * that shape: `status` is `'passed'` (so the attestation floor verified the
+   * surface and the snapshot was not mutated — either would have capped it),
+   * the run was in snapshot mode, and the agent returned a recipe. Validated
+   * HERE because only the runner holds the snapshot's `package.json`, the
+   * leased port/UDID and the snapshot path the rules check against (see
+   * learnedRecipe.ts). Advisory: the engine decides whether anything is
+   * learned, and neither answer changes this result's verdict.
+   */
+  learnedRecipe?: LearnedRecipeValidation;
+  /**
+   * §A5 (Codex A5 review F3) — on a LEARNED PIN whose report is `fail` only:
+   * whether the harness's own identity/binding probe saw the surface stand up
+   * (see `probeLearnedPinSurface`). Harness-owned and off the verdict path;
+   * `classifyLearnedPinExit` keeps the draft only when it is `true`.
+   */
+  surfaceVerified?: boolean;
 }
 
 /**
@@ -502,7 +550,19 @@ export interface VerificationAgentRunnerMobileDeps {
    * a gate that probed one Maestro while the driver shelled another is the exact
    * 2026-08-05 peekaboo lesson this tier was told not to repeat.
    */
-  toolchain: Pick<XcodeToolchainBackend, 'resolveMaestroBin' | 'resolvePinFlag' | 'healthCheck'>;
+  toolchain: Pick<XcodeToolchainBackend, 'resolveMaestroBin' | 'resolvePinFlag' | 'healthCheck'> &
+    Partial<Pick<XcodeToolchainBackend, 'resolveJavaHome'>>;
+  /**
+   * §B3 — the LIVE `mobileDriveEngine` knob (read per request, like the other
+   * live verify knobs). Absent ⇒ `'auto'`.
+   */
+  driveEngine?: () => MobileDriveEngine;
+  /**
+   * §B2/§B4 — the Xcode 27 DeviceInteraction rung's collaborators: the
+   * spawn-free probe and the resolved `xcrun`. Absent ⇒ under `auto`/`xcode`
+   * the rung degrades with `xcode-unavailable` (recorded, never skipped).
+   */
+  xcode?: MobileXcodeDeps;
   /** The cyboflow data dir this instance owns; `verify-mobile/<requestId>` is created under it. */
   dataDir: string;
   /** Optional device-type pin from config (`mobileSimDeviceType`). Absent ⇒ the newest compatible iPhone. */
@@ -729,8 +789,22 @@ export interface VerificationAgentRunnerDeps {
     hash: string,
   ) => PinnedRunbookRecord | null;
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
-  /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
-  checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
+  /**
+   * `git diff --quiet HEAD` on the snapshot — true when the verifier mutated
+   * tracked sources. `exempt` is the harness's own nonce-marker edit
+   * (`webNonceMarker.ts`): that one file is unmutated while it still holds the
+   * injected content (or was put back to HEAD).
+   */
+  checkSnapshotMutated?: (worktreePath: string, exempt?: SnapshotMutationExemption) => Promise<boolean>;
+  /** The fs seam the web nonce-marker injection reads and writes through; defaults to node:fs. */
+  nonceMarkerFs?: NonceMarkerFs;
+  /**
+   * §A5 — read one file's text, `null` when it is absent or unreadable. Used
+   * for the snapshot root's `package.json` a learned web/cdp-app recipe is
+   * validated against (its commands must be scripts the snapshot declares).
+   * Defaults to `fs.readFile`; faked in tests.
+   */
+  readTextFile?: (absPath: string) => Promise<string | null>;
   fileExists?: (absPath: string) => Promise<boolean>;
   /**
    * Write the `$VERIFY_DRIVER` wrapper script; returns its absolute path.
@@ -752,7 +826,7 @@ export interface VerificationAgentRunnerDeps {
    * §A1.4 (F8) — materialize the dependency-guard PATH SHIM for one request:
    * wrappers for the package managers that refuse `FORBIDDEN_DEP_COMMAND_PATTERN`
    * subcommands and otherwise exec the real binary. `binDir` is prepended to the
-   * agent's PATH in EVERY mode and on BOTH runtimes; `null` (win32, or any
+   * agent's PATH on EXPLORE runs only, on BOTH runtimes; `null` (win32, or any
    * failure) ⇒ no prepend. Defaults to `dependencyGuardShim`'s real
    * implementation; faked in tests. Defence in depth, NOT a sandbox: the agent
    * can still invoke a binary by absolute path — Claude keeps its live
@@ -1159,14 +1233,19 @@ export const ATTESTATION_EXPLORE_CAP_MESSAGE = 'explore mode — capped at low_c
 export type AttestationFloorOutcome =
   /** The declared channel was probed and matched (or is true by construction). */
   /**
-   * `serve-binding` is EXPLORE-only (§A1.2, relaxed 2026-09-25): no channel was
-   * declared, but the kernel-truth binding held — the port's listener is in the
-   * process group the driver started for the VERBATIM composed `serve.cmd`.
+   * `serve-binding` (§A1.2): the kernel-truth binding held — the port's listener
+   * is in the process group the driver started for the VERBATIM composed
+   * `serve.cmd`. Reached by a DECLARED `serve-binding` spec in any mode, and in
+   * explore also by an undeclared channel (relaxed 2026-09-25).
    */
-  | { kind: 'verified'; channel: AttestationSpec['kind'] | 'serve-binding'; detail: string }
+  | { kind: 'verified'; channel: AttestationSpec['kind']; detail: string }
   /** A channel WAS declared but the harness's own probe did not verify it. */
   | { kind: 'missing'; detail: string }
-  /** No channel was declared at all — the pass is advisory, capped at low_confidence. */
+  /**
+   * No channel was declared at all — or a declared `serve-binding` on a task
+   * that composed no `serve.cmd`, which has nothing to bind and so is no channel
+   * either (§A1.2). The pass is advisory, capped at low_confidence.
+   */
   | { kind: 'uncapped'; detail: string }
   /**
    * EXPLORE only (§A1.2): the harness's probe verified, but explore does not let
@@ -1198,11 +1277,19 @@ export type AttestationFloorOutcome =
  * channel needs no composer's declaration (an inferred or undeclared app never
  * carries one — without this, explore mobile could never reach `passed`).
  * Pinned rows keep reading the declaration only; their runbook supplies it.
+ *
+ * An EXPLORE web run whose snapshot the harness stamped with its nonce marker
+ * (`webNonceMarker.ts`, `implicit.harnessMarker` — set only when the task
+ * declared nothing or `serve-binding`, see {@link markerUpgradesDeclaration})
+ * gets that marker's `dom-marker` spec — the floor then falls back to the
+ * binding-only verdict when it does not verify (see
+ * {@link evaluateAttestationFloorForMode}).
  */
 export function effectiveAttestationSpec(
   task: VerificationTaskV1,
-  implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean },
+  implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean; harnessMarker?: boolean },
 ): AttestationSpec | null {
+  if (implicit?.harnessMarker === true) return HARNESS_NONCE_MARKER_SPEC;
   if (task.attestation !== undefined) return task.attestation;
   if (isDegenerateFileTarget(task)) return { kind: 'file-identity' };
   if (implicit?.executionMode === 'explore' && implicit.mobileLeased && task.app !== undefined) {
@@ -1218,7 +1305,7 @@ export function effectiveAttestationSpec(
  * word for `file-identity` on any other shape (§A1.2 — see
  * {@link evaluateAttestationFloorForMode}).
  */
-function isDegenerateFileTarget(task: VerificationTaskV1): boolean {
+export function isDegenerateFileTarget(task: VerificationTaskV1): boolean {
   const htmlPath = task.target?.htmlPath;
   return (
     typeof htmlPath === 'string' &&
@@ -1356,6 +1443,45 @@ export function serveBindingOnlyTarget(
   const probedPort = task.serve?.attach === 'cdp' ? ports.driverPort : ports.verifyPort;
   if (probedPort === null) return null;
   return { serveCmd, probedPort, portLever: ports.verifyPort };
+}
+
+/** True when the task composed a non-blank `serve.cmd` — the one thing `serve-binding` can bind (§A1.2). */
+export function hasComposedServeCmd(task: VerificationTaskV1): boolean {
+  const serveCmd = task.serve?.cmd;
+  return typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+}
+
+/**
+ * Should the harness stamp its nonce marker into this request's snapshot
+ * (`webNonceMarker.ts`)? Web only, on a composed classic serve (an attach-mode
+ * or serve-less task has no page served from the snapshot's entry HTML), and
+ * either an EXPLORE task that declared nothing or `serve-binding` — where it is an upgrade — or any
+ * task whose declaration IS the harness marker, which cannot verify without it.
+ * A legacy/pinned task declaring anything else is left exactly as it was.
+ */
+export function wantsNonceMarker(
+  task: VerificationTaskV1,
+  modality: VerificationModality,
+  executionMode: VerificationExecutionMode,
+): boolean {
+  if (modality !== 'web' || !hasComposedServeCmd(task) || task.serve?.attach === 'cdp') return false;
+  if (isHarnessNonceMarkerSpec(task.attestation)) return true;
+  return executionMode === 'explore' && markerUpgradesDeclaration(task.attestation);
+}
+
+/**
+ * The declarations the harness marker UPGRADES rather than overrides: none, or
+ * `serve-binding` — the channel task-verify composes for a web serve whose repo
+ * renders no nonce, i.e. exactly the tasks the marker exists for. Any other
+ * declared channel is the composer's own proof and is left alone.
+ */
+export function markerUpgradesDeclaration(attestation: AttestationSpec | undefined): boolean {
+  return attestation === undefined || attestation.kind === 'serve-binding';
+}
+
+/** The verified detail of a held serve binding — one spelling for the declared and the undeclared case. */
+function serveBindingVerifiedDetail(binding: ServeBindingResult): string {
+  return `serve-binding: ${binding.detail}`;
 }
 
 /**
@@ -1616,6 +1742,10 @@ export function evaluateAttestationFloor(
  * request (`null` when it did not apply or never ran). The binding still RUNS in
  * explore whenever it applies: its result is recorded as evidence even when it
  * cannot change a capped verdict.
+ *
+ * `opts.harnessSuppliedMarker` — `spec` is the harness-injected nonce marker
+ * (`webNonceMarker.ts`), not a declaration: a verified marker wins, anything else
+ * falls back to the no-spec verdict.
  */
 export function evaluateAttestationFloorForMode(
   mode: VerificationExecutionMode,
@@ -1623,7 +1753,30 @@ export function evaluateAttestationFloorForMode(
   spec: AttestationSpec | null,
   probe: HarnessAttestationResult | null,
   binding: ServeBindingResult | null,
+  opts: { harnessSuppliedMarker?: boolean } = {},
 ): AttestationFloorOutcome {
+  // The harness's OWN nonce marker (explore, nothing or serve-binding declared) is an upgrade,
+  // never a new way to fail: unless it verified (or the binding found a foreign
+  // listener), the request gets exactly the verdict it would have had without
+  // the marker — the binding-only one below.
+  if (opts.harnessSuppliedMarker === true && markerUpgradesDeclaration(task.attestation)) {
+    const undeclared = { ...task, attestation: undefined };
+    const marker = evaluateAttestationFloorForMode(mode, undeclared, spec, probe, binding);
+    if (marker.kind === 'verified' || marker.kind === 'foreign') return marker;
+    // Explore gives a declared `serve-binding` the undeclared binding-only
+    // verdict (§A1.2), so one fallback serves both.
+    return evaluateAttestationFloorForMode(mode, undeclared, null, null, binding);
+  }
+  // A declared `serve-binding` (§A1.2) with no composed serve.cmd can never
+  // verify — there is no serve to bind — in ANY mode. It caps rather than
+  // fails: like an undeclared channel, it never had an identity to prove.
+  if (spec?.kind === 'serve-binding' && !hasComposedServeCmd(task)) {
+    return {
+      kind: 'uncapped',
+      detail:
+        'the task declared "serve-binding" but composed no serve.cmd, so there is no serve for the harness to bind — this channel can never verify without one',
+    };
+  }
   const base = evaluateAttestationFloor(spec, probe);
   if (mode !== 'explore') return base;
   if (binding !== null && !binding.bound && binding.foreignListener !== undefined) {
@@ -1633,11 +1786,11 @@ export function evaluateAttestationFloorForMode(
   // against a composed serve.cmd. What it cannot rule out is a composed command
   // that deliberately fronts another server — accepted so a runbook-less web
   // deliverable can pass at all (runbooks accelerate, never gate).
+  // A task that DECLARES `serve-binding` reaches the same verdict through
+  // evaluateAttestationFloor: its probe IS this binding (probeSurfaceIdentity).
   if (spec === null) {
-    const serveCmd = task.serve?.cmd;
-    const composedServe = typeof serveCmd === 'string' && serveCmd.trim().length > 0;
-    if (composedServe && binding !== null && binding.bound) {
-      return { kind: 'verified', channel: 'serve-binding', detail: `serve-binding: ${binding.detail}` };
+    if (hasComposedServeCmd(task) && binding !== null && binding.bound) {
+      return { kind: 'verified', channel: 'serve-binding', detail: serveBindingVerifiedDetail(binding) };
     }
     return base;
   }
@@ -1659,8 +1812,7 @@ export function evaluateAttestationFloorForMode(
     case 'http-endpoint':
     case 'dom-marker':
     case 'cdp-token': {
-      const serveCmd = task.serve?.cmd;
-      const composedServe = typeof serveCmd === 'string' && serveCmd.trim().length > 0;
+      const composedServe = hasComposedServeCmd(task);
       if (composedServe && binding !== null && binding.bound) return base;
       return {
         kind: 'capped',
@@ -1752,7 +1904,7 @@ export interface UnverifiableCorroborationFacts {
   probe: HarnessAttestationResult | null;
   task: VerificationTaskV1;
   modality: VerificationModality;
-  mobileDrive: 'maestro' | 'none' | null;
+  mobileDrive: MobileDriveRung | null;
   driveUnsupported: boolean;
   driveCoerced: number;
 }
@@ -2231,12 +2383,16 @@ export function mapReportToResult(report: VerificationReportV1, ctx: ReportMappi
 // Default seam implementations (node builtins only; never used by tests)
 // ---------------------------------------------------------------------------
 
-const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolean> => {
-  // `git diff --quiet HEAD` exits 1 when tracked files differ from HEAD (the
-  // snapshot commit) — untracked build output is ignored, so only a mutation of a
-  // TRACKED source trips this.
+/** The one harness-made edit the mutation check must not count (see {@link VerificationAgentRunnerDeps.checkSnapshotMutated}). */
+export interface SnapshotMutationExemption {
+  relPath: string;
+  content: string;
+}
+
+/** `git diff --quiet HEAD [-- pathspec…]` in the snapshot: true on a diff, false on none OR a git failure. */
+const gitDiffFound = async (worktreePath: string, pathspec: string[]): Promise<boolean> => {
   try {
-    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD'], {
+    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD', ...(pathspec.length > 0 ? ['--', ...pathspec] : [])], {
       cwd: worktreePath,
       timeout: 30_000,
       windowsHide: true,
@@ -2248,6 +2404,34 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
     // NOT mutated — never turn an infra hiccup into a false low_confidence.
     return false;
   }
+};
+
+const defaultCheckSnapshotMutated = async (
+  worktreePath: string,
+  exempt?: SnapshotMutationExemption,
+): Promise<boolean> => {
+  // `git diff --quiet HEAD` exits 1 when tracked files differ from HEAD (the
+  // snapshot commit) — untracked build output is ignored, so only a mutation of a
+  // TRACKED source trips this.
+  if (exempt === undefined) return gitDiffFound(worktreePath, []);
+  if (await gitDiffFound(worktreePath, ['.', `:(exclude)${exempt.relPath}`])) return true;
+  // The marked file itself: unmutated while it holds exactly what the harness
+  // wrote, or was put back to HEAD; any other content is the agent's edit.
+  if ((await defaultReadTextFile(join(worktreePath, exempt.relPath))) === exempt.content) return false;
+  return gitDiffFound(worktreePath, [exempt.relPath]);
+};
+
+/** node:fs for {@link injectNonceMarker}: a symlinked entry file reads as absent, so the write never leaves the snapshot. */
+const defaultNonceMarkerFs: NonceMarkerFs = {
+  readRegularFile: async (absPath) => {
+    try {
+      if (!(await lstat(absPath)).isFile()) return null;
+      return await readFile(absPath, 'utf8');
+    } catch {
+      return null;
+    }
+  },
+  writeFile: (absPath, content) => writeFile(absPath, content, 'utf8'),
 };
 
 /**
@@ -2404,6 +2588,14 @@ const defaultProcessInfo = async (pid: number): Promise<{ pgid: number; command:
   }
 };
 
+const defaultReadTextFile = async (absPath: string): Promise<string | null> => {
+  try {
+    return await readFile(absPath, 'utf8');
+  } catch {
+    return null;
+  }
+};
+
 const defaultFileExists = async (absPath: string): Promise<boolean> => {
   try {
     await access(absPath);
@@ -2447,7 +2639,8 @@ const HOST_DATA_DIR_ENV = 'CYBOFLOW_DIR';
 
 /**
  * §A1.3 "Host env" — keep the HOST's own `CYBOFLOW_DIR` away from the agent and
- * every serve child, in EVERY mode, unless a runbook lever re-bound it (to this
+ * every serve child of an EXPLORE run (§A1.3 is explore's lever section; the
+ * runner applies it to explore only), unless a runbook lever re-bound it (to this
  * request's `VERIFY_DATA_DIR` — cyboflow's own runbook declares
  * `dataDirEnv: "CYBOFLOW_DIR"`). Returns the env keys to layer LAST.
  *
@@ -2756,56 +2949,6 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   }
 
   /**
-   * The §5.1/§5.4 MOBILE ENVIRONMENT — the eight-or-nine names that exist for a
-   * `mobile` request and for no other modality.
-   *
-   * `VERIFY_MOBILE_DRIVE` is the load-bearing one: it is `'maestro'` only when a
-   * Maestro binary resolved AND that build's own `--help` named a device-pin
-   * flag, because an unpinned `maestro test` lands on whichever simulator
-   * happens to be booted — which, with a developer's own device open, is the
-   * silent mis-targeting §5.4 refuses to ship. Anything less than both facts is
-   * `'none'`, and `'none'` is what makes every `requiresDrive` behavior coerce
-   * to `not_testable` downstream.
-   *
-   * Both toolchain calls are caught rather than allowed to propagate: a probe
-   * that cannot answer must degrade the drive rung, never fail the request. The
-   * observe-only arm is a real, useful verification.
-   */
-  private async buildMobileEnv(
-    app: MobileAppSpec,
-    mobile: VerificationAgentRunnerMobileDeps,
-    handle: MobileSimulatorHandle,
-    logger: LoggerLike | undefined,
-  ): Promise<Record<string, string>> {
-    let maestroBin: string | null = null;
-    try {
-      const bin = await mobile.toolchain.resolveMaestroBin();
-      maestroBin = bin !== null && (await mobile.toolchain.resolvePinFlag(bin)) !== null ? bin : null;
-      if (bin !== null && maestroBin === null) {
-        logger?.info('[VerificationAgentRunner] maestro resolved but names no device-pin flag; observe-only', {
-          maestro: bin,
-        });
-      }
-    } catch (err) {
-      logger?.info('[VerificationAgentRunner] maestro probe failed; mobile runs observe-only', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      maestroBin = null;
-    }
-    return {
-      VERIFY_SIM_UDID: handle.udid,
-      VERIFY_SIM_NAME: handle.name,
-      VERIFY_SIM_RUNTIME: handle.runtimeName,
-      VERIFY_DERIVED_DATA: handle.derivedDataDir,
-      VERIFY_APP_BUNDLE_ID: app.bundleId,
-      VERIFY_APP_PRODUCT_GLOB: app.productGlob ?? DEFAULT_MOBILE_PRODUCT_GLOB,
-      VERIFY_MOBILE_DRIVE: maestroBin === null ? 'none' : 'maestro',
-      ...(maestroBin === null ? {} : { VERIFY_MAESTRO_BIN: maestroBin }),
-      VERIFY_MOBILE_READY_TIMEOUT_MS: String(mobile.readyTimeoutMs ?? DEFAULT_MOBILE_READY_TIMEOUT_MS),
-    };
-  }
-
-  /**
    * §7.1 serve-identity binding for ONE request: resolve whether it applies
    * ({@link serveBindingTarget}) and, when it does, run
    * {@link checkServeIdentityBinding} against the injected probes. Returns
@@ -2818,14 +2961,17 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
    */
   private async bindServeIdentity(
     req: VerificationAgentRequest,
-    /** `null` = the explore binding-only case: a composed serve on the leased port. */
+    /**
+     * `null` = the explore binding-only case; a declared `serve-binding` binds
+     * the same way. Both need a composed serve on the leased port.
+     */
     spec: AttestationSpec | null,
     executionMode: VerificationExecutionMode,
     logger: LoggerLike | undefined,
   ): Promise<{ binding: ServeBindingResult; composed: boolean } | null> {
     const ports = { verifyPort: req.verifyPort, driverPort: req.verifyDriverPort };
     const target =
-      spec === null
+      spec === null || spec.kind === 'serve-binding'
         ? serveBindingOnlyTarget(req.task, ports)
         : serveBindingTarget(req.task, spec, ports, { explore: executionMode === 'explore' });
     if (target === null) return null;
@@ -2881,6 +3027,35 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       return { probe: null, binding: bound?.binding ?? null };
     }
     if (spec.kind === 'file-identity') return { probe: null, binding: null };
+    if (spec.kind === 'serve-binding') {
+      // §A1.2 — a DECLARED serve-binding has no channel probe: the binding IS
+      // the proof, in every mode. Its result becomes the probe the floor reads,
+      // so a held binding verifies, a foreign listener fails exactly as a
+      // port-mediated channel's short-circuit does, and nothing to bind (no
+      // composed serve.cmd or no leased port) is unverified.
+      const bound = await this.bindServeIdentity(req, spec, executionMode, logger);
+      if (bound === null) {
+        return {
+          binding: null,
+          probe: {
+            verified: false,
+            kind: 'serve-binding',
+            detail: 'serve-binding: the task composed no serve.cmd or holds no leased port, so there is no serve to bind',
+          },
+        };
+      }
+      const binding = bound.binding;
+      return {
+        binding,
+        probe: binding.bound
+          ? { verified: true, kind: 'serve-binding', detail: serveBindingVerifiedDetail(binding) }
+          : {
+              verified: false,
+              kind: 'serve-binding',
+              detail: `${SERVE_BINDING_FAILED_PREFIX} [${binding.failure}]: ${binding.detail}`,
+            },
+      };
+    }
     // (d2a) SERVE-IDENTITY BINDING — a PRECONDITION of the channel probe, not a
     // second opinion on it. The nonce proves a surface knows this request's
     // secret; the agent knows that secret too and chooses what the driver
@@ -3198,11 +3373,18 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     // that PASSED the pin check is kept — executing a rejected revision's levers
     // would bind values from a runbook this request already refused to run.
     let pinnedLevers: VerifyRunbookV1['levers'];
+    // §A5 — the pin accepted below names an unproven LEARNED draft (read for F3's surface probe).
+    let learnedPinRun = false;
     const resolveRunbookByHash = this.deps.resolveRunbookByHash;
     if (typeof req.runbookHash === 'string' && req.runbookHash.length > 0 && resolveRunbookByHash) {
       const record = resolveRunbookByHash(req.projectId, modality, req.runbookHash);
+      // §A5 — a LEARNED PIN (an unproven draft of origin 'learned') is the
+      // lane's own request acting as that draft's promotion proof, so it takes
+      // the PROOF half of the check: an unproven record is accepted, and it
+      // must be the exact version the request was pinned to. It is the only
+      // thing the learned pin changes here — the request is otherwise ordinary.
       const pinned = checkRunbookPin(record, modality, req.task, req.runbookHash, {
-        setupProof: req.setupProof === true,
+        setupProof: req.setupProof === true || isLearnedPinRecord(record),
         localVersion: typeof req.runbookLocalVersion === 'number' ? req.runbookLocalVersion : null,
       });
       if (!pinned.ok) {
@@ -3224,6 +3406,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         };
       }
       pinnedLevers = record?.runbook.levers;
+      learnedPinRun = isLearnedPinRecord(record);
     }
     // §A1.3 — WHICH record's levers bind the env. Pinned: the record the pin
     // check just accepted (above). Explore: the best registered record for
@@ -3288,6 +3471,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     const onAbort = (): void => controller.abort();
     if (req.signal.aborted) controller.abort();
     else req.signal.addEventListener('abort', onAbort, { once: true });
+    // X-1 — the query is raced against the abort INSIDE the runner too: a query
+    // that ignores its signal would otherwise keep this method out of its
+    // `finally`, and with it the simulator/xcode teardown the scheduler's
+    // mobile lease is waiting on. The abandoned query is detached and logged.
+    const unboundedQuery = queryFn;
+    queryFn = (args) => raceWithAbort(unboundedQuery(args), controller.signal, 'verification agent query', logger);
 
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;
@@ -3298,9 +3487,14 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     // preflight runs before pin validation, provider resolution and several
     // early returns, and a device acquired there leaks on every one of them (B2).
     let mobileHandle: MobileSimulatorHandle | null = null;
-    // `'maestro' | 'none'` once a mobile request has resolved its drive rung;
-    // `null` on every other modality. Read once, at coercion time.
-    let mobileDrive: 'maestro' | 'none' | null = null;
+    // The EXPORTED drive rung once a mobile request has resolved it (§B3);
+    // `null` on every other modality. The coercion keys strictly on `'none'`.
+    let mobileDrive: MobileDriveRung | null = null;
+    // §B3 provenance for the report, and §B4's live xcode session — hoisted so
+    // the `finally` can close it (EndSession → bridge → socket) before the
+    // simulator is disposed.
+    let mobileDriveProvenance: Pick<VerificationRunProvenance, 'driveEngineRequested' | 'driveEngineUsed' | 'degradeReason'> = {};
+    let xcodeSession: XcodeDriveSession | null = null;
     // §7.1: the per-REQUEST identity secret. Minted HERE, before the env is
     // built, because two consumers need the same value: the agent's environment
     // (so its serve step can inject it into the deliverable) and the HARNESS's
@@ -3353,6 +3547,31 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         mode = 'fallback';
       }
 
+      // (b0) WEB NONCE MARKER (webNonceMarker.ts) — stamped into the SNAPSHOT's
+      // entry HTML before the agent starts, never into the live worktree: an
+      // explore web task with nothing declared gets it as an upgrade over the
+      // binding-only verdict, and a task whose (learned) runbook declared the
+      // harness marker needs it to verify at all. A skip is logged and costs only
+      // the stronger channel.
+      let nonceMarker: NonceMarkerInjection | null = null;
+      if (snapshot !== null && wantsNonceMarker(req.task, modality, executionMode)) {
+        nonceMarker = await injectNonceMarker({
+          snapshotRoot: snapshot.worktreePath,
+          nonce: attestNonce,
+          fs: this.deps.nonceMarkerFs ?? defaultNonceMarkerFs,
+        });
+        logger?.info('[VerificationAgentRunner] web nonce marker', {
+          runId: req.runId,
+          requestId: req.requestId,
+          executionMode,
+          ...(nonceMarker.injected ? { injected: nonceMarker.relPath } : { skipped: nonceMarker.reason }),
+        });
+      }
+      const markerExemption = nonceMarker?.injected === true ? nonceMarker : undefined;
+      // Harness-SUPPLIED (vs declared by a runbook): only then does the floor
+      // fall back to the binding-only verdict when the marker does not verify.
+      const harnessSuppliedMarker = markerExemption !== undefined && markerUpgradesDeclaration(req.task.attestation);
+
       // (b cont.) Env + the driver wrapper script. VERIFY_PORT rides whenever the
       // engine passed a port: a task that implies a server, and every web /
       // cdp-app explore request (§A1.1 — the engine decided when it leased it).
@@ -3365,10 +3584,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // legitimate consumer (round-2 review — see `resolveNodeModulesRoot`).
       const shellPath = await this.resolvePathEnv(node);
       // §A1.4 (F8) — the dependency-guard PATH shim goes IN FRONT of the
-      // harness PATH, in every mode and on both runtimes, so a package manager
+      // harness PATH on EXPLORE runs, on both runtimes, so a package manager
       // reached BY NAME from the agent's shell, `$VERIFY_DRIVER` or a serve
       // child hits the guard first. Fail-soft: no shim ⇒ the plain harness PATH.
-      const shimBinDir = await this.materializeShimFailSoft(req, node, executionMode, logger);
+      // Pinned and legacy runs get none — an "Explore guardrail" in the design,
+      // and the kill switch must restore the pre-explore environment exactly.
+      const shimBinDir =
+        executionMode === 'explore' ? await this.materializeShimFailSoft(req, node, executionMode, logger) : null;
       // §A1.4: "Required before explore runs on Codex". The Codex seam runs
       // danger-full-access with no approval policy and no canUseTool, so in
       // explore — where the agent composes its own install/build steps — the
@@ -3463,14 +3685,29 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             fileNames: [],
           };
         }
+        // §B3 phase 1: the engine decision that must precede acquisition (an
+        // xcode run needs an iOS 27+ runtime, `minRuntimeMajor`).
+        const leasedEngine = req.mobileDriveEngine;
+        let xcodePlan = await planXcodeIntent(
+          leasedEngine !== undefined ? () => leasedEngine : mobile.driveEngine,
+          mobile.xcode,
+          logger,
+        );
         try {
-          mobileHandle = await mobile.session.acquire({
-            requestId: req.requestId,
-            dataDir: mobile.dataDir,
-            ...(mobile.deviceType !== undefined ? { deviceType: mobile.deviceType } : {}),
-            ...(mobile.runtime !== undefined ? { runtime: mobile.runtime } : {}),
-            bootTimeoutMs: mobile.bootTimeoutMs ?? DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
-          });
+          const acquired = await acquireMobileSimulator(
+            mobile.session,
+            {
+              requestId: req.requestId,
+              dataDir: mobile.dataDir,
+              ...(mobile.deviceType !== undefined ? { deviceType: mobile.deviceType } : {}),
+              ...(mobile.runtime !== undefined ? { runtime: mobile.runtime } : {}),
+              bootTimeoutMs: mobile.bootTimeoutMs ?? DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
+            },
+            xcodePlan.intent,
+            logger,
+          );
+          mobileHandle = acquired.handle;
+          xcodePlan = { ...xcodePlan, intent: acquired.intent };
         } catch (err) {
           // `acquire()` rolls its OWN partial state back (it deletes the device
           // and the request dir before it throws), so there is nothing to
@@ -3490,8 +3727,29 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             fileNames: [],
           };
         }
-        mobileEnv = await this.buildMobileEnv(app, mobile, mobileHandle, logger);
-        mobileDrive = mobileEnv.VERIFY_MOBILE_DRIVE === 'maestro' ? 'maestro' : 'none';
+        // §B3 phase 2 / §B4: open the xcode session when intended, resolve
+        // Maestro, and export the rung that actually came up.
+        const drive = await buildMobileDriveEnv({
+          requestId: req.requestId,
+          app,
+          handle: mobileHandle,
+          plan: xcodePlan,
+          toolchain: mobile.toolchain,
+          xcode: mobile.xcode,
+          dataDir: mobile.dataDir,
+          artifactsDir: req.artifactsDir,
+          readyTimeoutMs: mobile.readyTimeoutMs ?? DEFAULT_MOBILE_READY_TIMEOUT_MS,
+          logger,
+        });
+        xcodeSession = drive.session;
+        mobileEnv = drive.env;
+        mobileDrive = drive.decision.used;
+        mobileDriveProvenance = {
+          driveEngineRequested: drive.decision.requested,
+          driveEngineUsed: drive.decision.used,
+          ...(drive.decision.degradeReason !== null ? { degradeReason: drive.decision.degradeReason } : {}),
+        };
+        preflight.checks.push(drive.preflightRow);
       }
 
       env = {
@@ -3501,7 +3759,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // Written under whatever case THIS process spells it (`Path` on
         // Windows): the consumer merges this map over `process.env`, and a
         // second, case-variant PATH key there is a coin flip (round-2 review).
-        [pathEnvKey()]: pathEnv,
+        [pathEnvKey()]:
+          // B6: Maestro's JDK first on PATH, so the driver's Maestro (and its
+          // `--help` pin probe) never lands on the macOS `/usr/bin/java` stub.
+          mobileEnv.JAVA_HOME !== undefined ? `${join(mobileEnv.JAVA_HOME, 'bin')}${delimiter}${pathEnv}` : pathEnv,
         VERIFY_DATA_DIR: dataDir,
         ...(req.verifyDriverPort === null
           ? {}
@@ -3565,9 +3826,16 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           dropped: leverEnv.dropped,
         });
       }
-      // §A1.3 — the HOST's own data dir never reaches the agent or its serve
-      // children, in any mode, unless a lever re-bound it (see stripHostDataDirEnv).
-      env = { ...env, ...leverEnv.additions, ...stripHostDataDirEnv(leverEnv.additions) };
+      // §A1.3 — on an EXPLORE run the HOST's own data dir never reaches the
+      // agent or its serve children unless a lever re-bound it (see
+      // stripHostDataDirEnv). Pinned and legacy keep the inherited env as before
+      // the feature: a proven recipe may rely on it, and the kill switch must
+      // restore exactly that.
+      env = {
+        ...env,
+        ...leverEnv.additions,
+        ...(executionMode === 'explore' ? stripHostDataDirEnv(leverEnv.additions) : {}),
+      };
 
       if (controller.signal.aborted) {
         return {
@@ -3616,7 +3884,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       let raw: unknown;
       try {
         const outcome = await queryFn({
-          prompt: composeVerifyUserPrompt(req.task, exploreHints),
+          prompt: composeVerifyUserPrompt(
+            req.task,
+            exploreHints,
+            markerExemption !== undefined ? { relPath: markerExemption.relPath } : undefined,
+          ),
           systemPrompt,
           cwd,
           model,
@@ -3631,8 +3903,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           // the design never widened what either may be refused.
           //
           // `executionMode` rides in EVERY mode: it refuses nothing on its own,
-          // and the dependency deny (which does apply in every mode) words its
-          // refusal by it.
+          // the dependency deny (which does apply in every mode) words its
+          // refusal by it, and the Codex seam keys its explore-only
+          // `allow_login_shell: false` on it.
           guards: {
             executionMode,
             ...(executionMode === 'explore' ? { denyProcessKill: true, denySimctlLifecycle: modality === 'mobile' } : {}),
@@ -3767,6 +4040,12 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         ...(exploreRecord !== null
           ? { leverSource: { hash: exploreRecord.hash, status: exploreRecord.status, origin: exploreRecord.origin } }
           : {}),
+        ...mobileDriveProvenance,
+        // §B5: the ledger as it stands once the session is over (a snapshot —
+        // the live object belongs to the still-open socket until `finally`).
+        ...(xcodeSession !== null
+          ? { captureLedger: { ...xcodeSession.ledger, entries: [...xcodeSession.ledger.entries] } }
+          : {}),
       };
       // (d1) §4 fn.² native-screen coercion — applied BEFORE any verdict
       // mapping so every downstream branch (the attestation floor, the
@@ -3861,7 +4140,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // ended but before the `finally` tears the surface down: an attestation is
       // a question you can only ask something that is still alive, which is also
       // why the harness contract forbids the agent from stopping its own serve.
-      const spec = effectiveAttestationSpec(req.task, { executionMode, mobileLeased: mobileHandle !== null });
+      const spec = effectiveAttestationSpec(req.task, {
+        executionMode,
+        mobileLeased: mobileHandle !== null,
+        harnessMarker: harnessSuppliedMarker,
+      });
       const declaredChannel = req.task.attestation !== undefined || spec?.kind === 'bundle-identity';
       const runsFloor =
         report.outcome === 'pass' ||
@@ -3874,7 +4157,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       if (runsFloor) {
         const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
         probe = identity.probe;
-        floor = evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding);
+        floor = evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding, {
+          harnessSuppliedMarker,
+        });
         if (floor.kind === 'foreign' || floor.kind === 'missing' || floor.kind === 'capped') {
           logger?.warn('[VerificationAgentRunner] attestation floor did not vouch for the surface', {
             runId: req.runId,
@@ -3888,12 +4173,36 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         }
       }
 
+      // (d2b) §A5 (Codex A5 review F3) — a LEARNED PIN's `fail` keeps its draft
+      // only if the harness saw the surface stand up, so it is probed here with
+      // the floor's own probe. Off the verdict path: `floor` stays null, so the
+      // ordinary pinned-fail verdict is unchanged; only the fact rides along.
+      const surfaceVerified =
+        learnedPinRun && report.outcome === 'fail'
+          ? await probeLearnedPinSurface({
+              probe: async () => {
+                const identity = await this.probeSurfaceIdentity(req, spec, executionMode, mobileHandle, attestNonce, logger);
+                return evaluateAttestationFloorForMode(executionMode, req.task, spec, identity.probe, identity.binding, {
+                  harnessSuppliedMarker,
+                });
+              },
+              degenerateFileTarget: isDegenerateFileTarget(req.task),
+              requestId: req.requestId,
+              logger,
+            })
+          : undefined;
+
       // (e) Post-run mutation check — snapshot mode only (the fallback worktree is
       // expected to be dirty). A tracked-source mutation demotes to low_confidence.
       let mutated = false;
       if (mode === 'snapshot' && snapshot) {
         const checkMutated = this.deps.checkSnapshotMutated ?? defaultCheckSnapshotMutated;
-        mutated = await checkMutated(snapshot.worktreePath);
+        mutated = await checkMutated(
+          snapshot.worktreePath,
+          markerExemption !== undefined
+            ? { relPath: markerExemption.relPath, content: markerExemption.content }
+            : undefined,
+        );
       }
 
       // mapReportToResult already stamps deployed:true + provisionMode; the
@@ -3901,25 +4210,83 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // The report is persisted AS-IS (including the agent's own attestation
       // echo) — the floor changes the verdict, never the record of what the
       // agent said.
-      return {
-        ...mapReportToResult(report, {
-          provisionMode: mode,
-          mutated,
-          model: verdictModel,
-          executionMode,
-          modality,
+      const mapped = mapReportToResult(report, {
+        provisionMode: mode,
+        mutated,
+        model: verdictModel,
+        executionMode,
+        modality,
+        floor,
+        corroboration: unverifiableCorroboration({
           floor,
-          corroboration: unverifiableCorroboration({
-            floor,
-            probe,
-            task: req.task,
-            modality,
-            mobileDrive,
-            driveUnsupported,
-            driveCoerced: coerced,
-          }),
+          probe,
+          task: req.task,
+          modality,
+          mobileDrive,
+          driveUnsupported,
+          driveCoerced: coerced,
         }),
+      });
+      // (d3) §B5 — under the xcode rung a `pass` behaviour must cite a harness
+      // capture of the app under test since its pinned launch; otherwise the
+      // pass is folded to low_confidence the way an undeclared channel is.
+      if (xcodeSession !== null && mapped.status === 'passed') {
+        const reasons = await xcodePassEvidenceReasons(report, xcodeSession.ledger, req.artifactsDir);
+        if (reasons.length > 0) {
+          logger?.info('[VerificationAgentRunner] xcode capture ledger does not back every pass; capped', {
+            runId: req.runId,
+            requestId: req.requestId,
+            reasons,
+          });
+          return { ...capPassedAtLowConfidence(mapped, `${XCODE_LEDGER_CAP_MESSAGE}: ${reasons.join('; ')}`), preflight };
+        }
+      }
+      // (f0) §A5 — validate a passing explore request's recipe while the
+      // snapshot (its package.json) and the leases it must not name still
+      // exist. `passed` already means the floor verified the surface and the
+      // snapshot is unmutated; the snapshot-mode guard keeps a dirty-fallback
+      // run (which proves nothing about a commit) out of learning.
+      const learnedRecipe =
+        executionMode === 'explore' &&
+        mapped.status === 'passed' &&
+        mode === 'snapshot' &&
+        snapshot !== null &&
+        report.recipeJson !== undefined
+          ? validateLearnedRecipe({
+              recipeJson: report.recipeJson,
+              modality,
+              verifiedChannel: floor?.kind === 'verified' ? floor.channel : null,
+              // The harness verified ITS marker, so that — not whatever selector
+              // the agent wrote — is what the learned runbook records.
+              ...(harnessSuppliedMarker && floor?.kind === 'verified' && floor.channel === 'dom-marker'
+                ? { harnessAttestation: HARNESS_NONCE_MARKER_SPEC }
+                : {}),
+              composed: req.task,
+              packageJsonRaw:
+                modality === 'web' || modality === 'cdp-app'
+                  ? await (this.deps.readTextFile ?? defaultReadTextFile)(join(snapshot.worktreePath, 'package.json'))
+                  : null,
+              leased: {
+                ports: [req.verifyPort, req.verifyDriverPort].filter((p): p is number => p !== null),
+                udid: mobileHandle?.udid ?? null,
+                snapshotPath: snapshot.worktreePath,
+              },
+              ...(exploreRecord?.runbook.levers !== undefined ? { fallbackLevers: exploreRecord.runbook.levers } : {}),
+            })
+          : undefined;
+      if (learnedRecipe !== undefined && !learnedRecipe.ok) {
+        logger?.info('[VerificationAgentRunner] explore recipe not learnable (§A5; verdict unaffected)', {
+          runId: req.runId,
+          requestId: req.requestId,
+          modality,
+          reason: learnedRecipe.reason,
+        });
+      }
+      return {
+        ...mapped,
         preflight,
+        ...(learnedRecipe !== undefined ? { learnedRecipe } : {}),
+        ...(surfaceVerified !== undefined ? { surfaceVerified } : {}),
       };
     } catch (err) {
       // The outer catch can fire before OR after the deploy; `deployedProvenance`
@@ -3991,6 +4358,21 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // dispose already catches terminate/shutdown/delete/rm independently, so
       // one `simctl` that hangs cannot mask the next; this outer catch is the
       // guarantee that none of them can mask the snapshot either.
+      // §B4.8 — the xcode session ends BEFORE its device goes. `close()` is
+      // bounded per step and independent of `controller.signal` (aborted
+      // above); its contract is never-throw, and the catch is the guarantee
+      // that a violation cannot skip the simulator or the snapshot below.
+      if (xcodeSession) {
+        try {
+          await xcodeSession.close();
+        } catch (err) {
+          logger?.warn('[VerificationAgentRunner] xcode session close threw (ignored)', {
+            runId: req.runId,
+            requestId: req.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       if (mobileHandle) {
         try {
           await mobileHandle.dispose();

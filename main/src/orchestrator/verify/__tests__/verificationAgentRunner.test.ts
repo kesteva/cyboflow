@@ -1743,6 +1743,109 @@ describe('VerificationAgentRunner — runbook pin enforcement', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
+  it('§A5: a LEARNED PIN (unproven draft, origin learned) takes the proof half — accepted at its exact version, refused at any other', async () => {
+    const learned: PinnedRunbookRecord = { ...resolved, status: 'unproven-draft', origin: 'learned' };
+    const ok = makeRunner({ resolveRunbookByHash: () => learned, ...servedBy(entry.serve.cmd) });
+    const accepted = await ok.runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
+    expect(accepted.runbookMismatch).toBeUndefined();
+    expect(ok.query).toHaveBeenCalledTimes(1);
+
+    const moved = makeRunner({ resolveRunbookByHash: () => learned });
+    const refused = await moved.runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 1 }));
+    expect(refused).toMatchObject({ status: 'skipped', runbookMismatch: true, deployed: false });
+    expect(moved.query).not.toHaveBeenCalled();
+  });
+
+  describe('§A5 (Codex A5 review F3): a learned pin FAIL carries the harness-owned surfaceVerified fact', () => {
+    const learned: PinnedRunbookRecord = { ...resolved, status: 'unproven-draft', origin: 'learned' };
+    const failQuery = async () =>
+      makeOutcome(
+        validReport({
+          outcome: 'fail',
+          behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'button missing' } }],
+        }),
+      );
+    const run = (runner: VerificationAgentRunner) =>
+      runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
+
+    it('surface verified → true, and the ordinary pinned-fail verdict is unchanged', async () => {
+      const { runner, attest } = makeRunner({ resolveRunbookByHash: () => learned, query: failQuery, ...servedBy(entry.serve.cmd) });
+      const result = await run(runner);
+      expect(result.status).toBe('failed');
+      expect(result.verdict?.status).toBe('fail');
+      expect(result.errorMessage).toBeUndefined();
+      expect(result.surfaceVerified).toBe(true);
+      expect(attest).toHaveBeenCalledTimes(1);
+    });
+
+    it('the channel did not verify → false', async () => {
+      const { runner } = makeRunner({
+        resolveRunbookByHash: () => learned,
+        query: failQuery,
+        attest: async () => ({ verified: false, kind: 'http-endpoint', detail: 'error page, no nonce' }),
+        ...servedBy(entry.serve.cmd),
+      });
+      const result = await run(runner);
+      expect(result.status).toBe('failed');
+      expect(result.surfaceVerified).toBe(false);
+    });
+
+    it('the serve binding does not hold (no recorded serve) → false, without asking the channel', async () => {
+      const { runner, attest } = makeRunner({ resolveRunbookByHash: () => learned, query: failQuery });
+      const result = await run(runner);
+      expect(result.surfaceVerified).toBe(false);
+      expect(attest).not.toHaveBeenCalled();
+    });
+
+    it('a FOREIGN listener on the port → false', async () => {
+      const { runner } = makeRunner({
+        resolveRunbookByHash: () => learned,
+        query: failQuery,
+        ...servedBy(entry.serve.cmd, {
+          listeningPidForPort: async () => 9001,
+          processInfo: async (pid) =>
+            pid === 9001
+              ? { pgid: 9001, command: 'node /Users/dev/their-own/vite' }
+              : { pgid: SERVE_LEADER_PID, command: `sh -c ${entry.serve.cmd}` },
+        }),
+      });
+      const result = await run(runner);
+      expect(result.surfaceVerified).toBe(false);
+    });
+
+    it('the probe throws → false', async () => {
+      const { runner } = makeRunner({
+        resolveRunbookByHash: () => learned,
+        query: failQuery,
+        attest: async () => {
+          throw new Error('socket exploded');
+        },
+        ...servedBy(entry.serve.cmd),
+      });
+      const result = await run(runner);
+      expect(result.status).toBe('failed');
+      expect(result.surfaceVerified).toBe(false);
+    });
+
+    it('an ORDINARY (proven) pinned fail still skips the probe and carries no surfaceVerified', async () => {
+      const { runner, attest } = makeRunner({ resolveRunbookByHash: () => resolved, query: failQuery, ...servedBy(entry.serve.cmd) });
+      const result = await run(runner);
+      expect(result.status).toBe('failed');
+      expect(result.verdict?.status).toBe('fail');
+      expect(result).not.toHaveProperty('surfaceVerified');
+      expect(attest).not.toHaveBeenCalled();
+    });
+  });
+
+  it('§A5: an unproven draft of any OTHER origin is still refused on an ordinary request', async () => {
+    const draft: PinnedRunbookRecord = { ...resolved, status: 'unproven-draft', origin: 'setup-flow' };
+    const { runner, query } = makeRunner({ resolveRunbookByHash: () => draft });
+    const result = await runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
+    expect(result).toMatchObject({ status: 'skipped', runbookMismatch: true });
+    expect(result.errorMessage).toContain('not proven');
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('a MISS → env-class skip: no deploy, no budget charge, no provisioning', async () => {
     const { runner, query } = makeRunner({ resolveRunbookByHash: () => null });
     const provision = vi.fn();
@@ -2496,6 +2599,7 @@ function makeHandle(overrides: Partial<MobileSimulatorHandle> = {}): MobileSimul
     deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
     derivedDataDir: SIM_DERIVED,
     requestDir: '/data/verify-mobile/vr-1',
+    recordXcodeSessionKey: async () => {},
     dispose: async () => {},
     ...overrides,
   };

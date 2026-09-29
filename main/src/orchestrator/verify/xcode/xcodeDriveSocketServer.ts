@@ -20,9 +20,11 @@
  * PATH RULES (the orch-socket convention, §B4.3):
  *  - `<dataDir>/sockets/xd-<16 hex>.sock` inside a 0700 directory; when that
  *    would exceed {@link MAX_SOCKET_PATH_BYTES} (macOS `sun_path` is 104 bytes
- *    with its NUL, and the kernel TRUNCATES silently rather than failing), a
- *    0700 `mkdtemp` under a short tmpdir instead. The length is asserted, never
- *    hoped for.
+ *    with its NUL, and the kernel TRUNCATES silently rather than failing), the
+ *    STABLE per-user fallback root `<short tmpdir>/cfxd-<uid>/` instead — 0700
+ *    and ownership-checked, and scanned by the boot sweep, so a hard-killed
+ *    instance's fallback socket is reclaimed like any other (X-5). The length
+ *    is asserted, never hoped for.
  *  - NEVER pre-unlink, and fail on EADDRINUSE: a random 64-bit name that is
  *    already bound is someone else's socket, and unlinking it is the clobber the
  *    2026-07-28 orch.sock outage taught this repo to fear.
@@ -57,6 +59,18 @@ export const DRIVE_SOCKET_PREFIX = 'xd-';
 const DRIVE_SOCKET_SUFFIX = '.sock';
 const DRIVE_SOCKET_NAME = /^xd-[0-9a-f]{16}\.sock$/;
 const FALLBACK_DIR_PREFIX = 'cfxd-';
+const DEFAULT_SHORT_TMP_DIR = '/tmp';
+
+/**
+ * The long-path fallback's root: ONE stable, short directory per user under
+ * `shortTmpDir` (default `/tmp`), so the boot sweep knows where to look (X-5).
+ * Shared by every cyboflow instance of this user; each socket name is still
+ * unique to one request, and the sweep only removes a socket no listener answers.
+ */
+export function driveSocketFallbackRoot(shortTmpDir: string = DEFAULT_SHORT_TMP_DIR): string {
+  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
+  return path.join(shortTmpDir, `${FALLBACK_DIR_PREFIX}${uid}`);
+}
 
 /** `sun_path` is 104 bytes on macOS including the terminating NUL (108 on Linux); the stricter bound wins. */
 export const MAX_SOCKET_PATH_BYTES = 103;
@@ -105,7 +119,7 @@ export interface CreateDriveSocketOptions {
   /** The per-request bearer token ({@link mintDriveToken}). Held in memory only. */
   token: string;
   handler: DriveHandler;
-  /** Root for the long-path fallback `mkdtemp`. Defaults to `/tmp`. */
+  /** Where the long-path fallback root ({@link driveSocketFallbackRoot}) lives. Defaults to `/tmp`. */
   shortTmpDir?: string;
   maxFrameBytes?: number;
   logger?: LoggerLike;
@@ -115,9 +129,12 @@ export interface CreateDriveSocketOptions {
 
 export interface DriveSocket {
   readonly socketPath: string;
-  /** The per-request `mkdtemp` dir when the long-path fallback was taken, else `null`. */
+  /**
+   * The shared per-user fallback root when the long-path fallback was taken,
+   * else `null`. Never removed on close — other requests' sockets live there too.
+   */
   readonly fallbackDir: string | null;
-  /** Destroy connections, stop listening, unlink the socket, remove the fallback dir. Idempotent; never throws. */
+  /** Destroy connections, stop listening, unlink the socket. Idempotent; never throws. */
   close(): Promise<void>;
 }
 
@@ -237,16 +254,12 @@ export async function createDriveSocket(options: CreateDriveSocketOptions): Prom
   if (Buffer.byteLength(socketPath, 'utf8') <= MAX_SOCKET_PATH_BYTES) {
     await ensurePrivateDir(socketsDir);
   } else {
-    // mkdtemp creates the dir 0700; the chmod is a belt for exotic umask-ignoring filesystems.
-    fallbackDir = await fsp.mkdtemp(path.join(options.shortTmpDir ?? '/tmp', FALLBACK_DIR_PREFIX));
-    await fsp.chmod(fallbackDir, DIR_MODE);
+    fallbackDir = driveSocketFallbackRoot(options.shortTmpDir);
     socketPath = path.join(fallbackDir, name);
-  }
-  try {
+    // Asserted BEFORE the root is created, so an unusable tmpdir leaves nothing behind.
     assertSocketPathLength(socketPath);
-  } catch (err) {
-    if (fallbackDir !== null) await fsp.rmdir(fallbackDir).catch(() => undefined);
-    throw err;
+    // 0700, a real directory (a planted symlink is refused) and ours.
+    await ensurePrivateDir(fallbackDir);
   }
 
   const connections = new Set<net.Socket>();
@@ -363,7 +376,6 @@ export async function createDriveSocket(options: CreateDriveSocketOptions): Prom
   } catch (err) {
     // Deliberately NO server.close() and NO unlink: a failed bind owns nothing,
     // and on EADDRINUSE the node at this path belongs to someone else.
-    if (fallbackDir !== null) await fsp.rmdir(fallbackDir).catch(() => undefined);
     const code = (err as NodeJS.ErrnoException).code;
     throw new Error(
       code === 'EADDRINUSE'
@@ -403,11 +415,6 @@ export async function createDriveSocket(options: CreateDriveSocketOptions): Prom
           if (boundInode !== null && info.ino === boundInode) await fsp.rm(socketPath, { force: true });
         } catch {
           // Already gone — the normal case.
-        }
-        if (fallbackDir !== null) {
-          await fsp.rmdir(fallbackDir).catch((err: unknown) => {
-            logger?.warn('[xcodeDriveSocket] could not remove the fallback dir', { error: errorText(err) });
-          });
         }
       })();
       return closing;
@@ -489,17 +496,40 @@ export function sendDriveFrame(
 }
 
 /**
- * Boot sweep of leftover `xd-*.sock` files under `<dataDir>/sockets` (§B4.9) —
- * what a hard-killed cyboflow leaves behind. A file is removed only when no live
- * listener answers a connect probe, so a socket another live instance owns is
- * never touched. Returns the removed paths; never throws.
+ * Boot sweep of leftover `xd-*.sock` files (§B4.9) — what a hard-killed
+ * cyboflow leaves behind — under `<dataDir>/sockets` AND the per-user
+ * long-path fallback root (X-5). A file is removed only when no live listener
+ * answers a connect probe, so a socket another live instance owns is never
+ * touched; the fallback root is scanned only when it is a real 0700-able
+ * directory this user owns. Returns the removed paths; never throws.
  */
 export async function sweepStaleDriveSockets(
   dataDir: string,
   logger?: LoggerLike,
   probeTimeoutMs = 500,
+  shortTmpDir: string = DEFAULT_SHORT_TMP_DIR,
 ): Promise<string[]> {
-  const socketsDir = path.join(dataDir, 'sockets');
+  const removed = await sweepSocketDir(path.join(dataDir, 'sockets'), logger, probeTimeoutMs);
+  const fallbackRoot = driveSocketFallbackRoot(shortTmpDir);
+  if (await isOwnedRealDir(fallbackRoot)) {
+    removed.push(...(await sweepSocketDir(fallbackRoot, logger, probeTimeoutMs)));
+  }
+  if (removed.length > 0) logger?.info('[xcodeDriveSocket] swept stale drive sockets', { count: removed.length });
+  return removed;
+}
+
+/** Whether `dir` is a real directory (not a symlink) owned by this user. */
+async function isOwnedRealDir(dir: string): Promise<boolean> {
+  try {
+    const info = await fsp.lstat(dir);
+    if (!info.isDirectory()) return false;
+    return typeof process.getuid !== 'function' || info.uid === process.getuid();
+  } catch {
+    return false;
+  }
+}
+
+async function sweepSocketDir(socketsDir: string, logger: LoggerLike | undefined, probeTimeoutMs: number): Promise<string[]> {
   let names: string[];
   try {
     names = await fsp.readdir(socketsDir);
@@ -520,7 +550,6 @@ export async function sweepStaleDriveSockets(
       logger?.debug('[xcodeDriveSocket] stale-socket sweep skipped an entry', { name, error: errorText(err) });
     }
   }
-  if (removed.length > 0) logger?.info('[xcodeDriveSocket] swept stale drive sockets', { count: removed.length });
   return removed;
 }
 

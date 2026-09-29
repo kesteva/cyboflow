@@ -65,7 +65,7 @@ export function isAgentModelAlias(value: unknown): value is AgentModelAlias {
 export const AGENT_MODEL_LABELS: Record<AgentModelAlias, string> = {
   fable: 'Fable 5.1',
   opus: 'Opus 5.5',
-  sonnet: 'Sonnet 5',
+  sonnet: 'Sonnet 5.5',
   haiku: 'Haiku 4.5',
 };
 
@@ -230,9 +230,18 @@ export function claudeModelIdLabel(id: string): string | null {
  * rows by. `WorkflowStep.id` is unique only WITHIN its phase
  * (`shared/types/workflows.ts`), so a bare `stepId` key would let a cross-phase
  * duplicate paint one step's model on another step's card.
+ *
+ * `fanOutStepId` is the OPTIONAL third segment for a `fanOut.inner` step's
+ * entry (the owning fan-out step's own id) — an inner step's `id` can legally
+ * collide with an OUTER step's `id` within the same phase (e.g. both named
+ * `code-review`), and the 2-arg form alone cannot disambiguate them. A 3-part
+ * key can never collide with a 2-part key (the extra NUL-delimited segment),
+ * so every existing 2-arg call site (outer-step lookups) is unaffected.
  */
-export function stepModelKey(phaseId: string, stepId: string): string {
-  return `${phaseId}\u0000${stepId}`;
+export function stepModelKey(phaseId: string, stepId: string, fanOutStepId?: string): string {
+  return fanOutStepId === undefined
+    ? `${phaseId}\u0000${stepId}`
+    : `${phaseId}\u0000${fanOutStepId}\u0000${stepId}`;
 }
 
 export interface AgentUsageStep {

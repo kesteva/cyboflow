@@ -30,7 +30,7 @@
  * `TypedEventNarrowing` (adapting `verbose` → `debug`, as `LoggerLike` has no
  * `verbose`) so its diagnostics are not silently dropped.
  */
-import { TypedEventNarrowing, deriveEventType } from '../../../shared/streamParser';
+import { PROCESS_INSTANCE_ID_FIELD, TypedEventNarrowing, deriveEventType } from '../../../shared/streamParser';
 import type { StreamEnvelope, StreamEventType } from '../../../shared/types/claudeStream';
 import type { DatabaseLike, LoggerLike } from './types';
 
@@ -90,6 +90,13 @@ export function selectRunRawStreamEvents(
     } catch {
       // Unparseable persisted payload — skip (defensive; sink writes valid JSON).
       continue;
+    }
+    // The sink's process-identity stamp is persistence-only; the live bridge
+    // never carries it, so the replay does not either.
+    if (typeof raw === 'object' && raw !== null && PROCESS_INSTANCE_ID_FIELD in raw) {
+      const stripped: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+      delete stripped[PROCESS_INSTANCE_ID_FIELD];
+      raw = stripped;
     }
 
     const typed = narrower.narrow(raw);

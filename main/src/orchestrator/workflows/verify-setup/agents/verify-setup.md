@@ -131,7 +131,7 @@ ModalityEntry = {
     scheme: string,
     productGlob?: string,          // relative to $VERIFY_DERIVED_DATA; no `..`, no leading `/`
   },
-  attestation: AttestationSpec,    // REQUIRED — see the six kinds below
+  attestation: AttestationSpec,    // REQUIRED — see the seven kinds below
   notes?: string,                  // free-text derivation notes for a human reader
   viewports?: Array<{ width: number, height: number, label?: string }>,
 }
@@ -233,7 +233,7 @@ not pass. There is no low-confidence escape hatch. "The port answered" is not
 identity: it may be a stale dev server from an unrelated worktree, or the user's
 own running app.
 
-**There are exactly six attestation kinds. You may not invent a seventh**, and a
+**There are exactly seven attestation kinds. You may not invent an eighth**, and a
 `kind` outside this list is rejected by the validator, so an invented one is a
 failed draft rather than a creative one:
 
@@ -245,6 +245,7 @@ failed draft rather than a creative one:
 | `window-identity` | `titlePattern: string`, `app: string` | `native-screen` | The application named by `app` has an OS window whose title matches. `app` is required and MUST be a bundle id (e.g. `com.example.MyApp`) or `PID:<n>`, never a bare application name — peekaboo resolves `--app` by fuzzy match over both the display name and the bundle id, which can silently bind an unrelated app or fail with `Ambiguous application identifier` at app-resolution time, before `titlePattern` gets a chance to discriminate. The WEAKEST channel — a title is spoofable and coincidental in a way an in-page nonce is not — and must be recorded as such. |
 | `file-identity` | *(none)* | degenerate pre-live `htmlPath` | Identity BY CONSTRUCTION: the runner itself writes and owns the path it opens. No live process, nothing to race. |
 | `bundle-identity` | `bundleId: string` | `mobile` | After the session the harness re-hashes the executable inside the installed app container and requires it to be byte-identical to the exactly-one product staged under this request's DerivedData, carrying that `CFBundleIdentifier`. Must equal `app.bundleId`. It proves the identity of what was STAGED, not who compiled it — the agent runs `xcodebuild` itself through Bash, exactly as it runs a web build — so record that limit rather than calling it build provenance. |
+| `serve-binding` | *(none)* | `web`, `cdp-app` — REQUIRES a `serve` | No channel probe: after the session the harness requires the leased port's listener to be in the process group the driver started for this entry's VERBATIM `serve.cmd`. Needs no repo change, but identity rests on that port binding alone — a command that deliberately fronts another server would pass it — so it is the weakest web/cdp-app channel. Use it when the project renders no nonce and you would rather not propose a marker. |
 
 Literal shapes (`urlPath` / `selector` / `expression` are always whatever the
 project ACTUALLY exposes — these are shapes, not fixed values):
@@ -253,19 +254,22 @@ project ACTUALLY exposes — these are shapes, not fixed values):
 `{"kind":"cdp-token","expression":"window.__BUILD_SHA__","expected":"<the literal this build bakes in>"}`,
 `{"kind":"window-identity","titlePattern":"Cyboflow — .*","app":"com.github.Electron"}`,
 `{"kind":"file-identity"}`,
-`{"kind":"bundle-identity","bundleId":"com.example.MyApp"}`.
+`{"kind":"bundle-identity","bundleId":"com.example.MyApp"}`,
+`{"kind":"serve-binding"}`.
 
 **`file-identity` is NOT the escape hatch for "this is just static files."** It
 covers only the degenerate path where the runner opens a file it wrote itself. A
 project you SERVE over a leased port — even a directory of plain HTML — is a live
-process on a socket you do not own, so it needs `http-endpoint` or `dom-marker`
-like any other web deliverable. The port lease is an in-process mutex guarding a
+process on a socket you do not own, so it needs `http-endpoint`, `dom-marker` or
+`serve-binding` like any other web deliverable. The port lease is an in-process mutex guarding a
 logical slot, not the OS socket; "the runner owns the directory and leases the
 port, so nothing else can be answering" is precisely the reasoning this
 requirement exists to defeat.
 
-If a modality has no channel this project can support today, **say so** and
-propose adding one as a repo change (adding a `data-verify-build` attribute to a
+If a web or cdp-app modality has no nonce channel this project can support
+today, `serve-binding` is available with no repo change (the weakest channel —
+record that in `notes`). Otherwise, if a modality has no channel this project can
+support today, **say so** and propose adding one as a repo change (adding a `data-verify-build` attribute to a
 root element is a textbook rung-1 change). Never invent a route, selector, or
 global that does not exist — an attestation that names something absent fails the
 proof in the most confusing possible way.
