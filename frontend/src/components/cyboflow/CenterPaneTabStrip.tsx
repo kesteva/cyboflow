@@ -12,10 +12,11 @@
  * Colors are inline design hexes (warm-paper palette) for fidelity; the M7 polish
  * pass migrates them to `var(--cf-*)` tokens.
  */
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import type { TabItem } from '../../../../shared/types/centerPane';
 import { useShallow } from 'zustand/react/shallow';
 import { useWebConsentStore } from '../../stores/webConsentStore';
+import { typedUrl } from '../../utils/openWebLink';
 import {
   ARTIFACT_COLORS,
   ARTIFACT_GLYPHS,
@@ -54,6 +55,11 @@ interface CenterPaneTabStripProps {
   activeTabId: string;
   onTabClick: (tabId: string) => void;
   onTabClose: (tabId: string) => void;
+  /**
+   * Open a web tab at a URL the user typed. When set, the trailing "+" becomes
+   * a button that swaps in a URL field; absent, the "+" stays passive.
+   */
+  onOpenUrl?: (url: string) => void;
 }
 
 /** Edge / accent color for a tab by kind. */
@@ -86,6 +92,7 @@ export function CenterPaneTabStrip({
   activeTabId,
   onTabClick,
   onTabClose,
+  onOpenUrl,
 }: CenterPaneTabStripProps): ReactElement {
   // Web tabs with an agent access request waiting on the human. A prompt on a
   // BACKGROUND tab is otherwise invisible — its sheet renders only when shown.
@@ -235,22 +242,99 @@ export function CenterPaneTabStrip({
           );
         })}
       </div>
-      {/* Trailing affordance (design shows a passive "+" cell). */}
-      <div
-        aria-hidden="true"
-        style={{
-          flexShrink: 0,
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 8px',
-          borderLeft: `1px solid ${HAIRLINE}`,
-          color: FAINT,
-          fontSize: '13px',
-          cursor: 'default',
-        }}
+      {onOpenUrl ? (
+        <NewWebTabCell onOpenUrl={onOpenUrl} />
+      ) : (
+        <div aria-hidden="true" style={PLUS_CELL_STYLE}>
+          +
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PLUS_CELL_STYLE: React.CSSProperties = {
+  flexShrink: 0,
+  display: 'flex',
+  alignItems: 'center',
+  padding: '0 8px',
+  borderLeft: `1px solid ${HAIRLINE}`,
+  color: FAINT,
+  fontSize: '13px',
+  cursor: 'default',
+};
+
+/**
+ * The trailing "+": click → a URL field; Enter opens it as a user web tab,
+ * Escape or blur cancels. An unusable entry (a search, a non-http scheme) keeps
+ * the field open and marks it invalid instead of guessing.
+ */
+function NewWebTabCell({ onOpenUrl }: { onOpenUrl: (url: string) => void }): ReactElement {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState('');
+  const [invalid, setInvalid] = useState(false);
+
+  const close = (): void => {
+    setEditing(false);
+    setText('');
+    setInvalid(false);
+  };
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        aria-label="Open a web tab"
+        title="Open a web tab"
+        data-testid="center-pane-new-web-tab"
+        onClick={() => setEditing(true)}
+        style={{ ...PLUS_CELL_STYLE, background: 'transparent', border: 'none', borderLeft: `1px solid ${HAIRLINE}`, cursor: 'pointer' }}
       >
         +
-      </div>
+      </button>
+    );
+  }
+  return (
+    <div style={{ ...PLUS_CELL_STYLE, padding: '0 6px' }}>
+      <input
+        autoFocus
+        type="text"
+        value={text}
+        placeholder="Enter a URL"
+        aria-label="URL to open"
+        aria-invalid={invalid}
+        data-testid="center-pane-new-web-tab-input"
+        spellCheck={false}
+        onChange={(e) => {
+          setText(e.target.value);
+          setInvalid(false);
+        }}
+        onBlur={close}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            close();
+          } else if (e.key === 'Enter') {
+            const url = typedUrl(text);
+            if (!url) {
+              setInvalid(true);
+              return;
+            }
+            onOpenUrl(url);
+            close();
+          }
+        }}
+        style={{
+          width: 220,
+          height: 24,
+          padding: '0 7px',
+          fontSize: '11px',
+          color: INK,
+          background: PAGE,
+          border: `1px solid ${invalid ? 'var(--color-status-error)' : HAIRLINE}`,
+          borderRadius: 3,
+          outline: 'none',
+        }}
+      />
     </div>
   );
 }

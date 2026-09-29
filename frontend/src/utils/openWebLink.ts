@@ -31,6 +31,27 @@ export function viewableHref(href: string | undefined | null): string | null {
   }
 }
 
+const LOCAL_HOST = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
+
+/**
+ * The URL a user TYPED into the new-tab field, or null. Unlike `viewableHref`
+ * a bare host is accepted, the way an address bar does: `example.com/x` →
+ * https, `localhost:5173` → http (a dev server rarely serves TLS). Anything
+ * with a space or no dot is a search, not an address, and the viewer has no
+ * search engine to send it to.
+ */
+export function typedUrl(input: string): string | null {
+  const text = input.trim();
+  if (text.length === 0 || /\s/.test(text)) return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return viewableHref(text);
+  if (LOCAL_HOST.test(text)) return viewableHref(`http://${text}`);
+  // `mailto:x@y.z` / `javascript:…` — a scheme, not a host:port.
+  if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(text)) return null;
+  const host = text.split(/[/?#]/, 1)[0].replace(/:\d+$/, '');
+  if (!host.includes('.')) return null;
+  return viewableHref(`https://${text}`);
+}
+
 function openInBrowser(url: string): void {
   void window.electronAPI?.openExternal(url);
 }

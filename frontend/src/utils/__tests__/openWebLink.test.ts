@@ -9,7 +9,7 @@ vi.mock('../../trpc/client', () => ({
   trpc: { cyboflow: { webViewer: { open: { mutate: (...a: unknown[]) => openMutate(...a) } } } },
 }));
 
-import { openUserWebTab, viewableHref } from '../openWebLink';
+import { openUserWebTab, typedUrl, viewableHref } from '../openWebLink';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 
 const KEY = 's1';
@@ -35,6 +35,25 @@ describe('viewableHref', () => {
     expect(viewableHref('javascript:alert(1)')).toBeNull();
     expect(viewableHref('file:///etc/passwd')).toBeNull();
     expect(viewableHref(undefined)).toBeNull();
+  });
+});
+
+describe('typedUrl', () => {
+  it('fills in the scheme a user leaves off: https for a host, http for a local dev server', () => {
+    expect(typedUrl('example.com/docs')).toBe('https://example.com/docs');
+    expect(typedUrl('  docs.anthropic.com  ')).toBe('https://docs.anthropic.com/');
+    expect(typedUrl('localhost:5173')).toBe('http://localhost:5173/');
+    expect(typedUrl('127.0.0.1:8080/x')).toBe('http://127.0.0.1:8080/x');
+    expect(typedUrl('http://example.com')).toBe('http://example.com/');
+  });
+
+  it('refuses a search, a bare word, and any non-http(s) scheme', () => {
+    expect(typedUrl('how to center a div')).toBeNull();
+    expect(typedUrl('intranet')).toBeNull();
+    expect(typedUrl('')).toBeNull();
+    expect(typedUrl('file:///etc/passwd')).toBeNull();
+    expect(typedUrl('javascript:alert(1)')).toBeNull();
+    expect(typedUrl('mailto:a@b.c')).toBeNull();
   });
 });
 

@@ -10,7 +10,7 @@
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { CenterPaneTabStrip } from '../CenterPaneTabStrip';
 import { ARTIFACT_GLYPHS } from '../../../../../shared/types/artifacts';
 import { makeFlowTab, type TabItem } from '../../../../../shared/types/centerPane';
@@ -69,5 +69,55 @@ describe('CenterPaneTabStrip — web tabs', () => {
     renderStrip([USER_TAB], 'web:aaaa');
     const tab = screen.getByTestId('center-pane-tab-web:aaaa');
     expect(tab.style.borderBottom).toBe('');
+  });
+});
+
+describe('CenterPaneTabStrip — new web tab "+"', () => {
+  function renderWithOpen(onOpenUrl = vi.fn()) {
+    render(
+      <CenterPaneTabStrip
+        tabs={[makeFlowTab()]}
+        activeTabId="flow"
+        onTabClick={vi.fn()}
+        onTabClose={vi.fn()}
+        onOpenUrl={onOpenUrl}
+      />,
+    );
+    return onOpenUrl;
+  }
+
+  it('stays a passive cell when the pane wires no opener', () => {
+    renderStrip([]);
+    expect(screen.queryByTestId('center-pane-new-web-tab')).toBeNull();
+  });
+
+  it('opens the typed address, filling in the scheme, and closes the field', () => {
+    const onOpenUrl = renderWithOpen();
+    fireEvent.click(screen.getByTestId('center-pane-new-web-tab'));
+    const input = screen.getByTestId('center-pane-new-web-tab-input');
+    fireEvent.change(input, { target: { value: 'localhost:5173' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onOpenUrl).toHaveBeenCalledWith('http://localhost:5173/');
+    expect(screen.queryByTestId('center-pane-new-web-tab-input')).toBeNull();
+  });
+
+  it('keeps the field open and marked invalid for something that is not an address', () => {
+    const onOpenUrl = renderWithOpen();
+    fireEvent.click(screen.getByTestId('center-pane-new-web-tab'));
+    const input = screen.getByTestId('center-pane-new-web-tab-input');
+    fireEvent.change(input, { target: { value: 'how to center a div' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onOpenUrl).not.toHaveBeenCalled();
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('Escape cancels without opening anything', () => {
+    const onOpenUrl = renderWithOpen();
+    fireEvent.click(screen.getByTestId('center-pane-new-web-tab'));
+    const input = screen.getByTestId('center-pane-new-web-tab-input');
+    fireEvent.change(input, { target: { value: 'example.com' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(onOpenUrl).not.toHaveBeenCalled();
+    expect(screen.getByTestId('center-pane-new-web-tab')).toBeInTheDocument();
   });
 });
