@@ -29,13 +29,15 @@
  * box, StrictMode-safe `disposed` flag, pre-open byte buffering) is adapted from
  * `InteractiveTerminalView`.
  */
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useContext, useEffect, useRef, useState, type ReactElement } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { useTheme } from '../../contexts/ThemeContext';
 import { subscribeToShellBytes } from '../../utils/cyboflowApi';
 import { trpc } from '../../trpc/client';
+import { WebLinkContext } from '../../contexts/WebLinkContext';
+import { attachTerminalLinks } from '../../utils/terminalLinks';
 import '@xterm/xterm/css/xterm.css';
 
 /**
@@ -74,6 +76,10 @@ export function RunShellTerminalView({
 }): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  // The host session's web-link handler, read at click time (null → OS browser).
+  const openWebLink = useContext(WebLinkContext);
+  const openWebLinkRef = useRef(openWebLink);
+  openWebLinkRef.current = openWebLink;
   const { theme } = useTheme();
   const [error, setError] = useState<string | null>(null);
 
@@ -107,6 +113,7 @@ export function RunShellTerminalView({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    attachTerminalLinks(term, () => openWebLinkRef.current);
     termRef.current = term;
 
     // `opened` flips true after the first successful term.open() (the renderer has

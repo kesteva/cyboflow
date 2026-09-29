@@ -28,6 +28,7 @@ import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { openBlankWebTab } from '../../utils/openWebLink';
+import { WebLinkProvider } from '../../contexts/WebLinkContext';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
@@ -409,7 +410,10 @@ export function RunCenterPane({
         folderLabel={folderBasename(activeRun?.worktree_path)}
         branchName={activeRun?.branch_name ?? undefined}
       >
-        <RunBottomPane onActiveTabKindChange={setBottomTabKind} />
+        {/* Terminal links open as web tabs in this session. */}
+        <WebLinkProvider sessionKey={sessionKey}>
+          <RunBottomPane onActiveTabKindChange={setBottomTabKind} />
+        </WebLinkProvider>
       </TerminalDock>
     </div>
   );

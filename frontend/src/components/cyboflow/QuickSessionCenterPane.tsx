@@ -55,6 +55,7 @@ import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { openBlankWebTab } from '../../utils/openWebLink';
+import { WebLinkProvider } from '../../contexts/WebLinkContext';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
@@ -253,14 +254,17 @@ export function QuickSessionCenterPane({
         />
       )}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
-      <TerminalDock
-        open={pane.terminalOpen}
-        onToggle={() => toggleTerminal(sessionKey)}
-        storageKey="cyboflow.quickSessionDock.height"
-        defaultOpenHeight={420}
-      >
-        {dockContent}
-      </TerminalDock>
+      {/* Terminal links open as web tabs in this session. */}
+      <WebLinkProvider sessionKey={sessionKey}>
+        <TerminalDock
+          open={pane.terminalOpen}
+          onToggle={() => toggleTerminal(sessionKey)}
+          storageKey="cyboflow.quickSessionDock.height"
+          defaultOpenHeight={420}
+        >
+          {dockContent}
+        </TerminalDock>
+      </WebLinkProvider>
     </div>
   );
 }

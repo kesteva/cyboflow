@@ -51,7 +51,7 @@
  * additionally call the exported `disposeInteractiveTerminal(runId)` to evict +
  * dispose the cached xterm so the cache never leaks or stale-restores a dead run.
  */
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type ReactElement } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
@@ -59,6 +59,8 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { subscribeToPtyBytes } from '../../utils/cyboflowApi';
 import { trpc } from '../../trpc/client';
 import { InteractiveWarnDialog } from './InteractiveWarnDialog';
+import { WebLinkContext, type WebLinkHandler } from '../../contexts/WebLinkContext';
+import { attachTerminalLinks } from '../../utils/terminalLinks';
 import '@xterm/xterm/css/xterm.css';
 
 /**
@@ -146,6 +148,9 @@ interface TerminalCacheEntry {
    *  `term.write` callback from a prior (interrupted) flush cannot resume the
    *  chain against a newer flush of the same entry. */
   flushId: number;
+  /** Where a clicked link opens — the CURRENT host's web-link handler, re-pointed
+   *  on every mount because the entry outlives the mount that created it. */
+  openLink: WebLinkHandler | null;
 }
 
 // Coalesce buffered chunks into segments no larger than this so the buffer array
@@ -264,6 +269,14 @@ export function InteractiveTerminalView({
   guardFirstInteraction?: boolean;
 }): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
+  // The host session's web-link handler (null outside a session → OS browser).
+  const openWebLink = useContext(WebLinkContext);
+  const openWebLinkRef = useRef(openWebLink);
+  openWebLinkRef.current = openWebLink;
+  useEffect(() => {
+    const cached = terminalCache.get(runId);
+    if (cached) cached.openLink = openWebLink;
+  }, [runId, openWebLink]);
 
   // Active theme (paper | dark | light). The xterm palette is read from CSS vars
   // ONCE at construction, so a theme switch (Settings) — or a dev-time CSS token
@@ -415,7 +428,9 @@ export function InteractiveTerminalView({
         bufferBytes: 0,
         overflowTimer: undefined,
         flushId: 0,
+        openLink: openWebLinkRef.current,
       };
+      attachTerminalLinks(created.term, () => created.openLink);
 
       // Subscribe ONCE per cache entry and keep it alive across detach/re-attach.
       // Raw bytes go DIRECTLY to term.write (via writeWithAutoScroll) — NEVER into
@@ -464,6 +479,7 @@ export function InteractiveTerminalView({
     }
 
     const activeEntry = entry;
+    activeEntry.openLink = openWebLinkRef.current;
     const term = activeEntry.term;
     const fit = activeEntry.fit;
     termRef.current = term;
