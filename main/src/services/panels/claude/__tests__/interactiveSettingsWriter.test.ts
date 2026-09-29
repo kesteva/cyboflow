@@ -184,6 +184,14 @@ describe('hookCommand', () => {
     expect(hookCommand('/w/.cyboflow/hooks/gate.js', 'linux')).toBe('/w/.cyboflow/hooks/gate.js');
   });
 
+  it('POSIX single-quotes a path with spaces so /bin/sh does not split it', () => {
+    // The Dev variant installs to `/Applications/Cyboflow Dev.app` — unquoted,
+    // sh runs `/Applications/Cyboflow` and every hook fails (the gate open).
+    const devPath = '/Applications/Cyboflow Dev.app/Contents/Resources/hooks/gate.js';
+    expect(hookCommand(devPath, 'darwin')).toBe(`'${devPath}'`);
+    expect(hookCommand("/a/it's here/gate.js", 'linux')).toBe(`'/a/it'\\''s here/gate.js'`);
+  });
+
   it('win32 names the resolved node binary, both paths quoted', () => {
     // A bare `node` would depend on the PATH Claude Code hands the hook. A
     // PreToolUse hook that cannot start exits non-zero, which is NOT a block
