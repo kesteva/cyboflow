@@ -135,6 +135,7 @@ beforeEach(() => {
     liveEvents: [],
     composerDraft: null,
     pendingContextHint: null,
+    queuedTurn: null,
   });
 });
 
@@ -768,6 +769,252 @@ describe('interrupt', () => {
     resolveSend?.(); // simulates the server settling the interrupted sendMessage call
     await sendPromise;
     expect(useAgentThreadStore.getState().sending).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queueTurn / cancelQueuedTurn / interruptAndSend — TASK-301
+// ---------------------------------------------------------------------------
+
+describe('queueTurn / interruptAndSend (TASK-301)', () => {
+  it('queueTurn buffers the turn without sending it', () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+
+    useAgentThreadStore.getState().queueTurn('do this next');
+
+    expect(useAgentThreadStore.getState().queuedTurn).toEqual({ text: 'do this next' });
+    expect(mockSendMessageMutate).not.toHaveBeenCalled();
+  });
+
+  it('a SECOND queueTurn call accumulates onto the first instead of overwriting it (TASK-301 attempt 3, blocker B)', () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    const imageA = { name: 'a.png', mediaType: 'image/png' as const, base64: 'aaaa' };
+    const imageB = { name: 'b.png', mediaType: 'image/png' as const, base64: 'bbbb' };
+
+    useAgentThreadStore.getState().queueTurn('first message', [imageA]);
+    useAgentThreadStore.getState().queueTurn('second message', [imageB]);
+
+    // Both messages and both images must survive — a naive `set({ queuedTurn:
+    // {...} })` overwrite (the pre-fix behavior) would leave only the second
+    // call's payload here, silently discarding "first message" + imageA.
+    expect(useAgentThreadStore.getState().queuedTurn).toEqual({
+      text: 'first message\n\nsecond message',
+      images: [imageA, imageB],
+    });
+  });
+
+  it('proof of failure: attempt 2\'s overwrite reducer drops the first queued message (negative control for the test above)', () => {
+    // The exact pre-fix `queueTurn` body from attempt 2 (agentThreadStore.ts,
+    // before this attempt's fix): `set({ queuedTurn: { text, ...images } })`,
+    // an unconditional replace with no accumulation. Reproduced here verbatim
+    // (not by editing the production file — this worktree is shared with
+    // sibling lanes) to prove the assertion above is discriminating: run it
+    // through the SAME two-call sequence and the SAME assertion, and it fails.
+    let queuedTurn: { text: string; images?: Array<{ name: string; mediaType: string; base64: string }> } | null =
+      null;
+    const preFixQueueTurn = (
+      text: string,
+      images?: Array<{ name: string; mediaType: string; base64: string }>,
+    ): void => {
+      queuedTurn = { text, ...(images !== undefined ? { images } : {}) };
+    };
+    const imageA = { name: 'a.png', mediaType: 'image/png' as const, base64: 'aaaa' };
+    const imageB = { name: 'b.png', mediaType: 'image/png' as const, base64: 'bbbb' };
+
+    preFixQueueTurn('first message', [imageA]);
+    preFixQueueTurn('second message', [imageB]);
+
+    // Against the pre-fix reducer this is FALSE — `queuedTurn` is just
+    // `{ text: 'second message', images: [imageB] }`, silently discarding
+    // "first message" + imageA. This assertion documents that failure so the
+    // reducer's discriminating power (and this attempt's fix) is on record.
+    expect(queuedTurn).not.toEqual({
+      text: 'first message\n\nsecond message',
+      images: [imageA, imageB],
+    });
+    expect(queuedTurn).toEqual({ text: 'second message', images: [imageB] });
+  });
+
+  it('cancelQueuedTurn clears a pending queue without ever sending it', () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    useAgentThreadStore.getState().queueTurn('never mind');
+
+    useAgentThreadStore.getState().cancelQueuedTurn();
+
+    expect(useAgentThreadStore.getState().queuedTurn).toBeNull();
+    expect(mockSendMessageMutate).not.toHaveBeenCalled();
+  });
+
+  it('delivers the queued turn the instant the in-flight sendMessage call settles', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    let resolveFirst: (() => void) | undefined;
+    mockSendMessageMutate = vi.fn().mockImplementation(() =>
+      mockSendMessageMutate.mock.calls.length === 1
+        ? new Promise<{ ok: true }>((resolve) => {
+            resolveFirst = () => resolve({ ok: true });
+          })
+        : Promise.resolve({ ok: true }),
+    );
+
+    const firstSend = useAgentThreadStore.getState().sendMessage('first turn');
+    useAgentThreadStore.getState().queueTurn('queued follow-up');
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(1);
+
+    resolveFirst?.();
+    await firstSend;
+
+    // The queued turn was auto-delivered as soon as the first one landed.
+    await vi.waitFor(() => expect(mockSendMessageMutate).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageMutate).toHaveBeenLastCalledWith({
+      threadId: 'thread-1',
+      text: 'queued follow-up',
+    });
+    expect(useAgentThreadStore.getState().queuedTurn).toBeNull();
+  });
+
+  it('does NOT double-deliver a queued turn when the server publishes the terminal envelope WHILE this renderer\'s own sendMessage call is still in flight (blocker 3 race: AgentThreadService.spawn() emits the terminal envelope BEFORE spawn() — and therefore the mutate() promise — resolves)', async () => {
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+
+    let resolveFirst: (() => void) | undefined;
+    mockSendMessageMutate = vi.fn().mockImplementation(() =>
+      mockSendMessageMutate.mock.calls.length === 1
+        ? new Promise<{ ok: true }>((resolve) => {
+            resolveFirst = () => resolve({ ok: true });
+          })
+        : Promise.resolve({ ok: true }),
+    );
+
+    const firstSend = useAgentThreadStore.getState().sendMessage('first turn');
+    useAgentThreadStore.getState().queueTurn('queued follow-up');
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(1);
+
+    // The server publishes the terminal `result` envelope over the live tail
+    // WHILE this renderer's own `sendMessage.mutate()` call is still pending —
+    // the exact race: the server's onOutput fires the terminal envelope from
+    // inside AgentThreadService.spawn(), before spawn() itself (and therefore
+    // this mutate() call) returns.
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeResultEnvelope()]);
+
+    // Must NOT have double-spawned yet: this renderer holds a local
+    // currentSendPromise for the in-flight turn, so delivery is owned
+    // exclusively by that call's own `finally` once it truly settles — never
+    // from the terminal-marker handler too.
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(1);
+
+    resolveFirst?.();
+    await firstSend;
+
+    // NOW it delivers — exactly once, from the first send's own `finally`.
+    await vi.waitFor(() => expect(mockSendMessageMutate).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageMutate).toHaveBeenLastCalledWith({
+      threadId: 'thread-1',
+      text: 'queued follow-up',
+    });
+    expect(useAgentThreadStore.getState().queuedTurn).toBeNull();
+  });
+
+  it('delivers a queued turn threaded with images', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    const images = [{ name: 'shot.png', mediaType: 'image/png' as const, base64: 'iVBORw0KGgo=' }];
+    let resolveFirst: (() => void) | undefined;
+    mockSendMessageMutate = vi.fn().mockImplementation(() =>
+      mockSendMessageMutate.mock.calls.length === 1
+        ? new Promise<{ ok: true }>((resolve) => {
+            resolveFirst = () => resolve({ ok: true });
+          })
+        : Promise.resolve({ ok: true }),
+    );
+
+    const firstSend = useAgentThreadStore.getState().sendMessage('first turn');
+    useAgentThreadStore.getState().queueTurn('with a picture', images);
+    resolveFirst?.();
+    await firstSend;
+
+    await vi.waitFor(() => expect(mockSendMessageMutate).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageMutate).toHaveBeenLastCalledWith({
+      threadId: 'thread-1',
+      text: 'with a picture',
+      images,
+    });
+  });
+
+  it('delivers a queued turn on a terminal live-tail marker even with no local sendMessage promise (reload mid-turn)', async () => {
+    mockTurnStateQuery = vi.fn().mockResolvedValue({ inFlight: true });
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().sending).toBe(true));
+
+    useAgentThreadStore.getState().queueTurn('deliver me on terminal marker');
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeResultEnvelope()]);
+
+    await vi.waitFor(() => expect(mockSendMessageMutate).toHaveBeenCalledTimes(1));
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({
+      threadId: 'thread-1',
+      text: 'deliver me on terminal marker',
+    });
+    expect(useAgentThreadStore.getState().queuedTurn).toBeNull();
+  });
+
+  it('interruptAndSend calls interruptTurn, then sends once the interrupted call settles, preserving thread continuity', async () => {
+    useAgentThreadStore.setState({ thread: makeThread({ claudeSessionId: 'sess-1' }) });
+    let resolveFirst: (() => void) | undefined;
+    mockSendMessageMutate = vi.fn().mockImplementation(() =>
+      mockSendMessageMutate.mock.calls.length === 1
+        ? new Promise<{ ok: true }>((resolve) => {
+            resolveFirst = () => resolve({ ok: true });
+          })
+        : Promise.resolve({ ok: true }),
+    );
+
+    const firstSend = useAgentThreadStore.getState().sendMessage('long turn');
+    expect(useAgentThreadStore.getState().sending).toBe(true);
+
+    const interruptAndSendPromise = useAgentThreadStore.getState().interruptAndSend('abort and send this now');
+    await vi.waitFor(() => expect(mockInterruptTurnMutate).toHaveBeenCalledWith({ threadId: 'thread-1' }));
+
+    // The second send must NOT fire before the first one's own call settles —
+    // AgentThreadService has no per-thread send queue of its own.
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(1);
+
+    resolveFirst?.();
+    await firstSend;
+    await interruptAndSendPromise;
+
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(2);
+    expect(mockSendMessageMutate).toHaveBeenLastCalledWith({
+      threadId: 'thread-1',
+      text: 'abort and send this now',
+    });
+  });
+
+  it('interruptAndSend drops a pending queued turn (an explicit interrupt supersedes it)', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    useAgentThreadStore.getState().queueTurn('stale queued text');
+
+    await useAgentThreadStore.getState().interruptAndSend('fresh text instead');
+
+    expect(useAgentThreadStore.getState().queuedTurn).toBeNull();
+    expect(mockSendMessageMutate).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({ threadId: 'thread-1', text: 'fresh text instead' });
+  });
+
+  it('interruptAndSend is a no-op before the thread has loaded', async () => {
+    await useAgentThreadStore.getState().interruptAndSend('too early');
+    expect(mockInterruptTurnMutate).not.toHaveBeenCalled();
+    expect(mockSendMessageMutate).not.toHaveBeenCalled();
+  });
+
+  it('negative control: interrupting while genuinely idle (no queued/in-flight turn) never calls sendMessage from queue delivery', async () => {
+    // No turn in flight, nothing queued — a terminal-marker-style event must
+    // never fabricate a delivery when queuedTurn is null.
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    const onData = mockOnThreadEventSubscribe.mock.calls[0][1].onData as (values: unknown[]) => void;
+    onData([makeResultEnvelope()]);
+
+    expect(mockSendMessageMutate).not.toHaveBeenCalled();
   });
 });
 

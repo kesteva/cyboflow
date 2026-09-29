@@ -158,7 +158,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setInterruptAndSendDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -5730,6 +5730,22 @@ app.whenReady().then(async () => {
       runExecutor,
     });
     console.log('[Main] runs.queueInput deps wired');
+
+    // Interrupt & send (TASK-301): the SAME nudgeDeps bag (db / runQueues /
+    // runExecutor / logger) plus the facade's abort + live-spawn-key seams — the
+    // SAME ones laneRewindDepsBag (above) and rewindRunDepsBag use. Deliberately
+    // does NOT reuse `awaitTurnStart` — the live-spawn branch buffers the text via
+    // `runExecutor.queueInput` and requests the abort, then returns immediately;
+    // delivery is left entirely to the aborted turn's own drain
+    // (`drainQueuedInputAtRest`, reached once `teardownRun` observes the aborted
+    // spawn's 'drained' lifecycle transition), not to this mutation awaiting
+    // anything itself (see interruptAndSendHandler.ts's header note).
+    setInterruptAndSendDeps({
+      ...nudgeDeps,
+      abortRunSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
+      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
+    });
+    console.log('[Main] runs.interruptAndSend deps wired');
 
     // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
     // path into a running interactive REPL). Both methods route through the

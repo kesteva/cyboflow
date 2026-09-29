@@ -261,6 +261,42 @@ export interface AgentThreadState {
    * `sendMessage`.
    */
   interrupt: () => Promise<void>;
+
+  /**
+   * A turn buffered via `queueTurn` (TASK-301), waiting for the in-flight turn
+   * to land. Delivered automatically — see `deliverQueuedTurnIfAny` in the
+   * store body — the instant `sending` flips back to false, on EVERY path that
+   * can flip it (the normal `sendMessage` finally, the live-tail's own
+   * terminal-marker detection, and the hydrated-sending reconcile poll), so a
+   * turn queued against a turn this renderer never itself started (e.g. after
+   * a reload) still delivers. `null` the rest of the time.
+   */
+  queuedTurn: { text: string; images?: AgentThreadImageAttachment[] } | null;
+  /**
+   * Buffer `text`/`images` as the next turn. Call ONLY while a turn is
+   * in flight (the composer gates its Queue button on `sending`) — queueing
+   * while idle would just sit until the NEXT unrelated turn lands, which is
+   * never what "Queue" means to the user; callers that need "send now" while
+   * idle should call `sendMessage` directly.
+   *
+   * ACCUMULATES rather than replaces: a second `queueTurn` call while one is
+   * already buffered joins the new text onto the existing text (`\n\n`,
+   * matching `RunExecutor.queueInput`'s own multi-line join — runExecutor.ts's
+   * `drainQueuedInputAtRest`) and appends the new images to the existing ones,
+   * instead of silently discarding the first queued message — matching how
+   * the flow-run queue and the quick-session queue both already accumulate.
+   */
+  queueTurn: (text: string, images?: AgentThreadImageAttachment[]) => void;
+  /** Cancel a pending queued turn (the composer's "Queued… Cancel" control). */
+  cancelQueuedTurn: () => void;
+  /**
+   * "Interrupt & send" (TASK-301): abort the in-flight turn, wait for it to
+   * actually settle, THEN drive `text`/`images` as a fresh turn. Any pending
+   * `queuedTurn` is dropped first — an explicit interrupt-and-send supersedes
+   * whatever was queued. See the store body for why the settle-wait matters
+   * (AgentThreadService has no per-thread send queue of its own).
+   */
+  interruptAndSend: (text: string, images?: AgentThreadImageAttachment[]) => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -284,6 +320,14 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
   // a `turnState` answer computed before the send reached the server (a stale
   // `inFlight: false`) must not re-enable Send mid-turn.
   let localSendEpoch = 0;
+  // TASK-301: the in-flight `trpc...sendMessage.mutate()` promise THIS renderer
+  // is holding (if any) — tracked so `interruptAndSend` can await the
+  // just-aborted turn's own call fully settling before issuing a new one.
+  // `AgentThreadService.sendMessage` has no per-thread queue of its own: two
+  // overlapping `spawn()` calls would corrupt its single in-flight-turn
+  // bookkeeping (`this.inFlight` — see agentThreadService.ts), so a second
+  // send must never race the first's still-unwinding abort.
+  let currentSendPromise: Promise<void> | null = null;
   const stopReconcile = (): void => {
     hydratedSending = false;
     if (reconcileTimer !== null) {
@@ -302,6 +346,19 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     }
   };
 
+  /**
+   * TASK-301: fire whenever `sending` flips back to false — called from EVERY
+   * site that does so (see `queuedTurn`'s doc comment on the state field for
+   * why all three matter). Fire-and-forget: `sendMessage` manages its own
+   * `sending`/promise bookkeeping, so this must not be awaited here.
+   */
+  const deliverQueuedTurnIfAny = (): void => {
+    const q = get().queuedTurn;
+    if (q === null) return;
+    set({ queuedTurn: null });
+    void get().sendMessage(q.text, q.images !== undefined && q.images.length > 0 ? { images: q.images } : undefined);
+  };
+
   return {
     thread: null,
     proposals: [],
@@ -311,9 +368,26 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     liveEvents: [],
     composerDraft: null,
     pendingContextHint: null,
+    queuedTurn: null,
 
     setComposerDraft: (text) => set({ composerDraft: text }),
     setPendingContextHint: (hint) => set({ pendingContextHint: hint }),
+    queueTurn: (text, images) =>
+      set((s) => {
+        const prior = s.queuedTurn;
+        if (prior === null) {
+          return { queuedTurn: { text, ...(images !== undefined ? { images } : {}) } };
+        }
+        // Accumulate onto whatever is already buffered — see the field doc
+        // comment above for why this must never silently overwrite.
+        const joinedText = prior.text.length > 0 && text.length > 0 ? `${prior.text}\n\n${text}` : prior.text || text;
+        const joinedImages =
+          images !== undefined || prior.images !== undefined ? [...(prior.images ?? []), ...(images ?? [])] : undefined;
+        return {
+          queuedTurn: { text: joinedText, ...(joinedImages !== undefined ? { images: joinedImages } : {}) },
+        };
+      }),
+    cancelQueuedTurn: () => set({ queuedTurn: null }),
 
     init: () => {
       if (initialized) return cachedUnsubscribe!;
@@ -356,6 +430,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
        * `result` mid-batch resets what came before it in the SAME batch too).
        */
       const captureLiveEvents = (values: readonly unknown[]): void => {
+        // Hoisted so the TASK-301 queued-turn delivery (below) can fire AFTER
+        // `set()` has fully applied `sending: false` — never from inside the
+        // updater itself, which must stay a pure state computation.
+        let sawTerminalOut = false;
         set((s) => {
           let events = s.liveEvents;
           // A turn that settled on a DIFFERENT renderer than the one currently
@@ -390,6 +468,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           if (events !== s.liveEvents) next.liveEvents = events;
           if (sawTerminal) {
             terminalEpoch += 1;
+            sawTerminalOut = true;
             if (s.sending) next.sending = false;
             // The turn this poll was reconciling has now ended via its own
             // terminal marker — the poll's job is done.
@@ -397,6 +476,23 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           }
           return next;
         });
+        // TASK-301: a turn queued while THIS renderer held no local send
+        // promise for the turn that just ended (e.g. after a reload) has no
+        // `sendMessage` `finally` to deliver it — the live tail's own terminal
+        // marker is the only signal available, so deliver here too.
+        //
+        // Guarded on `currentSendPromise === null`: the server can publish the
+        // terminal `result` envelope over the live tail WHILE this renderer's
+        // own `sendMessage` call is still awaiting its `sendMessage.mutate()`
+        // promise (AgentThreadService's `onOutput` fires the terminal envelope
+        // from inside `spawn()`, before `spawn()` itself — and therefore the
+        // mutation — returns). When a local `currentSendPromise` exists for the
+        // in-flight turn, delivery is left ENTIRELY to that call's own `finally`
+        // block once it actually settles — calling `deliverQueuedTurnIfAny` here
+        // too would double-deliver: two overlapping `sendMessage.mutate()` calls
+        // racing `AgentThreadService`'s single `inFlight` bookkeeping (it has no
+        // per-thread send queue of its own).
+        if (sawTerminalOut && currentSendPromise === null) deliverQueuedTurnIfAny();
       };
 
       // onThreadEvent's input is `{ threadId }` (server-side per-thread filter),
@@ -462,6 +558,11 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
                     if (!result.inFlight) {
                       set({ sending: false });
                       stopReconcile();
+                      // TASK-301: this reconcile poll IS the "turn landed"
+                      // signal for a hydrated-sending turn with no terminal
+                      // envelope observed (or none this renderer subscribed in
+                      // time for) — deliver any queued turn now.
+                      deliverQueuedTurnIfAny();
                     }
                   } catch (err: unknown) {
                     console.warn('[agentThreadStore] turnState reconcile failed:', err);
@@ -537,24 +638,38 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       // envelopes (if any survived without a `result`, e.g. a cancelled turn)
       // must not bleed into this one's progressive render.
       set({ sending: true, liveEvents: [] });
+      // TASK-301: track this call's own promise so `interruptAndSend` can await
+      // it fully settling before issuing a follow-up send on the same thread
+      // (see `currentSendPromise`'s doc comment above).
+      const run = async (): Promise<void> => {
+        try {
+          await trpc.cyboflow.agentThread.sendMessage.mutate({
+            threadId,
+            text,
+            ...(contextHint !== undefined ? { contextHint } : {}),
+            // Omitted on a text-only turn so the mutation payload is unchanged
+            // for every existing caller.
+            ...(opts?.images !== undefined && opts.images.length > 0 ? { images: opts.images } : {}),
+          });
+        } catch (err: unknown) {
+          console.error('[agentThreadStore] sendMessage failed:', err);
+        } finally {
+          // The turn has settled either way (the mutation resolves at the result
+          // boundary, or the spawn failed and an error event was recorded).
+          // Force one transcript + proposals refetch here rather than trusting
+          // the live tail alone — see "Subscription self-healing" above.
+          set((s) => ({ sending: false, liveTailTick: s.liveTailTick + 1 }));
+          void refreshProposals(threadId);
+          // This turn just landed — deliver whatever was queued against it.
+          deliverQueuedTurnIfAny();
+        }
+      };
+      const p = run();
+      currentSendPromise = p;
       try {
-        await trpc.cyboflow.agentThread.sendMessage.mutate({
-          threadId,
-          text,
-          ...(contextHint !== undefined ? { contextHint } : {}),
-          // Omitted on a text-only turn so the mutation payload is unchanged
-          // for every existing caller.
-          ...(opts?.images !== undefined && opts.images.length > 0 ? { images: opts.images } : {}),
-        });
-      } catch (err: unknown) {
-        console.error('[agentThreadStore] sendMessage failed:', err);
+        await p;
       } finally {
-        // The turn has settled either way (the mutation resolves at the result
-        // boundary, or the spawn failed and an error event was recorded).
-        // Force one transcript + proposals refetch here rather than trusting
-        // the live tail alone — see "Subscription self-healing" above.
-        set((s) => ({ sending: false, liveTailTick: s.liveTailTick + 1 }));
-        void refreshProposals(threadId);
+        if (currentSendPromise === p) currentSendPromise = null;
       }
     },
 
@@ -566,6 +681,43 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       } catch (err: unknown) {
         console.error('[agentThreadStore] interrupt failed:', err);
       }
+    },
+
+    interruptAndSend: async (text: string, images?: AgentThreadImageAttachment[]) => {
+      const threadId = get().thread?.id;
+      if (threadId === undefined) return;
+      // An explicit interrupt-and-send supersedes anything already queued.
+      set({ queuedTurn: null });
+      const inFlight = currentSendPromise;
+      try {
+        await trpc.cyboflow.agentThread.interruptTurn.mutate({ threadId });
+      } catch (err: unknown) {
+        console.error('[agentThreadStore] interrupt (interruptAndSend) failed:', err);
+      }
+      if (inFlight !== null) {
+        // The turn THIS renderer started — its own `sendMessage` call resolves
+        // once the aborted turn's spawn has fully unwound server-side (the
+        // `trpc...sendMessage.mutate()` promise settles when
+        // AgentThreadService.sendMessage's async function returns). Awaiting it
+        // here is what prevents a second overlapping `spawn()` call.
+        await inFlight.catch(() => undefined);
+      } else {
+        // Hydrated-sending case: this renderer holds no local promise for the
+        // turn it just aborted (e.g. a reload mid-turn), so there is nothing to
+        // await directly. Briefly poll turnState so the aborted spawn's own
+        // `finally` has a chance to clear server-side first — bounded so a
+        // stuck server-side state can never wedge the composer.
+        for (let i = 0; i < 10; i++) {
+          try {
+            const { inFlight: stillInFlight } = await trpc.cyboflow.agentThread.turnState.query({ threadId });
+            if (!stillInFlight) break;
+          } catch {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+      await get().sendMessage(text, images !== undefined && images.length > 0 ? { images } : undefined);
     },
 
     confirmProposal: async (proposalId: string) => {

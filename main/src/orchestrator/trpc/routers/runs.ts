@@ -82,6 +82,11 @@ import {
   type NudgeNoOpReason,
 } from '../../nudgeRunHandler';
 import {
+  interruptAndSendHandler,
+  type InterruptAndSendDeps,
+  type InterruptAndSendResult,
+} from '../../interruptAndSendHandler';
+import {
   answerRecoveryGateHandler,
   type AnswerRecoveryGateResult,
 } from '../../answerRecoveryGateHandler';
@@ -343,6 +348,28 @@ let queueInputDeps: QueueInputDeps | null = null;
  */
 export function setQueueInputDeps(deps: QueueInputDeps): void {
   queueInputDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// interruptAndSend dependency bag (TASK-301 — interrupt & send parity)
+//
+// Injected at boot by main/src/index.ts via setInterruptAndSendDeps(), reusing the
+// SAME db / runQueues / runExecutor the nudge bag wires, plus the facade's abort +
+// live-spawn-key seams (the SAME ones laneRewindDepsBag / rewindRunDepsBag use).
+// Until wired the mutation throws METHOD_NOT_SUPPORTED — same stub pattern as the
+// other dep-bags.
+// ---------------------------------------------------------------------------
+
+let interruptAndSendDeps: InterruptAndSendDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the `interruptAndSend` mutation.
+ *
+ * Called once at boot by main/src/index.ts. Until this is called the mutation
+ * throws METHOD_NOT_SUPPORTED.
+ */
+export function setInterruptAndSendDeps(deps: InterruptAndSendDeps): void {
+  interruptAndSendDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -3154,6 +3181,48 @@ export const runsRouter = router({
         });
       }
       return { dequeued: queueInputDeps.runExecutor.dequeueInput(input.runId, input.text) };
+    }),
+
+  /**
+   * Interrupt & send (TASK-301): abort the run's live SDK turn and deliver `text`
+   * as its NEXT turn immediately, instead of buffering it for the next natural
+   * rest boundary (`runs.queueInput`'s behavior). The flow-run twin of the quick
+   * session's `panels:continue({ interrupt: true })` path.
+   *
+   * `itemId` optionally targets ONE fan-out lane's spawn (`${runId}:${itemId}`)
+   * instead of the run-level orchestrator spawn — see interruptAndSendHandler.ts's
+   * header note on why this mutation never aborts more than one spawn key. Today's
+   * flow-run composer (ChatInput.tsx) never supplies it.
+   *
+   * Returns:
+   *   { delivered: true; interrupted }  — `interrupted: false` means this behaved
+   *     like a plain idle nudge (text delivered as the run's next turn directly).
+   *     `interrupted: true` means a live spawn was found and its abort requested;
+   *     the text was only BUFFERED (via `runExecutor.queueInput`) at that point —
+   *     actual delivery is left to the aborted turn's own drain
+   *     (`drainQueuedInputAtRest` at the next drained REST seam), not to this
+   *     mutation itself (see interruptAndSendHandler.ts's header note on why the
+   *     abort-then-redrive race rules out a direct nudge call here).
+   *   { noOp: true; reason }            — see interruptAndSendHandler's own reasons
+   *     (mirrors runs.nudge's NudgeNoOpReason) plus 'interactive_unsupported' for a
+   *     PTY run (which keeps its live relay path instead) and
+   *     'programmatic_unsupported' for a Sprint fan-out run (each DAG step is a
+   *     fresh SDK session — a step-scoped abort cannot signal the
+   *     WorkflowController's walk; see interruptAndSendHandler.ts's header note).
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setInterruptAndSendDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  interruptAndSend: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string(), itemId: z.string().min(1).optional() }))
+    .mutation(async ({ input }): Promise<InterruptAndSendResult> => {
+      if (!interruptAndSendDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'interruptAndSend dependencies not wired yet. Call setInterruptAndSendDeps() at boot.',
+        });
+      }
+      return interruptAndSendHandler(input.runId, input.text, interruptAndSendDeps, { itemId: input.itemId });
     }),
 
   /**

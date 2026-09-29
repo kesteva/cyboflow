@@ -334,4 +334,143 @@ describe('AgentComposer', () => {
     expect(screen.queryByTestId('agent-composer-stop')).not.toBeInTheDocument();
     expect(screen.getByTestId('agent-composer-send')).toBeInTheDocument();
   });
+
+  // ---------------------------------------------------------------------
+  // Queue + Interrupt & send trio (TASK-301)
+  // ---------------------------------------------------------------------
+
+  it('an EMPTY draft while sending shows only Stop (no Queue/Interrupt & send)', () => {
+    render(
+      <AgentComposer
+        onSend={vi.fn()}
+        disabled={false}
+        sending
+        onStop={vi.fn()}
+        onQueue={vi.fn()}
+        onInterruptSend={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-composer-queue')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-composer-interrupt-send')).not.toBeInTheDocument();
+  });
+
+  it('renders the full [Queue] [Interrupt & send] [Stop] trio once a draft exists while sending', () => {
+    render(
+      <AgentComposer
+        onSend={vi.fn()}
+        disabled={false}
+        sending
+        onStop={vi.fn()}
+        onQueue={vi.fn()}
+        onInterruptSend={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'mid-turn draft' } });
+
+    expect(screen.getByTestId('agent-composer-queue')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-composer-interrupt-send')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+  });
+
+  it('the textarea stays typeable while sending (not `disabled`)', () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} onQueue={vi.fn()} />);
+    expect(screen.getByTestId('agent-composer-input')).not.toBeDisabled();
+  });
+
+  it('clicking Queue calls onQueue with the trimmed text and clears the draft', () => {
+    const onQueue = vi.fn();
+    render(
+      <AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} onQueue={onQueue} onInterruptSend={vi.fn()} />,
+    );
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: '  queue this  ' } });
+    fireEvent.click(screen.getByTestId('agent-composer-queue'));
+
+    expect(onQueue).toHaveBeenCalledWith('queue this', undefined);
+    expect(screen.getByTestId('agent-composer-input')).toHaveValue('');
+  });
+
+  it('clicking Interrupt & send calls onInterruptSend (not onQueue/onSend)', () => {
+    const onQueue = vi.fn();
+    const onSend = vi.fn();
+    const onInterruptSend = vi.fn();
+    render(
+      <AgentComposer onSend={onSend} disabled={false} sending onStop={vi.fn()} onQueue={onQueue} onInterruptSend={onInterruptSend} />,
+    );
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'abort and send' } });
+    fireEvent.click(screen.getByTestId('agent-composer-interrupt-send'));
+
+    expect(onInterruptSend).toHaveBeenCalledWith('abort and send', undefined);
+    expect(onQueue).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('plain ⌘↵ while sending queues (mirrors UnifiedComposer: same key sends idle, queues running)', () => {
+    const onQueue = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <AgentComposer onSend={onSend} disabled={false} sending onStop={vi.fn()} onQueue={onQueue} onInterruptSend={vi.fn()} />,
+    );
+
+    const input = screen.getByTestId('agent-composer-input');
+    fireEvent.change(input, { target: { value: 'keyboard queue' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+
+    expect(onQueue).toHaveBeenCalledWith('keyboard queue', undefined);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('⌘⇧↵ while sending triggers Interrupt & send, not Queue', () => {
+    const onQueue = vi.fn();
+    const onInterruptSend = vi.fn();
+    render(
+      <AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} onQueue={onQueue} onInterruptSend={onInterruptSend} />,
+    );
+
+    const input = screen.getByTestId('agent-composer-input');
+    fireEvent.change(input, { target: { value: 'keyboard interrupt' } });
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true, shiftKey: true });
+
+    expect(onInterruptSend).toHaveBeenCalledWith('keyboard interrupt', undefined);
+    expect(onQueue).not.toHaveBeenCalled();
+  });
+
+  it('an attached image survives Queue (passed through to onQueue)', async () => {
+    const onQueue = vi.fn();
+    render(
+      <AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} onQueue={onQueue} onInterruptSend={vi.fn()} />,
+    );
+    pasteImage(imageFile('shot.png', 'image/png'));
+    await screen.findByTestId('agent-composer-attachments');
+
+    fireEvent.click(screen.getByTestId('agent-composer-queue'));
+
+    expect(onQueue).toHaveBeenCalledTimes(1);
+    const [text, images] = onQueue.mock.calls[0] as [string, Array<Record<string, string>>];
+    expect(text).toBe('');
+    expect(images).toHaveLength(1);
+    expect(images[0].name).toBe('shot.png');
+  });
+
+  it('renders the "Queued" notice with a working Cancel control', () => {
+    const onCancelQueued = vi.fn();
+    render(
+      <AgentComposer onSend={vi.fn()} disabled={false} sending onStop={vi.fn()} queued onCancelQueued={onCancelQueued} />,
+    );
+
+    expect(screen.getByTestId('agent-composer-queued')).toHaveTextContent(
+      'Queued — sends once the current turn finishes.',
+    );
+    fireEvent.click(screen.getByTestId('agent-composer-queued-cancel'));
+    expect(onCancelQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no "Queued" notice when not queued', () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+    expect(screen.queryByTestId('agent-composer-queued')).not.toBeInTheDocument();
+  });
 });

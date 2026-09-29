@@ -363,6 +363,47 @@ describe('QuickSessionComposer — Interrupt & send', () => {
     // is suppressed) — the send path answers the question instead.
     expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
   });
+
+  it('does NOT offer Queue while a question gate is open AND a draft exists — Stop-only (TASK-301 attempt 3, blocker A)', () => {
+    // Regression: QuickSessionComposer deliberately withholds onInterruptSend
+    // while a question gate is open (`supportsInterrupt = !interactive &&
+    // activeQuestion == null`) and never sets `queueWhileRunning`, so
+    // UnifiedComposer's running+draft fallback must NOT show Queue here — a
+    // click would ANSWER the gate immediately, not buffer for later. The
+    // existing sibling test above only covers an EMPTY draft, which is why
+    // this regression went unnoticed.
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        activeQuestion={makeQuestion()}
+      />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'use the dev branch' } });
+    expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+    expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+  });
+
+  it('does NOT offer Queue on a running interactive (PTY) session with a draft — Stop-only (TASK-301 attempt 3, blocker A)', () => {
+    // Regression: the interactive substrate's onSubmit relays the draft
+    // straight into the live REPL (an immediate-effect action), never a
+    // buffered queue. QuickSessionComposer never sets `queueWhileRunning`
+    // for this substrate either, so the fallback must stay Stop-only.
+    render(<Harness session={makeSession({ status: 'running', substrate: 'interactive' })} interactive />);
+    // The PTY composer starts collapsed (⌃G reveal) — open it so the actual
+    // input row (and its Queue/Stop buttons) renders, not the hint bar.
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'ls -la' } });
+    // The interactive substrate never wires onStop either (typing into the
+    // live terminal IS the interrupt, not a composer button) — so the
+    // right-cluster renders nothing at all, not even a fallback Stop. The
+    // regression this guards against is specifically Queue appearing.
+    expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.queryByTestId('unified-composer-stop')).toBeNull();
+  });
 });
 
 describe('QuickSessionComposer — pending question gate', () => {

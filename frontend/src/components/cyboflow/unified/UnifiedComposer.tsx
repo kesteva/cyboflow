@@ -54,16 +54,34 @@ export interface UnifiedComposerProps {
   /** stop handler, shown as the primary button while running. */
   onStop?: () => void;
   /**
-   * "Interrupt & send" handler (quick SDK only). When provided AND the agent is
-   * running AND there is a draft, the running-state cluster becomes a pair —
-   * `[Queue]` (onSubmit, buffers for the rest boundary) + `[Interrupt & send]`
-   * (this, aborts the live turn and drives the message NOW). Omitted elsewhere
-   * (flow runs, PTY, Codex, a pending question), where the plain Stop button is
-   * kept. Cmd/Ctrl+Shift+Enter triggers it.
+   * "Interrupt & send" handler (quick SDK / SDK flow runs whose execution model
+   * supports it). While running WITH a draft, `[Queue]` + `[Stop]` always render;
+   * supplying this adds `[Interrupt & send]` (aborts the live turn and drives the
+   * message NOW) between them, making the full trio. Omitted for hosts that
+   * cannot safely redrive mid-turn (PTY, Codex, a pending question, a
+   * PROGRAMMATIC/Sprint-fan-out flow run — see ChatInput.tsx's `isProgrammatic`
+   * gate) — those fall back to `[Queue] [Stop]`, never losing the ability to
+   * queue a draft. Cmd/Ctrl+Shift+Enter triggers it when present.
    */
   onInterruptSend?: (atts: ComposerAttachments) => void | Promise<void>;
   /** label for the interrupt button; defaults to 'Interrupt & send'. */
   interruptLabel?: string;
+  /**
+   * Explicit opt-in: show `[Queue] [Stop]` while running WITH a draft even
+   * when `onInterruptSend` is withheld. Queue is only safe when submitting the
+   * draft truly means "buffer for later" — some hosts withhold
+   * `onInterruptSend` for a reason that ALSO makes `onSubmit` an
+   * immediate-effect action (QuickSessionComposer's `onSubmit` answers an open
+   * AskUserQuestion gate, or relays straight into a live interactive PTY), so
+   * for them the absence of `onInterruptSend` must fall through to a plain
+   * Stop-only button, not silently relabel that immediate action "Queue".
+   * ChatInput is the one host that wants Queue available without Interrupt &
+   * send (its withheld-onInterruptSend case is a genuine queue: a PROGRAMMATIC
+   * Sprint fan-out run, where `onSubmit` really does buffer via
+   * `runs.queueInput`), so it is the only caller that sets this `true`.
+   * Defaults to `false`.
+   */
+  queueWhileRunning?: boolean;
   /** external send-in-flight flag (host may also track its own). */
   sending?: boolean;
   sendError?: string | null;
@@ -122,6 +140,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     onStop,
     onInterruptSend,
     interruptLabel = 'Interrupt & send',
+    queueWhileRunning = false,
     sending = false,
     sendError,
     onTogglePtyOpen,
@@ -419,13 +438,24 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {/* right cluster */}
         <div className="ml-auto flex items-center gap-2">
           {running ? (
-            hasDraft && onInterruptSend ? (
-              // Running WITH a draft + an interrupt-capable host: offer Queue
-              // (buffer for the rest boundary), Interrupt & send (abort the live
-              // turn, drive the message now), and keep the plain Stop (abort
-              // WITHOUT sending — the draft is preserved). Gated on hasDraft (not
-              // canSend) so the trio stays visible — just disabled — while a send
-              // is in flight, instead of collapsing.
+            hasDraft && (onInterruptSend || queueWhileRunning) ? (
+              // Running WITH a draft AND a queue-capable host: offer Queue
+              // (buffer for the rest boundary) alongside Stop. A host is
+              // queue-capable when it supplies `onInterruptSend` (the
+              // interrupt-capable trio — add "Interrupt & send" to abort the
+              // live turn and drive the message now) OR opts into
+              // `queueWhileRunning` (ChatInput's PROGRAMMATIC Sprint-fan-out
+              // case: `onInterruptSend` is withheld because a step-scoped
+              // abort cannot safely redrive — see interruptAndSendHandler.ts —
+              // but `onSubmit` genuinely buffers via `runs.queueInput`, so
+              // Queue must still work). A host that supplies NEITHER (e.g.
+              // QuickSessionComposer while a question gate is open, or an
+              // interactive PTY session) falls through to the plain Stop-only
+              // button below — there `onSubmit` is an IMMEDIATE-effect action
+              // (answers the gate / relays into the live REPL), so labeling it
+              // "Queue" would misrepresent it.
+              // Gated on hasDraft (not canSend) so the buttons stay visible —
+              // just disabled — while a send is in flight, instead of collapsing.
               <>
                 <button
                   type="button"
@@ -443,21 +473,23 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
                     <CornerDownLeft className="h-3 w-3" />
                   </kbd>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void interruptSubmit()}
-                  disabled={!canSend}
-                  data-testid="unified-composer-interrupt-send"
-                  title={`Stop the agent and send this message now (${kbdHint('modShift', 'Enter')})`}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] transition-[filter]',
-                    canSend ? 'hover:brightness-110' : 'cursor-not-allowed opacity-50',
-                  )}
-                  style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
-                >
-                  <Square className="h-3 w-3 fill-current" /> {interruptLabel}
-                  <kbd className="opacity-70">{kbdHint('modShift', 'Enter')}</kbd>
-                </button>
+                {onInterruptSend && (
+                  <button
+                    type="button"
+                    onClick={() => void interruptSubmit()}
+                    disabled={!canSend}
+                    data-testid="unified-composer-interrupt-send"
+                    title={`Stop the agent and send this message now (${kbdHint('modShift', 'Enter')})`}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] transition-[filter]',
+                      canSend ? 'hover:brightness-110' : 'cursor-not-allowed opacity-50',
+                    )}
+                    style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
+                  >
+                    <Square className="h-3 w-3 fill-current" /> {interruptLabel}
+                    <kbd className="opacity-70">{kbdHint('modShift', 'Enter')}</kbd>
+                  </button>
+                )}
                 {onStop && (
                   // Secondary (outline) Stop — abort without sending; distinct
                   // from the filled Interrupt & send so the two don't read alike.
@@ -474,6 +506,10 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
                 )}
               </>
             ) : onStop ? (
+              // Stop-only fallback: either no draft, or a draft with a host
+              // that is neither interrupt-capable nor opted into
+              // `queueWhileRunning` (an open question gate, an interactive
+              // PTY relay, …) — see the branch above for why Queue is withheld.
               <button
                 type="button"
                 onClick={onStop}
