@@ -172,8 +172,9 @@ export const webViewerRouter = router({
     }),
 
   /**
-   * NEW tabs main opened on its own — an agent's background open. The renderer
-   * created every other tab itself; this is how an agent tab reaches the strip.
+   * Every NEW tab in the session — an agent's background open, or a URL the
+   * session CLI handed to `$BROWSER` (openUrlShellHook). The renderer already
+   * holds the tabs it opened itself, and its bridge leaves those be.
    */
   onTabOpened: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1) }))
@@ -186,7 +187,7 @@ export const webViewerRouter = router({
         events.tabOpenedChannel,
         abortSignal,
       )) {
-        if (ev.sessionId === input.sessionId && ev.snapshot.openedBy === 'agent') yield ev;
+        if (ev.sessionId === input.sessionId) yield ev;
       }
     }),
 
