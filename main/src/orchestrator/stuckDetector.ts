@@ -15,6 +15,7 @@ import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { StuckReason, StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import { emitSeamError } from './telemetrySink';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
+import { isLatestRunTurnCompleted } from './runQueries';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,6 +72,11 @@ interface WorkflowRunRow {
   status: string;
 }
 
+/** A run id row from the parked-no-gate scan. */
+interface ParkedRunRow {
+  id: string;
+}
+
 // ---------------------------------------------------------------------------
 // Dependency bag
 // ---------------------------------------------------------------------------
@@ -101,6 +107,8 @@ export class StuckDetector {
   private readonly stmtSelfDeadlockCount: PreparedStatement;
   private readonly stmtCrossRunDeadlock: PreparedStatement;
   private readonly stmtTransitionToStuck: PreparedStatement;
+  private readonly stmtParkedNoGateRuns: PreparedStatement;
+  private readonly stmtTransitionRunningToStuck: PreparedStatement;
 
   constructor(deps: StuckDetectorDeps) {
     this.db = deps.db;
@@ -170,6 +178,45 @@ export class StuckDetector {
        WHERE id = ? AND status = 'awaiting_review'`,
     );
 
+    // Rung "parked_no_gate" (TASK-300): a run left at status='running' with NO
+    // live turn and NO open gate of any kind. Unlike the approvals-scoped rungs
+    // above, this scans workflow_runs DIRECTLY — there is by definition no
+    // approvals row to key off (a genuine gate would already be caught by the
+    // approvals scan, or exempted deliberately for awaiting_input/review_items
+    // gates, see stuckDetectorHumanGateBlindSpot.test.ts). "No live turn" is
+    // read off raw_events (the append-only per-run event log), not
+    // workflow_runs.updated_at: a step-report / current_step_id write does not
+    // always bump updated_at, so keying staleness on it risks misclassifying a
+    // run that is genuinely still executing a single long step. A run with
+    // ZERO raw_events rows falls back to `wr.created_at`, never a `0` epoch
+    // sentinel: a spawn that has not emitted its first SDK message yet must get
+    // the same 45-minute grace period, not read as maximally stale on the next
+    // tick. Recency alone cannot tell a parked run from a long, quiet live
+    // turn; the scan loop below settles that with the live-turn guard.
+    this.stmtParkedNoGateRuns = this.db.prepare(
+      `SELECT wr.id AS id
+         FROM workflow_runs wr
+        WHERE wr.status = 'running'
+          AND NOT EXISTS (
+            SELECT 1 FROM approvals a
+             WHERE a.run_id = wr.id AND a.status = 'pending' AND a.awaited = 1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM questions q
+             WHERE q.run_id = wr.id AND q.status = 'pending'
+          )
+          AND COALESCE(
+                (SELECT MAX(unixepoch(re.created_at)) FROM raw_events re WHERE re.run_id = wr.id),
+                unixepoch(wr.created_at)
+              ) < unixepoch(?)`,
+    );
+    assertTransitionAllowed('running', 'stuck');
+    this.stmtTransitionRunningToStuck = this.db.prepare(
+      `UPDATE workflow_runs
+       SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?
+       WHERE id = ? AND status = 'running'`,
+    );
+
     // Bind scan so `setInterval` can call it as a free function without losing
     // the `this` context.
     this.scan = this.scan.bind(this);
@@ -233,6 +280,30 @@ export class StuckDetector {
         }
 
         this.transitionToStuck(approval, reason);
+      }
+
+      // parked_no_gate rung — independent of the approvals scan above; see the
+      // statement's construction-time comment for why it queries workflow_runs
+      // directly instead of keying off a (nonexistent) approvals row.
+      const parkedRows = this.stmtParkedNoGateRuns.all(cutoffIso) as ParkedRunRow[];
+      for (const row of parkedRows) {
+        // Live-turn guard. Skip (leave unclassified) when the executor still
+        // holds the run (`hasActiveRunForId`, the same real-time signal rung 1
+        // uses inversely) AND its last turn has not ended — a long, quiet
+        // tool call looks identical to a parked run by recency alone.
+        // `isLatestRunTurnCompleted` catches the hung-spawn shape the liveness
+        // flag cannot: a detached child the agent spawned (e.g. a left-running
+        // dev server) can keep the flag true forever after the turn's `result`
+        // row landed, so an orchestrated run in that shape falls through and
+        // is stamped `parked_no_gate`. For a PROGRAMMATIC run that helper is
+        // always false (a step's or lane's `result` does not end the walk),
+        // so a live walk is always skipped — a programmatic walk wedged by a
+        // hung spawn is not caught here. Killing the surviving child process
+        // is out of scope (TASK-311).
+        if (this.claudeManager.hasActiveRunForId(row.id) && !isLatestRunTurnCompleted(this.db, row.id)) {
+          continue;
+        }
+        this.transitionRunningToStuck(row.id, { kind: 'parked_no_gate' });
       }
     } catch (err) {
       this.logger.warn('[StuckDetector] scan failed', {
@@ -344,6 +415,34 @@ export class StuckDetector {
       // Report the wedge to Sentry — the literal "session timed out" symptom.
       // reason.kind is a fixed low-cardinality classification, so it doubles as
       // the errorClass tag; no PII (no run id) rides in tags.
+      emitSeamError('run-stuck-detected', new Error(`Run wedged (stuck): ${reason.kind}`), {
+        stuckReason: reason.kind,
+        errorClass: reason.kind,
+      });
+    }
+  }
+
+  /**
+   * Attempt to transition a `running` workflow_run to status='stuck' — the
+   * 'parked_no_gate' rung's transition. Twin of `transitionToStuck` but keyed
+   * on the run id directly (no backing approvals row) and guarded on
+   * `status = 'running'` instead of `'awaiting_review'`. Only emits the
+   * 'runs:stuck' event when `changes === 1`, same idempotency discipline.
+   */
+  private transitionRunningToStuck(runId: string, reason: StuckReason): void {
+    const detectedAt = Date.now();
+
+    const { changes } = this.stmtTransitionRunningToStuck.run(reason.kind, detectedAt, runId) as {
+      changes: number;
+    };
+
+    if (changes === 1) {
+      const event: StuckDetectedEvent = {
+        runId,
+        reason,
+        detectedAt,
+      };
+      this.emitter.emit('runs:stuck', event);
       emitSeamError('run-stuck-detected', new Error(`Run wedged (stuck): ${reason.kind}`), {
         stuckReason: reason.kind,
         errorClass: reason.kind,

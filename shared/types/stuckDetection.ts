@@ -29,12 +29,22 @@
  *                          historical row carrying stuck_reason='stale_socket'
  *                          still type-checks and still renders a label rather
  *                          than falling off a switch. Nothing produces it now.
+ *   parked_no_gate       — the run is status='running' with NO live turn (no
+ *                          fresh raw_events) and NO open gate of any kind (no
+ *                          pending awaited approval, no pending question) —
+ *                          the shape TASK-300 pins: a turn ended, nothing
+ *                          posted an answerable gate, and any chat message
+ *                          queued against the run (runs.queueInput) would
+ *                          otherwise buffer forever with no delivery trigger.
+ *                          Scanned directly against workflow_runs, unlike the
+ *                          approvals-scoped rungs above; carries no approvalId.
  */
 export type StuckReason =
   | { kind: 'self_deadlock' }
   | { kind: 'cross_run_deadlock'; conflictingRunId: string }
   | { kind: 'orphan_pty' }
-  | { kind: 'stale_socket' };
+  | { kind: 'stale_socket' }
+  | { kind: 'parked_no_gate' };
 
 // ---------------------------------------------------------------------------
 // StuckDetectedEvent
@@ -47,8 +57,12 @@ export type StuckReason =
 export interface StuckDetectedEvent {
   /** ID of the workflow_run row that transitioned to 'stuck'. */
   runId: string;
-  /** ID of the stale approvals row that triggered the classification. */
-  approvalId: string;
+  /**
+   * ID of the stale approvals row that triggered the classification. Absent
+   * for a rung that classifies directly off workflow_runs with no backing
+   * approvals row (e.g. 'parked_no_gate').
+   */
+  approvalId?: string;
   /** The classification result that caused the transition. */
   reason: StuckReason;
   /** Unix epoch milliseconds matching the stuck_detected_at column value. */

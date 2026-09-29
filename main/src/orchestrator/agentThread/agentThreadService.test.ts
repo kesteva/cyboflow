@@ -74,12 +74,29 @@ function buildDb(): Database.Database {
  * session id) synchronously then resolves; 'throw' rejects with a message. Default
  * (empty queue) emits an init with a generated id.
  */
-type Behavior = { kind: 'init'; sessionId: string } | { kind: 'throw'; message: string };
+type Behavior =
+  | { kind: 'init'; sessionId: string }
+  | { kind: 'throw'; message: string }
+  /** Emits an init, then hangs until `abortInFlightTurn` settles it — the
+   *  shape an interruptible in-flight turn needs (a real turn does not
+   *  resolve `spawnCliProcess` until abort/completion). */
+  | { kind: 'hang'; sessionId: string };
 
 class FakeManager implements AgentSpawnManagerLike {
   private readonly emitter = new EventEmitter();
   readonly calls: AgentSpawnOptions[] = [];
   private readonly behaviors: Behavior[] = [];
+  /** spawnKeys `abortInFlightTurn` was called with, in order. */
+  readonly abortCalls: string[] = [];
+  private pendingHang: { resolve: () => void; reject: (err: unknown) => void } | null = null;
+  /** When set, the NEXT `abortInFlightTurn` rejects the hung spawn with this
+   *  message instead of resolving it cleanly — both real managers currently
+   *  resolve cleanly on abort, but AgentThreadService must handle either. */
+  abortRejectMessage: string | null = null;
+  /** When set, the NEXT `abortInFlightTurn` call itself throws this message
+   *  (the abort attempt fails before touching the hung turn at all) instead
+   *  of settling it either way — the turn is left genuinely hanging. */
+  abortThrowMessage: string | null = null;
 
   queueInit(sessionId: string): void {
     this.behaviors.push({ kind: 'init', sessionId });
@@ -87,6 +104,10 @@ class FakeManager implements AgentSpawnManagerLike {
 
   queueThrow(message: string): void {
     this.behaviors.push({ kind: 'throw', message });
+  }
+
+  queueHang(sessionId: string): void {
+    this.behaviors.push({ kind: 'hang', sessionId });
   }
 
   async spawnCliProcess(options: AgentSpawnOptions): Promise<void> {
@@ -105,6 +126,12 @@ class FakeManager implements AgentSpawnManagerLike {
       data: { type: 'system', subtype: 'init', session_id: behavior.sessionId },
       timestamp: new Date(),
     });
+    if (behavior.kind === 'hang') {
+      await new Promise<void>((resolve, reject) => {
+        this.pendingHang = { resolve, reject };
+      });
+      return;
+    }
     // A follow-up non-init event to exercise the live-tail publish path.
     this.emitter.emit('output', {
       panelId: options.panelId,
@@ -113,6 +140,42 @@ class FakeManager implements AgentSpawnManagerLike {
       data: { type: 'assistant', message: { role: 'assistant', content: 'ok' } },
       timestamp: new Date(),
     });
+  }
+
+  async abortInFlightTurn(spawnKey: string): Promise<void> {
+    this.abortCalls.push(spawnKey);
+    if (this.abortThrowMessage !== null) {
+      const message = this.abortThrowMessage;
+      this.abortThrowMessage = null;
+      throw new Error(message);
+    }
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    if (pending === null) return;
+    if (this.abortRejectMessage !== null) {
+      const message = this.abortRejectMessage;
+      this.abortRejectMessage = null;
+      pending.reject(new Error(message));
+    } else {
+      pending.resolve();
+    }
+  }
+
+  /** Manually settle a still-hung turn cleanly — simulates the turn finishing
+   *  on its own after a failed abort attempt left it untouched. */
+  resolveHang(): void {
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    pending?.resolve();
+  }
+
+  /** Manually settle a still-hung turn with a real failure — simulates a
+   *  genuine spawn failure landing after a failed abort attempt left the
+   *  turn untouched. */
+  rejectHang(message: string): void {
+    const pending = this.pendingHang;
+    this.pendingHang = null;
+    pending?.reject(new Error(message));
   }
 
   /**
@@ -539,6 +602,210 @@ describe('AgentThreadService', () => {
       // Only the failed spawn — no fresh retry — and the id survives.
       expect(h.manager.calls).toHaveLength(2);
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
+    });
+  });
+
+  describe('interruptTurn', () => {
+    it('is a no-op when the thread is idle', async () => {
+      const thread = h.service.ensureGlobalThread();
+      await expect(h.service.interruptTurn(thread.id)).resolves.toEqual({ interrupted: false });
+      expect(h.manager.abortCalls).toHaveLength(0);
+    });
+
+    it('aborts an in-flight turn: sendMessage resolves cleanly, a "Stopped" marker is recorded, no error event', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      // Let the spawn actually start (and register itself in-flight) before interrupting.
+      await Promise.resolve();
+
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: true });
+      expect(h.manager.abortCalls).toEqual([`agent:${thread.id}`]);
+
+      // The abort resolves the manager's spawn cleanly (mirrors both real
+      // managers' current abort behaviour) — sendMessage must resolve, not reject.
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user', 'system']);
+      const persisted = JSON.parse(rows[1].payloadJson) as { type: string; subtype: string };
+      expect(persisted.type).toBe('system');
+      expect(persisted.subtype).toBe('assistant_interrupted');
+    });
+
+    it('an interrupt that surfaces as a resume-shaped rejection is still recorded as Stopped, never a stale-resume retry', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // Establish a stored resume id first.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      h.manager.queueHang('sess-2');
+      const sendPromise = h.service.sendMessage(thread.id, 'second');
+      await Promise.resolve();
+
+      // A hypothetical manager that rejects an aborted turn with a
+      // resume-shaped message must not be misread as a stale-resume failure.
+      h.manager.abortRejectMessage = 'No conversation found with session ID sess-1';
+      await h.service.interruptTurn(thread.id);
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // No third (retry) spawn call — the interrupt short-circuited before the
+      // stale-resume branch could fire.
+      expect(h.manager.calls).toHaveLength(2);
+      const rows = h.store.listEvents(thread.id);
+      // No 'result' row at all — a genuine error would have recorded one via
+      // recordSpawnFailure; the interrupt path never reaches it.
+      expect(rows.filter((r) => r.eventType === 'result')).toHaveLength(0);
+      const interrupted = rows.filter((r) => r.eventType === 'system');
+      expect(interrupted).toHaveLength(1);
+      expect(JSON.parse(interrupted[0].payloadJson).subtype).toBe('assistant_interrupted');
+    });
+
+    it('aborts the manager that actually hosts the turn, even after a runtime switch mid-turn', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'claude-sdk';
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'hello');
+      await Promise.resolve();
+
+      // Settings flips to Codex WHILE the Claude turn is still in flight.
+      h.runtime.value = 'codex-sdk';
+      await h.service.interruptTurn(thread.id);
+
+      expect(h.manager.abortCalls).toEqual([`agent:${thread.id}`]);
+      expect(h.codexManager.abortCalls).toHaveLength(0);
+      await expect(sendPromise).resolves.toBeUndefined();
+    });
+
+    it('preserves the interrupted turn\'s own captured session id even when the abort rejects resume-shaped: the NEXT turn resumes it, never cold-starts', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // Establish a stored resume id first.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      // Turn 2 resumes sess-1, emits its OWN init (sess-2) before hanging, and
+      // is interrupted mid-flight. The bridge captures sess-2 before the abort
+      // lands, so that is the id a correct implementation ends up with.
+      h.manager.queueHang('sess-2');
+      const sendPromise = h.service.sendMessage(thread.id, 'second');
+      await Promise.resolve();
+
+      // The abort rejects with a message that LOOKS like a stale-resume
+      // failure referencing the OLD id. Without the `pendingInterrupts` guard,
+      // the stale-resume branch would misread this as turn 2's own resume
+      // (sess-1) going stale, clear the just-captured sess-2, and retry fresh
+      // — exactly what this test proves does NOT happen.
+      h.manager.abortRejectMessage = 'No conversation found with session ID sess-1';
+      await h.service.interruptTurn(thread.id);
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // Only the 2 real spawns happened — no stale-resume retry spawn.
+      expect(h.manager.calls).toHaveLength(2);
+      const persistedThread = h.store.getThread(thread.id);
+      expect(persistedThread?.claudeSessionId).toBe('sess-2');
+
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'third');
+      expect(h.manager.calls[2].resumeSessionId).toBe('sess-2');
+    });
+
+    it('a failed abort attempt returns { interrupted: false } and does not mask the turn\'s real outcome', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      await Promise.resolve();
+
+      // The abort call itself fails (e.g. the manager can't reach the process)
+      // — the turn is left genuinely hanging, not settled either way.
+      h.manager.abortThrowMessage = 'no live process for spawn key';
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: false });
+
+      // The turn later completes normally on its own (nothing actually aborted
+      // it). Without clearing the pending-interrupt flag on a failed abort,
+      // this normal completion would be misrecorded as an intentional "Stopped".
+      h.manager.resolveHang();
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user']);
+    });
+
+    it('a failed abort attempt does not swallow a genuine spawn failure that follows', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'do something long');
+      await Promise.resolve();
+
+      h.manager.abortThrowMessage = 'no live process for spawn key';
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: false });
+
+      // The still-hung turn is settled with a real failure, not an abort.
+      h.manager.rejectHang('API Error: 500 internal');
+
+      await expect(sendPromise).rejects.toThrow(/500/);
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user', 'result']);
+    });
+
+    it('an interrupt landing during the pre-turn daily compact cancels the WHOLE send, not just the compact — the requested turn never spawns', async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      // Day two's first turn opens with a compact spawn (same spawn identity as
+      // every other turn on this thread) that hangs until aborted.
+      h.manager.queueHang('sess-1');
+      const sendPromise = h.service.sendMessage(thread.id, 'day two — the actual ask');
+      await Promise.resolve();
+
+      const result = await h.service.interruptTurn(thread.id);
+      expect(result).toEqual({ interrupted: true });
+      await expect(sendPromise).resolves.toBeUndefined();
+
+      // Only the compact spawn ran. Without the fix, `applyDailyRetention`'s
+      // fail-soft catch would swallow the abort and `sendMessage` would go on
+      // to spawn "day two — the actual ask" anyway — exactly the turn the
+      // click was meant to stop.
+      expect(h.manager.calls).toHaveLength(2);
+      expect(h.manager.calls[1].prompt).toBe(COMPACT_PROMPT);
+
+      const rows = h.store.listEvents(thread.id);
+      // No 'result' row (no real turn ran, no error), and the interrupted
+      // marker is recorded once.
+      expect(rows.filter((r) => r.eventType === 'result')).toHaveLength(0);
+      const interrupted = rows.filter((r) => r.eventType === 'system');
+      expect(interrupted).toHaveLength(1);
+      expect(JSON.parse(interrupted[0].payloadJson).subtype).toBe('assistant_interrupted');
+    });
+  });
+
+  describe('isTurnInFlight', () => {
+    it('is false when the thread is idle', () => {
+      const thread = h.service.ensureGlobalThread();
+      expect(h.service.isTurnInFlight(thread.id)).toBe(false);
+    });
+
+    it('is true while a turn is in flight, and false again once it settles', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueHang('sess-1');
+
+      const sendPromise = h.service.sendMessage(thread.id, 'hello');
+      await Promise.resolve();
+      expect(h.service.isTurnInFlight(thread.id)).toBe(true);
+
+      h.manager.resolveHang();
+      await sendPromise;
+      expect(h.service.isTurnInFlight(thread.id)).toBe(false);
     });
   });
 

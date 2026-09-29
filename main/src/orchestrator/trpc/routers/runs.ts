@@ -23,7 +23,7 @@ import {
 } from '../../../../../shared/workflows/runStateMachine';
 import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
-import { listRunsHandler } from '../../runQueries';
+import { listRunsHandler, isLatestRunTurnCompleted } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
@@ -35,9 +35,11 @@ import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
   AGENT_PROVIDERS,
+  DEFAULT_WORKFLOW_AGENT_RUNTIME,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   formatProviderRuntimeConflict,
   isWorkflowLaunchableRuntime,
+  isWorkflowRunStorableRuntime,
   providerForRuntime,
   providerRuntimeConflict,
   type AgentProvider,
@@ -53,7 +55,9 @@ import { isRuntimeMixOrchestratedError } from '../../../../../shared/types/execu
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
-import { countPendingBlockingReviewItems } from '../../reviewItemListing';
+import { countPendingBlockingReviewItems, selectPendingBlockingItemRows } from '../../reviewItemListing';
+import { isEvalSourcedFinding } from '../../../../../shared/types/reviews';
+import { ADDRESS_REVIEW_FINDINGS_CONTRACT } from '../../programmatic/stepPrompt';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { StepResultStore } from '../../stepResultStore';
 import { ApprovalRouter } from '../../approvalRouter';
@@ -75,7 +79,13 @@ import {
   nudgeRunHandler,
   type NudgeRunDeps,
   type NudgeRunResult,
+  type NudgeNoOpReason,
 } from '../../nudgeRunHandler';
+import {
+  interruptAndSendHandler,
+  type InterruptAndSendDeps,
+  type InterruptAndSendResult,
+} from '../../interruptAndSendHandler';
 import {
   answerRecoveryGateHandler,
   type AnswerRecoveryGateResult,
@@ -310,6 +320,17 @@ export interface QueueInputRunExecutorLike {
   queueInput(runId: string, text: string): void;
   /** Remove one queued message by text (click-to-reopen — no double delivery). */
   dequeueInput(runId: string, text: string): boolean;
+  /**
+   * True while an execute()/executeProgrammatic call is still live for this
+   * run (mid-turn, or genuinely resting at an open gate). Used by the
+   * mutation's 'parked' check below — status='running' with this false AND no
+   * pending approval/question means no live turn AND no gate is coming for a
+   * buffered message to ever be delivered against, so queueInput must refuse
+   * rather than buffer. The concrete RunExecutor already implements this
+   * (used identically by StuckDetector's live-turn checks), so production
+   * wiring needs no change — only test doubles need the method added.
+   */
+  hasActiveExecution(runId: string): boolean;
 }
 
 export interface QueueInputDeps {
@@ -327,6 +348,28 @@ let queueInputDeps: QueueInputDeps | null = null;
  */
 export function setQueueInputDeps(deps: QueueInputDeps): void {
   queueInputDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// interruptAndSend dependency bag (TASK-301 — interrupt & send parity)
+//
+// Injected at boot by main/src/index.ts via setInterruptAndSendDeps(), reusing the
+// SAME db / runQueues / runExecutor the nudge bag wires, plus the facade's abort +
+// live-spawn-key seams (the SAME ones laneRewindDepsBag / rewindRunDepsBag use).
+// Until wired the mutation throws METHOD_NOT_SUPPORTED — same stub pattern as the
+// other dep-bags.
+// ---------------------------------------------------------------------------
+
+let interruptAndSendDeps: InterruptAndSendDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the `interruptAndSend` mutation.
+ *
+ * Called once at boot by main/src/index.ts. Until this is called the mutation
+ * throws METHOD_NOT_SUPPORTED.
+ */
+export function setInterruptAndSendDeps(deps: InterruptAndSendDeps): void {
+  interruptAndSendDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +429,54 @@ export function setRetryRunDeps(deps: RetryRunDeps): void {
 /** The frozen-definition step id `addressReviewFindings` always rewinds to. */
 export const ADDRESS_REVIEW_STEP_ID = 'address-review';
 
+/**
+ * The gate tool name a runtime's own MCP surface actually offers, mirroring
+ * `workflowPromptRenderer.ts`'s per-provider adapter envelopes: Claude keeps
+ * the raw "AskUserQuestion" wording the workflow bodies are authored with,
+ * while Codex/OMP/pi are all told to redirect that instruction to
+ * `cyboflow_request_user_input` instead. Naming "AskUserQuestion" to a
+ * runtime that does not have it (Codex and every other non-Claude MCP
+ * runtime) makes the agent silently ask in plain chat instead of opening a
+ * real host gate — the failure `renderWorkflowPromptForRuntime` exists to
+ * prevent for the workflow body itself.
+ */
+function addressReviewGateToolName(runtime: WorkflowRunStorableRuntime): string {
+  return providerForRuntime(runtime) === 'claude' ? 'AskUserQuestion' : 'cyboflow_request_user_input';
+}
+
+/**
+ * TASK-299: the stock chat message delivered to a HANDED-OVER run's agent when
+ * the review queue's "Address review findings" CTA is clicked — that run has
+ * no DAG left for a rewind to re-enter, but it DOES have a live agent sitting
+ * in chat, and the manual workaround today is exactly this: type "pull and
+ * address the findings" at it. Reuses `ADDRESS_REVIEW_FINDINGS_CONTRACT`
+ * (stepPrompt.ts) verbatim — the SAME contract the programmatic
+ * `address-review` step follows — rather than inventing a second, driftable
+ * copy of the same instructions.
+ *
+ * Unlike the programmatic `address-review` STEP — which is always followed by
+ * the workflow's own human-review step, so the sign-off gate reopens itself —
+ * this message is the agent's ENTIRE instruction for the turn: nothing else
+ * re-opens the gate afterward. The trailing sentence below is the same
+ * instruction `handoverRunHandler`'s final-gate handover brief gives at
+ * handover time ("re-open the final sign-off gate yourself via
+ * AskUserQuestion... do NOT self-approve, and do NOT merge to main
+ * yourself") — repeated here rather than assumed-recalled, since this message
+ * may land long after that original brief scrolled out of the agent's
+ * effective context. `runtime` picks the gate tool name
+ * via {@link addressReviewGateToolName} so a Codex/OMP/pi agent is told to
+ * call a tool it actually has.
+ */
+function buildAddressReviewChatMessage(runtime: WorkflowRunStorableRuntime): string {
+  const gateTool = addressReviewGateToolName(runtime);
+  return (
+    `Please pull and address this run's still-pending review findings.\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}` +
+    `\n\nOnce you have worked through every finding above, re-open the final sign-off gate yourself via ` +
+    `${gateTool}, exactly as this workflow's instructions describe for that gate. Do NOT self-approve, ` +
+    `and do NOT merge to main yourself.`
+  );
+}
+
 let rewindRunDeps: RewindRunDeps | null = null;
 
 /**
@@ -401,28 +492,74 @@ export function setRewindRunDeps(deps: RewindRunDeps): void {
   rewindRunDeps = deps;
 }
 
-/** `canAddressReviewFindings`'s ineligibility reasons (mirrored by ReviewItemCard's tooltip copy). */
-export type AddressReviewIneligibleReason = 'completed' | 'no_step' | 'in_progress';
+/**
+ * `canAddressReviewFindings`'s ineligibility reasons (mirrored by
+ * ReviewItemCard's tooltip copy). `'handed_over'` is not really "ineligible" —
+ * the rewind action itself stays refused (rewindRunHandler's `not_programmatic`),
+ * but the run DOES have a live agent to hand the request to via chat — the
+ * card renders its button ENABLED for this one reason (see ReviewItemCard's
+ * ADDRESS_REVIEW_DISABLED_TOOLTIP / the enabled-anyway carve-out) while every
+ * other reason keeps the button disabled. `'orchestrated'` (TASK-299) is the
+ * one OTHER new reason: a run that was orchestrated from birth (never handed
+ * over) — no DAG step to rewind AND no chat-delivery path either, so it keeps
+ * the button disabled, distinctly from the false `'completed'` copy it used
+ * to get.
+ */
+export type AddressReviewIneligibleReason =
+  | 'completed'
+  | 'no_step'
+  | 'in_progress'
+  | 'handed_over'
+  | 'orchestrated';
 
 /**
- * `addressReviewFindings`'s result: rewindRunHandler's own shape plus the
- * mutation's one extra `noOp` reason (`'in_progress'` — address-review is
- * already the live current step, so the request is refused rather than
- * restarting in-flight repair work).
+ * `addressReviewFindings`'s result: rewindRunHandler's own shape, PLUS the
+ * mutation's own `noOp` reasons (`'in_progress'` — address-review is already
+ * the live current step, so the request is refused rather than restarting
+ * in-flight repair work; `'parked'` — a handed-over run
+ * whose execute() call is still holding its per-run queue slot open past its
+ * last completed turn, so nothing can be delivered OR safely queued right
+ * now), PLUS the handed-over-run chat-delivery outcomes (TASK-299):
+ * `{ delivered: true; viaChat: true }` on an immediate delivery, the same
+ * shape plus `queued: true` when a genuinely live turn absorbed the message
+ * into its buffer instead (delivered at that turn's own next drain), or a
+ * `noOp` carrying `nudgeRunHandler`'s own refusal reasons verbatim (its
+ * `'empty'` reason is unreachable here — the stock message is never blank —
+ * but is kept in the type rather than narrowed, since it is `NudgeRunResult`
+ * passed straight through).
  */
-export type AddressReviewFindingsResult = RewindRunResult | { noOp: true; reason: 'in_progress' };
+export type AddressReviewFindingsResult =
+  | RewindRunResult
+  | { noOp: true; reason: 'in_progress' | 'parked' }
+  | { delivered: true; viaChat: true; queued?: true }
+  | { noOp: true; reason: NudgeNoOpReason };
 
 interface AddressReviewRunRow {
   status: string;
   execution_model: string | null;
   current_step_id: string | null;
+  handed_over_at: string | null;
+  agent_runtime: string | null;
 }
 
 /** The pre-flight columns both address-review procedures read (never `any`). */
 function readAddressReviewRunRow(db: DatabaseLike, runId: string): AddressReviewRunRow | undefined {
   return db
-    .prepare('SELECT status, execution_model, current_step_id FROM workflow_runs WHERE id = ?')
+    .prepare(
+      'SELECT status, execution_model, current_step_id, handed_over_at, agent_runtime FROM workflow_runs WHERE id = ?',
+    )
     .get(runId) as AddressReviewRunRow | undefined;
+}
+
+/**
+ * True for a run that migration 081's `handoverRunHandler` converted from
+ * programmatic to orchestrated (TASK-299) — the exact pair the handover seam
+ * stamps together, so this is never true for a run that was orchestrated from
+ * birth (that one keeps today's disabled behaviour: `readAddressReviewRunRow`'s
+ * caller falls through to the ordinary `'completed'` ineligibility below it).
+ */
+function isHandedOverRun(row: AddressReviewRunRow): boolean {
+  return row.execution_model === 'orchestrated' && row.handed_over_at !== null;
 }
 
 /**
@@ -434,6 +571,94 @@ function readAddressReviewRunRow(db: DatabaseLike, runId: string): AddressReview
  */
 function isAddressReviewInProgress(row: AddressReviewRunRow): boolean {
   return row.current_step_id === ADDRESS_REVIEW_STEP_ID && (row.status === 'running' || row.status === 'starting');
+}
+
+/**
+ * TASK-299: `addressReviewFindings`'s handed-over-run branch — deliver the
+ * stock address-review request into that run's chat instead of rewinding.
+ *
+ * Reuses the EXACT seam a typed chat message takes for an idle orchestrated
+ * run resting at its final gate (ChatInput.tsx's `workflow-idle` mode ->
+ * `runs.nudge` -> `nudgeRunHandler`, which re-spawns the SDK conversation with
+ * `--resume`), NOT the monitor router's `send`: a handed-over run has no
+ * monitor session (monitors are wired only for programmatic runs), so
+ * `monitor.send` would resolve `{ delivered: false }` and silently drop the
+ * request — the exact "dead CTA" failure mode this task exists to fix.
+ *
+ * `row`'s live-turn state is read BEFORE `nudgeRunHandler` is ever called. `nudgeRunHandler`'s own guard runs INSIDE the per-run queue
+ * (`runQueues.getOrCreate(runId).add(...)`), and `RunExecutor.execute()` HOLDS
+ * that exact queue slot for the run's ENTIRE programmatic walk — including
+ * while parked at a human gate (see handoverRunHandler.ts's header note). So
+ * calling `nudgeRunHandler` while the run's own `execute()` call has not
+ * returned (`hasActiveExecution()` true) would enqueue this delivery BEHIND
+ * that still-held slot; for a run whose last turn already completed
+ * (`isLatestRunTurnCompleted`), nothing will EVER free that slot again, so the
+ * call would hang forever instead of delivering or refusing. Branch on the
+ * SAME two signals `runs.queueInput` already uses for its own `'parked'`
+ * refusal, entirely OUTSIDE the run queue:
+ *   - `row.status !== 'running'` (i.e. `awaiting_review`), or `'running'` with
+ *     `hasActiveExecution()` false — the queue slot is free (either never
+ *     held, or already released) — fall through to `nudgeRunHandler` below.
+ *   - `'running'` with `hasActiveExecution()` true and the last turn NOT
+ *     completed — a turn genuinely is in flight: buffer the message exactly
+ *     as a typed chat message would (`runs.queueInput`'s own mechanism),
+ *     delivered at that turn's own next drain.
+ *   - `'running'` with `hasActiveExecution()` true but the last turn ALREADY
+ *     completed — execution is held open past the turn's own end (the
+ *     TASK-300 shape). Nothing will ever drain a buffered message here, so
+ *     refuse immediately and honestly instead of queueing into a black hole.
+ *
+ * Every currently-pending BLOCKING eval-sourced finding for the run is passed
+ * as `ignoreBlockingReviewItemId` so the nudge is never refused by the very
+ * findings it is being sent to address — mirrors answerRecoveryGateHandler's
+ * "ignore the gate you are answering" pattern. Any OTHER pending blocking item
+ * still refuses the nudge with `'blocked'`, same as an ordinary chat message
+ * would today. `deliveredAt: 'turn-start'` mirrors answerRecoveryGate /
+ * approve-ideas verdict delivery: this resolves as soon as the agent's resumed
+ * turn STARTS with the request as its input, rather than blocking the mutation
+ * on however long the agent takes to work through the findings.
+ */
+async function deliverAddressReviewFindingsViaChat(
+  runId: string,
+  db: DatabaseLike,
+  row: AddressReviewRunRow,
+): Promise<AddressReviewFindingsResult> {
+  if (!nudgeRunDeps) {
+    throw new TRPCError({
+      code: 'METHOD_NOT_SUPPORTED',
+      message: 'nudge dependencies not wired yet. Call setNudgeRunDeps() at boot.',
+    });
+  }
+
+  const runtime: WorkflowRunStorableRuntime = isWorkflowRunStorableRuntime(row.agent_runtime)
+    ? row.agent_runtime
+    : DEFAULT_WORKFLOW_AGENT_RUNTIME;
+  const message = buildAddressReviewChatMessage(runtime);
+
+  if (row.status === 'running') {
+    const hasLiveTurn = nudgeRunDeps.runExecutor.hasActiveExecution?.(runId) ?? true;
+    if (hasLiveTurn) {
+      if (isLatestRunTurnCompleted(db, runId)) {
+        return { noOp: true, reason: 'parked' };
+      }
+      nudgeRunDeps.runExecutor.queueInput?.(runId, message);
+      return { delivered: true, viaChat: true, queued: true };
+    }
+    // hasActiveExecution() === false: the queue slot has already been
+    // released even though status stayed 'running' — safe to fall through.
+  }
+
+  const ignoreBlockingReviewItemId = selectPendingBlockingItemRows(db, runId)
+    .filter((r) => isEvalSourcedFinding(r.source))
+    .map((r) => r.id);
+  const nudge = await nudgeRunHandler(runId, message, nudgeRunDeps, {
+    ignoreBlockingReviewItemId,
+    deliveredAt: 'turn-start',
+  });
+  if ('delivered' in nudge) {
+    return { delivered: true, viaChat: true };
+  }
+  return nudge;
 }
 
 // ---------------------------------------------------------------------------
@@ -2846,9 +3071,26 @@ export const runsRouter = router({
    * PERMITTED only while the run is mid-flight (running / starting / queued):
    *   - terminal (completed/failed/canceled) → { noOp: 'terminal' } (a failed run
    *     uses runs.reopen; a completed run is done);
-   *   - awaiting_review / paused / awaiting_input / stuck → { noOp: 'not_running' }
-   *     (those rested states use runs.nudge / runs.resume / the question gate, not
-   *     this queue path);
+   *   - stuck → { noOp: 'stuck' } (TASK-300: a run the StuckDetector has already
+   *     classified as parked with no live turn and no gate to answer would
+   *     otherwise buffer the message with no delivery trigger at all —
+   *     honestly refuse instead of silently swallowing it; reopen/cancel it
+   *     via the review queue, then send again);
+   *   - running with no live execution AND no pending approval/question →
+   *     { noOp: 'parked' } (TASK-300: the SAME shape 'stuck' answers, caught
+   *     the INSTANT it is submitted rather than after the StuckDetector's
+   *     45-minute grace period — there is no drain seam coming); ALSO
+   *     returned when execution IS reported live but
+   *     `isLatestRunTurnCompleted()` (runQueries.ts) says the run's last turn
+   *     already ended — hasActiveExecution() only proves execute() has not
+   *     returned, and a detached child the agent spawned (e.g. a dev server
+   *     inheriting stdio) can hold it pending forever after the turn ended.
+   *     That helper is always false for a programmatic run (a step's or
+   *     lane's `result` does not end the walk), so a live programmatic walk
+   *     still queues;
+   *   - awaiting_review / paused / awaiting_input → { noOp: 'not_running' }
+   *     (those rested states use runs.nudge / runs.resume / the question gate,
+   *     not this queue path);
    *   - blank-after-trim text → { noOp: 'empty' } (nothing to deliver).
    *
    * ctx.db-direct status guard (no handler module): pure status check + a single
@@ -2862,7 +3104,7 @@ export const runsRouter = router({
     .input(z.object({ runId: z.string().min(1), text: z.string() }))
     .mutation(async ({ ctx, input }): Promise<
       | { queued: true }
-      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'empty' }
+      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'stuck' | 'parked' | 'empty' }
     > => {
       if (!queueInputDeps) {
         throw new TRPCError({
@@ -2882,8 +3124,38 @@ export const runsRouter = router({
       if (['completed', 'failed', 'canceled'].includes(run.status)) {
         return { noOp: true, reason: 'terminal' };
       }
+      if (run.status === 'stuck') {
+        return { noOp: true, reason: 'stuck' };
+      }
       if (!['running', 'starting', 'queued'].includes(run.status)) {
         return { noOp: true, reason: 'not_running' };
+      }
+
+      // 'parked': the StuckDetector's parked_no_gate rung waits out a
+      // 45-minute grace period, during which a run with no live turn and no
+      // gate would otherwise keep answering `{ queued: true }` into a buffer
+      // nothing can drain. Check the SAME condition here with no grace period.
+      if (run.status === 'running') {
+        const hasGate = ctx.db
+          .prepare(
+            `SELECT
+               EXISTS(SELECT 1 FROM approvals WHERE run_id = ? AND status = 'pending' AND awaited = 1)
+                 OR EXISTS(SELECT 1 FROM questions WHERE run_id = ? AND status = 'pending') AS hasGate`,
+          )
+          .get(input.runId, input.runId) as { hasGate: number };
+        if (!hasGate.hasGate) {
+          const hasLiveTurn = queueInputDeps.runExecutor.hasActiveExecution(input.runId);
+          // hasActiveExecution() means "execute() has not returned", not "a
+          // turn is generating": a detached child the agent spawned (e.g.
+          // `pnpm dev` inheriting stdio) can keep it true forever after the
+          // turn ended. So a message is queueable only when the executor is
+          // live AND the last turn has not ended (see isLatestRunTurnCompleted
+          // for why that is always false for a programmatic run).
+          const turnCompleted = isLatestRunTurnCompleted(ctx.db, input.runId);
+          if (!hasLiveTurn || turnCompleted) {
+            return { noOp: true, reason: 'parked' };
+          }
+        }
       }
 
       queueInputDeps.runExecutor.queueInput(input.runId, input.text);
@@ -2909,6 +3181,48 @@ export const runsRouter = router({
         });
       }
       return { dequeued: queueInputDeps.runExecutor.dequeueInput(input.runId, input.text) };
+    }),
+
+  /**
+   * Interrupt & send (TASK-301): abort the run's live SDK turn and deliver `text`
+   * as its NEXT turn immediately, instead of buffering it for the next natural
+   * rest boundary (`runs.queueInput`'s behavior). The flow-run twin of the quick
+   * session's `panels:continue({ interrupt: true })` path.
+   *
+   * `itemId` optionally targets ONE fan-out lane's spawn (`${runId}:${itemId}`)
+   * instead of the run-level orchestrator spawn — see interruptAndSendHandler.ts's
+   * header note on why this mutation never aborts more than one spawn key. Today's
+   * flow-run composer (ChatInput.tsx) never supplies it.
+   *
+   * Returns:
+   *   { delivered: true; interrupted }  — `interrupted: false` means this behaved
+   *     like a plain idle nudge (text delivered as the run's next turn directly).
+   *     `interrupted: true` means a live spawn was found and its abort requested;
+   *     the text was only BUFFERED (via `runExecutor.queueInput`) at that point —
+   *     actual delivery is left to the aborted turn's own drain
+   *     (`drainQueuedInputAtRest` at the next drained REST seam), not to this
+   *     mutation itself (see interruptAndSendHandler.ts's header note on why the
+   *     abort-then-redrive race rules out a direct nudge call here).
+   *   { noOp: true; reason }            — see interruptAndSendHandler's own reasons
+   *     (mirrors runs.nudge's NudgeNoOpReason) plus 'interactive_unsupported' for a
+   *     PTY run (which keeps its live relay path instead) and
+   *     'programmatic_unsupported' for a Sprint fan-out run (each DAG step is a
+   *     fresh SDK session — a step-scoped abort cannot signal the
+   *     WorkflowController's walk; see interruptAndSendHandler.ts's header note).
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setInterruptAndSendDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  interruptAndSend: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string(), itemId: z.string().min(1).optional() }))
+    .mutation(async ({ input }): Promise<InterruptAndSendResult> => {
+      if (!interruptAndSendDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'interruptAndSend dependencies not wired yet. Call setInterruptAndSendDeps() at boot.',
+        });
+      }
+      return interruptAndSendHandler(input.runId, input.text, interruptAndSendDeps, { itemId: input.itemId });
     }),
 
   /**
@@ -2979,25 +3293,42 @@ export const runsRouter = router({
    * disabled (with an explanatory tooltip) instead of letting the human click
    * it and hit a `noOp` reason.
    *
-   * `eligible: false` carries a `reason`:
-   *   - 'completed'  — the run is not programmatic, not found, or not in one
-   *     of rewindRunHandler's REWINDABLE_STATUSES (running / awaiting_review /
-   *     failed / paused) — i.e. it already completed, was canceled, or never
-   *     started walking a DAG at all.
-   *   - 'no_step'    — the run's FROZEN definition (resolveRunFrozenSpec, the
-   *     same source of truth rewindRunHandler validates against — never the
-   *     live workflows.spec_json) has no `address-review` step (e.g. a quick
-   *     session, compound, or launch/planner run — only sprint/ship carry one).
-   *   - 'in_progress' — `address-review` IS the run's live current step
-   *     (status 'running'): a previous click (or the flow itself) already has
-   *     the step working through the pending findings. Rewinding again would
-   *     abort and restart that repair mid-flight — rewindRunHandler allows
-   *     target === current — so the CTA reads as "already addressing" instead.
-   *     Every eval-finding card for the run shares this verdict, which is what
-   *     makes the action effectively once-per-run across sibling cards.
-   *
-   * A missing run row is folded into 'completed' — there is nothing to rewind
-   * either way, and the eligibility check has no narrower reason to report.
+   * Checked in this order (a truly terminal status and a flow with no
+   * `address-review` step disable the CTA even for a handed-over run, so both
+   * precede the `'handed_over'` check):
+   *   1. missing row, or a genuinely TERMINAL status (`canceled` / `failed` /
+   *      `completed`) → 'completed' — a handed-over run whose status has
+   *      since gone terminal has no live chat left to deliver into either.
+   *      A `failed` PROGRAMMATIC run is exempt: rewindRunHandler re-drives a
+   *      failed step, so it falls through and stays eligible.
+   *   2. the run's FROZEN definition (resolveRunFrozenSpec, the same source of
+   *      truth rewindRunHandler validates against — never the live
+   *      workflows.spec_json) has no `address-review` step (e.g. a quick
+   *      session, compound, or launch/planner run — only sprint/ship carry
+   *      one) → 'no_step', for a handed-over run exactly as for a
+   *      programmatic one: the stock chat message's findings contract has
+   *      nothing to reopen in that flow shape.
+   *   3. handed-over (`execution_model = 'orchestrated'` AND `handed_over_at`
+   *      set, by migration 081's handover seam) → 'handed_over'. A rewind is
+   *      genuinely wrong here (there is no DAG left for it to re-enter), but
+   *      the run's agent is sitting live in chat, so THIS is the one
+   *      `eligible: false` case ReviewItemCard renders with the button still
+   *      ENABLED — clicking it delivers the stock request into that chat
+   *      instead of calling `addressReviewFindings`'s rewind path.
+   *   4. orchestrated from BIRTH (never handed over) → 'orchestrated' — no DAG
+   *      step to rewind and no chat-delivery path either; unlike 'completed'
+   *      this never claims a possibly still-running run has finished.
+   *   5. programmatic but not in one of rewindRunHandler's REWINDABLE_STATUSES
+   *      (running / awaiting_review / failed / paused) → 'completed' — i.e.
+   *      it already completed, was canceled, or never started walking a DAG.
+   *   6. `address-review` IS the run's live current step (status 'running') →
+   *      'in_progress': a previous click (or the flow itself) already has the
+   *      step working through the pending findings. Rewinding again would
+   *      abort and restart that repair mid-flight — rewindRunHandler allows
+   *      target === current — so the CTA reads as "already addressing"
+   *      instead. Every eval-finding card for the run shares this verdict,
+   *      which is what makes the action effectively once-per-run across
+   *      sibling cards.
    */
   canAddressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -3009,12 +3340,30 @@ export const runsRouter = router({
         });
       }
       const row = readAddressReviewRunRow(ctx.db, input.runId);
-      if (!row || row.execution_model !== 'programmatic' || !REWINDABLE_STATUSES.has(row.status)) {
+      if (!row) {
         return { eligible: false, reason: 'completed' };
       }
-      if (isAddressReviewInProgress(row)) {
-        return { eligible: false, reason: 'in_progress' };
+      // Checked BEFORE the handed-over / orchestrated branches below: a run
+      // that has genuinely reached a terminal status is done — 'completed' is
+      // TRUE for it regardless of whether it was ever handed over (a
+      // handed-over run whose status has since flipped to terminal has no
+      // live chat left to deliver into either).
+      // EXCEPT a programmatic run in a status rewindRunHandler still re-drives
+      // (REWINDABLE_STATUSES includes 'failed'): re-driving a step that died is
+      // exactly what the rewind path is for, so a failed programmatic run keeps
+      // its eligibility and falls through to the checks below.
+      const rewindableProgrammatic = row.execution_model === 'programmatic' && REWINDABLE_STATUSES.has(row.status);
+      if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(row.status) && !rewindableProgrammatic) {
+        return { eligible: false, reason: 'completed' };
       }
+      // Checked BEFORE isHandedOverRun / the programmatic fold below: the
+      // stock chat message's findings contract ("reopen the sign-off gate...")
+      // presumes a flow shaped like sprint/ship — a handed-over run whose
+      // ORIGINAL flow never had an address-review step (e.g. Launch/Planner's
+      // approve-plan handover) gets the same 'no_step' disable an ordinary
+      // programmatic run without one already gets below, rather than an
+      // enabled button that sends a request the agent has no established
+      // contract for.
       const frozen = resolveRunFrozenSpec(ctx.db, input.runId);
       const definition = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
       const hasAddressReviewStep = Boolean(
@@ -3022,6 +3371,26 @@ export const runsRouter = router({
       );
       if (!hasAddressReviewStep) {
         return { eligible: false, reason: 'no_step' };
+      }
+      // Checked BEFORE the programmatic/REWINDABLE_STATUSES fold below: a
+      // handed-over run's execution_model is 'orchestrated', which that fold
+      // would otherwise collapse into the same false 'completed' verdict the
+      // bug report's whole premise is about.
+      if (isHandedOverRun(row)) {
+        return { eligible: false, reason: 'handed_over' };
+      }
+      if (row.execution_model !== 'programmatic') {
+        // Orchestrated from BIRTH (no handover stamp) — there is no DAG step
+        // to rewind and, unlike a handed-over run, no chat-delivery path
+        // either. 'completed' would be a lie (the run may be actively
+        // running); this reason names the real cause instead.
+        return { eligible: false, reason: 'orchestrated' };
+      }
+      if (!REWINDABLE_STATUSES.has(row.status)) {
+        return { eligible: false, reason: 'completed' };
+      }
+      if (isAddressReviewInProgress(row)) {
+        return { eligible: false, reason: 'in_progress' };
       }
       return { eligible: true };
     }),
@@ -3050,6 +3419,13 @@ export const runsRouter = router({
    * serialised by the handler's in-queue re-guard (the loser reads
    * 'not_rewindable' / 'race'). The caller (ReviewItemCard) should pre-check
    * `canAddressReviewFindings` so a `noOp` here is the exception, not the path.
+   *
+   * A HANDED-OVER run (TASK-299 — `canAddressReviewFindings`'s `'handed_over'`
+   * reason) never reaches `rewindRunHandler` at all: it is routed to
+   * {@link deliverAddressReviewFindingsViaChat} instead, which delivers the
+   * same request into the run's live chat. `rewindRunHandler` would only
+   * refuse it `not_programmatic` — a no-op that leaves the human with the same
+   * dead-looking CTA the bug report is about.
    */
   addressReviewFindings: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -3061,6 +3437,9 @@ export const runsRouter = router({
         });
       }
       const row = readAddressReviewRunRow(rewindRunDeps.db, input.runId);
+      if (row && isHandedOverRun(row)) {
+        return deliverAddressReviewFindingsViaChat(input.runId, rewindRunDeps.db, row);
+      }
       if (row && isAddressReviewInProgress(row)) {
         return { noOp: true, reason: 'in_progress' };
       }

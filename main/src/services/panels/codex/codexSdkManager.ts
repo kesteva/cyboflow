@@ -1495,6 +1495,29 @@ export class CodexSdkManager extends AbstractCliManager {
     return false;
   }
 
+  /**
+   * Interrupt seam for "Stop"/"Interrupt & send": abort the in-flight turn
+   * for this identity (panelId, runId, or spawnKey — same lookup
+   * {@link killProcess} uses) WITHOUT closing a warm-parked entry that has no
+   * turn running. No-op when idle, mirroring
+   * ClaudeCodeManager.abortInFlightTurn's contract: a warm entry parked
+   * between turns is left alone (there is nothing to interrupt), only a live
+   * `activeRuns` entry is cancelled.
+   */
+  async abortInFlightTurn(identity: string): Promise<void> {
+    const keys = new Set<string>([
+      ...(this.spawnKeysByPanelId.get(identity) ?? []),
+      ...(this.spawnKeysByRunId.get(identity) ?? []),
+    ]);
+    if (keys.size === 0) keys.add(identity);
+    await Promise.all(
+      [...keys].map(async (spawnKey) => {
+        const active = this.activeRuns.get(spawnKey);
+        if (active) await active.cancel();
+      }),
+    );
+  }
+
   override async killProcess(identity: string): Promise<void> {
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),

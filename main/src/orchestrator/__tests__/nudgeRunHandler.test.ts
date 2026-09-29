@@ -113,7 +113,7 @@ describe('nudgeRunHandler — guard matrix', () => {
     db.close();
   });
 
-  it('non-idle status (running) → { noOp: not_idle }', async () => {
+  it('non-idle status (running) → { noOp: not_idle } when hasActiveExecution is unwired', async () => {
     const db = makeDb();
     const { runId } = seedRun(db, { status: 'running' });
     setSession(db, runId, 'sess-1');
@@ -123,6 +123,42 @@ describe('nudgeRunHandler — guard matrix', () => {
       runExecutor: makeFakeExecutor(),
     });
     expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+    db.close();
+  });
+
+  it('non-idle status (running) → { noOp: not_idle } when hasActiveExecution reports a turn IS in flight (TASK-299)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    setSession(db, runId, 'sess-1');
+    const executor = { ...makeFakeExecutor(), hasActiveExecution: () => true };
+    const result = await nudgeRunHandler(runId, 'hi', {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: executor,
+    });
+    expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+    expect(executor.execute).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it("a PARKED 'running' run (hasActiveExecution() === false, no live turn) is treated as idle and delivers (TASK-299)", async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    setSession(db, runId, 'sess-1');
+    const executor = { ...makeFakeExecutor(), hasActiveExecution: () => false };
+
+    const result = await nudgeRunHandler(runId, 'please address the findings', {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: executor,
+    });
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingNudge).toHaveBeenCalledWith(runId, 'please address the findings');
+    expect(executor.execute).toHaveBeenCalledWith(runId);
+    // Already 'running' — no flip was attempted; the status is unchanged.
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('running');
     db.close();
   });
 
@@ -311,6 +347,57 @@ function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err
   });
   return { promise, resolve, reject };
 }
+
+// ---------------------------------------------------------------------------
+// Parked-running concurrency (TASK-299 finding: concurrent Address clicks
+// must not overwrite a pending message)
+// ---------------------------------------------------------------------------
+
+describe('nudgeRunHandler — parked-running concurrency', () => {
+  it('a second concurrent call for the same parked run is refused, not racing the first delivery', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    setSession(db, runId, 'sess-1');
+
+    const exec = deferred(); // held open so the first call's delivery stays in flight
+    const setPendingNudge = vi.fn<(runId: string, text: string) => void>();
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge,
+      execute: vi.fn(() => exec.promise),
+      hasActiveExecution: () => false,
+    };
+    const deps = { db: dbAdapter(db), runQueues: new RunQueueRegistry(), runExecutor: executor };
+
+    const first = nudgeRunHandler(runId, 'first click', deps);
+    // Let the first call's guard task (which reserves the parked delivery)
+    // run to completion before firing the second — it is synchronous DB work
+    // dispatched via the per-run queue, so setPendingNudge having been called
+    // is the observable signal that the reservation is already held.
+    await vi.waitFor(() => expect(setPendingNudge).toHaveBeenCalledTimes(1));
+
+    const second = await nudgeRunHandler(runId, 'second click', deps);
+    expect(second).toEqual({ noOp: true, reason: 'not_idle' });
+    // The second click must never have reached setPendingNudge — it would
+    // otherwise silently overwrite the first click's still-undelivered text.
+    expect(setPendingNudge).toHaveBeenCalledTimes(1);
+    expect(setPendingNudge).toHaveBeenCalledWith(runId, 'first click');
+
+    exec.resolve();
+    const firstResult = await first;
+    expect(firstResult).toEqual({ delivered: true });
+
+    // Once the first delivery has settled, the reservation is released and a
+    // later click is admitted again.
+    const thirdExec = deferred();
+    (executor.execute as ReturnType<typeof vi.fn>).mockImplementation(() => thirdExec.promise);
+    const third = nudgeRunHandler(runId, 'third click', deps);
+    thirdExec.resolve();
+    expect(await third).toEqual({ delivered: true });
+    expect(setPendingNudge).toHaveBeenCalledWith(runId, 'third click');
+
+    db.close();
+  });
+});
 
 describe("nudgeRunHandler — deliveredAt: 'turn-start'", () => {
   it('returns delivered as soon as the turn-start waiter fires, while execute() is still mid-turn', async () => {

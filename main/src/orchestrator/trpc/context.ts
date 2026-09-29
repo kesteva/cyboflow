@@ -229,6 +229,12 @@ export interface AgentThreadServiceLike {
     contextHint?: string,
     images?: readonly AgentThreadImageAttachment[],
   ): Promise<void>;
+  /** Abort whatever turn is currently in flight for this thread (the rail's
+   *  Stop control). No-op — `{ interrupted: false }` — when the thread is idle. */
+  interruptTurn(threadId: string): Promise<{ interrupted: boolean }>;
+  /** Whether a turn is currently in flight for this thread — lets a reloaded
+   *  renderer hydrate the Stop affordance for a turn that predates its mount. */
+  isTurnInFlight(threadId: string): boolean;
 }
 
 /**

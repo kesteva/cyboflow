@@ -303,3 +303,19 @@ describe('ChatTranscript — visibility gating (TASK-269)', () => {
     expect(screen.queryByText('Unhandled message type')).toBeNull();
   });
 });
+
+describe('ChatTranscript — assistant_interrupted (TASK-297 Stop marker)', () => {
+  it('renders a muted "Stopped" divider, never the red error card', () => {
+    const stopped: UnifiedMessage = {
+      id: 'stopped-1',
+      role: 'system',
+      timestamp: '2026-07-17T00:00:00Z',
+      segments: [{ type: 'text', content: 'Stopped' }],
+      metadata: { systemSubtype: 'assistant_interrupted' },
+    };
+    render(<ChatTranscript {...makeProps({ messages: [stopped] })} />);
+
+    expect(screen.getByText('Stopped')).toBeInTheDocument();
+    expect(screen.queryByText('Session Error')).toBeNull();
+  });
+});

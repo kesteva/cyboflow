@@ -334,6 +334,16 @@ const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
           </div>
         );
       }
+    } else if (sysMessage.metadata?.systemSubtype === 'assistant_interrupted') {
+      // A user-initiated Stop — a muted one-line divider, never the red error
+      // card, so a partial tool-sequence / text above it stays readable.
+      return (
+        <div className="flex items-center gap-2 py-1 text-xs text-text-tertiary">
+          <span className="h-px flex-1 bg-border-primary" />
+          <span>Stopped</span>
+          <span className="h-px flex-1 bg-border-primary" />
+        </div>
+      );
     } else if (sysMessage.metadata?.systemSubtype === 'error') {
       const errorInfo = sysMessage.segments.find(seg => seg.type === 'system_info')?.info || {};
 
