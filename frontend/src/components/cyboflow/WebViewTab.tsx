@@ -9,8 +9,9 @@
  * renderer CSP's `frame-src` would break an iframe viewer in shipped builds only
  * — the exact dev/packaged asymmetry that dogfooding misses.
  *
- * Chrome is deliberately minimal: back / forward / reload / URL / open-in-OS-
- * browser. No favicon — the strip is text glyphs by design, and the packaged
+ * Chrome is deliberately minimal: back / forward / reload / an editable URL /
+ * open-in-OS-browser. A tab with no URL yet (the strip's "+") is BLANK: main has
+ * no view for it until the user enters one. No favicon — the strip is text glyphs by design, and the packaged
  * CSP's `img-src` would block a remote one.
  *
  * See docs/proposals/native-web-viewer.md §3.6.
@@ -25,6 +26,7 @@ import { trpc } from '../../trpc/client';
 import { selectTabConsents, useWebConsentStore } from '../../stores/webConsentStore';
 import { WebConsentSheet } from './WebConsentSheet';
 import { WebAccessModal } from './WebAccessModal';
+import { openUserWebTab, typedUrl } from '../../utils/openWebLink';
 
 export interface WebViewTabProps {
   tab: TabItem;
@@ -40,8 +42,13 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
   // useShallow: an unrelated tab's prompt does not re-render this one.
   const consents = useWebConsentStore(useShallow(selectTabConsents(tab.id)));
   const [accessOpen, setAccessOpen] = useState(false);
+  // The address bar: `draft` is what the user is typing, null when not editing.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  const blank = !tab.currentUrl;
 
-  useWebViewBounds({ tabId: tab.id, anchorRef, active });
+  // A blank tab has no view to position; bounds are pushed once it opens.
+  useWebViewBounds({ tabId: tab.id, anchorRef, active: active && !blank });
 
   // Seed from main, then stay live. The snapshot is the authority for
   // canGoBack/canGoForward/state; the strip's label and URL are kept by
@@ -79,6 +86,23 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
   const blocked =
     state === 'crashed' || state === 'auth_required' || state === 'certificate_error';
 
+  const submit = (text: string, input: HTMLInputElement): void => {
+    const next = typedUrl(text);
+    if (!next) {
+      setInvalid(true);
+      return;
+    }
+    if (blank) {
+      openUserWebTab(sessionKey, next, { tabId: tab.id });
+    } else {
+      void trpc.cyboflow.webViewer.navigate.mutate({ tabId: tab.id, url: next }).catch(() => {
+        /* a failed load surfaces through the tab's state */
+      });
+    }
+    setDraft(null);
+    input.blur();
+  };
+
   const go = useCallback(
     (verb: 'back' | 'forward' | 'reload') => {
       void trpc.cyboflow.webViewer[verb].mutate({ tabId: tab.id }).catch(() => {
@@ -98,7 +122,7 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           type="button"
           aria-label="Back"
           data-testid="web-view-tab-back"
-          disabled={snapshot?.canGoBack !== true}
+          disabled={blank || snapshot?.canGoBack !== true}
           onClick={() => go('back')}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover disabled:opacity-30"
         >
@@ -108,7 +132,7 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           type="button"
           aria-label="Forward"
           data-testid="web-view-tab-forward"
-          disabled={snapshot?.canGoForward !== true}
+          disabled={blank || snapshot?.canGoForward !== true}
           onClick={() => go('forward')}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover disabled:opacity-30"
         >
@@ -118,18 +142,42 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           type="button"
           aria-label="Reload"
           data-testid="web-view-tab-reload"
+          disabled={blank}
           onClick={() => go('reload')}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover disabled:opacity-30"
         >
           <RotateCw className={`h-3.5 w-3.5 ${snapshot?.loading === true ? 'animate-spin' : ''}`} />
         </button>
-        <span
+        <input
+          type="text"
           data-testid="web-view-tab-url"
-          className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary"
+          aria-label="Address"
+          aria-invalid={invalid}
+          autoFocus={blank && active}
+          spellCheck={false}
+          placeholder="Enter a URL"
+          value={draft ?? url}
           title={url}
-        >
-          {url}
-        </span>
+          onFocus={(e) => {
+            setDraft(url);
+            e.currentTarget.select();
+          }}
+          onBlur={() => {
+            setDraft(null);
+            setInvalid(false);
+          }}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setInvalid(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit(e.currentTarget.value, e.currentTarget);
+            else if (e.key === 'Escape') e.currentTarget.blur();
+          }}
+          className={`min-w-0 flex-1 truncate rounded-button border bg-transparent px-1.5 py-0.5 font-mono text-xs text-text-secondary outline-none focus:bg-surface-primary focus:text-text-primary ${
+            invalid ? 'border-status-error' : 'border-transparent focus:border-border-primary'
+          }`}
+        />
         {tab.openedBy === 'agent' && (
           <span
             data-testid="web-view-tab-agent-badge"
@@ -143,8 +191,9 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           aria-label="Agent access"
           title="Agent access"
           data-testid="web-view-tab-access"
+          disabled={blank}
           onClick={() => setAccessOpen(true)}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover disabled:opacity-30"
         >
           <Shield className="h-3.5 w-3.5" />
         </button>
@@ -152,8 +201,9 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
           type="button"
           aria-label="Open in your browser"
           data-testid="web-view-tab-open-external"
+          disabled={blank}
           onClick={() => void window.electronAPI?.openExternal(url)}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-button text-text-secondary hover:bg-surface-hover disabled:opacity-30"
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </button>

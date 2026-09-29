@@ -13,7 +13,7 @@
  * See docs/proposals/native-web-viewer.md §4.
  */
 import { trpc } from '../trpc/client';
-import { useCenterPaneStore } from '../stores/centerPaneStore';
+import { useCenterPaneStore, webTabLabel } from '../stores/centerPaneStore';
 import { useErrorStore } from '../stores/errorStore';
 
 /**
@@ -56,15 +56,45 @@ function openInBrowser(url: string): void {
   void window.electronAPI?.openExternal(url);
 }
 
-export function openUserWebTab(sessionKey: string, url: string, options: { focus?: boolean } = {}): void {
-  const tabId = useCenterPaneStore
+/** Strip label of a tab that has no URL yet. */
+export const BLANK_TAB_LABEL = 'New tab';
+
+/**
+ * A blank tab from the strip's "+": a strip entry only, with its address bar
+ * focused. Main has no view for it until the user enters a URL, which then goes
+ * through {@link openUserWebTab} with this tab's id.
+ */
+export function openBlankWebTab(sessionKey: string): string {
+  return useCenterPaneStore
     .getState()
-    .openWebTab(sessionKey, { url, openedBy: 'user', focus: options.focus !== false });
+    .openWebTab(sessionKey, { url: '', label: BLANK_TAB_LABEL, openedBy: 'user', focus: true });
+}
+
+/**
+ * Open `url` as a user tab. `tabId` names an existing BLANK tab to load it into
+ * (see {@link openBlankWebTab}); without it a new tab is minted.
+ */
+export function openUserWebTab(
+  sessionKey: string,
+  url: string,
+  options: { focus?: boolean; tabId?: string } = {},
+): void {
+  const store = useCenterPaneStore.getState();
+  const blankId = options.tabId;
+  const tabId =
+    blankId ?? store.openWebTab(sessionKey, { url, openedBy: 'user', focus: options.focus !== false });
+  if (blankId) store.updateWebTab(sessionKey, blankId, { currentUrl: url, label: webTabLabel(url) });
   void trpc.cyboflow.webViewer.open
     .mutate({ sessionId: sessionKey, tabId, url, openedBy: 'user' })
     .then((res) => {
       if (res.ok) return;
-      useCenterPaneStore.getState().closeTab(sessionKey, tabId);
+      // A rejected open has no view behind it: drop the strip entry — or, for a
+      // blank tab the user is typing into, put it back to blank.
+      if (blankId && res.error !== 'viewer_disabled') {
+        useCenterPaneStore.getState().updateWebTab(sessionKey, blankId, { currentUrl: '', label: BLANK_TAB_LABEL });
+      } else {
+        useCenterPaneStore.getState().closeTab(sessionKey, tabId);
+      }
       if (res.error === 'viewer_disabled') {
         openInBrowser(url);
       } else if (res.error === 'tab_limit_reached') {

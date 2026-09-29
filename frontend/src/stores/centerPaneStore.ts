@@ -185,7 +185,7 @@ export interface WebTabPatch {
  * predictable before the page reports a title. A non-parsing URL falls back to
  * the raw string rather than throwing inside a store action.
  */
-function webTabLabel(url: string): string {
+export function webTabLabel(url: string): string {
   try {
     return new URL(url).hostname || url;
   } catch {

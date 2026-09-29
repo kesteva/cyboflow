@@ -10,7 +10,8 @@
  */
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import { acquireOcclusion, resetOcclusionForTests } from '../../../utils/occlusion';
 import { useWebConsentStore } from '../../../stores/webConsentStore';
 import type { TabItem } from '../../../../../shared/types/centerPane';
@@ -21,6 +22,8 @@ const setVisibleMutate = vi.fn();
 const setBoundsMutate = vi.fn();
 const reloadMutate = vi.fn();
 const onTabStateSubscribe = vi.fn();
+const navigateMutate = vi.fn();
+const openMutate = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -30,6 +33,8 @@ vi.mock('../../../trpc/client', () => ({
         setVisible: { mutate: (...a: unknown[]) => setVisibleMutate(...a) },
         setBounds: { mutate: (...a: unknown[]) => setBoundsMutate(...a) },
         reload: { mutate: (...a: unknown[]) => reloadMutate(...a) },
+        navigate: { mutate: (...a: unknown[]) => navigateMutate(...a) },
+        open: { mutate: (...a: unknown[]) => openMutate(...a) },
         back: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
         forward: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
         onTabState: { subscribe: (...a: unknown[]) => onTabStateSubscribe(...a) },
@@ -74,6 +79,8 @@ beforeEach(() => {
   setBoundsMutate.mockResolvedValue({ ok: true });
   reloadMutate.mockResolvedValue({ ok: true });
   onTabStateSubscribe.mockReturnValue({ unsubscribe: vi.fn() });
+  navigateMutate.mockResolvedValue({ ok: true });
+  openMutate.mockResolvedValue({ ok: true, snapshot: {} });
 });
 
 afterEach(() => resetOcclusionForTests());
@@ -90,9 +97,7 @@ describe('WebViewTab', () => {
     // No favicon in v1 on purpose: the packaged renderer CSP's img-src would
     // block a remote one, so it would work in dev and break in every build.
     const { container } = render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
-    expect(screen.getByTestId('web-view-tab-url')).toHaveTextContent(
-      'https://docs.anthropic.com/en/docs',
-    );
+    expect(screen.getByTestId('web-view-tab-url')).toHaveValue('https://docs.anthropic.com/en/docs');
     expect(container.querySelector('img')).toBeNull();
   });
 
@@ -190,5 +195,63 @@ describe('WebViewTab', () => {
     render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
     await waitFor(() => expect(getQuery).toHaveBeenCalled());
     expect(screen.queryByTestId('web-view-tab-blocked')).toBeNull();
+  });
+
+  it('navigates the tab to an address the user types', async () => {
+    render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
+    const bar = screen.getByTestId('web-view-tab-url');
+    fireEvent.focus(bar);
+    fireEvent.change(bar, { target: { value: 'example.com/next' } });
+    fireEvent.keyDown(bar, { key: 'Enter' });
+    expect(navigateMutate).toHaveBeenCalledWith({ tabId: TAB.id, url: 'https://example.com/next' });
+    expect(openMutate).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-address and keeps it in the bar, marked invalid', () => {
+    render(<WebViewTab tab={TAB} sessionKey="sess-1" active />);
+    const bar = screen.getByTestId('web-view-tab-url');
+    fireEvent.focus(bar);
+    fireEvent.change(bar, { target: { value: 'how to center a div' } });
+    fireEvent.keyDown(bar, { key: 'Enter' });
+    expect(navigateMutate).not.toHaveBeenCalled();
+    expect(bar).toHaveAttribute('aria-invalid', 'true');
+    expect(bar).toHaveValue('how to center a div');
+  });
+
+  describe('a blank tab (the strip\'s "+")', () => {
+    const BLANK: TabItem = { ...TAB, id: 'web:blank', label: 'New tab', initialUrl: '', currentUrl: '' };
+
+    beforeEach(() => {
+      getQuery.mockResolvedValue(null);
+      useCenterPaneStore.setState({ bySession: {} });
+      useCenterPaneStore.getState().openWebTab('sess-1', { id: BLANK.id, url: '', label: 'New tab' });
+    });
+
+    it('focuses the empty address bar and positions no view', async () => {
+      render(<WebViewTab tab={BLANK} sessionKey="sess-1" active />);
+      const bar = screen.getByTestId('web-view-tab-url');
+      expect(bar).toHaveFocus();
+      expect(bar).toHaveValue('');
+      await waitFor(() => expect(setVisibleMutate).toHaveBeenCalled());
+      expect(setVisibleMutate).not.toHaveBeenCalledWith({ tabId: BLANK.id, visible: true });
+      expect(setBoundsMutate).not.toHaveBeenCalled();
+      expect(screen.getByTestId('web-view-tab-reload')).toBeDisabled();
+    });
+
+    it('OPENS its first address in main under the same tab id, instead of navigating', () => {
+      render(<WebViewTab tab={BLANK} sessionKey="sess-1" active />);
+      const bar = screen.getByTestId('web-view-tab-url');
+      fireEvent.change(bar, { target: { value: 'localhost:5173' } });
+      fireEvent.keyDown(bar, { key: 'Enter' });
+      expect(openMutate).toHaveBeenCalledWith({
+        sessionId: 'sess-1',
+        tabId: BLANK.id,
+        url: 'http://localhost:5173/',
+        openedBy: 'user',
+      });
+      expect(navigateMutate).not.toHaveBeenCalled();
+      const tab = useCenterPaneStore.getState().bySession['sess-1'].tabs.find((t) => t.id === BLANK.id);
+      expect(tab).toMatchObject({ currentUrl: 'http://localhost:5173/', label: 'localhost' });
+    });
   });
 });

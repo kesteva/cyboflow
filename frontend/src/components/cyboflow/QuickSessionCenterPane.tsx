@@ -54,7 +54,7 @@ import { WebViewTab } from './WebViewTab';
 import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
-import { openUserWebTab } from '../../utils/openWebLink';
+import { openBlankWebTab } from '../../utils/openWebLink';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
@@ -249,7 +249,7 @@ export function QuickSessionCenterPane({
           activeTabId={pane.activeTabId}
           onTabClick={(id) => focusTab(sessionKey, id)}
           onTabClose={(id) => closeTab(sessionKey, id)}
-          onOpenUrl={(url) => openUserWebTab(sessionKey, url)}
+          onNewWebTab={() => openBlankWebTab(sessionKey)}
         />
       )}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>

@@ -27,7 +27,7 @@ import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
-import { openUserWebTab } from '../../utils/openWebLink';
+import { openBlankWebTab } from '../../utils/openWebLink';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
@@ -325,7 +325,7 @@ export function RunCenterPane({
             activeTabId={session.activeTabId}
             onTabClick={(id) => focusTab(sessionKey, id)}
             onTabClose={(id) => closeTab(sessionKey, id)}
-            onOpenUrl={(url) => openUserWebTab(sessionKey, url)}
+            onNewWebTab={() => openBlankWebTab(sessionKey)}
           />
         </div>
         {/* A/B variant pill (migration 048) — reads the denormalized

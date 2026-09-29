@@ -9,7 +9,7 @@ vi.mock('../../trpc/client', () => ({
   trpc: { cyboflow: { webViewer: { open: { mutate: (...a: unknown[]) => openMutate(...a) } } } },
 }));
 
-import { openUserWebTab, typedUrl, viewableHref } from '../openWebLink';
+import { openBlankWebTab, openUserWebTab, typedUrl, viewableHref } from '../openWebLink';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 
 const KEY = 's1';
@@ -76,5 +76,22 @@ describe('openUserWebTab', () => {
     openUserWebTab(KEY, 'https://example.com/');
     await waitFor(() => expect(openExternal).toHaveBeenCalledWith('https://example.com/'));
     expect(webTabs()).toHaveLength(0);
+  });
+});
+
+describe('openBlankWebTab', () => {
+  it('adds a focused strip entry and asks main for nothing until a URL is entered', () => {
+    const id = openBlankWebTab(KEY);
+    expect(webTabs()).toEqual([expect.objectContaining({ id, label: 'New tab', currentUrl: '', openedBy: 'user' })]);
+    expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).toBe(id);
+    expect(openMutate).not.toHaveBeenCalled();
+  });
+
+  it('a rejected first open puts the tab back to blank instead of dropping it', async () => {
+    openMutate.mockResolvedValue({ ok: false, error: 'tab_limit_reached' });
+    const id = openBlankWebTab(KEY);
+    openUserWebTab(KEY, 'https://example.com/', { tabId: id });
+    expect(webTabs()[0]).toMatchObject({ currentUrl: 'https://example.com/' });
+    await waitFor(() => expect(webTabs()[0]).toMatchObject({ id, currentUrl: '', label: 'New tab' }));
   });
 });
