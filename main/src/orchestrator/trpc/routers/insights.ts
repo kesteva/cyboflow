@@ -68,7 +68,9 @@ import {
   selectTuningLevelUsage,
   selectWorkflowName,
   getRunEval,
+  DAILY_USAGE_DEFAULT_WINDOW_DAYS,
 } from '../../insightsQueries';
+import { ACCOUNTING_VERSION } from '../../usageFold';
 import {
   dailyUsageInputSchema,
   projectIdSchema,
@@ -128,9 +130,12 @@ function zeroedRunUsageRollup(runId: string): RunUsageRollup {
     costUsd: null,
     numTurns: null,
     assistantMessageCount: 0,
+    accountingVersion: ACCOUNTING_VERSION,
+    coverage: 'complete',
     // No run row (or none matched) → no runtime timestamps to report.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 
@@ -147,10 +152,13 @@ export const insightsRouter = router({
     }),
 
   /**
-   * Per-workflow token/cost aggregate over the runs that carried usage data.
-   * `limitRunsPerWorkflow` caps how many recent runs per workflow are folded into
-   * the aggregate (a cost ceiling on the underlying raw_events scan); omitted lets
-   * the helper apply its own default.
+   * Per-workflow token/cost aggregate over the runs that carried usage data,
+   * within the last `DAILY_USAGE_DEFAULT_WINDOW_DAYS` days (TASK-290 follow-up
+   * — the same window `dailyUsage` applies by default, so a workflow's card can
+   * never count a run the chart excludes). `limitRunsPerWorkflow` caps how many
+   * recent runs per workflow are folded into the aggregate WITHIN that window (a
+   * cost ceiling on the underlying raw_events scan); omitted lets the helper
+   * apply its own default.
    */
   workflowUsage: protectedProcedure
     .input(
@@ -317,6 +325,6 @@ export const insightsRouter = router({
     .input(dailyUsageInputSchema)
     .query(({ ctx, input }): DailyModelUsagePoint[] => {
       const db = requireDb(ctx.db, 'dailyUsage');
-      return selectDailyModelUsage(db, input.projectId, input.days ?? 30);
+      return selectDailyModelUsage(db, input.projectId, input.days ?? DAILY_USAGE_DEFAULT_WINDOW_DAYS);
     }),
 });

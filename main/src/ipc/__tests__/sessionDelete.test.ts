@@ -147,6 +147,7 @@ function makeServices(
   const stopCodexSdkPanel = vi.fn(async () => {});
   const stopCodexPtyPanel = vi.fn(async () => {});
   const stopClaudePanel = vi.fn(async () => {});
+  const stopInteractivePanel = vi.fn(async () => {});
   const archiveSession = vi.fn(async () => {});
   const cancelHostedRuns = vi.fn(async () => {
     if (opts?.cancelThrows) throw new Error('cancel failed');
@@ -169,6 +170,7 @@ function makeServices(
     worktreeManager: { removeWorktree, deleteBranch },
     killLiveSession,
     claudeCodeManager: { stopPanel: stopClaudePanel, stopSession: vi.fn() },
+    interactiveCliManager: { stopPanel: stopInteractivePanel },
     codexSdkManager: { on: vi.fn(), stopPanel: stopCodexSdkPanel },
     codexPtyManager: { on: vi.fn(), stopPanel: stopCodexPtyPanel },
     archiveProgressManager,
@@ -182,6 +184,7 @@ function makeServices(
     stopCodexSdkPanel,
     stopCodexPtyPanel,
     stopClaudePanel,
+    stopInteractivePanel,
     archiveSession,
     cancelHostedRuns,
     removeWorktree,
@@ -351,6 +354,37 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
     releaseTeardown();
     await dismissal;
     expect(made.archiveSession).toHaveBeenCalledWith('s1');
+  });
+
+  it('tears down a panel-level substrate override on its OWN manager, not the session-level one (composed with resolvePanelLane)', async () => {
+    // Session substrate is 'sdk' (claudeCodeManager's lane), but this ONE
+    // panel overrides to 'interactive' (claude-panels:set-substrate) — the
+    // exact mixed case claudePanelContinue.test.ts covers for the continue
+    // seam. resolvePanelLane must resolve the PANEL's substrate, not the
+    // session's, so the interactive-lane manager tears it down and the
+    // SDK-lane manager is never touched.
+    const made = makeServices({
+      id: 's1',
+      substrate: 'sdk',
+      agent_runtime: 'claude-sdk',
+      is_main_repo: true,
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: 'panel-override-interactive',
+      sessionId: 's1',
+      type: 'claude',
+      substrate: 'interactive',
+      title: 'Claude',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(made.stopInteractivePanel).toHaveBeenCalledWith('panel-override-interactive');
+    expect(made.stopClaudePanel).not.toHaveBeenCalled();
   });
 
   it('kills a live SDK quick-agent fallback BEFORE archiving the session', async () => {

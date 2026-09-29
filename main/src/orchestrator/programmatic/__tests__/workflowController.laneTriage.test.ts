@@ -25,9 +25,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   WorkflowController,
   MONITOR_LANE_RESCUE_CAP,
-  MONITOR_RUN_RESCUE_CAP,
+  monitorRunRescueCap,
 } from '../workflowController';
 import type {
+  BuildSlotCheck,
   ControllerHost,
   ControllerStepContext,
   FanOutDriver,
@@ -169,7 +170,10 @@ function rescue(targetStepId: string, guidance = 'do it the other way'): LaneRes
 interface TriageHost {
   host: ControllerHost;
   driver: ReturnType<typeof makeDriver>;
+  /** EXHAUSTED-stage consults only (the pre-existing seam). */
   consults: LaneTriageFailure[];
+  /** EARLY-stage consults (before a lane's final automatic attempt). */
+  earlyConsults: LaneTriageFailure[];
   /** The `attempt` of every visual-verification enqueue, in call order. */
   enqueueAttempts: number[];
   /** Every systemic-park consult, in call order (empty unless `pauses` is set). */
@@ -184,6 +188,8 @@ interface TriageHost {
 function makeTriageHost(opts: {
   items: string[];
   outcomes?: LaneRescueOutcome[];
+  /** Replayed for EARLY consults, defaulting to give_up ("no steering"). */
+  earlyOutcomes?: LaneRescueOutcome[];
   triage?: boolean;
   visualGate?: VisualVerifyGate;
   deps?: Map<string, string[]>;
@@ -194,6 +200,8 @@ function makeTriageHost(opts: {
   const driver = makeDriver(opts.items, opts.deps);
   const queue = [...(opts.outcomes ?? [])];
   const consults: LaneTriageFailure[] = [];
+  const earlyConsults: LaneTriageFailure[] = [];
+  const earlyQueue = [...(opts.earlyOutcomes ?? [])];
   const enqueueAttempts: number[] = [];
   const pauseQueue = [...(opts.pauses ?? [])];
   const pauseCalls: Array<{ stepId: string; error: string | undefined }> = [];
@@ -230,12 +238,16 @@ function makeTriageHost(opts: {
       ? {}
       : {
           async triageLaneFailure(req: LaneTriageFailure): Promise<LaneRescueOutcome> {
+            if (req.stage === 'early') {
+              earlyConsults.push(req);
+              return earlyQueue.shift() ?? { kind: 'give_up' };
+            }
             consults.push(req);
             return queue.shift() ?? { kind: 'give_up' };
           },
         }),
   };
-  return { host, driver, consults, enqueueAttempts, pauseCalls };
+  return { host, driver, consults, earlyConsults, enqueueAttempts, pauseCalls };
 }
 
 /** A visual gate that replays scripted verdicts (default 'advance'). */
@@ -428,28 +440,61 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
   // ── Budgets ───────────────────────────────────────────────────────────────
 
-  it(`caps rescues at MONITOR_LANE_RESCUE_CAP (${MONITOR_LANE_RESCUE_CAP}) per lane — the second failure settles WITHOUT consulting`, async () => {
+  it(`caps rescues at MONITOR_LANE_RESCUE_CAP (${MONITOR_LANE_RESCUE_CAP}) per lane — the next failure settles WITHOUT consulting`, async () => {
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
-    const runner = makeRunner({
-      implement: [
-        { status: 'failed', error: 'first' },
-        { status: 'failed', error: 'second' },
-      ],
-    });
+    const failures = Array.from({ length: MONITOR_LANE_RESCUE_CAP + 1 }, (_, i) => ({
+      status: 'failed' as const,
+      error: `failure ${i + 1}`,
+    }));
+    const runner = makeRunner({ implement: failures });
     const { host, driver, consults } = makeTriageHost({
       items: ['t1'],
-      outcomes: [rescue('implement'), rescue('implement')],
+      outcomes: failures.map(() => rescue('implement')),
     });
 
     await new WorkflowController(runner, host).run('r', d);
 
-    expect(consults).toHaveLength(1);
-    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+    expect(consults).toHaveLength(MONITOR_LANE_RESCUE_CAP);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(MONITOR_LANE_RESCUE_CAP + 1);
     expect(laneStatus(driver.lanes, 't1')).toBe('failed');
   });
 
-  it(`caps rescues at MONITOR_RUN_RESCUE_CAP (${MONITOR_RUN_RESCUE_CAP}) across the whole walk`, async () => {
-    const items = ['t1', 't2', 't3', 't4', 't5', 't6'];
+  it('hands every later consult of a lane the failures its earlier rescues answered', async () => {
+    // Every rescue after the first is progress-gated in the brain; the controller's
+    // job is to carry the lane's rescue history so the brain can judge it.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const runner = makeRunner({
+      implement: [
+        { status: 'failed', error: 'race A' },
+        { status: 'failed', error: 'race B' },
+      ],
+    });
+    const { host, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [rescue('implement', 'fix race A'), rescue('implement', 'fix race B')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(2);
+    expect(consults[0].priorRescues).toBeUndefined();
+    expect(consults[1].priorRescues).toEqual([
+      { stepId: 'implement', failureKind: 'inner-step', errorExcerpt: 'race A', guidance: 'fix race A' },
+    ]);
+  });
+
+  it('sizes the run rescue budget at floor(3 + n/2) for n tasks', () => {
+    expect(monitorRunRescueCap(0)).toBe(3);
+    expect(monitorRunRescueCap(1)).toBe(3);
+    expect(monitorRunRescueCap(5)).toBe(5);
+    expect(monitorRunRescueCap(14)).toBe(10);
+    expect(monitorRunRescueCap(58)).toBe(32);
+  });
+
+  it(`caps rescues at floor(3 + n/2) across the whole walk`, async () => {
+    const items = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10'];
+    const MONITOR_RUN_RESCUE_CAP = monitorRunRescueCap(items.length);
+    expect(MONITOR_RUN_RESCUE_CAP).toBe(8);
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
     // Every lane fails its first implement; a rescued lane succeeds on the retry.
     const scripts: Record<string, StepRunResult[]> = {};
@@ -462,7 +507,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
     await new WorkflowController(runner, host).run('r', d);
 
-    // Only the first four lanes to fail get a consult; the rest settle directly.
+    // Only the first eight lanes to fail get a consult; the rest settle directly.
     expect(consults).toHaveLength(MONITOR_RUN_RESCUE_CAP);
     const rescued = items.filter((id) => laneStatus(driver.lanes, id) === 'integrated');
     const abandoned = items.filter((id) => laneStatus(driver.lanes, id) === 'failed');
@@ -815,5 +860,685 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
     expect(result.outcome).toBe('completed');
     expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+});
+
+// ── Commit-integrity: the lane-end probe consults the monitor ────────────────
+//    Lanes share ONE worktree, so "no commit + dirty tree" only proves THIS lane
+//    left work uncommitted when it ran alone. Live 2026-09-25: an already-done
+//    task made no commit, a concurrent sibling's untracked files dirtied the tree,
+//    and the probe failed the no-op lane with no chance of rescue.
+describe('WorkflowController — commit-integrity lane triage', () => {
+  type Reading = { headAdvanced: boolean; dirty: boolean; dirtyPaths?: string[]; newDirtyPaths?: string[] };
+
+  /** Wire a probe that returns `readings` in order (repeating the last one). */
+  function withProbe(driver: FanOutDriver, readings: Reading[]): void {
+    const queue = [...readings];
+    driver.beginCommitProbe = async () => async () => (queue.length > 1 ? queue.shift()! : queue[0]);
+  }
+
+  const dirtyNew: Reading = {
+    headAdvanced: false,
+    dirty: true,
+    dirtyPaths: ['src/a.ts'],
+    newDirtyPaths: ['src/a.ts'],
+  };
+
+  it('integrates without consulting when every dirty path predates the lane', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'] });
+    withProbe(driver, [{ headAdvanced: false, dirty: true, dirtyPaths: ['old.txt'], newDirtyPaths: [] }]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(0);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it("consults with failureKind 'commit-integrity' and the dirty paths as evidence", async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'] });
+    withProbe(driver, [dirtyNew]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(consults[0]).toMatchObject({ itemId: 't1', stepId: 'verify', failureKind: 'commit-integrity' });
+    expect(consults[0].errorExcerpt).toContain('src/a.ts');
+    expect(consults[0].errorExcerpt).toContain('No other lane was running');
+  });
+
+  it("integrates the lane on an 'accept' verdict, spending no rescue budget", async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'accept', reason: 'the paths are a sibling lane’s' }],
+    });
+    withProbe(driver, [dirtyNew]);
+
+    const runner = makeRunner();
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(1);
+  });
+
+  it('re-drives the lane on a rescue, with guidance, and integrates once the re-run commits', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [rescue('implement', 'commit src/a.ts')],
+    });
+    withProbe(driver, [dirtyNew, { headAdvanced: true, dirty: false, dirtyPaths: [], newDirtyPaths: [] }]);
+    const runner = makeRunner();
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    const implementCalls = runner.calls.filter((c) => c.id === 'implement');
+    expect(implementCalls).toHaveLength(2);
+    expect(implementCalls[1].laneGuidance).toContain('commit src/a.ts');
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('fails a lane that ran ALONE when the monitor gives up', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver } = makeTriageHost({ items: ['t1'], outcomes: [{ kind: 'give_up' }] });
+    withProbe(driver, [dirtyNew]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  it('fails a lane that ran ALONE when no monitor can be consulted (the original backstop)', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver } = makeTriageHost({ items: ['t1'], triage: false });
+    withProbe(driver, [dirtyNew]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  it('integrates OVERLAPPING lanes when no monitor can judge whose dirt it is', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }], 2)])]);
+    const { host, driver } = makeTriageHost({ items: ['t1', 't2'], triage: false });
+    withProbe(driver, [dirtyNew]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    expect(laneStatus(driver.lanes, 't2')).toBe('integrated');
+  });
+
+  it('tells the monitor ownership is ambiguous for overlapping lanes, and still fails on its give_up', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }], 2)])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1', 't2'] });
+    withProbe(driver, [dirtyNew]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(2);
+    for (const c of consults) expect(c.errorExcerpt).toContain('OWNERSHIP IS AMBIGUOUS');
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(laneStatus(driver.lanes, 't2')).toBe('failed');
+  });
+
+  it('continues the chain on an accept at the generic inner-step site', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const runner = makeRunner({ implement: [{ status: 'failed', error: 'tsc: command not found' }] });
+    const { host, driver } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'accept', reason: 'toolchain missing, code done' }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(runner.calls.map((c) => c.id)).toEqual(['implement', 'verify']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+});
+
+// ── Commit-integrity: lane BUILD OUTPUT committed (laneBuildSlots.ts) ────────
+//    `.cyboflow/build-slots/` is git-excluded, but a force-add (or a broken
+//    exclude) can still put it in a commit. HEAD advanced, the tree is clean —
+//    and the lane must still not integrate: merging it ships build output. The
+//    probe reads the lane-END HEAD's committed tree, tri-state: a git failure
+//    while the slots directory exists reads 'unknown' and is refused too.
+describe('WorkflowController — committed lane build output', () => {
+  type Reading = {
+    headAdvanced: boolean;
+    dirty: boolean;
+    dirtyPaths?: string[];
+    newDirtyPaths?: string[];
+    buildSlots?: BuildSlotCheck;
+  };
+
+  function withProbe(driver: FanOutDriver, readings: Reading[]): void {
+    const queue = [...readings];
+    driver.beginCommitProbe = async () => async () => (queue.length > 1 ? queue.shift()! : queue[0]);
+  }
+
+  const committedSlots: Reading = {
+    headAdvanced: true,
+    dirty: false,
+    dirtyPaths: [],
+    newDirtyPaths: [],
+    buildSlots: { kind: 'leak', paths: ['.cyboflow/build-slots/slot-0/DerivedData/build.db'] },
+  };
+  const unverified: Reading = { headAdvanced: true, dirty: false, dirtyPaths: [], newDirtyPaths: [], buildSlots: { kind: 'unknown' } };
+  const clean: Reading = { headAdvanced: true, dirty: false, dirtyPaths: [], newDirtyPaths: [], buildSlots: { kind: 'clean' } };
+
+  it('fails the lane when no monitor can be consulted, even though HEAD advanced and the tree is clean', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver } = makeTriageHost({ items: ['t1'], triage: false });
+    withProbe(driver, [committedSlots]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  it('fails OVERLAPPING lanes too when unconsulted (no ownership fallback, unlike the dirty-tree case)', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }], 2)])]);
+    const { host, driver } = makeTriageHost({ items: ['t1', 't2'], triage: false });
+    withProbe(driver, [committedSlots]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(laneStatus(driver.lanes, 't2')).toBe('failed');
+  });
+
+  it('consults with its own excerpt: the paths, the fix, and that accept is not an option', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [{ kind: 'give_up' }] });
+    withProbe(driver, [committedSlots]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(consults[0]).toMatchObject({ itemId: 't1', stepId: 'verify', failureKind: 'commit-integrity' });
+    const excerpt = consults[0].errorExcerpt;
+    expect(excerpt).toContain('- .cyboflow/build-slots/slot-0/DerivedData/build.db');
+    expect(excerpt).toContain('git rm -r --cached -- .cyboflow/build-slots');
+    expect(excerpt).toContain('"accept" IS NOT AN OPTION');
+    expect(excerpt).not.toContain('uncommitted changes.');
+    // The host is told, so an accept is refused before anything records it.
+    expect(consults[0].acceptUnavailable).toBe(true);
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  it('re-drives on a rescue, and integrates once the re-run removes them (the check re-runs at lane end)', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [rescue('implement', 'git rm -r --cached -- .cyboflow/build-slots, then commit')],
+    });
+    withProbe(driver, [committedSlots, clean]);
+    const runner = makeRunner();
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    const implementCalls = runner.calls.filter((c) => c.id === 'implement');
+    expect(implementCalls).toHaveLength(2);
+    expect(implementCalls[1].laneGuidance).toContain('git rm -r --cached');
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('does NOT integrate on an accept verdict — it fails the lane', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'accept', reason: 'the files are a sibling lane’s' }],
+    });
+    withProbe(driver, [committedSlots]);
+    const logs: string[] = [];
+    host.log = (_level, message) => {
+      logs.push(message);
+    };
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(logs.some((m) => m.includes('accept cannot integrate a lane whose committed tree carries'))).toBe(true);
+  });
+
+  /**
+   * A git-shaped probe: the leak is committed during dispatch 1, so it is in the
+   * lane-end HEAD's tree of EVERY later dispatch too — there is no lane-start
+   * state to lose. `removed()` says a re-run untracked it.
+   */
+  function withLeakFromFirstDispatch(driver: FanOutDriver, removed: () => boolean = () => false): { dispatches: number } {
+    const counter = { dispatches: 0 };
+    driver.beginCommitProbe = async () => {
+      counter.dispatches += 1;
+      return async () => (removed() ? clean : committedSlots);
+    };
+    return counter;
+  }
+
+  it('PARKS on a systemic consult without failing the lane — and the re-dispatch still sees what dispatch 1 committed', async () => {
+    const LIMIT = "You've hit your session limit · resets 3am";
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, pauseCalls, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }, { kind: 'give_up' }],
+      pauses: ['retry'],
+    });
+    const probe = withLeakFromFirstDispatch(driver);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+    expect(probe.dispatches).toBe(2);
+    // The re-dispatch's lane-end check reads the committed tree, which still
+    // holds what dispatch 1 committed — no memory of dispatch 1 needed.
+    expect(consults).toHaveLength(2);
+    expect(consults[1].errorExcerpt).toContain('.cyboflow/build-slots/slot-0/DerivedData/build.db');
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  it('integrates a re-dispatched lane once its re-run removed the build output', async () => {
+    const LIMIT = "You've hit your session limit · resets 3am";
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, pauseCalls, consults } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+    });
+    // The re-run (dispatch 2) untracked the build output and committed.
+    const probe = withLeakFromFirstDispatch(driver, () => probe.dispatches > 1);
+
+    const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(pauseCalls).toHaveLength(1);
+    expect(consults).toHaveLength(1);
+    expect(driver.lanes.filter((l) => l.status === 'failed')).toEqual([]);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('keeps the dirty-tree logic unchanged when the committed tree is clean', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'] });
+    withProbe(driver, [clean]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(0);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('integrates on step verdicts when the probe runs no build-slot check (reading absent)', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'] });
+    withProbe(driver, [{ headAdvanced: true, dirty: false, dirtyPaths: [], newDirtyPaths: [] }]);
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(consults).toHaveLength(0);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  // ── 'unknown': git could not verify, and the slots directory exists ──
+  describe("an UNVERIFIED build-slot check ('unknown') is refused like a leak", () => {
+    it('consults with its own excerpt and acceptUnavailable, and fails the lane on give_up', async () => {
+      const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+      const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [{ kind: 'give_up' }] });
+      withProbe(driver, [unverified]);
+
+      await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(consults).toHaveLength(1);
+      expect(consults[0]).toMatchObject({ itemId: 't1', stepId: 'verify', failureKind: 'commit-integrity' });
+      expect(consults[0].acceptUnavailable).toBe(true);
+      const excerpt = consults[0].errorExcerpt;
+      expect(excerpt).toContain('git could not verify');
+      expect(excerpt).toContain('"accept" IS NOT AN OPTION');
+      expect(excerpt).not.toContain('committed tree at the lane-end HEAD contains');
+      expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    });
+
+    it('fails the lane when unconsulted — even an overlapping one', async () => {
+      const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }], 2)])]);
+      const { host, driver } = makeTriageHost({ items: ['t1', 't2'], triage: false });
+      withProbe(driver, [unverified]);
+
+      await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+      expect(laneStatus(driver.lanes, 't2')).toBe('failed');
+    });
+
+    it('re-drives on a rescue and integrates once the re-run check reads clean', async () => {
+      const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+      const { host, driver, consults } = makeTriageHost({
+        items: ['t1'],
+        outcomes: [rescue('implement', 'confirm git ls-tree -r HEAD -- .cyboflow/build-slots is empty')],
+      });
+      withProbe(driver, [unverified, clean]);
+      const runner = makeRunner();
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      expect(consults).toHaveLength(1);
+      expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+      expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    });
+
+    it('does NOT integrate on an accept verdict', async () => {
+      const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+      const { host, driver, consults } = makeTriageHost({
+        items: ['t1'],
+        outcomes: [{ kind: 'accept', reason: 'probably fine' }],
+      });
+      withProbe(driver, [unverified]);
+
+      await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(consults).toHaveLength(1);
+      expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    });
+
+    it('PARKS on a systemic consult without failing the lane', async () => {
+      const LIMIT = "You've hit your session limit · resets 3am";
+      const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+      const { host, driver, pauseCalls } = makeTriageHost({
+        items: ['t1'],
+        outcomes: [{ kind: 'systemic', error: LIMIT }],
+        pauses: ['retry'],
+      });
+      withProbe(driver, [unverified, clean]);
+
+      const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+      expect(result.outcome).toBe('completed');
+      expect(driver.lanes.filter((l) => l.status === 'failed')).toEqual([]);
+      expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    });
+  });
+});
+
+// ── ACCEPT: proceed past a failing gate with the residue waived ──────────────
+//    Observed 2026-09-28: lanes failed on a cosmetic a11y nit, on UI-only
+//    criteria applied to a backend task, on a missing toolchain, and on a
+//    simulator that cannot grant Screen Time — all with the substance done.
+describe('WorkflowController — accept verdict at every exhaustion site', () => {
+  const accept: LaneRescueOutcome = { kind: 'accept', reason: 'substance done' };
+
+  it('code-review: continues to task-verify, spending no rescue budget', async () => {
+    const d = def([
+      phase('p', [
+        fanStep('execute', [
+          { id: 'implement' },
+          { id: 'code-review', loopback: 'implement' },
+          { id: 'task-verify', loopback: 'implement' },
+        ]),
+      ]),
+    ]);
+    const blocking: StepRunResult = { status: 'ok', resultText: '## Blocking\n\n- nit\n\nREVIEW: BLOCKING' };
+    const runner = makeRunner({
+      'code-review': [blocking, blocking, blocking],
+      'task-verify': [{ status: 'ok', resultText: verifyText('PASS') }],
+    });
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(runner.calls.filter((c) => c.id === 'task-verify')).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('task-verify: integrates the lane past a FAIL', async () => {
+    const d = def([
+      phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'task-verify', loopback: 'implement' }])]),
+    ]);
+    const fail: StepRunResult = { status: 'ok', resultText: verifyText('FAIL') };
+    const runner = makeRunner({ 'task-verify': [fail, fail, fail] });
+    const { host, driver } = makeTriageHost({ items: ['t1'], outcomes: [accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(3);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('merge-gate: REVIVES the failed row and integrates without re-driving', async () => {
+    const d = def([
+      phase('p', [
+        fanStep('execute', [
+          { id: 'implement' },
+          { id: 'task-verify' },
+          { id: 'visual-verify', loopback: 'implement' },
+        ]),
+      ]),
+    ]);
+    const runner = makeRunner({ 'task-verify': [{ status: 'ok', resultText: verifyWithFence() }] });
+    const { host, driver } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [accept],
+      visualGate: makeVisualGate([{ kind: 'failed' }]),
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(driver.revived).toEqual(['t1']);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(1);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('an accept does not consume the rescue budget', async () => {
+    // One lane ⇒ run pool floor(3 + 1/2) = 3 and lane cap 3. Four steps each fail
+    // once with no loopback (each failure IS an exhaustion) and each is accepted:
+    // all four must be consulted, which only holds if accepts spend nothing.
+    const d = def([
+      phase('p', [fanStep('execute', [{ id: 's1' }, { id: 's2' }, { id: 's3' }, { id: 's4' }])]),
+    ]);
+    const boom: StepRunResult = { status: 'failed', error: 'boom' };
+    const runner = makeRunner({ s1: [boom], s2: [boom], s3: [boom], s4: [boom] });
+    const { host, driver, consults } = makeTriageHost({ items: ['t1'], outcomes: [accept, accept, accept, accept] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults.map((c) => c.stepId)).toEqual(['s1', 's2', 's3', 's4']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+});
+
+// ── EARLY consult: steer a lane BEFORE its final automatic attempt ───────────
+//    Observed 2026-09-28: concurrency lanes fixed one real race per round and
+//    spent the whole budget before the monitor ever saw them.
+describe('WorkflowController — early consult before the final attempt', () => {
+  const reviewChain = (): WorkflowStep =>
+    fanStep('execute', [{ id: 'implement' }, { id: 'code-review', loopback: 'implement' }]);
+  const blocking: StepRunResult = { status: 'ok', resultText: '## Blocking\n\n- race N\n\nREVIEW: BLOCKING' };
+
+  it('consults once, at the loopback into the FINAL attempt, and loops back as usual on give_up', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking] });
+    const { host, driver, consults, earlyConsults } = makeTriageHost({ items: ['t1'] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(earlyConsults).toHaveLength(1);
+    // Lane attempt 2 failed; the loopback about to run is attempt 3.
+    expect(earlyConsults[0]).toMatchObject({ stage: 'early', failureKind: 'code-review', attempt: 2 });
+    expect(consults).toHaveLength(0);
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(3);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('threads the steering guidance into the final attempt and spends no rescue budget', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking, blocking] });
+    const { host, consults } = makeTriageHost({
+      items: ['t1'],
+      earlyOutcomes: [rescue('implement', 'use a turn-completed signal, not staleness')],
+      outcomes: [rescue('implement')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    const implementCalls = runner.calls.filter((c) => c.id === 'implement');
+    expect(implementCalls[2].laneGuidance).toContain('turn-completed signal');
+    // The later exhaustion is still consulted as a FIRST rescue: no history,
+    // because the early steer spent nothing.
+    expect(consults).toHaveLength(1);
+    expect(consults[0].priorRescues).toBeUndefined();
+  });
+
+  it('skips the final attempt entirely on an early accept', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking, blocking] });
+    const { host, driver } = makeTriageHost({
+      items: ['t1'],
+      earlyOutcomes: [{ kind: 'accept', reason: 'remaining entry is cosmetic' }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('does not consult early on the FIRST loopback', async () => {
+    const d = def([phase('p', [reviewChain()])]);
+    const runner = makeRunner({ 'code-review': [blocking] });
+    const { host, earlyConsults } = makeTriageHost({ items: ['t1'] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(earlyConsults).toHaveLength(0);
+  });
+});
+
+// ── RELEASE: a failing lane's dependents run when what they need landed ───────
+//    Observed 2026-09-28: TASK-273 failed task-verify on criteria it could not
+//    meet while the procedure TASK-274/275/298 consume was at HEAD; all three
+//    were blocked.
+describe('WorkflowController — releasing a failed lane’s dependents', () => {
+  const chain = (): WorkflowStep => fanStep('execute', [{ id: 'implement' }]);
+
+  it('hands the consult the lanes waiting on the failing one', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']], ['t3', ['t1']]]);
+    const { host, consults } = makeTriageHost({ items: ['t1', 't2', 't3'], deps });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults[0].dependents).toEqual(['t2', 't3']);
+  });
+
+  it('runs the dependents of a released lane while the lane itself still fails', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']]]);
+    const { host, driver } = makeTriageHost({
+      items: ['t1', 't2'],
+      deps,
+      outcomes: [{ kind: 'give_up', releaseDependents: true }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+    expect(laneStatus(driver.lanes, 't2')).toBe('integrated');
+  });
+
+  it('still blocks dependents on a plain give_up', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
+    const deps = new Map<string, string[]>([['t2', ['t1']]]);
+    const { host, driver } = makeTriageHost({ items: ['t1', 't2'], deps, outcomes: [{ kind: 'give_up' }] });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't2')).toBe('blocked');
+  });
+
+  it('keeps a dependent blocked while ANOTHER of its prerequisites failed unreleased', async () => {
+    const d = def([phase('p', [chain()])]);
+    const runner = makeRunner({
+      't1:implement': [{ status: 'failed', error: 'boom' }],
+      't2:implement': [{ status: 'failed', error: 'boom' }],
+    });
+    const deps = new Map<string, string[]>([['t3', ['t1', 't2']]]);
+    const { host, driver } = makeTriageHost({
+      items: ['t1', 't2', 't3'],
+      deps,
+      outcomes: [{ kind: 'give_up', releaseDependents: true }, { kind: 'give_up' }],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't3')).toBe('blocked');
+  });
+});
+
+// ── ENVIRONMENT: preflight + free (environment-fix) rescues ──────────────────
+describe('WorkflowController — environment fixes', () => {
+  it('awaits the host environment preflight before dispatching any lane', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const order: string[] = [];
+    const runner: StepRunner = {
+      async runStep() {
+        order.push('step');
+        return { status: 'ok' };
+      },
+    };
+    const { host } = makeTriageHost({ items: ['t1'] });
+    host.prepareFanOutEnvironment = async () => {
+      order.push('preflight');
+    };
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(order).toEqual(['preflight', 'step']);
+  });
+
+  it('dispatches anyway when the preflight throws', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const { host, driver } = makeTriageHost({ items: ['t1'] });
+    host.prepareFanOutEnvironment = async () => {
+      throw new Error('pnpm exploded');
+    };
+
+    await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+  });
+
+  it('does not charge a FREE (environment-fix) rescue to the run pool', async () => {
+    // Two lanes ⇒ run pool floor(3 + 2/2) = 4. t1 (dispatched first) needs three
+    // FREE rescues; t2 then needs two paid ones. Charged, t1 would leave one slot
+    // and t2's second failure would settle unconsulted.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const boom: StepRunResult = { status: 'failed', error: 'tsc: command not found' };
+    const runner = makeRunner({ 't1:implement': [boom, boom, boom], 't2:implement': [boom, boom] });
+    const free: LaneRescueOutcome = {
+      kind: 'rescue',
+      targetStepId: 'implement',
+      guidance: 'deps installed',
+      adjusted: false,
+      free: true,
+    };
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1', 't2'],
+      outcomes: [free, free, free, rescue('implement'), rescue('implement')],
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults.map((c) => c.itemId)).toEqual(['t1', 't1', 't1', 't2', 't2']);
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    expect(laneStatus(driver.lanes, 't2')).toBe('integrated');
   });
 });

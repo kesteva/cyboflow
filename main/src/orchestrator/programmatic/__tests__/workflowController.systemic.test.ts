@@ -25,6 +25,7 @@ import type {
   HumanGateDecision,
   StepRunResult,
   StepRunner,
+  SystemicPauseInfo,
   SystemicPauseVerdict,
   TriageDecision,
 } from '../types';
@@ -745,5 +746,161 @@ describe('WorkflowController — systemic-pause seam', () => {
       const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
       expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't4', 't5']));
     });
+  });
+});
+
+// ── what the pause says was blocked (SystemicPauseInfo) ──────────────────────
+describe('WorkflowController — systemic pause info (switch runtime & retry)', () => {
+  /** A host recording the 4th awaitSystemicPause arg; verdicts scripted (default giveup). */
+  function makeInfoHost(verdicts: SystemicPauseVerdict[]): {
+    host: ControllerHost;
+    infos: Array<SystemicPauseInfo | undefined>;
+  } {
+    const q = [...verdicts];
+    const infos: Array<SystemicPauseInfo | undefined> = [];
+    const host: ControllerHost = {
+      reportStep() {},
+      async requestHumanGate() {
+        return 'approve';
+      },
+      async awaitSystemicPause(_s, _ctx, _error, info) {
+        infos.push(info);
+        return q.shift() ?? 'giveup';
+      },
+    };
+    return { host, infos };
+  }
+
+  const codexSystemic = (): StepRunResult => ({
+    status: 'failed',
+    systemic: true,
+    error: 'usage limit reached',
+    provider: 'codex',
+    runtime: 'codex-sdk',
+  });
+
+  it("single step: blocks the step's canonical agent on the provider/runtime the attempt ran on", async () => {
+    const d = def([phase('p1', [step({ id: 'build', agent: 'executor' })])]);
+    const runner = makeRunner({ build: [codexSystemic(), { status: 'ok' }] });
+    const { host, infos } = makeInfoHost(['retry']);
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(infos).toEqual([
+      {
+        blockedAgentKeys: ['implement'], // 'executor' resolves to the canonical key
+        blockedProvider: 'codex',
+        blockedRuntime: 'codex-sdk',
+        origin: 'step',
+        fanOut: false,
+      },
+    ]);
+  });
+
+  it('single step: leaves provider/runtime undefined when the failed result does not name them', async () => {
+    const d = def([phase('p1', [step({ id: 'a', agent: 'context' })])]);
+    const runner = makeRunner({ a: [systemicFail()] });
+    const { host, infos } = makeInfoHost(['giveup']);
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(infos).toEqual([{ blockedAgentKeys: ['context'], origin: 'step', fanOut: false }]);
+  });
+
+  it('fan-out: blocks EVERY inner-chain agent (retry replays from inner step 0), de-duplicated, chain order', async () => {
+    const d = def([
+      phase('p1', [
+        step({
+          id: 'execute',
+          agent: 'orchestrate',
+          fanOut: {
+            over: 'tasks',
+            inner: [
+              { id: 'implement', agent: 'implement' },
+              { id: 'write-tests', agent: 'implement' },
+              { id: 'code-review', agent: 'code-review' },
+              { id: 'task-verify', agent: 'task-verify' },
+            ],
+          },
+        }),
+      ]),
+    ]);
+    const driver = makeFanOutDriver(['t1', 't2']);
+    let fired = false;
+    const runner: StepRunner = {
+      async runStep(s, ctx) {
+        if (!fired && ctx.item?.id === 't1' && s.id === 'code-review') {
+          fired = true;
+          return codexSystemic();
+        }
+        return { status: 'ok' };
+      },
+    };
+    const { host, infos } = makeInfoHost(['retry']);
+    host.fanOut = driver;
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(infos).toEqual([
+      {
+        blockedAgentKeys: ['implement', 'code-review', 'task-verify'],
+        blockedProvider: 'codex',
+        blockedRuntime: 'codex-sdk',
+        origin: 'step',
+        fanOut: true,
+      },
+    ]);
+  });
+
+  it("fan-out: origin 'triage' when only the lane-triage consult died systemically", async () => {
+    const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+    const driver = makeFanOutDriver(['t1']);
+    let n = 0;
+    const runner: StepRunner = {
+      async runStep() {
+        n += 1;
+        return n === 1 ? { status: 'failed', error: 'a real defect', provider: 'claude', runtime: 'claude-sdk' } : { status: 'ok' };
+      },
+    };
+    const { host, infos } = makeInfoHost(['retry']);
+    host.fanOut = driver;
+    host.triageLaneFailure = async () => ({ kind: 'systemic', error: "You've hit your session limit" });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(infos).toHaveLength(1);
+    expect(infos[0]).toMatchObject({ blockedAgentKeys: ['implement'], origin: 'triage', fanOut: true });
+    // A triage death says nothing about the step agent's provider.
+    expect(infos[0]?.blockedProvider).toBeUndefined();
+  });
+
+  it("fan-out: any STEP-origin lane wins over a triage-origin one; disagreeing providers leave it undefined", async () => {
+    const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+    const driver = makeFanOutDriver(['t1', 't2', 't3']);
+    const seen = new Map<string, number>();
+    const runner: StepRunner = {
+      async runStep(_s, ctx) {
+        const id = ctx.item?.id ?? '';
+        const k = (seen.get(id) ?? 0) + 1;
+        seen.set(id, k);
+        if (k > 1) return { status: 'ok' };
+        if (id === 't1') return codexSystemic();
+        if (id === 't2')
+          return { status: 'failed', systemic: true, error: 'rate limit', provider: 'claude', runtime: 'claude-sdk' };
+        return { status: 'failed', error: 'a real defect' }; // t3 → triage dies
+      },
+    };
+    const { host, infos } = makeInfoHost(['retry']);
+    host.fanOut = driver;
+    host.triageLaneFailure = async () => ({ kind: 'systemic', error: 'session limit' });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(infos).toHaveLength(1);
+    expect(infos[0]?.origin).toBe('step');
+    expect(infos[0]?.blockedProvider).toBeUndefined();
+    expect(infos[0]?.blockedRuntime).toBeUndefined();
   });
 });

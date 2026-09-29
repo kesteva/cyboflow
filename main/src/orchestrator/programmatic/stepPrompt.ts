@@ -44,12 +44,15 @@
  * is trivially testable. Human-gate steps never reach here (the controller
  * resolves them via the host's human-gate path, not the runner).
  */
-import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { DESIGN_SPEC_SECTION_HEADING, PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
 import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
 import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudgets';
 import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
 import { maxAdversarialId } from '../../../../shared/types/adversarialReview';
+import type { StepDispatch } from './stepDispatch';
+import { flattenStepIds } from '../prompts/step-reporting-instructions';
+import { LANE_BUILD_SLOTS_DIR, LANE_SCRATCH_DIR_ENV } from './laneBuildSlots';
 
 /**
  * The run supervisor's per-lap steering, declared STRUCTURALLY here rather than
@@ -80,6 +83,19 @@ export interface ComposeStepPromptArgs {
    * scoped to exactly this item (do not touch other items).
    */
   item?: { id: string; over: string };
+  /**
+   * `direct` ⇒ this turn runs the step's role itself (programmatic/stepDispatch.ts):
+   * step 1 says do the work rather than delegate, and the sections that speak of
+   * "your subagent" are read as the turn's own work. Absent or `delegated` ⇒ the
+   * prompt is byte-identical to the delegated shape.
+   */
+  stepDispatch?: StepDispatch;
+  /**
+   * The run's definition has an `epics` step but no `tasks` step (the
+   * planner/ship Efficient preset merges task decomposition into `epics`) —
+   * see {@link definitionMergesDecomposition}. Absent/false ⇒ byte-identical.
+   */
+  mergedDecomposition?: boolean;
   /**
    * The sprint's task scope — the pre-rendered `# Sprint tasks` block BODY (the
    * SAME text the orchestrated `getPrompt` path prepends), resolved by the host
@@ -208,6 +224,16 @@ export interface ComposeStepPromptArgs {
    * this field existed).
    */
   laneGuidance?: string;
+  /**
+   * Absolute path of this fan-out lane's private BUILD directory — its
+   * concurrency slot's `.cyboflow/build-slots/slot-<n>` (laneBuildSlots.ts), also
+   * exported to the agent as `$CYBOFLOW_LANE_SCRATCH_DIR`. Rendered as a
+   * `## Lane build directory` section telling the agent to point toolchain build
+   * output there, since sibling lanes building the same worktree otherwise
+   * collide on shared caches. Absent (every non-lane step, and a lane whose slot
+   * could not be prepared) ⇒ no section (byte-identical prompts).
+   */
+  laneScratchDir?: string;
   /**
    * The §5.1 visual-verification output-contract defect quoted back to a
    * RE-DELEGATED task-verify (verification-agent redesign §5.3). Set ONLY on the
@@ -451,9 +477,9 @@ function ideaFlagContract(step: WorkflowStep): string {
  * starts one step earlier, at `context`, where the RESUME read happens. So the
  * two families are separate functions with separate headings, dispatched here.
  */
-function ideaLedgerContract(step: WorkflowStep, workflowName: string): string {
+function ideaLedgerContract(step: WorkflowStep, workflowName: string, mergedDecomposition: boolean): string {
   if (workflowName === 'launch') return launchIdeaLedgerContract(step);
-  if (workflowName === 'planner' || workflowName === 'ship') return planIdeaLedgerContract(step);
+  if (workflowName === 'planner' || workflowName === 'ship') return planIdeaLedgerContract(step, mergedDecomposition);
   return '';
 }
 
@@ -503,9 +529,12 @@ function launchIdeaLedgerContract(step: WorkflowStep): string {
  * started. Collapsing the middle case into the last one is the expensive mistake —
  * it throws away real work and burns a whole run redoing it.
  */
-function planIdeaLedgerContract(step: WorkflowStep): string {
+function planIdeaLedgerContract(step: WorkflowStep, mergedDecomposition: boolean): string {
   const H = '\n\n## Component ledger\n\n';
-  switch (step.id) {
+  // A merged-decomposition `epics` step creates the tasks, so it owns the
+  // `tasks` step's stamps — its own "defer to tasks" string would leave
+  // `epics`/`stories` unstamped with no later step to write them.
+  switch (step.id === 'epics' && mergedDecomposition ? 'tasks' : step.id) {
     case 'context':
       return `${H}Before you plan anything, call \`cyboflow_get_task\` on EVERY idea in scope and read its \`components\` block — the five-entry ledger (\`idea-spec\`, \`prototype\`, \`architecture\`, \`epics\`, \`stories\`). It records what earlier runs already did to this idea, and this flow re-enters ideas other runs have already worked. Read each entry's \`state\` AND its \`staleAt\`:\n\n- \`complete\` → settled work. Do NOT redo it, do NOT rewrite the body section it covers, and do not delegate a step whose only output would be that component again. Say in your summary which components you found settled.\n- \`incomplete\` with a non-null \`staleAt\` → prior work that EXISTS and needs RE-VERIFICATION, not a redo. Something changed underneath it (the \`staleReason\` says what). Read what is there, judge whether it still holds against the change, and adjust the parts that no longer do. Rewriting it from scratch throws away work a human may already have reviewed.\n- \`incomplete\` with \`staleAt\` null → genuinely not started. Plan it.\n- \`skipped\` → a deliberate "not applicable" declaration. Leave it skipped; never silently un-skip it by producing the component anyway.\n\nIf what you find means this run has materially less to do than its brief assumes — e.g. every component already reads \`complete\` — say so plainly in your summary rather than manufacturing work to fill the step.`;
     case 'expand-spec':
@@ -553,6 +582,32 @@ function decomposeEverything(step: WorkflowStep, workflowName: string): string {
   if (workflowName !== 'launch') return '';
   if (step.id !== 'ideas' && step.id !== 'expand-spec' && step.id !== 'tasks') return '';
   return `\n\n## Decompose everything approved\n\nEVERY approved idea gets the full treatment in THIS run — spec expansion and epic/task decomposition, all of them. Never narrow the set to save time, and never treat \`BUILD_ORDER\` as a cut line: it is a build sequence that decides what gets built first, never what gets planned. Work the ideas in \`BUILD_ORDER\`, and expect this to be the long part of the run — a 4-8 idea set means 4-8 expansions and 4-8 breakdowns, and that cost is the intended one. The ONLY ideas you skip are the ones the human DENIED at the approve-ideas gate; those stay on the backlog untouched. A run that plans a subset leaves a backlog that LOOKS planned, which is worse than one that visibly is not.`;
+}
+
+/**
+ * True when the definition keeps `epics` but drops `tasks` — the planner/ship
+ * Efficient preset's merged decomposition (shared/tuning/workflowTuning.ts).
+ */
+export function definitionMergesDecomposition(def: WorkflowDefinition): boolean {
+  const ids = flattenStepIds(def);
+  return ids.includes('epics') && !ids.includes('tasks');
+}
+
+/**
+ * Merged-decomposition contract for the planner/ship `epics` step, when the run
+ * has no `tasks` step.
+ *
+ * The flows' small-idea rule sends a `small` idea past `epics` untouched ("the
+ * task count is unknown until the tasks step"), and the epics role says it is
+ * never invoked for one. With `tasks` removed that leaves no step that creates a
+ * small idea's tasks: the run reached approve-plan with zero tasks and could
+ * only be rejected (live smoke, 2026-09-25, delegated and direct alike). Planner
+ * batches are all-small, so every Efficient planner batch hit it.
+ */
+function mergedDecompositionContract(step: WorkflowStep, workflowName: string, merged: boolean): string {
+  if (!merged || step.id !== 'epics') return '';
+  if (workflowName !== 'planner' && workflowName !== 'ship') return '';
+  return `\n\n## Task decomposition happens at THIS step\n\nThis run has no separate \`tasks\` step: its definition merged task decomposition into \`epics\`, so this step is the ONLY place the run's tasks get created. An idea you pass over here reaches the plan gate with no tasks, and the run cannot continue.\n\n- Decompose EVERY idea in scope into its tasks — a \`small\` idea included. For a \`small\` idea your subagent proposes NO epics, only the complete task list (title, body, acceptance criteria, and file/dependency hints per task). A \`large\` idea gets its epic breakdown AND the complete task list for every epic.\n- Create each task with \`cyboflow_create_task\` (\`task_type='task'\`, \`originating_idea_id\` = its idea). **Fallback epic first:** for an idea with no epic, count its tasks before creating any. More than one → create ONE epic (\`task_type='epic'\`, title = the idea's title, \`originating_idea_id\` = the idea) FIRST, and set \`parent_epic_id\` to it on every task. Exactly one → no epic.`;
 }
 
 /**
@@ -757,6 +812,16 @@ function composeMonitorSteeringSection(steering: MonitorSteering): string {
   return lines.join('\n');
 }
 
+/**
+ * The address-review findings contract's body (sans the leading blank-line
+ * separator `composeStepPrompt` interpolates it behind) — exported so
+ * TASK-299's handed-over-run chat delivery (runs.ts's `addressReviewFindings`
+ * mutation) can hand a genuinely-orchestrated agent the SAME instructions the
+ * programmatic `address-review` step gets, rather than inventing a second,
+ * driftable copy of this contract.
+ */
+export const ADDRESS_REVIEW_FINDINGS_CONTRACT = `## Findings contract (address-review) — how this step gets its input and closes it out\n\nThis step acts on the findings THIS run already filed; it does not produce new ones.\n\n1. Call \`cyboflow_list_run_findings\` (read-only, no arguments) FIRST. It returns every still-open finding this run's session filed — each task lane's \`code-review\` \`## Findings\`, \`sprint-review\`'s, and the code-review eval jury's — with the \`id\` each one needs to be resolved. Do NOT reconstruct this list from your own context: \`cyboflow_report_finding\` never returns the minted id, and most of these were filed by lanes you never saw. An empty list means there is nothing to do — say so and stop.\n2. Delegate to \`cyboflow-address-review\`, passing the findings verbatim (id, title, body, category, severity, locations, suggested fix).\n3. **Settle the code BEFORE you resolve anything.** If the subagent changed any files, re-run the project's FULL test suite yourself. This step runs AFTER the sprint's full-suite verification, so that verification is now stale with respect to your edits — and the subagent only ran the targeted tests covering the files it touched, which cannot see a cross-module regression. If the full suite fails, re-delegate \`cyboflow-address-review\` ONCE to repair or revert its own fixes and re-run the suite. If it STILL fails, file a BLOCKING finding via \`cyboflow_report_finding\` (\`blocking: true\`, category \`address-review-regression\`) titled exactly \`address-review left the tree red\` and NAMING the failing spec file in the title's body — carrying the failing tests and what was changed — and say so in your summary. Use that exact title: the human triaging the gate needs to tell this apart from an ordinary deferred nit at a glance, and a title that varies per run cannot be recognized. That finding is the durable signal — your summary prose is not machine-read, so a blocking review item is the only thing that actually parks the run before the human's merge gate instead of letting a red tree slide into it. This is the ONE exception to "do not file new findings from this step", and it qualifies precisely because no further retry or loopback in this chain will fix it. The next step is the human's merge gate, and it must not open over a tree whose suite has not passed since the last edit. Then commit per step 2 above with a message naming the findings addressed. If the subagent changed NO files, skip straight to step 4.\n4. **Only now** act on its \`## Disposition\`, one entry per finding id, using the disposition as it stands AFTER step 3 — the verdicts are NOT interchangeable:\n   - **FIXED, and the fix survived step 3** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'fixed'\` and a \`note\` naming what changed.\n   - **FIXED, but the fix was reverted or dropped in step 3** → leave it OPEN, exactly like a DEFERRED one. The code no longer carries the fix, so the finding is not fixed.\n   - **INVALID** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'triaged'\` and a \`note\` carrying the refutation.\n   - **DEFERRED** → do NOTHING. Leave it open. It is a real issue deliberately left for the human gate, and resolving it would erase the one record of it. The same applies to any id the subagent omitted or gave a verdict outside those three — never guess a disposition.\n\nNever resolve a finding before its fix is verified and committed: resolving is IRREVERSIBLE (there is no un-resolve tool), so a finding closed as \`fixed\` whose fix is then reverted — or lost to a crash before the commit — leaves a real defect in the branch with its only record already closed. Resolution is the cheapest, most repeatable action in this chain; it goes last precisely because everything before it can fail.\n\nDo NOT file new findings from this step, and do NOT widen the change beyond the filed findings.`;
+
 function composeAdversarialRevisionSection(
   reviewStepId: string,
   blockingNote: string,
@@ -778,6 +843,7 @@ function composeAdversarialRevisionSection(
 
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   const { step, workflowName, attempt } = args;
+  const direct = args.stepDispatch === 'direct';
   const retryNote =
     attempt > 1
       ? `\n\nThis is **attempt ${attempt}** — a previous attempt at this step did not complete. Diagnose what went wrong and try again.`
@@ -788,7 +854,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     : '';
   const taskScope =
     args.taskScope !== undefined && args.taskScope.trim().length > 0
-      ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
+      ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list${direct ? '' : ' and pass it to your subagent'}; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
   const runOwnedIdeaIds = [...new Set(args.runOwnedIdeaIds?.filter((id) => id.trim().length > 0) ?? [])];
   const runOwnedIdeaScope =
@@ -891,7 +957,9 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   // into a live cyboflow_request_verification call + a self-parked lane). Both
   // observed on the first live run. This note overrides them for task-verify.
   const taskVerifyRelayNote =
-    step.agent === 'task-verify' || step.id === 'task-verify'
+    (step.agent === 'task-verify' || step.id === 'task-verify') && direct
+      ? `\n\n## Final message contract (task-verify) — overrides step 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly.\n\n- End your final message with your literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of a \`## Visual verification task\` section (a single \`\`\`json fence) or a bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line, exactly as your role instructions specify. Dropping these, or replacing them with a summary, is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT run a visual verification yourself. The controller fires the request from the fence you print and parks the lane itself.`
+      : step.agent === 'task-verify' || step.id === 'task-verify'
       ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
       : '';
   // Address-review findings contract (sprint/ship): this step is the ONLY one
@@ -904,7 +972,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   // delete the exact backlog entry this stage exists to preserve.
   const addressReviewNote =
     step.agent === 'address-review' || step.id === 'address-review'
-      ? `\n\n## Findings contract (address-review) — how this step gets its input and closes it out\n\nThis step acts on the findings THIS run already filed; it does not produce new ones.\n\n1. Call \`cyboflow_list_run_findings\` (read-only, no arguments) FIRST. It returns every still-open finding this run's session filed — each task lane's \`code-review\` \`## Findings\`, \`sprint-review\`'s, and the code-review eval jury's — with the \`id\` each one needs to be resolved. Do NOT reconstruct this list from your own context: \`cyboflow_report_finding\` never returns the minted id, and most of these were filed by lanes you never saw. An empty list means there is nothing to do — say so and stop.\n2. Delegate to \`cyboflow-address-review\`, passing the findings verbatim (id, title, body, category, severity, locations, suggested fix).\n3. **Settle the code BEFORE you resolve anything.** If the subagent changed any files, re-run the project's FULL test suite yourself. This step runs AFTER the sprint's full-suite verification, so that verification is now stale with respect to your edits — and the subagent only ran the targeted tests covering the files it touched, which cannot see a cross-module regression. If the full suite fails, re-delegate \`cyboflow-address-review\` ONCE to repair or revert its own fixes and re-run the suite. If it STILL fails, file a BLOCKING finding via \`cyboflow_report_finding\` (\`blocking: true\`, category \`address-review-regression\`) titled exactly \`address-review left the tree red\` and NAMING the failing spec file in the title's body — carrying the failing tests and what was changed — and say so in your summary. Use that exact title: the human triaging the gate needs to tell this apart from an ordinary deferred nit at a glance, and a title that varies per run cannot be recognized. That finding is the durable signal — your summary prose is not machine-read, so a blocking review item is the only thing that actually parks the run before the human's merge gate instead of letting a red tree slide into it. This is the ONE exception to "do not file new findings from this step", and it qualifies precisely because no further retry or loopback in this chain will fix it. The next step is the human's merge gate, and it must not open over a tree whose suite has not passed since the last edit. Then commit per step 2 above with a message naming the findings addressed. If the subagent changed NO files, skip straight to step 4.\n4. **Only now** act on its \`## Disposition\`, one entry per finding id, using the disposition as it stands AFTER step 3 — the verdicts are NOT interchangeable:\n   - **FIXED, and the fix survived step 3** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'fixed'\` and a \`note\` naming what changed.\n   - **FIXED, but the fix was reverted or dropped in step 3** → leave it OPEN, exactly like a DEFERRED one. The code no longer carries the fix, so the finding is not fixed.\n   - **INVALID** → \`cyboflow_resolve_finding\` with \`resolution_kind: 'triaged'\` and a \`note\` carrying the refutation.\n   - **DEFERRED** → do NOTHING. Leave it open. It is a real issue deliberately left for the human gate, and resolving it would erase the one record of it. The same applies to any id the subagent omitted or gave a verdict outside those three — never guess a disposition.\n\nNever resolve a finding before its fix is verified and committed: resolving is IRREVERSIBLE (there is no un-resolve tool), so a finding closed as \`fixed\` whose fix is then reverted — or lost to a crash before the commit — leaves a real defect in the branch with its only record already closed. Resolution is the cheapest, most repeatable action in this chain; it goes last precisely because everything before it can fail.\n\nDo NOT file new findings from this step, and do NOT widen the change beyond the filed findings.`
+      ? `\n\n${ADDRESS_REVIEW_FINDINGS_CONTRACT}`
       : '';
   // The bootstrap's own files, appended to the address-review contract above.
   // Deliberately a SEPARATE const rather than interpolated into that one: the
@@ -923,7 +991,9 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       : '';
   const conditionalExecutionNote = conditionalExecution(step, workflowName, runOwnedIdeaIds.length > 0);
   const ideaFlagContractNote = ideaFlagContract(step);
-  const ideaLedgerContractNote = ideaLedgerContract(step, workflowName);
+  const mergedDecomposition = args.mergedDecomposition === true;
+  const ideaLedgerContractNote = ideaLedgerContract(step, workflowName, mergedDecomposition);
+  const mergedDecompositionNote = mergedDecompositionContract(step, workflowName, mergedDecomposition);
   const ideaSizeGuardNote = ideaSizeGuard(step, workflowName, runOwnedIdeaIds.length);
   const decomposeEverythingNote = decomposeEverything(step, workflowName);
   const shipNoDesignForkNote = shipNoDesignFork(step, workflowName);
@@ -963,6 +1033,20 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   }
   const userGuidance =
     guidanceBlocks.length > 0 ? `\n\n## Operator guidance\n\n${guidanceBlocks.join('\n\n')}` : '';
+  // This lane's private build directory (a concurrency slot's, reused by later
+  // lanes). The env var reaches a delegated subagent on its own; the flags below
+  // do not, so a delegating turn is told to pass the section on. Deliberately
+  // scoped to the Apple toolchains: the slot sits inside the worktree, and
+  // linters/test runners that ignore git excludes (ESLint flat config, vitest's
+  // default globs) would scan anything else sent there. And lane-only: the
+  // verifier runs a separate snapshot without this env, so the path must never
+  // reach a `## Visual verification task` (task-verify's build line uses
+  // `$VERIFY_DERIVED_DATA`) or a committed file.
+  const scratchVar = `$${LANE_SCRATCH_DIR_ENV}`;
+  const laneBuildDir =
+    args.laneScratchDir !== undefined && args.laneScratchDir.trim().length > 0
+      ? `\n\n## Lane build directory\n\nOther lanes build in this same worktree at the same time, so shared build caches collide. This lane has a private build directory: \`${args.laneScratchDir.trim()}\` (also \`${scratchVar}\`). It is git-excluded and reused by later lanes, so treat it as a cache: never commit it, never delete it. Send these Apple toolchains' build output there:\n\n- \`xcodebuild\`: \`-derivedDataPath "${scratchVar}/DerivedData" -clonedSourcePackagesDirPath "${scratchVar}/SourcePackages"\`\n- \`swift build\` / \`swift test\`: \`--scratch-path "${scratchVar}/swiftpm"\`. Inside a sandbox (a Codex agent's shell usually is one) also pass \`--disable-sandbox\`: SwiftPM's own manifest sandbox cannot start inside another sandbox and fails with \`sandbox_apply: Operation not permitted\`.\n\nThe clang/Swift module cache already points there (\`CLANG_MODULE_CACHE_PATH\`). Send nothing else there (no \`tsc\` or bundler output, no \`cargo\` target dir): linters and test runners do not read git excludes and would scan it. If one reports a file under \`${LANE_BUILD_SLOTS_DIR}/\`, that is build output, not your code: exclude the path from that command, never edit or delete it. Use this directory only in commands you run yourself in this lane: never write its path or \`${scratchVar}\` into a \`## Visual verification task\` (its build line uses \`$VERIFY_DERIVED_DATA\`), a runbook, or any committed file such as a script, Makefile or CI config. The verifier and other checkouts do not have it.${direct ? '' : ' When you delegate, pass this section to the subagent: the variable is already in its environment, but these instructions are not.'}`
+      : '';
   // The supervisor's ONE-SHOT retry guidance, rendered immediately after the
   // operator's section (and only when the host staged one for this attempt). Its
   // own heading, not a third block inside `## Operator guidance`: the heading is
@@ -1030,15 +1114,25 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
             : ''
         }`;
 
+  const doTheWork = direct
+    ? `1. **Do the work yourself.** You are running the \`cyboflow-${step.agent}\` role directly — its instructions are in your system instructions. Do NOT delegate this step's work to a subagent or any other agent. Persist every cyboflow state change via the \`cyboflow_*\` MCP tools, recording EVERY item your work produces that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge you identify; never collapse a non-empty result to "none". This does NOT mean filing context-only sections you produce for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer.`
+    : `1. **Do the work.** Delegate to the \`cyboflow-${step.agent}\` role. On the Claude runtime, use the Task tool with that EXACT \`subagent_type\` — it is installed in this worktree's \`.claude/agents/\`, so do NOT fall back to \`general-purpose\`. On another runtime, follow its provider adapter for the equivalent native delegation type. Pass the role the context it needs (including the task scope above when relevant) and read its result. Persist every cyboflow state change yourself via the \`cyboflow_*\` MCP tools, recording EVERY item the subagent returns that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge it reports; never collapse a non-empty result to "none". This does NOT mean filing context-only sections the subagent returns for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer; subagents are edit-only.`;
+  // Some sections below were written for the delegated shape and speak of "your
+  // subagent". Rather than fork every one of them, a direct turn gets one reading
+  // rule, placed before them.
+  const directReadingNote = direct
+    ? `\n\n## Reading the sections below\n\nThis step runs its role directly. Wherever a section below says "your subagent", "the \`cyboflow-${step.agent}\` subagent", or what that subagent returns, it means YOU and the output of your own work in this turn — produce those sections yourself, then do what the section says with them. An instruction not to delegate still applies.`
+    : '';
+
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
 Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${selectedFindings}${solutionThoroughness}${projectBrief}${designSurfaces}${runbookProposal}${approveRunbookResolution}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 
-1. **Do the work.** Delegate to the \`cyboflow-${step.agent}\` role. On the Claude runtime, use the Task tool with that EXACT \`subagent_type\` — it is installed in this worktree's \`.claude/agents/\`, so do NOT fall back to \`general-purpose\`. On another runtime, follow its provider adapter for the equivalent native delegation type. Pass the role the context it needs (including the task scope above when relevant) and read its result. Persist every cyboflow state change yourself via the \`cyboflow_*\` MCP tools, recording EVERY item the subagent returns that is an ACTION to persist — e.g. call \`cyboflow_add_task_dependency\` for each edge it reports; never collapse a non-empty result to "none". This does NOT mean filing context-only sections the subagent returns for the operator's or a doc's benefit (e.g. a Compound \`## Discarded\` list) as review items — follow any workflow-specific review-queue discipline below. You are the single writer; subagents are edit-only.
+${doTheWork}
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${directReadingNote}${conditionalExecutionNote}${ideaFlagContractNote}${mergedDecompositionNote}${ideaLedgerContractNote}${ideaSizeGuardNote}${decomposeEverythingNote}${shipNoDesignForkNote}${compoundSeedNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${buildBreakNote}${addressReviewNote}${bootstrapDenylistNote}${laneBuildDir}${userGuidance}${retryGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

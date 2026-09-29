@@ -27,7 +27,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createVerdictDelivery, createCapabilityBreakerFinding } from '../verify/verdictDelivery';
+import {
+  createVerdictDelivery,
+  createCapabilityBreakerFinding,
+  createExploreStaleProofFinding,
+  createRunbookLearningFinding,
+} from '../verify/verdictDelivery';
 import {
   VERIFY_NO_RUNBOOK_REASON,
   VERIFY_RUNBOOK_DRIFTED_REASON,
@@ -904,6 +909,51 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     expect(findingRows(db, 'run-s2')).toHaveLength(0);
   });
 
+  it.each([
+    ['passed', 'integrated'],
+    ['failed', 'running'],
+  ] as const)(
+    '§A5: a LEARNED-PIN promotion request (pinned, bootstrap_proof=0) is an ordinary lane verdict — %s drives the lane (%s)',
+    async (status, laneStatus) => {
+      // The learned pin is the lane's OWN request: it reaches applyMergeGateVerdict
+      // like any pinned request, never the bootstrap-proof exclusion.
+      for (const f of ['096_verify_runbook_local.sql', '107_bootstrap_proof.sql']) {
+        db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+      }
+      db.prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+         VALUES ('tsk_l', 1, 'TASK-050', 'L', 'board-1-default', 'stage-board-1-default-5')`,
+      ).run();
+      const store = SprintLaneStore.getInstance();
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_l']);
+      seedSprintRun(db, 'run-learned', batchId, 'tsk_l', 'orchestrated');
+      store.updateLane({ runId: 'run-learned', batchId, taskId: 'tsk_l', status: 'running', currentStepId: 'awaiting-verify' });
+      db.prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, runbook_hash, runbook_local_version, bootstrap_proof)
+         VALUES ('vr_learned', 'run-learned', 1, ?, 'interactive-web-behavior', '{}', ?, 1, 0)`,
+      ).run(status, 'l'.repeat(64));
+
+      const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/x', fileExists: () => false });
+      await deliver({
+        requestId: 'vr_learned',
+        runId: 'run-learned',
+        projectId: 1,
+        type: 'interactive-web-behavior',
+        status,
+        verdict: status === 'passed' ? PASS_VERDICT : FAIL_VERDICT,
+        fileNames: ['home.png'],
+        input: { intent: 'shows the submit button', taskRef: 'TASK-050' },
+      });
+
+      const lane = db
+        .prepare('SELECT status, current_step_id AS step FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, 'tsk_l') as { status: string; step: string };
+      expect(lane.status).toBe(laneStatus);
+      if (status === 'failed') expect(lane.step).toBe('implement');
+    },
+  );
+
   it('R4: TIMEOUT on a sprint lane ADVANCES it to integrated AND raises a NON-blocking finding', async () => {
     // R4: a timeout is an environment failure — advance-with-visibility. The parked
     // lane is driven OFF awaiting-verify (never wedged), and a NON-blocking finding is
@@ -1262,6 +1312,33 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     expect(f[0].body).toMatch(/could not build the deliverable/i);
     expect(f[0].body).toMatch(/Build\/launch log excerpt/);
     expect(f[0].body).toMatch(/Cannot find module "\.\/missing"/);
+  });
+
+  it('a low_confidence WITH a report still carries the reason (the unverifiable diagnosis reaches the human)', async () => {
+    seedRun(db, 'run-b4');
+    seedRequestFull(db, {
+      id: 'vr_lc',
+      runId: 'run-b4',
+      status: 'low_confidence',
+      enqueueKey: 'run-b4:TASK-1:1',
+      errorMessage: 'unverifiable: no simulator runtime matches the deployment target',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'unverifiable',
+        diagnosis: 'no simulator runtime matches the deployment target',
+        confidence: 0,
+        feedback: '',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
+    await deliver({ requestId: 'vr_lc', runId: 'run-b4', projectId: 1, type: 'static-render-snapshot', status: 'low_confidence', verdict: undefined, fileNames: [] });
+
+    const f = visualFindings(db, 'run-b4');
+    expect(f).toHaveLength(1);
+    expect(f[0].body).toMatch(/Reason: unverifiable: no simulator runtime matches the deployment target/);
   });
 
   it('timeout / skipped bodies carry the concrete error_message reason', async () => {
@@ -1770,6 +1847,61 @@ describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () =>
     const body = bodyOf(db, 'run-brk');
     expect(body).toContain('chromium not resolved (absent)');
     expect(body).toContain('clears itself');
+  });
+
+  it('§A7 stale-proof: files ONE non-blocking finding per dedupeKey, even when called twice', async () => {
+    seedRun(db, 'run-stale', 'tsk_1');
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_1', 1, 'TASK-100', 'T', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const file = createExploreStaleProofFinding({ db: dbAdapter(db) });
+    const finding = {
+      projectId: 1,
+      runId: 'run-stale',
+      laneTaskRef: 'TASK-1',
+      modality: 'web' as const,
+      title: 'Verification runbook (web) needs re-proving — lanes explore meanwhile',
+      body: 'the recorded proof is stale',
+      dedupeKey: 'visual-verify:explore-stale-proof:run-stale:web',
+    };
+    await file(finding);
+    await file(finding);
+
+    const findings = findingRows(db, 'run-stale');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].source).toBe(finding.dedupeKey);
+    expect(findings[0].blocking).toBe(0);
+    expect(findings[0].audience).toBe('human');
+    const { body } = db.prepare(`SELECT body FROM review_items WHERE id = ?`).get(findings[0].id) as { body: string };
+    expect(body).toContain('the recorded proof is stale');
+  });
+
+  it('§A5 runbook learning: files ONE non-blocking finding per dedupeKey at the given severity', async () => {
+    seedRun(db, 'run-learn', 'tsk_1');
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_1', 1, 'TASK-100', 'T', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const file = createRunbookLearningFinding({ db: dbAdapter(db) });
+    const finding = {
+      projectId: 1,
+      runId: 'run-learn',
+      modality: 'web' as const,
+      title: 'Verification recipe learned for web (unproven)',
+      body: 'pnpm run build\npnpm run preview --port ${PORT} — from request vr_1',
+      dedupeKey: 'visual-verify:runbook-learned:1:web:abc',
+      severity: 'info' as const,
+    };
+    await file(finding);
+    await file(finding);
+
+    const findings = findingRows(db, 'run-learn');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ source: finding.dedupeKey, blocking: 0, audience: 'human', severity: 'info' });
+    expect(findings[0].entity_id).toBe('tsk_1');
+    const { body } = db.prepare(`SELECT body FROM review_items WHERE id = ?`).get(findings[0].id) as { body: string };
+    expect(body).toContain('vr_1');
   });
 
   it('is FAIL-SOFT: a router failure never throws back into the settled verdict path', async () => {

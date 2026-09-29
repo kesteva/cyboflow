@@ -1010,14 +1010,19 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 const PREFERENCE_LABEL: Record<'A' | 'B' | 'tie', string> = { A: 'Prefers A', B: 'Prefers B', tie: 'Tie' };
 
 function nonBlank(value: string | null | undefined): string | null {
-  return value === undefined || value === null || value === '' ? null : value;
+  if (value === undefined || value === null) return null;
+  return value.trim() === '' ? null : value;
+}
+
+function judgeModelFallback(sample: PairwiseSample, verdictModel: string | null): string {
+  return nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown';
 }
 
 function judgeAttribution(sample: PairwiseSample, verdictModel: string | null): { compact: string; full: string } {
-  const model = nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown';
+  const model = judgeModelFallback(sample, verdictModel);
   const name = nonBlank(sample.judgeName);
   return {
-    compact: name ?? nonBlank(sample.judgeModel) ?? nonBlank(verdictModel) ?? 'unknown',
+    compact: name ?? model,
     full: name === null ? model : `${name} · ${model}`,
   };
 }
@@ -1120,6 +1125,13 @@ function VerdictCard({
                 key={s.sampleIndex}
                 sample={s}
                 ordinal={i + 1}
+                // `?.` here is NOT a real null case — `payload.verdict` was
+                // already narrowed non-null by the ternary guard above. It is
+                // TS's control-flow analysis not extending a property-access
+                // narrowing into this nested .map() callback:
+                // `payload.verdict.judgeModel` alone fails to typecheck here
+                // even though every sibling access in this block (outside the
+                // callback) uses it unguarded.
                 verdictModel={payload.verdict?.judgeModel ?? null}
               />
             ))}
@@ -1156,7 +1168,11 @@ function VerdictCard({
 // ---------------------------------------------------------------------------
 
 function ArmColumn({ arm }: { arm: ExperimentArmView }): React.JSX.Element {
-  const runtime = arm.usage ? formatRuntime(arm.usage.startedAt, arm.usage.endedAt) : null;
+  const gateReachedAt = arm.usage?.gateReachedAt ?? null;
+  const runtime = arm.usage
+    ? formatRuntime(arm.usage.startedAt, gateReachedAt ?? arm.usage.endedAt)
+    : null;
+  const runtimeIsToGate = gateReachedAt !== null;
   return (
     <div className="flex flex-col gap-3 rounded-card border border-border-primary bg-surface-primary p-4" data-testid={`experiment-arm-${arm.arm.toLowerCase()}`}>
       <div className="flex items-center justify-between gap-2">
@@ -1176,7 +1192,17 @@ function ArmColumn({ arm }: { arm: ExperimentArmView }): React.JSX.Element {
         {arm.usage !== null ? (
           <>
             {compactTokens(arm.usage.totalTokens)} tokens · {formatCost(arm.usage.costUsd)}
-            {runtime !== null && <> · {runtime}</>}
+            {runtime !== null && (
+              <>
+                {' '}
+                ·{' '}
+                {runtimeIsToGate ? (
+                  <span title="time to final human gate — excludes review wait">{runtime} to review</span>
+                ) : (
+                  runtime
+                )}
+              </>
+            )}
           </>
         ) : (
           'No usage recorded yet.'

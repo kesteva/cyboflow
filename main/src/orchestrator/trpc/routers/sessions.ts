@@ -109,7 +109,11 @@ export const sessionsRouter = router({
     }),
 
   getStatistics: protectedProcedure
-    .input(sessionInput)
+    // TASK-278: baseRef is the caller's persisted BaseSelector selection
+    // (optional — absent preserves the pre-TASK-278 branch-point-only
+    // behavior). Its own schema, not the shared `sessionInput`, since no
+    // other procedure on this router takes it.
+    .input(sessionInput.extend({ baseRef: z.string().optional() }))
     .query(async ({ ctx, input }): Promise<{ success: true; data: SessionStatisticsPayload } | SessionOpsError> => {
       return requireOps(ctx.sessionOps).getStatistics(input);
     }),

@@ -57,7 +57,7 @@ export class TerminalDelivery {
    * In-process delivery-retry sweep (§5.6 amended): armed when a delivery leaves a
    * terminal row `pending` (a required consumer failed); fires
    * replayPendingDeliveries after a backoff so recovery does not wait for the next
-   * boot. One timer at a time, `unref`ed like queuedAgeTimer.
+   * boot. One timer at a time, `unref`ed like QueuedAgeDeadline's timer.
    */
   private deliveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Current retry backoff — doubles per consecutive failed sweep, reset on a full drain. */

@@ -291,7 +291,7 @@ body.light {
 
 .thinking-content blockquote {
   color: inherit;
-  border-color: rgba(var(--color-interactive-rgb), 0.2);
+  border-color: rgb(var(--color-interactive-rgb) / 0.2);
   @apply pl-3 py-1;
 }
 

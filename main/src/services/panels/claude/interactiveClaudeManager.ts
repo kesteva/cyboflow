@@ -1,5 +1,6 @@
 import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import type { LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
@@ -146,8 +147,12 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
  *                      system prompt has its OWN field: `sessionBriefing`.
  * ------------------------------------------------------------------------- */
 
-/** CLI spawn options accepted by the interactive substrate. */
-interface InteractiveClaudeSpawnOptions {
+/**
+ * CLI spawn options accepted by the interactive substrate. `laneEnv`
+ * ({@link LaneSpawnEnv}) reaches it only through a per-agent `claude-interactive`
+ * runtime pin on a programmatic lane step; initializeCliEnvironment merges it LAST.
+ */
+interface InteractiveClaudeSpawnOptions extends LaneSpawnEnv {
   /**
    * Set ONLY by a seam that showed the user their provider is switched off and
    * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
@@ -1022,6 +1027,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const theme = this.configManager?.getConfig()?.theme;
     env.COLORFGBG = theme === 'dark' ? '15;0' : '0;15';
 
+    // A fan-out lane's build-slot env (programmatic/laneBuildSlots.ts), LAST so
+    // it wins here and — since cliEnv overrides systemEnv — over the inherited env.
+    if (options.laneEnv) Object.assign(env, options.laneEnv);
+
     return env;
   }
 
@@ -1866,8 +1875,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const cliProcess = this.processes.get(panelId);
     if (!cliProcess) return;
     this.sendInput(panelId, body);
+    // Pin the EXACT process the body went to (mirrors CodexPtyManager's
+    // beginComposerTurn/TASK-206 fix): a presence-only `processes.has()` check
+    // would let this deferred '\r' fire into a REPLACED PTY under the same
+    // panelId (continuePanel/restart within the delay window) that never
+    // received the body above.
+    const target = cliProcess.process;
     setTimeout(() => {
-      if (!this.processes.has(panelId)) return;
+      if (this.processes.get(panelId)?.process !== target) return;
       try {
         this.sendInput(panelId, '\r');
       } catch (err) {

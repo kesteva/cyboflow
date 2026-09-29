@@ -17,6 +17,7 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 import { AddIdeaModal, splitIdeaText, type AddIdeaProjectRef } from '../AddIdeaModal';
+import { ADD_IDEA_MODAL_DRAFT_KEY } from '../../../utils/ideaDraftStorage';
 
 const ONE_PROJECT: AddIdeaProjectRef[] = [{ id: 1, name: 'Alpha' }];
 const TWO_PROJECTS: AddIdeaProjectRef[] = [
@@ -26,6 +27,7 @@ const TWO_PROJECTS: AddIdeaProjectRef[] = [
 
 beforeEach(() => {
   mockCreate.mockReset().mockResolvedValue({ taskId: 'idea_new' });
+  localStorage.clear();
 });
 
 function typeIdea(text: string): void {
@@ -144,5 +146,93 @@ describe('AddIdeaModal — launch step', () => {
     fireEvent.click(screen.getByTestId('add-idea-add-another'));
     expect((screen.getByTestId('add-idea-input') as HTMLTextAreaElement).value).toBe('');
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('AddIdeaModal — draft persistence across close', () => {
+  it('preserves typed text and the picked project across an unmount/remount after Cancel', () => {
+    const onClose = vi.fn();
+    const { unmount } = render(
+      <AddIdeaModal isOpen onClose={onClose} projects={TWO_PROJECTS} onLaunchPlanner={vi.fn()} />,
+    );
+    typeIdea('Draft idea text');
+    fireEvent.change(screen.getByTestId('add-idea-project'), { target: { value: '2' } });
+    fireEvent.click(screen.getByText('Cancel'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // Simulate reopening after the component identity is lost (e.g. the
+    // modal's owning page unmounted and remounted, or the app reloaded) —
+    // only a localStorage-backed draft can survive this, not React state.
+    unmount();
+    render(
+      <AddIdeaModal isOpen onClose={vi.fn()} projects={TWO_PROJECTS} onLaunchPlanner={vi.fn()} />,
+    );
+
+    expect((screen.getByTestId('add-idea-input') as HTMLTextAreaElement).value).toBe(
+      'Draft idea text',
+    );
+    expect((screen.getByTestId('add-idea-project') as HTMLSelectElement).value).toBe('2');
+  });
+
+  it('preserves the draft across overlay/Escape-style closes too, since they share handleClose', () => {
+    // The Cancel button, the header X, an overlay click, and Escape all route
+    // through the same Modal `onClose` prop (AddIdeaModal's handleClose) — so
+    // exercising Escape is an equivalent check of the same code path.
+    const onClose = vi.fn();
+    const { unmount } = render(
+      <AddIdeaModal isOpen onClose={onClose} projects={ONE_PROJECT} onLaunchPlanner={vi.fn()} />,
+    );
+    typeIdea('Escape-preserved draft');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    unmount();
+    render(<AddIdeaModal isOpen onClose={vi.fn()} projects={ONE_PROJECT} onLaunchPlanner={vi.fn()} />);
+    expect((screen.getByTestId('add-idea-input') as HTMLTextAreaElement).value).toBe(
+      'Escape-preserved draft',
+    );
+  });
+
+  it('clears the persisted draft on a successful create — reopening afterward is blank', async () => {
+    const onClose = vi.fn();
+    const { unmount } = render(
+      <AddIdeaModal isOpen onClose={onClose} projects={ONE_PROJECT} onLaunchPlanner={vi.fn()} />,
+    );
+    typeIdea('Ship the thing');
+    fireEvent.click(screen.getByTestId('add-idea-submit'));
+    await screen.findByTestId('add-idea-launch-planner');
+
+    expect(localStorage.getItem(ADD_IDEA_MODAL_DRAFT_KEY)).toBeNull();
+
+    unmount();
+    render(<AddIdeaModal isOpen onClose={onClose} projects={ONE_PROJECT} onLaunchPlanner={vi.fn()} />);
+    expect((screen.getByTestId('add-idea-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('does not write to localStorage again on an unrelated re-render (e.g. an error clearing)', async () => {
+    mockCreate.mockRejectedValueOnce(new Error('backlog unavailable'));
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    render(
+      <AddIdeaModal isOpen onClose={vi.fn()} projects={ONE_PROJECT} onLaunchPlanner={vi.fn()} />,
+    );
+
+    typeIdea('Stable text');
+    const draftCallsAfterTyping = setItemSpy.mock.calls.filter(
+      ([key]) => key === ADD_IDEA_MODAL_DRAFT_KEY,
+    ).length;
+    expect(draftCallsAfterTyping).toBeGreaterThan(0);
+
+    // Trigger a rejected create (busy true -> false, error set then implicitly
+    // present) — none of this touches text/projectOverride, so it must not
+    // cause another draft write.
+    fireEvent.click(screen.getByTestId('add-idea-submit'));
+    await screen.findByRole('alert');
+
+    const draftCallsAfterError = setItemSpy.mock.calls.filter(
+      ([key]) => key === ADD_IDEA_MODAL_DRAFT_KEY,
+    ).length;
+    expect(draftCallsAfterError).toBe(draftCallsAfterTyping);
+
+    setItemSpy.mockRestore();
   });
 });

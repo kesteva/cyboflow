@@ -34,6 +34,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import type { ReviewItemRouter } from './reviewItemRouter';
+import { humanTaskReviewSource } from './humanTaskReviewItemCloser';
 
 /** One human prerequisite + the batch tasks blocked on it. */
 interface HumanPrerequisite {
@@ -166,7 +167,7 @@ export async function surfaceHumanPrerequisites(
         blocking: false,
         // Keyed on the HUMAN TASK, not the batch: a second batch depending on
         // the same human work must not mint a second copy of the same to-do.
-        source: `human-task:${prereq.humanTaskId}`,
+        source: humanTaskReviewSource(prereq.humanTaskId),
         entityType: 'task',
         entityId: prereq.humanTaskId,
         payload: { kind: 'human_task' },

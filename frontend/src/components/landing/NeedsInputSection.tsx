@@ -11,7 +11,12 @@
  *      two "Human gate: Human review" cards are otherwise distinguishable only
  *      by project. NOTE: `notification` items are deliberately NOT here — an FYI
  *      has no answer, so it lives in the grey NotificationsSection rather than
- *      under an "Asked you" kicker;
+ *      under an "Asked you" kicker. A SYSTEMIC-PAUSE decision (a step's agent
+ *      hit a usage / session limit — `gate:systemic-pause:<stepId>`) is the one
+ *      decision this row can settle itself: it offers the same Retry now /
+ *      Switch & retry… / Stop waiting trio the in-session ReviewItemCard does,
+ *      with the switch routing INTO the session (the runtime/model form lives
+ *      there) and withheld for a triage-origin pause that no switch can move;
  *   3. real-time permission approvals — the only rows with two real verdicts,
  *      so they get Approve/Reject inline rather than an "Answer →" jump.
  *
@@ -30,6 +35,10 @@
  */
 import React from 'react';
 import { trpc } from '../../trpc/client';
+import { useErrorStore } from '../../stores/errorStore';
+import { trackEvent } from '../../utils/telemetry';
+import { useReviewItemActions } from '../../hooks/useReviewItemActions';
+import { isSystemicPauseItem, systemicPauseOrigin } from '../../utils/systemicPause';
 import type { QuickSessionRow } from '../../../../shared/types/quickSessions';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
@@ -177,9 +186,22 @@ function QuickSessionAsk({
     setBusy(true);
     void trpc.cyboflow.sessions.dismissAsk
       .mutate({ sessionId: row.sessionId })
-      .then(() => onDismissed())
-      .catch(() => {
-        // Best-effort — leave the card in place on error, matching ApprovalAsk.
+      .then((result) => {
+        // dismissAsk RESOLVES (never throws) with { success: false, error }
+        // on a validation/not-found failure — only a truthy success should
+        // fire the board refresh; a resolved failure must still leave the
+        // card in place and surface the error, like the rejection branch.
+        if (result.success) {
+          onDismissed();
+        } else {
+          useErrorStore.getState().showError({ title: 'Dismiss failed', error: result.error });
+        }
+      })
+      .catch((err: unknown) => {
+        useErrorStore.getState().showError({
+          title: 'Dismiss failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
       })
       .finally(() => setBusy(false));
   };
@@ -211,12 +233,70 @@ function QuickSessionAsk({
   );
 }
 
+/**
+ * The queue-side actions for a systemic-pause item — the same trio the
+ * in-session ReviewItemCard renders, minus the inline switch form: Retry now
+ * resolves WITHOUT an outcome (the pause gate reads any resolve as 'retry'),
+ * Switch & retry… opens the session (the runtime/model form lives there), and
+ * Stop waiting DISMISSES (the gate's giveup) — never outcome 'reject'.
+ */
+function SystemicPauseActions({
+  item,
+  onOpen,
+  onActed,
+}: {
+  item: ReviewItem;
+  onOpen: (item: ReviewItem) => void;
+  onActed: () => void;
+}): React.JSX.Element {
+  const { pendingItemId, resolve, dismiss } = useReviewItemActions();
+  const busy = pendingItemId === item.id;
+  // A triage-origin pause: only the run's Claude-only supervisor hit the
+  // limit — no step-agent switch moves it (the backend refuses one), so the
+  // row offers Retry now / Stop waiting only, like the card.
+  const switchable = systemicPauseOrigin(item) !== 'triage';
+
+  const retryNow = (): void => {
+    void resolve(item.project_id, item.id, { surface: 'queue' }).then((r) => {
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'retry', blocking: item.blocking });
+        onActed();
+      }
+    });
+  };
+  const stopWaiting = (): void => {
+    void dismiss(item.project_id, item.id).then((ok) => {
+      if (ok) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'stop_waiting', blocking: item.blocking });
+        onActed();
+      }
+    });
+  };
+
+  return (
+    <>
+      <PrimaryButton onClick={retryNow} disabled={busy} data-testid="pause-retry">
+        Retry now
+      </PrimaryButton>
+      {switchable && (
+        <SecondaryButton onClick={() => onOpen(item)} disabled={item.run_id === null} data-testid="pause-switch-open">
+          Switch &amp; retry…
+        </SecondaryButton>
+      )}
+      <GhostButton onClick={stopWaiting} disabled={busy} data-testid="pause-stop">
+        Stop waiting
+      </GhostButton>
+    </>
+  );
+}
+
 function ReviewItemAsk({
   item,
   projectName,
   identity,
   nowMs,
   onOpen,
+  onActed,
 }: {
   item: ReviewItem;
   projectName: string | null;
@@ -224,9 +304,12 @@ function ReviewItemAsk({
   identity: RunSessionIdentity | null;
   nowMs: number;
   onOpen: (item: ReviewItem) => void;
+  /** Fired after a systemic-pause row settles its own item (Retry now / Stop waiting). */
+  onActed: () => void;
 }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false);
   const hasBody = item.body !== null && item.body !== '';
+  const isPause = isSystemicPauseItem(item);
   return (
     <AskCard>
       <CardTop quiet={formatElapsedMinutes(item.created_at, nowMs)} />
@@ -243,7 +326,11 @@ function ReviewItemAsk({
                 Details {expanded ? '▾' : '▸'}
               </GhostButton>
             )}
-            <PrimaryButton onClick={() => onOpen(item)}>Answer →</PrimaryButton>
+            {isPause ? (
+              <SystemicPauseActions item={item} onOpen={onOpen} onActed={onActed} />
+            ) : (
+              <PrimaryButton onClick={() => onOpen(item)}>Answer →</PrimaryButton>
+            )}
           </>
         }
       />
@@ -384,6 +471,12 @@ export interface NeedsInputSectionProps {
   flashing: boolean;
   onOpenQuickSession: (row: QuickSessionRow) => void;
   onOpenReviewItem: (item: ReviewItem) => void;
+  /**
+   * Fired after a systemic-pause row settles its own item (Retry now / Stop
+   * waiting) — refresh the board, exactly as {@link onApprovalDecided} does.
+   * Optional: the landing's aggregated items also catch up on their own.
+   */
+  onReviewItemActed?: () => void;
   onApprovalDecided: () => void;
   /** Fired after a quick-session ask is dismissed (TASK-225) — refresh the board. */
   onQuickSessionAskDismissed: () => void;
@@ -404,6 +497,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
       flashing,
       onOpenQuickSession,
       onOpenReviewItem,
+      onReviewItemActed,
       onApprovalDecided,
       onQuickSessionAskDismissed,
     } = props;
@@ -450,6 +544,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
                 identity={item.run_id !== null ? (runSessionMap[item.run_id] ?? null) : null}
                 nowMs={nowMs}
                 onOpen={onOpenReviewItem}
+                onActed={onReviewItemActed ?? (() => undefined)}
               />
             ))}
             {approvals.map((item) => {

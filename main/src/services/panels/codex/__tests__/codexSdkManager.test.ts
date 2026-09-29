@@ -1,10 +1,14 @@
 import Database from 'better-sqlite3';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionManager } from '../../../sessionManager';
 import { SpawnStepRunner } from '../../../../orchestrator/programmatic/spawnStepRunner';
 import { WorkflowController } from '../../../../orchestrator/programmatic/workflowController';
 import type { ControllerHost } from '../../../../orchestrator/programmatic/types';
 import type { WorkflowDefinition } from '../../../../../../shared/types/workflows';
+import { materializeForLevel } from '../../../../../../shared/tuning/workflowTuning';
 import type {
   AppServerNotification,
   CodexAppServerClientOptions,
@@ -13,8 +17,10 @@ import type { AppServerInitializeParams } from '../appServer/protocol';
 import type { AgentStreamEvent } from '../../../../../../shared/types/agentStream';
 import { EventRouter } from '../../../../../../shared/streamParser';
 import { CODEX_RAW_NOTIFICATION_EVENT_TYPE } from '../appServer/rawNotificationSink';
+import { _resetCodexAgentRolePruneForTesting } from '../appServer/agentRoles';
 import {
   CodexSdkManager,
+  type CodexAgentRolesDirResolver,
   type CodexAppServerClientFactory,
   type CodexAppServerClientLike,
 } from '../codexSdkManager';
@@ -25,7 +31,7 @@ class FakeAppServerClient implements CodexAppServerClientLike {
   readonly start = vi.fn(() => undefined);
   readonly stop = vi.fn(async (_signal?: NodeJS.Signals) => undefined);
   readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
-    userAgent: 'codex-cli/0.153.3',
+    userAgent: 'codex-cli/0.156.1',
     codexHome: '/home/user/.codex',
     platformFamily: 'unix',
     platformOs: 'macos',
@@ -83,6 +89,15 @@ function createDb(): Database.Database {
     CREATE UNIQUE INDEX idx_raw_events_dedup
       ON raw_events(dedup_key)
       WHERE dedup_key IS NOT NULL;
+    -- migration 146: the invocation <-> Codex turn link.
+    CREATE TABLE codex_invocation_turns (
+      agent_invocation_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      codex_turn_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (agent_invocation_id, codex_turn_id)
+    );
   `);
   db.prepare("INSERT INTO workflow_runs (id, updated_at) VALUES ('run-1', CURRENT_TIMESTAMP)").run();
   return db;
@@ -106,7 +121,7 @@ function makeManager(
     () => ({
       executablePath: '/app/codex/bin/codex',
       pathDir: '/app/codex/codex-path',
-      version: '0.153.3',
+      version: '0.156.1',
       target: 'aarch64-apple-darwin',
     }),
     '0.1.test',
@@ -152,6 +167,24 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
           turnId: 'turn-1',
           completedAtMs: 20,
           item: { type: 'agentMessage', id: 'message-1', text: 'Done from Codex.' },
+        },
+      });
+      // The per-response usage source the root agent_result is counted from.
+      client.notify({
+        method: 'rawResponse/completed',
+        params: {
+          threadId: 'codex-thread-1',
+          turnId: 'turn-1',
+          responseId: 'response-1',
+          usage: {
+            totalTokens: 17,
+            inputTokens: 10,
+            cachedInputTokens: 3,
+            cacheWriteInputTokens: 0,
+            outputTokens: 7,
+            reasoningOutputTokens: 2,
+          },
+          usageMetadata: null,
         },
       });
       client.notify({
@@ -201,7 +234,7 @@ describe('CodexSdkManager app-server runtime', () => {
         runtime: {
           found: true,
           path: '/app/codex/bin/codex',
-          version: '0.153.3',
+          version: '0.156.1',
         },
         account: {
           found: true,
@@ -552,7 +585,7 @@ describe('CodexSdkManager app-server runtime', () => {
         provider: 'codex',
         runtime: 'codex-sdk',
         external_session_id: 'codex-thread-1',
-        sdk_version: 'codex-cli/0.153.3',
+        sdk_version: 'codex-cli/0.156.1',
         mcp_servers: [{ name: 'cyboflow', status: 'configured' }],
       });
       expect(JSON.parse(rows[2].payloadJson)).toMatchObject({
@@ -585,6 +618,7 @@ describe('CodexSdkManager app-server runtime', () => {
         .all(CODEX_RAW_NOTIFICATION_EVENT_TYPE) as Array<{ payloadJson: string }>;
       expect(rawNotifications.map((row) => JSON.parse(row.payloadJson).method)).toEqual([
         'item/completed',
+        'rawResponse/completed',
         'thread/tokenUsage/updated',
         'turn/completed',
       ]);
@@ -768,6 +802,83 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
+  it('abortInFlightTurn interrupts an active turn by run id (the global-assistant Stop control)', async () => {
+    const db = createDb();
+    try {
+      let markTurnStarted!: () => void;
+      const turnStarted = new Promise<void>((resolve) => {
+        markTurnStarted = resolve;
+      });
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(markTurnStarted, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        if (method === 'turn/interrupt') return {};
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const spawn = manager.spawnCliProcess({
+        panelId: 'panel:agent-thread-1',
+        sessionId: 'panel:agent-thread-1',
+        runId: 'agent:thread-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'wait',
+      });
+      await turnStarted;
+      await manager.abortInFlightTurn('agent:thread-1');
+      await spawn;
+
+      const client = getClient();
+      expect(client.requests).toContainEqual({
+        method: 'turn/interrupt',
+        params: { threadId: 'codex-thread-1', turnId: 'turn-1' },
+      });
+      expect(client.stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn is a no-op when nothing is in flight for that identity', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method) => {
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      // Idle — never spawned. Must not throw, and must not touch any client.
+      await expect(manager.abortInFlightTurn('nobody-home')).resolves.toBeUndefined();
+      expect(getClient).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn leaves a warm-parked entry (no turn in flight) untouched — a later resume still reuses it', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients[0].stop).not.toHaveBeenCalled(); // parked, not closed
+
+      await manager.abortInFlightTurn('run-1');
+      expect(clients[0].stop).not.toHaveBeenCalled(); // still parked — nothing was in flight
+
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(1); // reused the SAME parked client, no cold respawn
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('rejects API-key auth before creating a thread', async () => {
     const db = createDb();
     try {
@@ -878,6 +989,7 @@ function warmTurnHandler(): RequestHandler {
 function makeWarmManager(
   db: Database.Database,
   handler: RequestHandler = warmTurnHandler(),
+  resolveAgentRolesDir?: CodexAgentRolesDirResolver,
 ): { manager: CodexSdkManager; clients: FakeAppServerClient[] } {
   const clients: FakeAppServerClient[] = [];
   const factory: CodexAppServerClientFactory = (options) => {
@@ -894,10 +1006,11 @@ function makeWarmManager(
     () => ({
       executablePath: '/app/codex/bin/codex',
       pathDir: '/app/codex/codex-path',
-      version: '0.153.3',
+      version: '0.156.1',
       target: 'aarch64-apple-darwin',
     }),
     '0.1.test',
+    resolveAgentRolesDir,
   );
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
@@ -1097,6 +1210,23 @@ describe('CodexSdkManager warm app-server reuse', () => {
     }
   });
 
+  it('cold-respawns when the lane env changes (laneEnv is part of the warm fingerprint)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      await manager.spawnCliProcess(baseTurn({
+        prompt: 'second',
+        resumeSessionId: 'codex-thread-1',
+        laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: '/tmp/worktree/.cyboflow/build-slots/slot-0' },
+      }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('stops (not just evicts) a parked app-server whose client errors with no active turn', async () => {
     const db = createDb();
     try {
@@ -1172,6 +1302,67 @@ function agentTurn(
     ...overrides,
   } as Parameters<CodexSdkManager['spawnCliProcess']>[0];
 }
+
+describe('CodexSdkManager lane build-slot env', () => {
+  // The app-server hands its env to every command the agent runs, so a fan-out
+  // lane's build slot (programmatic/laneBuildSlots.ts) reaches the agent's shell
+  // only through the app-server env — merged LAST so it wins.
+  const LANE_KEYS = ['CYBOFLOW_LANE_SCRATCH_DIR', 'CLANG_MODULE_CACHE_PATH', 'SWIFTPM_MODULECACHE_OVERRIDE'] as const;
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    // This suite may itself run inside a cyboflow lane whose env carries these.
+    for (const key of LANE_KEYS) {
+      saved.set(key, process.env[key]);
+      delete process.env[key];
+    }
+  });
+  afterEach(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('merges laneEnv into the app-server env, overriding an inherited value', async () => {
+    process.env.CLANG_MODULE_CACHE_PATH = '/inherited/module-cache';
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      const slot = '/tmp/worktree/.cyboflow/build-slots/slot-1';
+      await manager.spawnCliProcess(baseTurn({
+        spawnKey: 'run-1:TASK-1',
+        laneEnv: {
+          CYBOFLOW_LANE_SCRATCH_DIR: slot,
+          CLANG_MODULE_CACHE_PATH: `${slot}/clang-module-cache`,
+          SWIFTPM_MODULECACHE_OVERRIDE: `${slot}/clang-module-cache`,
+        },
+      }));
+
+      const env = clients[0].options.env ?? {};
+      expect(env.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      expect(env.CLANG_MODULE_CACHE_PATH).toBe(`${slot}/clang-module-cache`);
+      expect(env.SWIFTPM_MODULECACHE_OVERRIDE).toBe(`${slot}/clang-module-cache`);
+      // The run env is intact alongside it.
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-1');
+      expect(env.PATH).toContain('/app/codex/codex-path');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds no lane keys to a spawn without laneEnv', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ spawnKey: 'run-1:TASK-1' }));
+
+      const env = clients[0].options.env ?? {};
+      for (const key of LANE_KEYS) expect(env[key]).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+});
 
 describe('CodexSdkManager hermetic global-agent spawn', () => {
   it('routes the turn into the injected sink and writes NEITHER run-keyed table', async () => {
@@ -1283,6 +1474,176 @@ describe('CodexSdkManager hermetic global-agent spawn', () => {
         .get() as { c: number };
       expect(rawCount.c).toBeGreaterThan(0);
       expect(invocationCount.c).toBe(1);
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Native agent roles (config.agents)
+//
+// A run's deployable cyboflow roles are registered as native Codex agent roles
+// so the orchestrator's `spawn_agent({ agent_type: "cyboflow-<key>" })` runs a
+// child under the role's prompt. The roles come from the run's REAL frozen
+// definition — the same resolveRunDeployableAgents seam the other runtimes use.
+// ---------------------------------------------------------------------------
+
+/**
+ * createDb() plus just enough of the workflows schema for the run's frozen
+ * definition to resolve: run-1 becomes a run of the real built-in sprint flow.
+ * `agent_overrides` / variant / run-target columns stay absent — each of those
+ * reads is fail-soft, which is part of what this exercises.
+ */
+function createSprintRunDb(): Database.Database {
+  const db = createDb();
+  db.exec(`
+    ALTER TABLE workflow_runs ADD COLUMN workflow_id TEXT;
+    ALTER TABLE workflow_runs ADD COLUMN project_id INTEGER;
+    CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT NOT NULL, spec_json TEXT);
+  `);
+  db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-sprint', 'sprint', ?)")
+    .run(materializeForLevel('sprint', '', 'standard'));
+  db.prepare("UPDATE workflow_runs SET workflow_id = 'wf-sprint', project_id = 1 WHERE id = 'run-1'").run();
+  return db;
+}
+
+type AgentRolesConfig = Record<string, { description: string; config_file: string }>;
+
+function threadRequestAgents(client: FakeAppServerClient, method: 'thread/start' | 'thread/resume'): unknown {
+  const request = client.requests.find((r) => r.method === method);
+  if (!request) throw new Error(`no ${method} request`);
+  return (request.params as { config: Record<string, unknown> }).config.agents;
+}
+
+describe('CodexSdkManager native agent roles', () => {
+  let rolesDir: string;
+  beforeEach(() => {
+    rolesDir = mkdtempSync(path.join(tmpdir(), 'codex-sdk-agent-roles-'));
+    _resetCodexAgentRolePruneForTesting();
+  });
+  afterEach(() => {
+    rmSync(rolesDir, { recursive: true, force: true });
+  });
+
+  it('registers the run\'s deployable roles on thread/start, each backed by an absolute on-disk role file', async () => {
+    const db = createSprintRunDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), () => rolesDir);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'orchestrate the sprint' }));
+
+      const agents = threadRequestAgents(clients[0], 'thread/start') as AgentRolesConfig;
+      const names = Object.keys(agents);
+      expect(names).toEqual(expect.arrayContaining(['cyboflow-implement', 'cyboflow-code-review', 'cyboflow-task-verify']));
+      // Only the roles the frozen sprint definition binds — not the catalogue.
+      for (const foreign of ['cyboflow-interview', 'cyboflow-compounder']) expect(names).not.toContain(foreign);
+
+      const implement = agents['cyboflow-implement'];
+      expect(implement.description.length).toBeGreaterThan(0);
+      expect(path.isAbsolute(implement.config_file)).toBe(true);
+      expect(path.dirname(implement.config_file)).toBe(rolesDir);
+      expect(existsSync(implement.config_file)).toBe(true);
+      const toml = readFileSync(implement.config_file, 'utf8');
+      expect(toml.startsWith('developer_instructions = "')).toBe(true);
+      expect(toml).not.toContain('[mcp_servers');
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('carries the same roles on thread/resume', async () => {
+    const db = createSprintRunDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), () => rolesDir);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'continue', resumeSessionId: 'codex-thread-1' }));
+
+      const agents = threadRequestAgents(clients[0], 'thread/resume') as AgentRolesConfig;
+      expect(Object.keys(agents)).toContain('cyboflow-implement');
+      expect(existsSync(agents['cyboflow-implement'].config_file)).toBe(true);
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('registers nothing and writes nothing for a hermetic isolation spawn, even one naming a real run', async () => {
+    const db = createSprintRunDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), () => rolesDir);
+      // runId 'run-1' resolves to the sprint roles — only the isolation guard in
+      // the manager keeps them from being materialized.
+      await manager.spawnCliProcess(agentTurn(new RecordingEventsSink(), { runId: 'run-1' }));
+
+      expect(threadRequestAgents(clients[0], 'thread/start')).toBeUndefined();
+      expect(readdirSync(rolesDir)).toEqual([]);
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('registers nothing for a run whose definition cannot be resolved (and never touches the roles dir)', async () => {
+    const db = createDb(); // no workflows table: run-1 has no frozen definition
+    try {
+      const resolveDir = vi.fn(() => rolesDir);
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), resolveDir);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'chat' }));
+
+      expect(threadRequestAgents(clients[0], 'thread/start')).toBeUndefined();
+      expect(resolveDir).not.toHaveBeenCalled();
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('spawns without roles when role registration fails (fail-soft)', async () => {
+    const db = createSprintRunDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), () => {
+        throw new Error('data dir unavailable');
+      });
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'go' }))).resolves.toEqual({
+        resultText: 'Done 1.',
+      });
+      expect(threadRequestAgents(clients[0], 'thread/start')).toBeUndefined();
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('busts a parked app-server when a role prompt changes (roles are in the warm fingerprint)', async () => {
+    const db = createSprintRunDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, warmTurnHandler(), () => rolesDir);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      // Control: an unchanged role set reuses the parked process.
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(1);
+
+      // Change implement's effective prompt through the frozen definition.
+      const def = JSON.parse(materializeForLevel('sprint', '', 'standard')) as Record<string, unknown>;
+      const configs = (def.agentConfigs ?? {}) as Record<string, Record<string, unknown>>;
+      configs.implement = { ...(configs.implement ?? {}), promptAddendum: 'Also update the changelog.' };
+      def.agentConfigs = configs;
+      db.prepare("UPDATE workflows SET spec_json = ? WHERE id = 'wf-sprint'").run(JSON.stringify(def));
+
+      await manager.spawnCliProcess(baseTurn({ prompt: 'third', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(2);
+      const before = threadRequestAgents(clients[0], 'thread/start') as AgentRolesConfig;
+      const after = threadRequestAgents(clients[1], 'thread/resume') as AgentRolesConfig;
+      expect(after['cyboflow-implement'].config_file).not.toBe(before['cyboflow-implement'].config_file);
+      expect(readFileSync(after['cyboflow-implement'].config_file, 'utf8')).toContain('Also update the changelog.');
+      expect(after['cyboflow-code-review'].config_file).toBe(before['cyboflow-code-review'].config_file);
 
       await manager.killAllProcesses();
     } finally {

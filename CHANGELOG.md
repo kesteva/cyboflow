@@ -6,6 +6,156 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-09-28
+
+### Added
+
+- **Learned verification runbooks.** A passing explore run now records the recipe it used as a
+  runbook draft. The lane's own next request promotes that draft, so the project gets a proven
+  runbook without a separate setup flow.
+- **Xcode 27 drive for iOS verification.** Mobile verifications drive the app through Xcode's
+  DeviceInteraction rung. The rung has its own probe, health row and approval action, and its
+  sessions are serialised when more than one simulator slot exists. (The 0.4.5 notes listed this,
+  but it first ships here.)
+- **Serve binding as an attestation channel.** A web or cdp-app runbook can declare the serve
+  binding as its channel, and a pass resting on it can be learned as a recipe.
+- **Monitor lane rescue.** The monitor is consulted before a lane's last automatic attempt, not only
+  after it fails. It can accept a lane past a failing gate (the waived items become follow-ups),
+  release dependents whose needs already landed, and repair the worktree environment. Missing
+  dependencies are installed before a sprint dispatches. The rescue budget scales with the sprint.
+- **Usage accounting v1.** Run usage goes through one per-provider formula. Codex usage is counted
+  per response, including collaboration child threads, and past runs are backfilled at boot.
+
+### Changed
+
+- **Sonnet picker alias → Sonnet 5.5** (`claude-sonnet-5-5`), with the Agent SDK bumped to 0.3.284
+  (bundled CLI 2.1.284).
+
+### Fixed
+
+- The commit-integrity probe no longer fails a lane for a sibling lane's uncommitted changes.
+- A cancelled run keeps its usage, and a resumed Codex thread's usage is counted.
+- Codex child agents are priced by their role's model.
+- A `package.json` script with only an env-var prefix is accepted as a runbook command.
+- Xcode drive hardening: long-path sockets move under a per-user root that the boot sweep cleans.
+  The approval scaffold path refuses symlinks. A session whose start outcome is unknown is ended.
+  A mobile row keeps its simulator lease until an aborted runner has torn down.
+- Explore-mode fixes: the host-env strip is confined to explore runs. Learned recipes keep their
+  paths inside the snapshot and match leased ports by value. A draft is kept on a failure only when
+  the harness saw the surface stand up.
+
+## [0.4.5] — 2026-09-26
+
+### Added
+
+- **Verification without a proven runbook.** A visual verification request no longer needs a proven
+  runbook first. It runs in one of three modes: *pinned* (a proven runbook), *explore* (the verifier
+  stands the app up itself and attests what it drove) or *legacy*. Lanes stop authoring a runbook for
+  requests that will explore. An explore web run can pass on a verified serve binding alone, and an
+  explore mobile run can attest bundle identity without a declared channel. When a request names no
+  iOS app, the app is inferred from the project. Verification reports gain `unverifiable` and
+  `wrong_environment` outcomes.
+- **Verifier guardrails.** During verification, dependency installs, process kills and `simctl`
+  lifecycle commands go through a guard.
+- **Maestro mobile drive.** Maestro now runs under a resolved `JAVA_HOME`, so the mobile drive rung
+  is no longer silently `none`. (These notes originally also listed the Xcode 27 DeviceInteraction
+  drive. It was not wired into this build and first ships in 0.4.6.)
+- **Programmatic steps run directly.** A programmatic run dispatches each step to its agent rather
+  than delegating through an orchestrator turn. Direct Claude steps deny the Workflow tool.
+- **Native agent roles on Codex, OMP and pi.** A run's roles are registered natively: as Codex agent
+  roles, as OMP project agents, and as pi role files. The orchestrator delegates to them by name.
+- **Drafts survive closing a dialog.** Add Idea, New Task and the idea picker restore unsent drafts.
+
+### Fixed
+
+- The verify driver runs on `chrome-headless-shell`, so local pages load on macOS 26.
+- Non-npm and re-registered proven runbooks stay proven.
+- Queued verification requests age from UTC and from the drain's last progress.
+- A composed verification task that names nothing to stand up is skipped, and task-verify composes
+  iOS apps as mobile, never native-screen.
+- Low-confidence verification findings always show their reason.
+- Small ideas get their tasks created when the epics step absorbs the tasks step.
+- Codex workflow threads run on the standard service tier.
+- Codex 0.156.1 image input backed by a `fileId` is accepted.
+- The OMP config directory `.omp/` is excluded from git on every MCP config write.
+- The session card's diff stat follows the Diff view's selected base.
+- The landing's ready-for-review list drops a terminal flow run older than the session's own chat
+  activity.
+- Won't-do and delete no longer reap artifacts of runs still in flight.
+- Insights workflow cards share the chart's 30-day window and flag a per-model cost shortfall.
+- The quick-session canvas reserves the summary width while loading and wraps on narrow panes.
+- Compound write-back findings applied: gate policy, model-constant re-exports and stale docs.
+
+### Changed
+
+- **Bundled Codex CLI upgraded 0.153.3 → 0.156.1** (`@openai/codex`). The server only offers the
+  GPT-6 family (`gpt-6-sol`, `gpt-6-luna`) to 0.156+ clients, so they now appear in the Codex model
+  picker. The app-server protocol change is additive for every method Cyboflow uses (the unused
+  `thread/rollback` was removed; `personality` is deprecated).
+- The runtime-mix tier map now targets the GPT-6 family: Opus- and Fable-tier steps go to
+  `gpt-6-sol` (was `gpt-5.6-sol`), Sonnet- and Haiku-tier steps to `gpt-6-luna` (was
+  `gpt-5.6-luna`). Mixed runs launched after this fork a new spec revision.
+- `McpQueryHandler` is down from 5,717 to 1,151 lines: its remaining tool families moved into
+  `mcpServer/handlers/` (issue #19, steps 10–15).
+
+## [0.4.4] — 2026-09-24
+
+### Added
+
+- **Switch runtime and retry when a run pauses on a systemic error.** When a programmatic run parks on
+  a usage limit, an expired login or a similar environment problem, the pause item now names the
+  agents that were blocked and offers *Retry now*, *Switch runtime & retry* and *Stop waiting*. The
+  switch form lists only providers that are installed and signed in and defaults to a ready one other
+  than the blocked provider. Its choice is stored as a per-run agent-target override (migration 144),
+  the top layer of the run's effective agents, so it applies from the very next spawn. An override chip
+  shows active switches with a Revert. The parked step card reads **PAUSED**, and the landing's
+  needs-input row can settle the pause directly.
+- **Opus 5.5.** The Opus picker alias now pins `claude-opus-5-5[1m]`. This needed Agent SDK 0.3.280,
+  which bundles CLI 2.1.280. Opus 5 moves to "Other models".
+- **Models are visible at every step.** The live workflow canvas, sprint fan-out lanes and a new
+  "Models used" section on the run summary show the concrete model each step resolved to.
+- **Sprint lanes prove their tests.** Write-tests must show a test failing before the fix and passing
+  after it, without touching the shared tree. Its output is passed to code-review and task-verify.
+  Defects inside the lane's own scope are fixed in the lane rather than filed as findings, and lane
+  review findings are deduplicated against the run's open findings.
+- **Chat sessions can triage any finding in their project.** `cyboflow_list_run_findings` gains a
+  project scope, and `cyboflow_resolve_finding` gains a `dismissed` resolution.
+- **Insights code quality shows tallies with a drill-down** in place of a flat list of findings, and
+  can seed a Compound run with a whole set of findings at once.
+- **Idea cards pulse on the backlog board** while a Planner or Ship run is working on them, with a
+  "planning · agent / step" hint.
+- *Mark complete* reports sprint tasks it left open because the branch is not on `main` yet.
+- The launch wizard seeds `openrouter/auto` when you switch it to an OMP runtime.
+
+### Fixed
+
+- **The context meter read the wrong model's window.** It took the first `modelUsage` entry, which
+  could be a Haiku side query, rather than the main model's.
+- **89 review findings fixed across the app.** Mutation failures that were swallowed now surface, the
+  diff anchors on the merge base, Restore failures are reported, and close-out is stamped when a
+  session lands. Also fixed: disclosure when the eval's pairwise judge degrades, run-type defaults
+  writes and launch save-as-default, workflow archive read surfaces, Insights sparklines and trend
+  metrics, and invalid design tokens.
+- **Systemic environment errors no longer reach Sentry** from any capture point.
+- **The monitor chat offers the sign-in card** when Claude's login has expired.
+- The MCP `request_verification` path now runs the lane runbook bootstrap, as the controller path
+  already did.
+- The assistant rail's live tail dropped in-flight deltas under load.
+- Codex and OMP `result.usage` now shows up in the Insights token chart, and subagent usage no longer
+  hides it.
+- *Mark complete* runs sprint close-out when the session has already landed.
+- WorkflowPicker launches send the model coerced to the runtime's family at render time, so a quick
+  Start Run can no longer launch with a stale model from another provider.
+- Fixes to hidden/empty segments in the chat transcript, to the approve-design gate body and
+  accepted-risk filing, and to a boot backfill guard that checked the wrong status values.
+
+### Changed
+
+- The unmounted `ReviewQueueView` is deleted.
+- `McpQueryHandler`'s verify/eval tool family moved into `VerifyToolHandlers` (issue #19, step 9).
+- CI rebuilds cyboflow.com after a stable release publishes, and fails a Windows build whose
+  installer is not validly signed.
+
 ## [0.4.3] — 2026-09-21
 
 ### Added

@@ -23,7 +23,7 @@ export type FastGitOptions = Pick<RunGitOptions, 'signal' | 'timeout'>;
  * a boolean dirty/clean signal like a real git failure is. Rethrow it so it
  * propagates to the caller instead.
  */
-function isAbortError(err: unknown): boolean {
+export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
 }
 
@@ -47,7 +47,7 @@ export class GitOperationalError extends Error {
   }
 }
 
-function isOperationalFailure(err: unknown): boolean {
+export function isOperationalFailure(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null };
   // Timeout kill (killed=true, code typically null) or any signal-kill.

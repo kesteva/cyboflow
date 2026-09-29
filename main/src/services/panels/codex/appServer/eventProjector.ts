@@ -121,7 +121,7 @@ function userMessageText(item: Extract<TurnSessionItem, { type: 'userMessage' }>
       case 'text':
         return content.text;
       case 'image':
-        return `[image: ${content.url}]`;
+        return 'url' in content ? `[image: ${content.url}]` : `[image file: ${content.fileId}]`;
       case 'localImage':
         return `[local image: ${content.path}]`;
       case 'audio':

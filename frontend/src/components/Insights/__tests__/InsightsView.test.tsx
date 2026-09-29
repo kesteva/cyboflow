@@ -20,7 +20,7 @@
  *      a project-load failure degrading to "All projects" alone.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type {
@@ -81,7 +81,9 @@ vi.mock('../../../stores/insightsStore', () => {
   const useInsightsStore = (selector: (s: ReturnType<typeof snapshot>) => unknown) =>
     selector(snapshot());
   useInsightsStore.getState = () => snapshot();
-  return { useInsightsStore };
+  // Mirrors the real store's export (see insightsStore.ts) — CodeQualitySection,
+  // mounted inside InsightsView, imports this constant directly.
+  return { useInsightsStore, QUALITY_FINDINGS_LIMIT: 500 };
 });
 
 // ---------------------------------------------------------------------------
@@ -335,8 +337,13 @@ describe('InsightsView', () => {
     fireEvent.click(screen.getByTestId('stats-card-wf-busy'));
     const panel = screen.getByTestId('stats-token-by-step');
     expect(panel).toBeInTheDocument();
-    // BarRow stub renders its label; both step ids present.
-    expect(screen.getAllByTestId('bar-row').map((n) => n.textContent)).toEqual(['execute', 'verify']);
+    // BarRow stub renders its label; both step ids present. Scoped to the
+    // panel — CodeQualitySection (section 03) also renders BarRow instances
+    // (category/severity/source tallies) elsewhere on this same page.
+    expect(within(panel).getAllByTestId('bar-row').map((n) => n.textContent)).toEqual([
+      'execute',
+      'verify',
+    ]);
   });
 });
 

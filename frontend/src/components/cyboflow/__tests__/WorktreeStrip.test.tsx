@@ -163,16 +163,43 @@ describe('WorktreeStrip', () => {
     confirmSpy.mockRestore();
   });
 
-  it('Restore: a failed mutation does NOT signal onMutated', async () => {
+  it('Restore: a failed mutation surfaces its error and still refetches the (possibly partly-restored) tree', async () => {
     mockGitRestore.mockResolvedValue({ success: false, error: 'nope' });
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const onMutated = vi.fn();
     render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
 
     fireEvent.click(screen.getByTestId('worktree-strip-restore'));
-    await waitFor(() => expect(mockGitRestore).toHaveBeenCalled());
-    await Promise.resolve();
-    expect(onMutated).not.toHaveBeenCalled();
+    const alert = await screen.findByTestId('worktree-strip-restore-error');
+    expect(alert.textContent).toBe('Restore failed: nope');
+    expect(screen.queryByTestId('worktree-strip-count')).toBeNull();
+    expect(onMutated).toHaveBeenCalledTimes(1);
+    confirmSpy.mockRestore();
+  });
+
+  it('Restore: a REJECTED mutation is caught and surfaced (no unhandled rejection)', async () => {
+    mockGitRestore.mockRejectedValue(new Error('transport down'));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+
+    fireEvent.click(screen.getByTestId('worktree-strip-restore'));
+    const alert = await screen.findByTestId('worktree-strip-restore-error');
+    expect(alert.textContent).toBe('Restore failed: transport down');
+    errorSpy.mockRestore();
+    confirmSpy.mockRestore();
+  });
+
+  it('Restore: a later successful restore clears a previous failure', async () => {
+    mockGitRestore.mockResolvedValueOnce({ success: false, error: 'nope' }).mockResolvedValueOnce({ success: true });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+
+    fireEvent.click(screen.getByTestId('worktree-strip-restore'));
+    await screen.findByTestId('worktree-strip-restore-error');
+    fireEvent.click(screen.getByTestId('worktree-strip-restore'));
+    await waitFor(() => expect(screen.queryByTestId('worktree-strip-restore-error')).toBeNull());
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
     confirmSpy.mockRestore();
   });
 

@@ -9,28 +9,36 @@
  * probes, and DB are the same injected seams the scheduler already took.
  */
 import type { DatabaseLike, LoggerLike } from '../types';
+import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
 import {
   parseVerificationTaskV1,
+  requireProvenRunbookEngaged,
   resolveTaskModality,
+  taskJsonHasInferredApp,
 } from '../../../../shared/types/visualVerification';
 import type {
+  MobileAppSpec,
+  MobileDriveEngine,
   RequestStatus,
   ResolvedVisualVerifyConfig,
+  VerificationExecutionMode,
   VerificationFailureClass,
+  VerificationFailureEvidence,
   VerificationModality,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationType,
 } from '../../../../shared/types/visualVerification';
 import type {
+  ExploreRunbookRecord,
   VerificationAgentRequest,
   VerificationAgentRunResult,
   VerificationAgentRunnerLike,
 } from './verificationAgentRunner';
 import { classifyVerificationFailure } from './failureClassifier';
 import type { VerifyCapabilityStore } from './capabilityStore';
-import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookStore';
-import { declineForRunbookStatus, taskDerivesEnvironment } from './bootstrapEligibility';
+import { isLearnedPinRecord, type VerifyRunbookStatusDetail, type VerifyRunbookStore } from './runbookStore';
+import { declineForRunbookStatus, taskDerivesEnvironment, taskHasRunnableSurface } from './bootstrapEligibility';
 import type { CapabilityBreakerFindingFn } from './verificationSchedulerContracts';
 import { raceWithAbort, verifyAgentSlot } from './verificationLeases';
 import type { LeaseHandle, ResourceLeasePool } from './verificationLeases';
@@ -38,11 +46,21 @@ import {
   NATIVE_CAPTURE_UNAVAILABLE_DETAIL,
   UNSUPPORTED_MODALITY_REASONS,
   VERIFY_UNPROVEN_SKIP_BLOCKED,
+  nothingToRunReason,
   skipReasonForRunbookDecline,
 } from './verificationSkipReasons';
 import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
+import { MobileTeardownHolds, trackSettle, type TrackedSettle } from './mobileTeardownHold';
+import { isBindableLeverName } from './runbookLevers';
+import { probeProjectSurface, tagInferredApp } from './projectSurfaceProbe';
 import type { VerificationRequestRow } from './verificationRequestRows';
 import type { TerminalDelivery } from './terminalDelivery';
+import {
+  classifyLearnedPinExit,
+  learnFromExploreSuccess,
+  learnedPromotionFinding,
+  type RunbookLearningFindingFn,
+} from './learnedRunbook';
 
 /** The §3.2 runbook-status resolver the scheduler is composed with (VerificationSchedulerDeps.runbookStatus). */
 export type RunbookStatusResolver = (
@@ -51,12 +69,121 @@ export type RunbookStatusResolver = (
   probePath?: string,
 ) => Promise<VerifyRunbookStatusDetail>;
 
+/**
+ * Gate (3)'s answer for a row that may run: HOW it runs
+ * (docs/proposals/runbook-optional-verification.md §A1). Chosen once per row
+ * before any lease and threaded unchanged to the runner request, the deadline
+ * and the terminal settlement.
+ */
+export interface AgentExecutionSelection {
+  mode: VerificationExecutionMode;
+  /**
+   * §A1.3 — explore only: the best registered record for (project, modality),
+   * any status or origin, whose levers bind the env and whose build/serve reach
+   * the agent as hints. `null` for pinned/legacy, and for an explore row with
+   * no record at all.
+   */
+  exploreRecord: ExploreRunbookRecord | null;
+}
+
+/**
+ * §A1 — may a request for `modality` run in EXPLORE mode at all, given the best
+ * registered record for (project, modality)?
+ *   - `web`, `mobile`: always — the harness owns the isolation (a leased port +
+ *     nonce + headless chromium; a fresh leased simulator + a harness-owned
+ *     install and attestation).
+ *   - `cdp-app`: only when `record` (any status, any origin) declares a
+ *     `dataDirEnv` lever the runner will actually EXPORT
+ *     ({@link isBindableLeverName} — the binder's own name rules). A desktop
+ *     app with no known way to confine its state dir is exactly §0's
+ *     "singleton collisions" failure (RS-8, F8), and a declared lever the
+ *     binder drops (`cyboflow_dir`, `HOME`, `VERIFY_PORT`) confines nothing:
+ *     parseVerifyRunbookV1 checks only that it is a string.
+ *   - `native-screen`: never — pinned-only. Window identity binds by app name
+ *     and can attest the user's own running instance (T-F7).
+ */
+export function isExploreEligible(
+  modality: VerificationModality,
+  record: Pick<ExploreRunbookRecord, 'runbook'> | null,
+): boolean {
+  if (modality === 'web' || modality === 'mobile') return true;
+  if (modality !== 'cdp-app') return false;
+  const dataDirEnv = record?.runbook.levers?.dataDirEnv;
+  return typeof dataDirEnv === 'string' && isBindableLeverName('dataDirEnv', dataDirEnv);
+}
+
+/**
+ * §A1.1 — the execution mode as a failure-evidence entry, stamped on every
+ * post-selection agent terminal that carries NO report (budget skip, timeout,
+ * abort, deployment error, a runner result without one). A report carries it
+ * as `report.provenance`, which the runner attaches; this is the fallback that
+ * keeps e.g. the explore-mode `build_failed`/timeout rate measurable from the
+ * rows alone. Evidence rather than `preflight_json` because a preflight blob
+ * the runner never produced would read as a check that ran; source `'runner'`
+ * with no `failure_class` of its own never feeds the §3.1 classifier.
+ */
+/**
+ * The capability-ledger key for an EFFECTIVE execution mode: the pin hash for a
+ * `pinned` run, `''` (the shared unpinned bucket, §A11) for `explore` and
+ * `legacy` — see {@link AgentEngine.capabilityRunbookKey}.
+ */
+export function capabilityKeyForMode(pinHash: string, mode: VerificationExecutionMode): string {
+  return mode === 'pinned' ? pinHash : '';
+}
+
+function executionModeEvidence(mode: VerificationExecutionMode): VerificationFailureEvidence {
+  return { source: 'runner', check: 'execution-mode', detail: mode };
+}
+
+/**
+ * The engine-only `task_json` key an A3 re-dispatch stamps
+ * (runbook-optional-verification.md §A3): the modality the row ran under
+ * before it was requeued. `parseVerificationTaskV1` drops unknown keys, so a
+ * composer can never set it — it is read with a raw `JSON.parse`, and its
+ * presence makes a second `wrong_environment` terminal.
+ */
+const REDISPATCHED_FROM_KEY = '_redispatchedFrom';
+
+/**
+ * The terminal message for a PINNED `wrong_environment` the engine declined to
+ * re-dispatch (§A3 terminal, §A4 pinned row) — see settleWrongEnvironment.
+ */
+const PINNED_WRONG_ENVIRONMENT_UNCORROBORATED =
+  'unverifiable on a pinned runbook with no harness corroboration (wrong-environment report not re-dispatched) — a proven recipe that could not be exercised is evidence against the change';
+
+/**
+ * The stored `task_json` as a RAW object — unknown keys KEPT, which is the
+ * point: {@link REDISPATCHED_FROM_KEY} is exactly such a key, and the requeue
+ * must round-trip everything else the row carried. `null` for absent,
+ * unparseable or non-object content (a legacy intent-only row).
+ */
+function parseRawTaskObject(taskJson: string | null): Record<string, unknown> | null {
+  if (taskJson === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(taskJson);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** What {@link AgentEngine} is composed over — the scheduler passes its own deps + helpers through. */
 export interface AgentEngineDeps {
   db: DatabaseLike;
   logger?: LoggerLike;
   /** The scheduler's resolved config (agentSlots, simulatorDevices). */
   config: ResolvedVisualVerifyConfig;
+  /**
+   * The scheduler's LIVE config reader (runbook-optional-verification.md §A1,
+   * F12). `config` above is a boot snapshot, so the kill switch and the explore
+   * deadline floor are read through this once per row — a Settings flip binds
+   * the next request. Absent/null ⇒ `config`.
+   */
+  liveConfig?: (() => ResolvedVisualVerifyConfig) | null;
+  /** The scheduler's drain nudge — called once an A3 re-dispatch has released every lease. */
+  nudge: () => void;
   /** The SHARED lease pool — agent slots, ports, and the screen lease are the same names the drain leases. */
   leasePool: ResourceLeasePool;
   artifactsDirResolver: (runId: string) => string;
@@ -74,6 +201,12 @@ export interface AgentEngineDeps {
   mobileToolchainProbe?: () => Promise<boolean>;
   runbookStatus: RunbookStatusResolver;
   runbookStore?: VerifyRunbookStore;
+  /**
+   * §A5 — files the non-blocking "recipe learned" / "learned recipe promoted" /
+   * "suggested runbook entry" notices (verdictDelivery's
+   * `createRunbookLearningFinding`). Absent ⇒ learning still happens, silently.
+   */
+  learningFinding?: RunbookLearningFindingFn;
   /** The terminal-write + delivery chokepoint every exit of the engine goes through. */
   delivery: TerminalDelivery;
   /** The scheduler's in-flight AbortController registry, SHARED BY REFERENCE (cancelForRun reaches in). */
@@ -90,12 +223,16 @@ export interface AgentEngineDeps {
   isProjectBudgetExhausted: (projectId: number) => boolean;
   incrementJudgeCallsUsed: (id: string) => void;
   portFromLease: (name: string | null) => number | null;
+  /** X-1 — the hard bound on holding a detached mobile runner's lease; defaults to `MOBILE_TEARDOWN_HOLD_BOUND_MS` (mobileTeardownHold.ts). */
+  mobileTeardownHoldMs?: number;
 }
 
 /**
  * The verification-AGENT engine (redesign §5.4/§5.7): for a row the drain has
  * classified as agent-stamped, evaluate the phase-0 gates (modality support,
- * capability breaker, runbook status), lease a bounded agent slot (+ the screen
+ * capability breaker, and — since runbook-optional verification — the
+ * execution-mode selector that replaced the runbook-status skip; see
+ * {@link AgentExecutionSelection}), lease a bounded agent slot (+ the screen
  * lease for native-screen), deploy the verification agent through the injected
  * runner under the per-row deadline, settle the terminal outcome through the
  * delivery chokepoint, and write back the runbook proof + capability ledger.
@@ -107,6 +244,8 @@ export class AgentEngine {
   private readonly db: DatabaseLike;
   private readonly logger?: LoggerLike;
   private readonly config: ResolvedVisualVerifyConfig;
+  private readonly liveConfig: (() => ResolvedVisualVerifyConfig) | null;
+  private readonly nudge: () => void;
   private readonly leasePool: ResourceLeasePool;
   private readonly artifactsDirResolver: (runId: string) => string;
   private readonly agentRunner?: VerificationAgentRunnerLike;
@@ -119,6 +258,7 @@ export class AgentEngine {
   private readonly mobileToolchainProbe?: () => Promise<boolean>;
   private readonly runbookStatus: RunbookStatusResolver;
   private readonly runbookStore?: VerifyRunbookStore;
+  private readonly learningFinding?: RunbookLearningFindingFn;
   private readonly delivery: TerminalDelivery;
   private readonly inFlight: Map<string, AbortController>;
   private readonly agentGateColumnsForRow: AgentEngineDeps['agentGateColumnsForRow'];
@@ -128,11 +268,15 @@ export class AgentEngine {
   private readonly isProjectBudgetExhausted: (projectId: number) => boolean;
   private readonly incrementJudgeCallsUsed: (id: string) => void;
   private readonly portFromLease: (name: string | null) => number | null;
+  /** X-1 — mobile rows whose detached runner is still tearing down, each holding its simulator lease. */
+  private readonly teardownHolds: MobileTeardownHolds;
 
   constructor(deps: AgentEngineDeps) {
     this.db = deps.db;
     this.logger = deps.logger;
     this.config = deps.config;
+    this.liveConfig = deps.liveConfig ?? null;
+    this.nudge = deps.nudge;
     this.leasePool = deps.leasePool;
     this.artifactsDirResolver = deps.artifactsDirResolver;
     this.agentRunner = deps.agentRunner;
@@ -145,6 +289,7 @@ export class AgentEngine {
     this.mobileToolchainProbe = deps.mobileToolchainProbe;
     this.runbookStatus = deps.runbookStatus;
     this.runbookStore = deps.runbookStore;
+    this.learningFinding = deps.learningFinding;
     this.delivery = deps.delivery;
     this.inFlight = deps.inFlight;
     this.agentGateColumnsForRow = deps.agentGateColumnsForRow;
@@ -154,6 +299,10 @@ export class AgentEngine {
     this.isProjectBudgetExhausted = deps.isProjectBudgetExhausted;
     this.incrementJudgeCallsUsed = deps.incrementJudgeCallsUsed;
     this.portFromLease = deps.portFromLease;
+    this.teardownHolds = new MobileTeardownHolds({
+      ...(deps.mobileTeardownHoldMs !== undefined ? { boundMs: deps.mobileTeardownHoldMs } : {}),
+      ...(deps.logger !== undefined ? { logger: deps.logger } : {}),
+    });
   }
 
   /** Read the request's `task_json` / `snapshot_sha` (migration 078); fail-soft to nulls. */
@@ -208,13 +357,21 @@ export class AgentEngine {
    * derive→prove→persist loop would be unable to clear it.
    *
    * `''` — migration 095's column default — is the genuinely-UNPINNED bucket:
-   * degenerate pre-live requests that derive no environment, and every legacy
-   * row from before 096. It is a real key, not a fallback for "we could not be
-   * bothered to look": those requests share a capability story precisely
-   * because none of them runs project-authored commands.
+   * degenerate pre-live requests that derive no environment, every legacy row
+   * from before 096, and every EXPLORE run
+   * (docs/proposals/runbook-optional-verification.md §A1/§A11). It is a real
+   * key, not a fallback for "we could not be bothered to look": those requests
+   * share a capability story precisely because none of them runs a pinned
+   * revision's commands. The key therefore follows the EFFECTIVE execution
+   * mode, not the pin column: an explore run whose stale pin stopped reading
+   * proven runs none of that revision's commands, so it neither consults the
+   * dead revision's breaker nor feeds it — it lands in `''` with every other
+   * explore run. Gate (2) reads with the mode {@link evaluateAgentGates}
+   * resolves BEFORE it, and settlement writes with the mode the row ran under,
+   * which is the same answer, so the read and the write can never disagree.
    */
-  private capabilityRunbookKey(requestId: string): string {
-    return this.runbookPinForRow(requestId).hash ?? '';
+  private capabilityRunbookKey(requestId: string, mode: VerificationExecutionMode): string {
+    return capabilityKeyForMode(this.runbookPinForRow(requestId).hash ?? '', mode);
   }
 
   /**
@@ -256,8 +413,10 @@ export class AgentEngine {
 
   /**
    * True when the task implies the agent must BIND a dev/preview server on the leased
-   * port (VERIFY_PORT rides only then). A `serve.cmd` means the agent stands one up;
-   * a localhost `target.url` names an already-running server it points at (no bind).
+   * port (VERIFY_PORT rides only then — for a pinned/legacy request; an EXPLORE
+   * web/cdp-app request always gets it, runbook-optional-verification.md §A1.1).
+   * A `serve.cmd` means the agent stands one up; a localhost `target.url` names an
+   * already-running server it points at (no bind).
    */
   private taskImpliesServer(task: VerificationTaskV1): boolean {
     if (task.serve && typeof task.serve.cmd === 'string' && task.serve.cmd.trim().length > 0) {
@@ -303,10 +462,11 @@ export class AgentEngine {
    * The three PRE-LEASE gates of phase 0
    * (docs/proposals/verification-setup-flow.md §3.2/§3.3/§3.4), evaluated in
    * precedence order. Returns the skip REASON when the request must not run, or
-   * `null` to let it proceed. It never MUTATES the request row (it reads the
-   * capability ledger, the injected runbook-status thunk, and — for
-   * `native-screen` only — the injected host-capability probe; the sole write is
-   * the ledger's `markUnsupported`).
+   * the {@link AgentExecutionSelection} it runs under
+   * (docs/proposals/runbook-optional-verification.md §A1). It never MUTATES the
+   * request row (it reads the capability ledger, the injected runbook-status
+   * thunk, the runbook store, and — for `native-screen` only — the injected
+   * host-capability probe; the sole write is the ledger's `markUnsupported`).
    *
    *  1. UNSUPPORTED MODALITY (§3.3/§4). A modality with no executable path on
    *     THIS HOST — the agent path never consults `verify_type` at all
@@ -352,14 +512,40 @@ export class AgentEngine {
    *     the ONLY shape that has ever actually passed in production. A
    *     `setup_proof` row is exempt too (§3.6): proving the runbook is how a
    *     project stops being unproven, so gating it would deadlock the bootstrap.
+   *
+   *     RUNBOOKS ACCELERATE, NEVER GATE (runbook-optional-verification.md §A1).
+   *     The §1 diagnosis above was cyboflow verifying ITSELF — a desktop app
+   *     with a singleton lock — and the production record since (§0: 47 of 101
+   *     requests skipped "no proven runbook", zero ordinary build/serve passes)
+   *     says the gate cost more than the guessing it retired. So (3) is now a
+   *     SELECTOR:
+   *       - a proof row ⇒ `'pinned'`, exempt from 3a and 3 as before;
+   *       - KILL SWITCH OFF + a LEARNED PIN (§A5: the row's pin names an
+   *         unproven draft of origin `'learned'`) ⇒ `'pinned'`: the row is that
+   *         draft's promotion proof. Not an exemption — with the switch on the
+   *         caller never reports one, and the row is gated as below;
+   *       - KILL SWITCH OFF + an explore-eligible modality
+   *         ({@link isExploreEligible}) + no usable pin (none, or one whose
+   *         record no longer reads `proven` in the probe tree) ⇒ `'explore'`:
+   *         gates 3a and 3 do not apply, and a stale pin is dropped from the
+   *         request;
+   *       - otherwise (the switch is on — {@link requireProvenRunbookEngaged},
+   *         read LIVE by the caller — the modality cannot explore, or the pin
+   *         still reads proven) ⇒ today's 3a + 3 byte for byte, and a row that
+   *         passes them runs `'pinned'` when it carries a pin, else `'legacy'`.
+   *         A usable pin goes through 3a too: "pinned" is today's contract
+   *         unchanged, and only explore is exempt from it.
    */
   private async evaluateAgentGates(
     row: VerificationRequestRow,
     task: VerificationTaskV1,
     modality: VerificationModality,
     setupProof: boolean,
-    /** This row's ledger key — see {@link capabilityRunbookKey}. */
-    runbookHash: string,
+    /**
+     * The row's own pin COLUMN (`''` when unpinned). NOT the ledger key: the key
+     * is derived from it and the effective mode below — see {@link capabilityRunbookKey}.
+     */
+    pinHash: string,
     /**
      * Migration 107 — a LANE-DRIVEN bootstrap proof. Exempt from gate (3) on the
      * identical §3.6 reasoning that exempts `setupProof`: this request exists to
@@ -370,7 +556,45 @@ export class AgentEngine {
      * budget still charges it.
      */
     bootstrapProof: boolean,
-  ): Promise<string | null> {
+    /**
+     * The runbook-optional KILL SWITCH ({@link requireProvenRunbookEngaged}),
+     * read ONCE for this row from the live config by the caller.
+     */
+    requireProvenRunbook: boolean,
+    /**
+     * §A5 — the row's pin names an unproven LEARNED draft
+     * ({@link isLearnedPinRecord}); resolved by the caller only with the
+     * switch off. Such a row is the draft's promotion proof and runs PINNED
+     * (§A1's table: "a learned pin"). This is the selector's answer, not a
+     * gate-3 EXEMPTION: with the switch on the caller never sets it, so the
+     * row meets today's gate 3 exactly like any unproven pin.
+     */
+    learnedPin = false,
+  ): Promise<string | AgentExecutionSelection> {
+    // (0) Resolve the EFFECTIVE mode's explore half first (§A1/§A11): the
+    // ledger key of gates (1)/(2) depends on it. A proof row is always pinned —
+    // it executes the draft it exists to prove — and so is a learned pin.
+    const pinned: AgentExecutionSelection = { mode: 'pinned', exploreRecord: null };
+    const hasPin = pinHash.length > 0;
+    // The pin's status, when the explore branch already had to read it — reused
+    // below so one row costs one probe of its tree, as before.
+    let pinStatus: VerifyRunbookStatusDetail | null = null;
+    let explore: AgentExecutionSelection | null = null;
+    if (!setupProof && !bootstrapProof && !requireProvenRunbook && !learnedPin) {
+      const record = modality === 'native-screen' ? null : this.exploreRecordFor(row.project_id, modality);
+      if (isExploreEligible(modality, record)) {
+        // A pin that drifted (or was demoted) since enqueue explores instead of
+        // skipping. One still reading proven is NOT selected here: "pinned:
+        // today's contract, unchanged" (§A1) includes gate 3a, so it falls
+        // through to the path below exactly as with the switch on.
+        if (hasPin) pinStatus = await this.runbookStatusForRow(row, modality);
+        if (pinStatus?.status !== 'proven') explore = { mode: 'explore', exploreRecord: record };
+      }
+    }
+    // Only an effective PINNED run keys on its pin; explore (a stale pin
+    // included) and legacy share `''` — see capabilityRunbookKey.
+    const runbookHash = capabilityKeyForMode(pinHash, explore?.mode ?? (hasPin ? 'pinned' : 'legacy'));
+
     // (1) Modalities with no executable path on the agent engine (§3.3), plus the
     // probe-conditional native-screen lane (§4).
     const unsupportedDetail = await this.unsupportedModalityDetail(modality);
@@ -387,19 +611,34 @@ export class AgentEngine {
       return `verification suppressed for ${modality}: ${suppression.reason}`;
     }
 
-    // (3) The §3.2 degrade path.
-    if (setupProof || bootstrapProof) return null;
+    // (3) The execution-mode selector (runbook-optional-verification.md §A1),
+    // whose explore half step (0) already resolved.
+    if (setupProof || bootstrapProof) return pinned;
+    if (!requireProvenRunbook && learnedPin) return pinned;
+    if (explore !== null) return explore;
+
+    // The §3.2 degrade path, unchanged — the kill switch is on, the modality
+    // cannot explore (native-screen; cdp-app with no data-dir lever), or the row
+    // carries a pin that still reads proven.
+    const runsAs: AgentExecutionSelection = hasPin ? pinned : { mode: 'legacy', exploreRecord: null };
+    // (3a) A COMPOSED web/cdp-app task with no surface at all can never run —
+    // the degenerate exemption below would wave it through to an agent that has
+    // nothing to open (see taskHasRunnableSurface). The legacy intent-only row
+    // (no task_json) keeps its own contract, and native-screen/mobile have
+    // their own shapes (a running app window; the `app` block + mobile gates).
+    // Explore bypasses it on purpose: finding what to stand up IS explore's job.
+    if (
+      (modality === 'web' || modality === 'cdp-app') &&
+      this.agentColumnsForRow(row.id).taskJson !== null &&
+      !taskHasRunnableSurface(task)
+    ) {
+      return nothingToRunReason(modality, task.modality);
+    }
     // ONE definition of "derives an environment", shared with the bootstrap
     // preflight — see bootstrapEligibility.ts for why they must not be two.
-    if (!taskDerivesEnvironment(task)) return null;
-    // Probe the tree this request would actually execute in — the run's
-    // worktree, the SAME ladder resolveProvenRunbook uses, so the gate and the
-    // enqueue-time injection can no longer disagree about which tree they are
-    // describing. `undefined` (a run with no worktree row, or an unreadable one)
-    // lets the thunk fall back to the project root, which is the old behavior.
-    const probePath = this.worktreePathForRun(row.run_id) ?? undefined;
-    const runbook = await this.runbookStatus(row.project_id, modality, probePath);
-    if (runbook.status === 'proven') return null;
+    if (!taskDerivesEnvironment(task)) return runsAs;
+    const runbook = pinStatus ?? (await this.runbookStatusForRow(row, modality));
+    if (runbook.status === 'proven') return runsAs;
     // NOT all "no proven runbook" are the same situation, and the remedies are
     // mutually exclusive (§4): telling a human to run setup on a branch that is
     // merely missing the file would overwrite the proven record every other
@@ -408,15 +647,43 @@ export class AgentEngine {
   }
 
   /**
+   * The §3.2 runbook status for this row's modality, probed in the tree the
+   * request would actually execute in — the run's worktree, the SAME ladder
+   * resolveProvenRunbook uses, so the gate and the enqueue-time injection can
+   * no longer disagree about which tree they are describing. `undefined` (a run
+   * with no worktree row, or an unreadable one) lets the thunk fall back to the
+   * project root, which is the old behavior.
+   */
+  private runbookStatusForRow(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+  ): Promise<VerifyRunbookStatusDetail> {
+    return this.runbookStatus(row.project_id, modality, this.worktreePathForRun(row.run_id) ?? undefined);
+  }
+
+  /**
+   * §A1.3 — the best registered record for (project, modality) as an explore
+   * lever source: whatever `getCurrent` holds, proven or `unproven-draft`, of
+   * any origin (the table's primary key allows one record per pair, so "best"
+   * is "the one"). `null` with no store wired or no record; `getCurrent` is
+   * fail-soft itself.
+   */
+  private exploreRecordFor(projectId: number, modality: VerificationModality): ExploreRunbookRecord | null {
+    const current = this.runbookStore?.getCurrent(projectId, modality) ?? null;
+    if (current === null) return null;
+    return { hash: current.hash, status: current.status, origin: current.origin, runbook: current.runbook };
+  }
+
+  /**
    * Agent-engine sibling of processRow (§5.4/§4). Acquires, in order: ONE
    * {@link verifyAgentSlot} from the bounded pool, the count-1
    * {@link VERIFY_SCREEN_LEASE} when (and only when) the row's modality is
    * `native-screen`, and one pooled port (always — the bundled driver needs a
    * CDP port even for a non-serving task; VERIFY_PORT is exported only when the
-   * task implies a server). Then transitions the row leased→running and detaches
-   * the deployment work. Leaves the row 'queued' (LANE never blocks) when ANY of
-   * those is held, and resolves 'skipped' (fail-open) when the runner is not
-   * configured.
+   * task implies a server, or the row explores — §A1.1). Then transitions the row
+   * leased→running and detaches the deployment work. Leaves the row 'queued'
+   * (LANE never blocks) when ANY of those is held, and resolves 'skipped'
+   * (fail-open) when the runner is not configured.
    *
    * LEASE ORDER IS DELIBERATE: slot → screen → port, cheapest-to-reacquire last,
    * with every earlier lease released on a later miss. The screen lease sits
@@ -449,6 +716,16 @@ export class AgentEngine {
       );
       return { work: null };
     }
+    // X-1 — this request id's previous attempt is still tearing down its
+    // simulator (a same-id §A5 requeue): leasing it now would share its
+    // request dir with a runner that is about to delete it. Stay queued; the
+    // hold nudges the drain when that teardown settles.
+    if (this.teardownHolds.isHeld(row.id)) {
+      this.logger?.debug('[VerificationScheduler] previous attempt still tearing down; leaving queued', {
+        requestId: row.id,
+      });
+      return { work: null };
+    }
 
     const task = this.taskForAgentRow(row.id, input);
 
@@ -460,23 +737,34 @@ export class AgentEngine {
     const gate = this.agentGateColumnsForRow(row.id);
     const modality =
       gate.modality ?? resolveTaskModality(row.verify_type as VerificationType, task);
-    const gateSkip = await this.evaluateAgentGates(
+    // ONE live-config read per row (runbook-optional-verification.md §A1, F12):
+    // the kill switch that picks the mode and the explore floor that sizes its
+    // deadline come from the same snapshot, never from the boot-time `config`.
+    const live = this.liveConfig?.() ?? this.config;
+    // §A5 — a row pinned to an unproven LEARNED draft is that draft's
+    // promotion proof. Resolved ONCE here, and only with the kill switch off:
+    // with it on no learned pin is honoured and the row is gated as before.
+    const learnedPin =
+      !gate.setupProof && !gate.bootstrapProof && !requireProvenRunbookEngaged(live) && this.isLearnedPin(row, modality);
+    const gateResult = await this.evaluateAgentGates(
       row,
       task,
       modality,
       gate.setupProof,
-      this.capabilityRunbookKey(row.id),
+      this.runbookPinForRow(row.id).hash ?? '',
       gate.bootstrapProof,
+      requireProvenRunbookEngaged(live),
+      learnedPin,
     );
-    if (gateSkip !== null) {
+    if (typeof gateResult === 'string') {
       await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         {
-          error: gateSkip,
+          error: gateResult,
           captureOrigin: 'agent',
           failureClass: 'env',
-          failureEvidence: [{ source: 'runner', check: 'pre-lease-gate', detail: gateSkip }],
+          failureEvidence: [{ source: 'runner', check: 'pre-lease-gate', detail: gateResult }],
         },
         undefined,
         [],
@@ -484,6 +772,7 @@ export class AgentEngine {
       );
       return { work: null };
     }
+    const selection = gateResult;
 
     const servesPort = this.taskImpliesServer(task);
 
@@ -505,6 +794,10 @@ export class AgentEngine {
       leasePool: this.leasePool,
       modality,
       mobileSimSlots: this.config.mobileSimSlots,
+      // §B3 — the SAME live snapshot as every other per-row knob: the lease
+      // decision and the rung the runner drives must read one value, or a
+      // Settings flip lets two rows open Xcode sessions side by side.
+      mobileDriveEngine: live.mobileDriveEngine,
       devServerPorts: this.config.devServerPorts,
       portFromLease: (name) => this.portFromLease(name),
       requestId: row.id,
@@ -523,7 +816,11 @@ export class AgentEngine {
       await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
-        { error: 'could not resolve leased verify port', captureOrigin: 'agent' },
+        {
+          error: 'could not resolve leased verify port',
+          captureOrigin: 'agent',
+          failureEvidence: [executionModeEvidence(selection.mode)],
+        },
         undefined,
         [],
         input,
@@ -562,8 +859,24 @@ export class AgentEngine {
         modality,
         gate.setupProof,
         gate.bootstrapProof,
+        selection,
+        live.exploreDeadlineFloorMs,
+        learnedPin,
+        live.mobileDriveEngine,
       ),
     };
+  }
+
+  /**
+   * §A5 — does this row's pin name an unproven LEARNED draft? Read by hash
+   * through the store (`getByHash` carries `origin`), so a draft discarded or
+   * re-registered since enqueue no longer counts and the row falls to the
+   * ordinary stale-pin handling. `false` with no store or no pin.
+   */
+  private isLearnedPin(row: VerificationRequestRow, modality: VerificationModality): boolean {
+    const hash = this.runbookPinForRow(row.id).hash;
+    if (hash === null || !this.runbookStore) return false;
+    return isLearnedPinRecord(this.runbookStore.getByHash(row.project_id, modality, hash));
   }
 
   /**
@@ -615,6 +928,14 @@ export class AgentEngine {
    * DEPLOYED (§3.6); the terminal is run through the conservative §3.1 classifier
    * and persisted with its evidence; and the (project, modality) capability
    * ledger is fed the classified outcome (§3.4 breaker).
+   *
+   * RUNBOOK-OPTIONAL (docs/proposals/runbook-optional-verification.md §A1.1,
+   * §A3): the gate's {@link AgentExecutionSelection} shapes the request (an
+   * explore row drops any pin, carries its lever-source record, always exports
+   * `VERIFY_PORT` on web/cdp-app, and gets the explore deadline floor), every
+   * report-less terminal records the mode as evidence, and an A3 re-dispatch
+   * returns the row to the queue instead of writing a terminal — the drain is
+   * nudged only after the `finally` below has released every lease.
    */
   private async runAgentChosen(
     row: VerificationRequestRow,
@@ -641,9 +962,21 @@ export class AgentEngine {
      * an unproven draft) and on proof eligibility at settle time.
      */
     bootstrapProof: boolean,
+    /** Gate (3)'s mode + explore lever source (§A1). */
+    selection: AgentExecutionSelection,
+    /** The live `exploreDeadlineFloorMs`, applied only when `selection.mode` is `'explore'` (§A1.1). */
+    exploreFloorMs: number,
+    /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
+    learnedPin = false,
+    /** §B3 — the live engine the lease decision used; handed to the runner so it drives with the same value. */
+    mobileDriveEngine?: MobileDriveEngine,
   ): Promise<void> {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
+    const explore = selection.mode === 'explore';
+    const modeEvidence = [executionModeEvidence(selection.mode)];
+    // Set by settleAgentTerminal when the row went back to the queue (§A3).
+    let requeued = false;
 
     // ONE evaluation, reused by the abort timer and the runner request, so the
     // mobile floor's warn (see agentDeadlineMs) fires once per deployment.
@@ -653,6 +986,7 @@ export class AgentEngine {
       defaultMs: this.agentRequestTimeoutMs,
       ceilingMs: this.agentRequestCeilingMs,
       mobileFloorMs: this.config.mobileDeadlineFloorMs,
+      ...(explore ? { exploreFloorMs } : {}),
       logger: this.logger,
     });
     let timedOut = false;
@@ -669,6 +1003,9 @@ export class AgentEngine {
     }
 
     let batchLease: LeaseHandle | null = null;
+    // X-1 — the runner's own settlement, observed so the `finally` can tell a
+    // detached (still-tearing-down) mobile runner from one that finished.
+    let runner: TrackedSettle | null = null;
     try {
       // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
       // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
@@ -680,7 +1017,11 @@ export class AgentEngine {
         await this.delivery.markTerminalAndDeliver(
           row,
           'skipped',
-          { error: 'per-project visual-verify budget exhausted', captureOrigin: 'agent' },
+          {
+            error: 'per-project visual-verify budget exhausted',
+            captureOrigin: 'agent',
+            failureEvidence: modeEvidence,
+          },
           undefined,
           [],
           input,
@@ -695,7 +1036,11 @@ export class AgentEngine {
         await this.delivery.markTerminalAndDeliver(
           row,
           'timeout',
-          { error: timedOut ? 'request timed out' : 'aborted', captureOrigin: 'agent' },
+          {
+            error: timedOut ? 'request timed out' : 'aborted',
+            captureOrigin: 'agent',
+            failureEvidence: modeEvidence,
+          },
           undefined,
           [],
           input,
@@ -708,7 +1053,7 @@ export class AgentEngine {
         await this.delivery.markTerminalAndDeliver(
           row,
           'skipped',
-          { error: 'run worktree path unavailable', captureOrigin: 'agent' },
+          { error: 'run worktree path unavailable', captureOrigin: 'agent', failureEvidence: modeEvidence },
           undefined,
           [],
           input,
@@ -721,7 +1066,12 @@ export class AgentEngine {
       // provisions anything. Read here rather than in processAgentRow so a
       // recovery/replay path that re-enters this method always re-reads the
       // authoritative row value.
-      const pin = this.runbookPinForRow(row.id);
+      //
+      // An EXPLORE row carries no pin by definition (§A1): gate (3) chose
+      // explore because the row had none, or because its pin no longer reads
+      // proven — and handing the runner that stale pin would only earn a
+      // runbook/sha mismatch skip, the exact outcome explore exists to replace.
+      const pin = explore ? { hash: null, version: null } : this.runbookPinForRow(row.id);
 
       const req: VerificationAgentRequest = {
         runId: row.run_id,
@@ -732,6 +1082,15 @@ export class AgentEngine {
         snapshotSha,
         ...(pin.hash !== null ? { runbookHash: pin.hash } : {}),
         ...(pin.version !== null ? { runbookLocalVersion: pin.version } : {}),
+        // §A1 — how the runner runs it, and (explore only) the record whose
+        // levers bind the env and whose build/serve are hints (§A1.3).
+        executionMode: selection.mode,
+        ...(explore ? { exploreRecord: selection.exploreRecord } : {}),
+        // §A2 — an app block the surface probe INFERRED: the runner reads a
+        // bundle-id / scheme / dependency-step failure on it as unverifiable.
+        ...(modality === 'mobile' && taskJsonHasInferredApp(this.agentColumnsForRow(row.id).taskJson)
+          ? { appInferred: true }
+          : {}),
         // §5.3 — which half of the runner's pin check applies. A proof run may
         // legitimately execute an 'unproven-draft' record (proving it is the
         // point) but must pin to the EXACT version it was enqueued against;
@@ -745,7 +1104,10 @@ export class AgentEngine {
         // therefore "is this a proof run", not "is this the setup flow".
         ...(setupProof || bootstrapProof ? { setupProof: true } : {}),
         artifactsDir: this.artifactsDirResolver(row.run_id),
-        verifyPort: servesPort ? leasedPort : null,
+        // §A1.1 — an explore web/cdp-app agent may have to stand the app up
+        // however it can, so it always gets the leased port; pinned/legacy keep
+        // exporting it only when the task implies a server.
+        verifyPort: servesPort || (explore && (modality === 'web' || modality === 'cdp-app')) ? leasedPort : null,
         verifyDriverPort: leasedPort === null ? null : leasedPort + 1,
         // Thread the effective deadline into the query boundary so its internal
         // deadline matches this method's abort timer — a task-supplied timeoutMs
@@ -758,13 +1120,16 @@ export class AgentEngine {
         // shape alone could disagree with the one that just decided whether this
         // request may touch the screen at all.
         modality,
+        ...(modality === 'mobile' && mobileDriveEngine !== undefined ? { mobileDriveEngine } : {}),
         signal: controller.signal,
       };
 
       // ABORT-BOUNDED (R1 #1a): a runner that never settles can no more hang the
       // drain than a hung capture — race it against the deadline/cancel signal.
+      const running = this.agentRunner!.run(req);
+      runner = trackSettle(running);
       const result = await raceWithAbort(
-        this.agentRunner!.run(req),
+        running,
         controller.signal,
         'agent',
         this.logger,
@@ -786,12 +1151,20 @@ export class AgentEngine {
       }
 
       if (controller.signal.aborted) {
+        // §A5 — a learned recipe that ran out the deadline did not stand the
+        // deliverable up: discard it and re-dispatch the row once in explore.
+        // A cancel is not a verdict on the recipe and keeps its own path.
+        if (learnedPin && timedOut && (await this.exitLearnedPin(row, modality, 'timeout')) !== 'declined') {
+          requeued = true;
+          return;
+        }
         await this.delivery.markTerminalAndDeliver(
           row,
           'timeout',
           {
             error: timedOut ? 'request timed out' : 'aborted',
             captureOrigin: 'agent',
+            failureEvidence: modeEvidence,
             ...(result.preflight ? { preflight: result.preflight } : {}),
           },
           undefined,
@@ -801,7 +1174,7 @@ export class AgentEngine {
         return;
       }
 
-      await this.settleAgentTerminal(
+      const settled = await this.settleAgentTerminal(
         row,
         input,
         result,
@@ -809,7 +1182,11 @@ export class AgentEngine {
         setupProof,
         snapshotSha,
         bootstrapProof,
+        task,
+        selection.mode,
+        learnedPin,
       );
+      requeued = settled === 'requeued';
     } catch (err) {
       const aborted = controller.signal.aborted;
       controller.abort();
@@ -831,10 +1208,19 @@ export class AgentEngine {
       if (timedOut && !setupProof) {
         this.incrementJudgeCallsUsed(row.id);
       }
+      // §A5 — the same learned-recipe deadline exit as the post-race branch.
+      if (learnedPin && timedOut && (await this.exitLearnedPin(row, modality, 'timeout')) !== 'declined') {
+        requeued = true;
+        return;
+      }
       await this.delivery.markTerminalAndDeliver(
         row,
         aborted ? 'timeout' : 'skipped',
-        { error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message, captureOrigin: 'agent' },
+        {
+          error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message,
+          captureOrigin: 'agent',
+          failureEvidence: modeEvidence,
+        },
         undefined,
         [],
         input,
@@ -848,10 +1234,20 @@ export class AgentEngine {
       if (portLease !== null && leasedPort !== null) {
         await this.releaseOrQuarantinePort(portLease, leasedPort);
       }
-      // The mobile slot releases UNCONDITIONALLY too, and for the screen lease's
-      // reason: the per-request simulator is created and destroyed inside the
-      // runner, so nothing this deployment leaves behind can occupy the slot.
-      mobileLease?.release();
+      // The mobile slot is created and destroyed inside the runner, so it frees
+      // once the RUNNER is done with it — which, after an abort detached it, is
+      // later than now (X-1): hand it to a teardown hold that releases it (and
+      // nudges) when the runner settles, bounded. Otherwise release it here.
+      let heldForTeardown = false;
+      if (mobileLease !== null && runner !== null && !runner.isSettled()) {
+        heldForTeardown = true;
+        this.teardownHolds.hold(row.id, runner, () => {
+          mobileLease.release();
+          this.nudge();
+        });
+      } else {
+        mobileLease?.release();
+      }
       // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
       // port (which a leaked dev server can keep genuinely occupied past
       // teardown), the display is not a resource this deployment can leave dirty
@@ -859,6 +1255,11 @@ export class AgentEngine {
       // for the whole deployment, released here in the same chain as the rest.
       screenLease?.release();
       agentLease.release();
+      // §A3 — only now, with every lease back in the pool and the in-flight
+      // controller gone, can the requeued row be drained again; nudging before
+      // the release would find its own slot/port/simulator still held. A held
+      // mobile row is nudged by its teardown hold instead (X-1).
+      if (requeued && !heldForTeardown) this.nudge();
     }
   }
 
@@ -903,6 +1304,14 @@ export class AgentEngine {
    * PHASE 2 adds the ENGINE-ENFORCED PROOF (§5.3) at the end: a `setup_proof`
    * request that reached `'passed'` while carrying a pin is the ONLY transition
    * into a `'proven'` runbook. See {@link recordRunbookProof}.
+   *
+   * THE A3 CHANNEL COMES FIRST (docs/proposals/runbook-optional-verification.md
+   * §A3). A `wrong_environment` result is not a verdict on the deliverable, so
+   * it must never reach the classifier, the env conversion, the advancing-skip
+   * guard, delivery or the ledger as one — see {@link settleWrongEnvironment}.
+   * Resolves `'requeued'` when the row went back to the queue (no terminal was
+   * written; the caller nudges the drain after releasing its leases), else
+   * `'settled'`.
    */
   private async settleAgentTerminal(
     row: VerificationRequestRow,
@@ -912,15 +1321,43 @@ export class AgentEngine {
     setupProof: boolean,
     snapshotSha: string | null,
     /** Migration 107 — see {@link VerificationScheduler.processAgentRow}. */
-    bootstrapProof: boolean = false,
-  ): Promise<void> {
+    bootstrapProof: boolean,
+    /** The task the agent ran — the A3 mobile re-dispatch falls back to its `app`. */
+    task: VerificationTaskV1,
+    /** Gate (3)'s mode for this row (§A1). */
+    mode: VerificationExecutionMode,
+    /** §A5 — the row is a learned draft's promotion proof (see {@link isLearnedPin}). */
+    learnedPin = false,
+  ): Promise<'settled' | 'requeued'> {
+    // §A5 LEARNED-PIN EXITS, ahead of the A3 channel: for a promotion proof,
+    // a `wrong_environment` is just one more way the recipe failed to stand the
+    // deliverable up. `'discard'` drops the draft and re-dispatches the row once
+    // in explore (the budget A3 uses — see exitLearnedPin); `'promote'`,
+    // `'keep'` and `'deliver'` settle through the ordinary path below, which
+    // flips a passing proof to proven before it delivers.
+    if (learnedPin && classifyLearnedPinExit(result) === 'discard') {
+      const exit = await this.exitLearnedPin(row, modality, this.learnedFailureDetail(result));
+      if (exit !== 'declined') return exit === 'requeued' ? 'requeued' : 'settled';
+    }
+    if (result.redispatch !== undefined) {
+      return this.settleWrongEnvironment(row, input, task, result, result.redispatch, modality, mode, {
+        setupProof,
+        bootstrapProof,
+        snapshotSha,
+      });
+    }
+
     const isTerminalFailure =
       result.status === 'failed' || result.status === 'timeout' || result.status === 'skipped';
     const classified = isTerminalFailure
       ? classifyVerificationFailure({
           preflight: result.preflight ?? null,
           runnerStatus: result.status,
-          reportOutcome: result.report?.outcome ?? null,
+          // A FOREIGN surface (§A1.2) means the agent judged something that is
+          // not the deliverable, so its `fail` must not reach the classifier's
+          // snapshot+fail → `'deliverable'` rule: withholding the outcome books
+          // it `'ambiguous'` — blocking, but never charged to the lane.
+          reportOutcome: result.foreignSurface === true ? null : (result.report?.outcome ?? null),
           provisionMode: result.provisionMode ?? null,
           // A future harness seam (§3.1): no instance-lock detector exists yet.
           instanceLockContention: false,
@@ -988,9 +1425,23 @@ export class AgentEngine {
     //
     // Flipping first makes "the row is terminal" mean "the record has already
     // been decided", which is what every reader assumed it meant.
-    if ((setupProof || bootstrapProof) && status === 'passed') {
+    // §A5 — a LEARNED PIN's pass is the second (and only other) way in: the
+    // lane's ordinary request executed the learned draft verbatim and passed.
+    // The kill switch is re-read LIVE for it (Codex A5 review F4): flipped on
+    // mid-run, the verdict still lands but the draft stays unproven and no
+    // promotion finding is filed. Setup/bootstrap proofs are unaffected.
+    let promoted = false;
+    let learnedPromotes = learnedPin;
+    if (learnedPin && status === 'passed' && requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)) {
+      learnedPromotes = false;
+      this.logger?.info('[VerificationScheduler] kill switch engaged mid-run; learned draft NOT promoted (verdict unaffected)', {
+        requestId: row.id,
+        modality,
+      });
+    }
+    if ((setupProof || bootstrapProof || learnedPromotes) && status === 'passed') {
       try {
-        await this.recordRunbookProof(row, modality, result, snapshotSha);
+        promoted = await this.recordRunbookProof(row, modality, result, snapshotSha);
       } catch (err) {
         // Swallowed deliberately: the verdict below is the load-bearing act, and
         // a proof-recording failure may not prevent it from being written.
@@ -1010,8 +1461,17 @@ export class AgentEngine {
         ...(result.verdict ? { verdict: result.verdict } : {}),
         ...(result.report ? { report: result.report } : {}),
         ...(errorMessage ? { error: errorMessage } : {}),
-        ...(classified
-          ? { failureClass: classified.failureClass, failureEvidence: classified.evidence }
+        ...(classified ? { failureClass: classified.failureClass } : {}),
+        // §A1.1 — a report carries the mode as `report.provenance`; without one
+        // the mode rides on the evidence, after the classifier's own entries
+        // (and never into `evidenceDetail`, which is the classifier's alone).
+        ...(classified || !result.report
+          ? {
+              failureEvidence: [
+                ...(classified?.evidence ?? []),
+                ...(result.report ? [] : [executionModeEvidence(mode)]),
+              ],
+            }
           : {}),
         ...(result.preflight ? { preflight: result.preflight } : {}),
       },
@@ -1026,8 +1486,362 @@ export class AgentEngine {
       result,
       classified?.failureClass ?? null,
       evidenceDetail,
-      this.capabilityRunbookKey(row.id),
+      this.capabilityRunbookKey(row.id, mode),
     );
+
+    if (learnedPin && promoted) await this.fileLearnedPromotion(row, modality);
+
+    // §A5 LEARN FROM SUCCESS — after the verdict is written, never before it,
+    // and never able to change it. Only a terminal `passed` EXPLORE request
+    // learns (the floor verified the surface and the snapshot is unmutated —
+    // either would have capped it); never low_confidence, unverifiable,
+    // wrong_environment or fail, never pinned or legacy. The runner validated
+    // the recipe (`learnedRecipe`); the kill switch is re-read LIVE so a flip
+    // mid-run stops learning at once.
+    if (
+      mode === 'explore' &&
+      status === 'passed' &&
+      snapshotSha !== null &&
+      result.learnedRecipe?.ok === true &&
+      !requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)
+    ) {
+      await this.learnFromSuccess(row, modality, result.learnedRecipe);
+    }
+    return 'settled';
+  }
+
+  /** §A5 — hand a validated explore recipe to {@link learnFromExploreSuccess} (fail-soft). */
+  private async learnFromSuccess(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    recipe: Extract<NonNullable<VerificationAgentRunResult['learnedRecipe']>, { ok: true }>,
+  ): Promise<void> {
+    if (!this.runbookStore) return;
+    const worktreePath = this.worktreePathForRun(row.run_id);
+    await learnFromExploreSuccess({
+      store: this.runbookStore,
+      status: this.runbookStatus,
+      worktreePath,
+      probePath: worktreePath ?? this.projectPathFor(row.project_id),
+      row,
+      modality,
+      recipe: { entry: recipe.entry, ...(recipe.levers !== undefined ? { levers: recipe.levers } : {}) },
+      ...(this.learningFinding ? { finding: this.learningFinding } : {}),
+      ...(this.logger ? { logger: this.logger } : {}),
+    });
+  }
+
+  /**
+   * §A3 — settle a `wrong_environment` result: the agent found this deliverable
+   * needs a DIFFERENT modality than the one it ran under. ONE automatic
+   * re-dispatch, else an honest `unverifiable`.
+   *
+   * ELIGIBILITY. Only an EXPLORE row is re-dispatched, and only once:
+   *   - it ran in explore mode AND its row carries no pin and no proof flag
+   *     (`runbook_hash IS NULL AND setup_proof=0 AND bootstrap_proof=0`). The
+   *     column check is not redundant with the mode: an explore row whose stale
+   *     pin stopped reading proven still carries that pin, and a requeue would
+   *     re-drain it with a hash that names a record of the OLD modality;
+   *   - its raw `task_json` has no {@link REDISPATCHED_FROM_KEY} — a second
+   *     mismatch is terminal, so a confused agent costs two deploys, never a loop;
+   *   - the needed modality differs from the one it ran under;
+   *   - `native-screen` only on a `native-desktop` run (RS-9): anywhere else it
+   *     is the shiny-eagle mis-declaration, not a fact about the host;
+   *   - `mobile` only with an `app` — the report's, else the task's own.
+   *
+   * THE REQUEUE is one guarded UPDATE (§A3's exact statement): back to
+   * `'queued'` under the new modality, with the marker stamped into
+   * `task_json`, `leased_at` cleared and `enqueued_at` reset through SQLite's
+   * own `CURRENT_TIMESTAMP` (the shape the queued-age parser reads — a JS ISO
+   * string there is the A9 bug). The row moves to the back of the FIFO. It
+   * writes NO terminal and bumps no `attempt` (a terminal write is the only
+   * thing that does), delivers nothing, and touches neither the proof nor the
+   * capability ledger. `changes !== 1` means a cancel sweep won the race and
+   * owns the row: nothing further. The redeploy is charged again by the
+   * existing budget logic (a deployed result was already counted in
+   * runAgentChosen) — "deploys twice, charged twice", by design.
+   *
+   * A NEEDED MODALITY THE RE-DRAIN CANNOT RUN is ineligible too: one this host
+   * does not support (gate (1)), or one that cannot explore here
+   * ({@link isExploreEligible} — e.g. cdp-app with no exportable `dataDirEnv`).
+   * `native-screen` skips the explore half: it is pinned-only, honoured on a
+   * native-desktop run by RS-9.
+   *
+   * A PINNED ROW (proof rows included) terminates under §A4's pinned rule, not
+   * as `low_confidence`: uncorroborated (the engine cannot see corroboration, so
+   * it assumes none) is a verdict-less blocking `failed` — `skipped` under the
+   * dirty fallback — settled through {@link settleAgentTerminal}'s ordinary path.
+   *
+   * THE TERMINAL (every other ineligible case) is `low_confidence` with an
+   * `unverifiable (wrong environment …)` message carrying the needed modality,
+   * why it was not re-dispatched, and the agent's diagnosis. No
+   * `failure_class`, no ledger write — the harness has no evidence either way
+   * about the host — and delivery is the ordinary low_confidence path: the
+   * merge gate advances the lane (mergeGateLaneAdvance) and verdictDelivery
+   * files a NON-blocking "needs human review" finding. It never loops
+   * implement.
+   */
+  private async settleWrongEnvironment(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    task: VerificationTaskV1,
+    result: VerificationAgentRunResult,
+    redispatch: NonNullable<VerificationAgentRunResult['redispatch']>,
+    modality: VerificationModality,
+    mode: VerificationExecutionMode,
+    proof: { setupProof: boolean; bootstrapProof: boolean; snapshotSha: string | null },
+  ): Promise<'settled' | 'requeued'> {
+    const needed = redispatch.modality;
+    const { taskJson } = this.agentColumnsForRow(row.id);
+    const stored = parseRawTaskObject(taskJson);
+    const previous = stored?.[REDISPATCHED_FROM_KEY];
+    const app = needed === 'mobile' ? (redispatch.app ?? task.app ?? (await this.inferRedispatchApp(row))) : undefined;
+
+    let declined: string | null = null;
+    if (proof.setupProof || proof.bootstrapProof) declined = 'a proof request is never re-dispatched';
+    else if (mode !== 'explore') declined = `only an unpinned explore request is re-dispatched (this one ran ${mode})`;
+    else if (this.runbookPinForRow(row.id).hash !== null) {
+      declined = 'only an unpinned explore request is re-dispatched (this row still carries a runbook pin)';
+    } else if (previous !== undefined) {
+      declined = `it was already re-dispatched once, from ${typeof previous === 'string' ? previous : 'another modality'}`;
+    } else if (needed === modality) declined = `it already ran as ${modality}`;
+    else if (needed === 'native-screen' && row.verify_type !== 'native-desktop') {
+      declined = 'native-screen is honoured only on a native-desktop run';
+    } else if (needed === 'mobile' && app === undefined) {
+      declined = 'no iOS app (bundle id + scheme) is known for a mobile run';
+    } else {
+      // The re-drain runs gate (1) and the §A1 selector under `needed`, and the
+      // requeue bypasses enqueue-time pin injection — so a modality this host
+      // cannot run, or one that cannot EXPLORE here, would come back as a
+      // pre-lease `skipped` ("unsupported modality" plus a ledger write, or "no
+      // proven runbook") that advances the lane and drops the diagnosis. Declined
+      // now, the honest `unverifiable` terminal below carries it instead.
+      // `native-screen` is exempt from the explore check only: it is pinned-only
+      // by design and reaches here solely on a native-desktop run (RS-9).
+      const unsupported = await this.unsupportedModalityDetail(needed);
+      if (unsupported !== null) declined = `${needed} is unsupported on this host: ${unsupported}`;
+      else if (needed !== 'native-screen' && !isExploreEligible(needed, this.exploreRecordFor(row.project_id, needed))) {
+        declined = `${needed} cannot explore here (no registered runbook declares an exportable dataDirEnv lever)`;
+      }
+    }
+
+    if (declined === null) {
+      // The stored object round-trips (unknown keys included) only when it is
+      // the task that actually ran; one the parser rejected was replaced by the
+      // degenerate task, and writing it back would fail the parser again on the
+      // re-drain — losing the `app` just set, which on a mobile run is the
+      // env-classed MOBILE_NO_APP_BLOCK skip that feeds the breaker (§A2).
+      const base = stored !== null && parseVerificationTaskV1(stored).ok ? stored : task;
+      const nextTask = {
+        ...base,
+        modality: needed,
+        ...(app !== undefined ? { app } : {}),
+        [REDISPATCHED_FROM_KEY]: modality,
+      };
+      const changes = this.db
+        .prepare(
+          `UPDATE verification_requests
+           SET status='queued', modality=?, task_json=?, leased_at=NULL, enqueued_at=CURRENT_TIMESTAMP
+           WHERE id=? AND status='running'`,
+        )
+        .run(needed, JSON.stringify(nextTask), row.id).changes;
+      if (changes !== 1) {
+        this.logger?.debug('[VerificationScheduler] wrong-environment re-dispatch lost the race to a cancel', {
+          requestId: row.id,
+        });
+        return 'settled';
+      }
+      this.logger?.info('[VerificationScheduler] wrong environment — request re-dispatched once (§A3)', {
+        requestId: row.id,
+        from: modality,
+        to: needed,
+        diagnosis: redispatch.diagnosis,
+      });
+      return 'requeued';
+    }
+
+    this.logger?.info('[VerificationScheduler] wrong environment — not re-dispatched; unverifiable (§A3)', {
+      requestId: row.id,
+      modality,
+      needed,
+      declined,
+    });
+    const notRedispatched = `wrong environment: needs ${needed}; not re-dispatched: ${declined}`;
+    if (mode === 'pinned') {
+      // §A4's PINNED row, not A3's flat `low_confidence` (which A3 itself
+      // defines as "unverifiable (A4)"): a proven recipe the agent could not
+      // exercise is evidence against the change, whatever the report was
+      // labelled — otherwise `wrong_environment` (even naming the modality it
+      // already ran) is a pure bypass of the blocking uncorroborated rule. The
+      // runner maps a pinned mismatch itself and never hands one here; this is
+      // the backstop. The engine sees none of the runner's corroboration facts,
+      // so it FAILS CLOSED as uncorroborated: the result is rewritten to exactly
+      // the runner's pinned-uncorroborated `unverifiable` shape (verdict-less
+      // `failed`, the classifier's `'ambiguous'`; `skipped` under the dirty
+      // fallback, which isUnprovenAdvancingSkip carves out by that outcome) and
+      // settled through the ordinary path, redispatch stripped so it cannot
+      // come back here.
+      const diagnosis = `${notRedispatched}: ${redispatch.diagnosis}`;
+      const fallback = result.provisionMode === 'fallback';
+      const asUnverifiable: VerificationAgentRunResult = {
+        ...result,
+        status: fallback ? 'skipped' : 'failed',
+        errorMessage: fallback
+          ? `unattributable shared-worktree unverifiable: ${diagnosis}`
+          : `${PINNED_WRONG_ENVIRONMENT_UNCORROBORATED}: ${diagnosis}`,
+        ...(result.report ? { report: { ...result.report, outcome: 'unverifiable', diagnosis } } : {}),
+      };
+      // Verdict-less (the agent judged nothing), and the channel is consumed.
+      delete asUnverifiable.verdict;
+      delete asUnverifiable.redispatch;
+      return this.settleAgentTerminal(
+        row,
+        input,
+        asUnverifiable,
+        modality,
+        proof.setupProof,
+        proof.snapshotSha,
+        proof.bootstrapProof,
+        task,
+        mode,
+      );
+    }
+    await this.delivery.markTerminalAndDeliver(
+      row,
+      'low_confidence',
+      {
+        captureOrigin: 'agent',
+        error: `unverifiable (${notRedispatched}): ${redispatch.diagnosis}`,
+        ...(result.verdict ? { verdict: result.verdict } : {}),
+        ...(result.report ? { report: result.report } : { failureEvidence: [executionModeEvidence(mode)] }),
+        ...(result.preflight ? { preflight: result.preflight } : {}),
+      },
+      result.verdict,
+      result.fileNames,
+      input,
+    );
+    return 'settled';
+  }
+
+  /**
+   * §A5 — the "anything else" exit of a LEARNED-PIN request: the learned
+   * recipe could not be shown to stand the deliverable up (build_failed,
+   * launch_failed, an identity failure, a timeout, low_confidence,
+   * unverifiable, a runbook mismatch, wrong_environment — see
+   * `classifyLearnedPinExit`). Three steps:
+   *
+   *   1. CAS-DISCARD the draft the row pinned (`discardLearnedDraft` on the
+   *      row's hash + version, this row excepted from the live-pin guard) so
+   *      the next passing explore run can learn afresh. A record that moved
+   *      since (relearned, re-registered, promoted) is someone else's and
+   *      survives; another live request still pinning it keeps it too.
+   *   2. CLEAR THE ROW'S PIN COLUMNS and requeue it, in the SAME guarded
+   *      UPDATE A3 uses (`WHERE status='running'`, SQLite's own
+   *      `CURRENT_TIMESTAMP`, no attempt bump, no terminal): with no pin the
+   *      re-drain's gate (3) selects EXPLORE, and the lane gets that verdict.
+   *   3. Stamp A3's engine-only {@link REDISPATCHED_FROM_KEY} marker, so the
+   *      ONE-SHOT BUDGET IS SHARED with `wrong_environment`: the explore
+   *      re-run can never itself be re-dispatched.
+   *
+   * `'declined'` when the budget is already spent (the row carries the marker)
+   * or there is no stored task to carry it — the caller then settles the
+   * result through the ordinary path. `'cancelled'` when a cancel sweep won
+   * the requeue race and owns the row. The task itself is carried unchanged:
+   * it is the SAME row re-dispatched, so the learned build/serve it was
+   * merged with ride along as explore HINTS.
+   */
+  private async exitLearnedPin(
+    row: VerificationRequestRow,
+    modality: VerificationModality,
+    why: string,
+  ): Promise<'requeued' | 'cancelled' | 'declined'> {
+    const stored = parseRawTaskObject(this.agentColumnsForRow(row.id).taskJson);
+    if (stored === null || stored[REDISPATCHED_FROM_KEY] !== undefined) return 'declined';
+    const pin = this.runbookPinForRow(row.id);
+    const discarded =
+      pin.hash !== null && pin.version !== null
+        ? (this.runbookStore?.discardLearnedDraft(row.project_id, modality, pin.hash, pin.version, row.id) ?? null)
+        : null;
+    const changes = this.db
+      .prepare(
+        `UPDATE verification_requests
+         SET status='queued', runbook_hash=NULL, runbook_local_version=NULL, task_json=?,
+             leased_at=NULL, enqueued_at=CURRENT_TIMESTAMP
+         WHERE id=? AND status='running'`,
+      )
+      .run(JSON.stringify({ ...stored, [REDISPATCHED_FROM_KEY]: modality }), row.id).changes;
+    this.logger?.info('[VerificationScheduler] learned recipe failed its promotion — draft discarded, request explores (§A5)', {
+      requestId: row.id,
+      modality,
+      why,
+      runbookHash: pin.hash,
+      runbookLocalVersion: pin.version,
+      discarded: discarded === null ? null : discarded.ok ? 'discarded' : discarded.error,
+      requeued: changes === 1,
+    });
+    return changes === 1 ? 'requeued' : 'cancelled';
+  }
+
+  /** §A5 — a one-line account of why a learned-pin request failed its promotion, for the log. */
+  private learnedFailureDetail(result: VerificationAgentRunResult): string {
+    if (result.redispatch !== undefined) return `wrong_environment (needs ${result.redispatch.modality})`;
+    const outcome = result.report?.outcome;
+    return `${result.status}${outcome !== undefined ? `/${outcome}` : ''}${result.errorMessage ? `: ${result.errorMessage}` : ''}`;
+  }
+
+  /**
+   * §A5 review surface — the learned-pin request just PROMOTED its draft to
+   * proven: file the non-blocking notice naming the exact commands, now read
+   * back off the proven record (its entry notes carry the request it was
+   * learned from). Fail-soft; the verdict is already written.
+   */
+  private async fileLearnedPromotion(row: VerificationRequestRow, modality: VerificationModality): Promise<void> {
+    try {
+      const pin = this.runbookPinForRow(row.id);
+      const record = pin.hash !== null ? (this.runbookStore?.getByHash(row.project_id, modality, pin.hash) ?? null) : null;
+      if (pin.hash === null || record === null) return;
+      this.logger?.info('[VerificationScheduler] learned verification recipe promoted to proven (§A5)', {
+        requestId: row.id,
+        modality,
+        runbookHash: pin.hash,
+      });
+      await this.learningFinding?.(
+        learnedPromotionFinding({
+          row,
+          modality,
+          hash: pin.hash,
+          entry: record.runbook.modalities[modality as VerifyRunbookModality],
+        }),
+      );
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] learned-promotion finding failed (fail-soft)', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * §A2/§A3: a `mobile` re-dispatch with no `app` on the report or the task
+   * runs the project surface probe (`projectSurfaceProbe.ts`) over the run's
+   * worktree (the deploy that just returned required one) to infer the bundle
+   * id + scheme from the project's own Xcode files. The
+   * block comes back TAGGED as inferred, so the tag rides the requeued
+   * `task_json` and the re-drain maps an inference-shaped stand-up failure to
+   * `unverifiable` (§A2). A miss, an inconclusive project or no tree at all is
+   * `undefined`, and the caller's terminal path — `unverifiable` — is the
+   * honest answer.
+   */
+  private async inferRedispatchApp(row: VerificationRequestRow): Promise<MobileAppSpec | undefined> {
+    const root = this.worktreePathForRun(row.run_id);
+    if (root === null) return undefined;
+    const found = await probeProjectSurface(root);
+    this.logger?.info('[VerificationScheduler] wrong-environment re-dispatch: project surface probe', {
+      requestId: row.id,
+      result: found.kind,
+      detail: found.detail,
+    });
+    return found.kind === 'ios-app' ? tagInferredApp(found.app) : undefined;
   }
 
   /**
@@ -1057,7 +1871,8 @@ export class AgentEngine {
    *     MID-SESSION transport failure is now mapped to a blocking `'failed'` at
    *     source rather than arriving here wearing this flag.
    *  2. The §5.7 UNATTRIBUTABLE FALLBACK — a `build_failed`/`launch_failed`
-   *     reported while provisioning ran in the DIRTY live worktree. That skip is
+   *     (or a pinned, uncorroborated `unverifiable`, which the runner maps by
+   *     the same rule) reported while provisioning ran in the DIRTY live worktree. That skip is
    *     the proposal's explicit carve-out: in a worktree carrying every sibling
    *     lane's half-finished edits, a build failure genuinely cannot be charged
    *     to this lane's deliverable, so it fails open on purpose. The pairing is
@@ -1073,7 +1888,7 @@ export class AgentEngine {
     const outcome = result.report?.outcome;
     if (
       result.provisionMode === 'fallback' &&
-      (outcome === 'build_failed' || outcome === 'launch_failed')
+      (outcome === 'build_failed' || outcome === 'launch_failed' || outcome === 'unverifiable')
     ) {
       return false;
     }
@@ -1139,9 +1954,9 @@ export class AgentEngine {
     modality: VerificationModality,
     result: VerificationAgentRunResult,
     snapshotSha: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const store = this.runbookStore;
-    if (!store) return;
+    if (!store) return false;
     if (snapshotSha === null) {
       this.logger?.warn(
         '[VerificationScheduler] setup proof refused: it ran in the dirty-worktree fallback (§5.3), so the record stays a draft',
@@ -1152,7 +1967,7 @@ export class AgentEngine {
           provisionMode: result.provisionMode ?? null,
         },
       );
-      return;
+      return false;
     }
     const pin = this.runbookPinForRow(row.id);
     if (pin.hash === null || pin.version === null) {
@@ -1160,7 +1975,7 @@ export class AgentEngine {
         requestId: row.id,
         modality,
       });
-      return;
+      return false;
     }
     try {
       const proofJson = JSON.stringify({
@@ -1231,7 +2046,7 @@ export class AgentEngine {
           inputHashObserved: fresh !== undefined ? fresh.inputHash !== null : null,
           probePath,
         });
-        return;
+        return true;
       }
       this.logger?.warn('[VerificationScheduler] setup proof could not be recorded (verdict unaffected)', {
         requestId: row.id,
@@ -1248,6 +2063,7 @@ export class AgentEngine {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    return false;
   }
 
   /**
@@ -1283,7 +2099,18 @@ export class AgentEngine {
         }
         return;
       }
-      if (result.status === 'passed' || (result.status === 'failed' && failureClass === 'deliverable')) {
+      // A11 (runbook-optional-verification.md, T-F6): a DEPLOYED low_confidence
+      // that exercised ≥1 behaviour (a pass or a fail) also proves the
+      // environment stood up and drove. One with nothing exercised — an
+      // `unverifiable`, a surface the agent never reached — proves nothing and
+      // must not clear a real suppression.
+      const exercised =
+        result.report?.behaviors.some((b) => b.result === 'pass' || b.result === 'fail') === true;
+      if (
+        result.status === 'passed' ||
+        (result.status === 'failed' && failureClass === 'deliverable') ||
+        (result.status === 'low_confidence' && result.deployed && exercised)
+      ) {
         store.recordHealthyOutcome(row.project_id, modality, runbookHash);
       }
     } catch (err) {

@@ -30,6 +30,15 @@ import {
   type ResolvedCodexExecutable,
 } from './codexExecutablePath';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
+import { rollupRunUsage } from '../../../orchestrator/runUsageRollup';
+import { resolveRunDeployableAgents } from '../claude/agentOverlayWriter';
+import {
+  codexAgentRoleModels,
+  defaultCodexAgentRolesDir,
+  materializeCodexAgentRoles,
+  type CodexAgentRoles,
+} from './appServer/agentRoles';
 import { buildCodexTurnInput } from './appServer/imageSpill';
 import {
   CODEX_APP_SERVER_APPROVAL_SOURCE,
@@ -73,7 +82,12 @@ import {
   type TurnSessionClient,
   type TurnSessionEvent,
 } from './appServer/turnSession';
-import { CodexTurnUsageAccumulator } from './appServer/usageAccumulator';
+import {
+  CodexProcessUsageTracker,
+  CodexUsageRowWriter,
+  createCodexUsageOwner,
+  type CodexUsageOwner,
+} from './codexUsageTracker';
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 const APP_SERVER_INTERRUPT_TIMEOUT_MS = 2_000;
@@ -96,6 +110,9 @@ export type CodexAppServerClientFactory = (
 ) => CodexAppServerClientLike;
 
 export type CodexExecutableResolver = () => ResolvedCodexExecutable;
+
+/** Where native agent-role files are written; injectable so tests use a temp dir. */
+export type CodexAgentRolesDirResolver = () => string;
 
 export type CodexMcpRuntimeConfig = CodexAppServerMcpRuntimeConfig;
 
@@ -137,7 +154,8 @@ interface CodexTurnContext {
    * context uses so both shapes bind here.
    */
   sink: TurnEventsSink;
-  usageAccumulator: CodexTurnUsageAccumulator;
+  /** This invocation's usage identity; outlives the context through the drain. */
+  usageOwner: CodexUsageOwner;
   approvalBridge: CodexAppServerApprovalBridge;
   questionBridge: CodexAppServerQuestionBridge;
   startedAt: number;
@@ -170,6 +188,13 @@ interface WarmCodexEntry {
   // that arrive while parked (currentContext is null).
   rawNotificationSink: CodexRawNotificationSink;
   /**
+   * Process-lifetime usage accounting: sees every thread's notifications
+   * (collab descendants included) before TurnSession's root-only filter, owns
+   * the descendant registry and the response/update pairing, and is settled
+   * once the client stops.
+   */
+  usage: CodexProcessUsageTracker;
+  /**
    * false for a hermetic global-agent spawn. `rawNotificationSink` writes
    * `raw_events` keyed by the entry's runId, which for that spawn is the
    * run-less `agent:<threadId>`: with `foreign_keys=ON` every INSERT fails the
@@ -180,6 +205,13 @@ interface WarmCodexEntry {
   persistRawNotifications: boolean;
   /** The isolation inputs this entry's thread was (or will be) opened with; undefined for a run-scoped spawn. */
   isolationConfig: CodexIsolationConfig | undefined;
+  /**
+   * The native agent roles this entry's thread was (or will be) opened with —
+   * resolved once per spawn and reused for thread/start AND thread/resume, so the
+   * thread carries exactly the roles its warm fingerprint hashed. Empty for an
+   * isolation spawn or a run with no deployable roles.
+   */
+  agentRoles: CodexAgentRoles;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -286,6 +318,22 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(canonicalize(value)) ?? 'null';
 }
 
+/**
+ * The app-server env: the run env plus a fan-out lane's build-slot env
+ * (`options.laneEnv`, programmatic/laneBuildSlots.ts), merged LAST so it wins.
+ * The app-server hands its env to every command the agent runs, which is how the
+ * slot reaches a Codex lane's shell. ONE builder for both the cold spawn and the
+ * warm fingerprint so the two can never disagree. No laneEnv ⇒ the run env as-is.
+ */
+function appServerEnvironment(
+  runId: string,
+  runtimeConfig: CodexMcpRuntimeConfig,
+  options: ClaudeSpawnerOptions,
+): NodeJS.ProcessEnv {
+  const env = buildCodexAppServerEnvironment(runId, runtimeConfig);
+  return options.laneEnv ? { ...env, ...options.laneEnv } : env;
+}
+
 function defaultCodexAppServerClientFactory(
   options: CodexAppServerClientOptions,
 ): CodexAppServerClientLike {
@@ -349,6 +397,9 @@ export class CodexSdkManager extends AbstractCliManager {
   // conversation, keyed by spawnKey. A parked entry is NOT in `this.processes`
   // (deleted per logical turn); killAllProcesses/killProcess sweep this map too.
   private readonly warmCodexRuns = new Map<string, WarmCodexEntry>();
+  // Closed entries still draining late descendant usage after their root turn
+  // (entry → spawnKey). Out of `warmCodexRuns`, so kill/shutdown sweep them here.
+  private readonly drainingCodexEntries = new Map<WarmCodexEntry, string>();
   // Short-lived probe app-servers (onboarding detection + model discovery) that
   // are not tracked in `this.processes`. Tracked here so shutdown reaps any that
   // are mid-flight; each self-removes in its own try/finally on resolve/reject.
@@ -369,6 +420,7 @@ export class CodexSdkManager extends AbstractCliManager {
     private readonly createAppServerClient: CodexAppServerClientFactory = defaultCodexAppServerClientFactory,
     private readonly resolveExecutable: CodexExecutableResolver = resolveCodexExecutablePath,
     private readonly clientVersion: string = 'development',
+    private readonly resolveAgentRolesDir: CodexAgentRolesDirResolver = defaultCodexAgentRolesDir,
   ) {
     super(sessionManager, logger, configManager);
     if (db == null) {
@@ -633,7 +685,18 @@ export class CodexSdkManager extends AbstractCliManager {
     // fingerprint) without a restart.
     const isolationConfig: CodexIsolationConfig | undefined =
       options.isolation === 'agent' ? { disabledMcpServers: readUserMcpServerNames() } : undefined;
-    const fingerprint = this.computeWarmFingerprint(runId, options, runtimeConfig, executable, isolationConfig);
+    // Resolved BEFORE the fingerprint so the roles are part of the fingerprinted
+    // thread configuration: role files are content-addressed, so a changed role
+    // prompt changes a `config_file` path and busts a parked entry by itself.
+    const { roles: agentRoles, roleModels } = this.resolveAgentRoles(runId, options);
+    const fingerprint = this.computeWarmFingerprint(
+      runId,
+      options,
+      runtimeConfig,
+      executable,
+      isolationConfig,
+      agentRoles,
+    );
 
     // Warm reuse: a parked entry for this key whose thread + fingerprint match the
     // incoming resume-continuation absorbs the turn with NO cold app-server spawn.
@@ -651,7 +714,17 @@ export class CodexSdkManager extends AbstractCliManager {
       }
     }
 
-    const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible, isolationConfig);
+    const entry = this.buildColdEntry(
+      options,
+      runId,
+      runtimeConfig,
+      executable,
+      fingerprint,
+      warmEligible,
+      isolationConfig,
+      agentRoles,
+      roleModels,
+    );
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     return await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
@@ -685,9 +758,49 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   /**
+   * The run's deployable roles, materialized as native Codex agent-role files
+   * (appServer/agentRoles.ts) and returned as the thread's `config.agents` map.
+   *
+   * Never for a hermetic global-agent spawn: that thread is run-less (no frozen
+   * definition to resolve) and deliberately deploys nothing. Otherwise the roles
+   * are the ones the run's FROZEN definition binds (resolveRunDeployableAgents) —
+   * `{}` for a quick chat or a definition-less flow, which keeps their thread
+   * configuration byte-identical to a role-less spawn.
+   *
+   * Fail-soft end to end: a failure here must never block a spawn — it degrades
+   * to "no native roles", which only means the orchestrator does each role's
+   * work itself (the runtime-adapter prompt's fallback) instead of delegating.
+   *
+   * `roleModels` rides alongside for usage accounting (codexAgentRoleModels).
+   */
+  private resolveAgentRoles(
+    runId: string,
+    options: ClaudeSpawnerOptions,
+  ): { roles: CodexAgentRoles; roleModels: Record<string, string | null> } {
+    const none = { roles: {}, roleModels: {} };
+    if (options.isolation === 'agent') return none;
+    // Adapt only a REAL logger: a logger-less manager stays silent, as every
+    // `this.logger?.` call in this file does, instead of falling back to the
+    // console shim makeLoggerLike builds for an absent one.
+    const logger = this.logger ? makeLoggerLike(this.logger) : undefined;
+    try {
+      const agents = resolveRunDeployableAgents(this.db, runId, logger);
+      if (agents.length === 0) return none;
+      const roles = materializeCodexAgentRoles(agents, this.resolveAgentRolesDir(), logger);
+      return { roles, roleModels: codexAgentRoleModels(agents, roles) };
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] native agent-role registration failed for run ${runId}; spawning without roles: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return none;
+    }
+  }
+
+  /**
    * Fingerprint the spawn-baked inputs (serialized env + thread configuration —
-   * incl. `developerInstructions`, model, sandbox, and the runId-bearing MCP
-   * bridge env — plus executable path/version and client init version). A warm
+   * incl. `developerInstructions`, model, sandbox, the runId-bearing MCP
+   * bridge env, and the native agent-role map (content-addressed role-file
+   * paths) — plus executable path/version and client init version). A warm
    * turn whose fingerprint changed forces a cold respawn instead of splicing a
    * mismatched conversation onto the live thread. runId is baked into the env, so
    * a cross-run reuse self-invalidates.
@@ -698,10 +811,11 @@ export class CodexSdkManager extends AbstractCliManager {
     runtimeConfig: CodexMcpRuntimeConfig,
     executable: ResolvedCodexExecutable,
     isolationConfig: CodexIsolationConfig | undefined,
+    agentRoles: CodexAgentRoles,
   ): string {
     return sha1(stableSerialize({
-      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
-      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig),
+      env: appServerEnvironment(runId, runtimeConfig, options),
+      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig, agentRoles),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
       clientVersion: this.clientVersion,
@@ -742,6 +856,8 @@ export class CodexSdkManager extends AbstractCliManager {
     fingerprint: string,
     warmEligible: boolean,
     isolationConfig: CodexIsolationConfig | undefined,
+    agentRoles: CodexAgentRoles,
+    roleModels: Record<string, string | null>,
   ): WarmCodexEntry {
     // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
     // never an `agent:` id-prefix sniff. The client callbacks below are baked once
@@ -753,8 +869,16 @@ export class CodexSdkManager extends AbstractCliManager {
       client: undefined as unknown as CodexAppServerClientLike,
       turnSession: undefined as unknown as CodexAppServerTurnSession,
       rawNotificationSink: new CodexRawNotificationSink(this.db, this.logger),
+      usage: new CodexProcessUsageTracker({
+        runId,
+        writer: isolationSpawn ? null : new CodexUsageRowWriter(this.db, this.logger),
+        logger: this.logger,
+        onLateRows: (lateRunId) => this.rerollRunUsageAfterLateRows(lateRunId),
+        roleModels,
+      }),
       persistRawNotifications: !isolationSpawn,
       isolationConfig,
+      agentRoles,
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -773,7 +897,7 @@ export class CodexSdkManager extends AbstractCliManager {
       command: executable.executablePath,
       cwd: options.worktreePath,
       env: prependCodexPathToEnvironment(
-        buildCodexAppServerEnvironment(runId, runtimeConfig),
+        appServerEnvironment(runId, runtimeConfig, options),
         executable.pathDir,
       ),
       onServerRequest: (request) => {
@@ -804,6 +928,16 @@ export class CodexSdkManager extends AbstractCliManager {
         // under the entry's stable runId, mirroring pre-warm behavior.
         if (entry.persistRawNotifications) {
           entry.rawNotificationSink.persist(entry.runId, notification);
+        }
+        // BEFORE TurnSession, which drops every non-root thread's frames: the
+        // descendants' responses are only visible here. Never allowed to throw
+        // (an escaping exception SIGTERMs the app-server — see below).
+        try {
+          entry.usage.observe(notification);
+        } catch (error) {
+          this.logger?.warn(
+            `[CodexSdkManager] usage accounting failed on ${notification.method}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
         entry.turnSession.handleNotification(notification);
         // Usage telemetry LAST, and never allowed to throw: an exception
@@ -895,7 +1029,13 @@ export class CodexSdkManager extends AbstractCliManager {
       rawSink.attachToRouter(router, runId);
       sink = rawSink;
     }
-    const usageAccumulator = new CodexTurnUsageAccumulator();
+    const usageOwner = createCodexUsageOwner({
+      invocationId: agentInvocationId,
+      runId,
+      model: this.displayModel(options.model),
+      rootThreadId: entry.threadId,
+    });
+    entry.usage.bindOwner(usageOwner);
 
     const approvalBridge = new CodexAppServerApprovalBridge({
       runId,
@@ -918,7 +1058,7 @@ export class CodexSdkManager extends AbstractCliManager {
       terminal,
       router,
       sink,
-      usageAccumulator,
+      usageOwner,
       approvalBridge,
       questionBridge,
       startedAt: Date.now(),
@@ -1001,23 +1141,34 @@ export class CodexSdkManager extends AbstractCliManager {
                 options,
                 runtimeConfig,
                 entry.isolationConfig,
+                entry.agentRoles,
               )),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread resume',
             )
           : await withTimeout(
               entry.turnSession.startThread(
-                buildCodexAppServerThreadStartParams(runId, options, runtimeConfig, entry.isolationConfig),
+                buildCodexAppServerThreadStartParams(
+                  runId,
+                  options,
+                  runtimeConfig,
+                  entry.isolationConfig,
+                  entry.agentRoles,
+                ),
               ),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread start',
             );
         entry.threadId = thread.threadId;
+        // Only thread/start carries `experimentalRawEvents`; a resumed thread
+        // emits no rawResponse/completed, so its usage counts from updates.
+        entry.usage.markThreadOrigin(thread.threadId, options.resumeSessionId ? 'resumed' : 'started');
       }
 
       if (entry.threadId === null || entry.initializeResponse === null) {
         throw new Error('Codex warm entry missing thread/init state before turn start');
       }
+      entry.usage.setRootThread(entry.threadId);
 
       // A hermetic global-agent spawn has NO `workflow_runs` row: `createInvocation`
       // INSERTs an FK to it and THROWS for the run-less `agent:<threadId>` id,
@@ -1059,11 +1210,15 @@ export class CodexSdkManager extends AbstractCliManager {
           options.images,
           getCyboflowSubdirectory('artifacts', 'agent-thread', options.sessionId.replace(/[^\w.-]/g, '_')),
         ) ?? options.prompt;
-      await withTimeout(
+      const startedTurn = await withTimeout(
         entry.turnSession.startTurn(turnInput, buildCodexAppServerTurnOptions(options)),
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server turn start',
       );
+      usageOwner.codexTurnId = startedTurn.turnId;
+      if (!isolationSpawn) {
+        this.recordInvocationCodexTurn(runId, agentInvocationId, startedTurn.threadId, startedTurn.turnId);
+      }
       await terminal.promise;
       // A clean, un-aborted turn is the ONLY path with a result to hand back; a
       // turn with no substantive agent message still resolves the shape, with
@@ -1100,14 +1255,21 @@ export class CodexSdkManager extends AbstractCliManager {
               message,
               Date.now() - ctx.startedAt,
               entry.threadId,
-              usageAccumulator.snapshot(),
+              usageOwner.accumulator.rootSnapshot(),
             ),
           );
+          entry.usage.sealRoot(usageOwner);
         }
         throw error;
       }
     } finally {
       entry.currentContext = null;
+      // A cancelled turn never wrote its agent_result: keep the root usage it
+      // already spent (the client is about to stop, so nothing more arrives).
+      if (abortController.signal.aborted && !ctx.terminalResultEmitted) {
+        ctx.terminalResultEmitted = true;
+        entry.usage.recordInterruptedRoot(usageOwner);
+      }
       // Park ONLY on a clean turn.completed (activeTurnId cleared by finishTurn).
       // Any error / interrupt / abort / kill-switch closes the process instead —
       // a turn.error never clears the active turn, so a reused turnSession would
@@ -1125,8 +1287,24 @@ export class CodexSdkManager extends AbstractCliManager {
       approvalBridge.teardown();
       if (canPark) {
         this.armWarmIdleTimer(entry, spawnKey);
+        // The parked process keeps its client; after this drain the owner is
+        // sealed and any later descendant response goes unattributed.
+        void entry.usage.drain(usageOwner);
       } else {
-        await this.closeWarmEntry(spawnKey, entry, abortController.signal.aborted);
+        // Cancellation stops the client at once. Any other close first drains
+        // late descendant usage — in the background: the step outcome was
+        // already resolved at the root terminal, so the lane is not delayed.
+        const aborted = abortController.signal.aborted;
+        const closing = this.closeWarmEntry(spawnKey, entry, aborted, aborted ? undefined : usageOwner);
+        if (entry.usage.isDraining(usageOwner)) {
+          void closing.catch((error: unknown) => {
+            this.logger?.warn(
+              `[CodexSdkManager] drained teardown failed for run ${entry.runId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        } else {
+          await closing;
+        }
       }
       sink.dispose(runId);
       this.processes.delete(spawnKey);
@@ -1148,9 +1326,6 @@ export class CodexSdkManager extends AbstractCliManager {
     const ctx = entry.currentContext;
     if (!ctx) return; // stray event while parked — ignore
     if (event.type === 'thread.started') entry.threadId = event.threadId;
-    if (event.type === 'thread.tokenUsage.updated') {
-      ctx.usageAccumulator.addLastUsage(event.tokenUsage.last);
-    }
     if (event.type === 'item.started' || event.type === 'item.completed') {
       ctx.approvalBridge.observeItem(event.item);
     }
@@ -1191,13 +1366,15 @@ export class CodexSdkManager extends AbstractCliManager {
     const projectedEvents = projectTurnSessionEvent(event, {
       model: this.displayModel(ctx.model),
       durationMs: Date.now() - ctx.startedAt,
-      usage: ctx.usageAccumulator.snapshot(),
+      usage: ctx.usageOwner.accumulator.rootSnapshot(),
       hideUserMessage: ctx.hidePromptFromTranscript,
     });
     for (const projected of projectedEvents) {
       if (projected.type === 'agent_result') {
         if (ctx.terminalResultEmitted) continue;
         ctx.terminalResultEmitted = true;
+        // The root's usage is final once its agent_result is written.
+        entry.usage.sealRoot(ctx.usageOwner);
       }
       this.emitProjected(ctx.router, ctx.runId, ctx.displayPanelId, ctx.sessionId, projected);
       if (projected.type === 'agent_result') {
@@ -1211,27 +1388,49 @@ export class CodexSdkManager extends AbstractCliManager {
     }
   }
 
-  /** Close + evict a warm entry (idempotent via `teardownPromise`). */
-  private closeWarmEntry(spawnKey: string, entry: WarmCodexEntry, interrupt: boolean): Promise<void> {
-    if (entry.teardownPromise) return entry.teardownPromise;
+  /**
+   * Close + evict a warm entry (idempotent via `teardownPromise`). With
+   * `drainOwner`, the client, raw sink and descendant registry stay alive until
+   * that invocation's usage drain ends; any later close WITHOUT one (cancel,
+   * kill, shutdown) cuts the drain short. Usage is settled after the client
+   * stops, when nothing more can arrive.
+   */
+  private closeWarmEntry(
+    spawnKey: string,
+    entry: WarmCodexEntry,
+    interrupt: boolean,
+    drainOwner?: CodexUsageOwner,
+  ): Promise<void> {
+    if (entry.teardownPromise) {
+      if (!drainOwner) entry.usage.cancelDrains();
+      return entry.teardownPromise;
+    }
     entry.closing = true;
     this.clearWarmIdleTimer(entry);
     if (this.warmCodexRuns.get(spawnKey) === entry) this.warmCodexRuns.delete(spawnKey);
+    const drain = drainOwner ? entry.usage.drain(drainOwner) : null;
+    if (drainOwner && entry.usage.isDraining(drainOwner)) this.drainingCodexEntries.set(entry, spawnKey);
     entry.teardownPromise = (async () => {
-      if (interrupt && entry.turnSession.isInitialized && entry.turnSession.activeTurnId) {
-        try {
-          await withTimeout(
-            entry.turnSession.interruptTurn(),
-            APP_SERVER_INTERRUPT_TIMEOUT_MS,
-            'Codex app-server turn interruption',
-          );
-        } catch (error) {
-          this.logger?.warn(
-            `[CodexSdkManager] failed to interrupt run ${entry.runId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+      try {
+        if (drain) await drain;
+        if (interrupt && entry.turnSession.isInitialized && entry.turnSession.activeTurnId) {
+          try {
+            await withTimeout(
+              entry.turnSession.interruptTurn(),
+              APP_SERVER_INTERRUPT_TIMEOUT_MS,
+              'Codex app-server turn interruption',
+            );
+          } catch (error) {
+            this.logger?.warn(
+              `[CodexSdkManager] failed to interrupt run ${entry.runId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
+        await entry.client.stop();
+      } finally {
+        this.drainingCodexEntries.delete(entry);
+        entry.usage.settle();
       }
-      await entry.client.stop();
     })();
     return entry.teardownPromise;
   }
@@ -1245,6 +1444,8 @@ export class CodexSdkManager extends AbstractCliManager {
    * `client.stop()` is idempotent and no-ops on an already-exited client.
    */
   private evictDeadWarmEntry(entry: WarmCodexEntry): void {
+    // A dead process owes no more usage — end any drain waiting on it.
+    entry.usage.cancelDrains();
     for (const [key, value] of this.warmCodexRuns) {
       if (value === entry) {
         void this.closeWarmEntry(key, entry, false);
@@ -1259,7 +1460,7 @@ export class CodexSdkManager extends AbstractCliManager {
         this.logger?.warn(
           `[CodexSdkManager] warm entry eviction teardown failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-      });
+      }).finally(() => entry.usage.settle());
     }
   }
 
@@ -1294,6 +1495,29 @@ export class CodexSdkManager extends AbstractCliManager {
     return false;
   }
 
+  /**
+   * Interrupt seam for "Stop"/"Interrupt & send": abort the in-flight turn
+   * for this identity (panelId, runId, or spawnKey — same lookup
+   * {@link killProcess} uses) WITHOUT closing a warm-parked entry that has no
+   * turn running. No-op when idle, mirroring
+   * ClaudeCodeManager.abortInFlightTurn's contract: a warm entry parked
+   * between turns is left alone (there is nothing to interrupt), only a live
+   * `activeRuns` entry is cancelled.
+   */
+  async abortInFlightTurn(identity: string): Promise<void> {
+    const keys = new Set<string>([
+      ...(this.spawnKeysByPanelId.get(identity) ?? []),
+      ...(this.spawnKeysByRunId.get(identity) ?? []),
+    ]);
+    if (keys.size === 0) keys.add(identity);
+    await Promise.all(
+      [...keys].map(async (spawnKey) => {
+        const active = this.activeRuns.get(spawnKey);
+        if (active) await active.cancel();
+      }),
+    );
+  }
+
   override async killProcess(identity: string): Promise<void> {
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
@@ -1311,8 +1535,11 @@ export class CodexSdkManager extends AbstractCliManager {
       if (warm) await this.closeWarmEntry(spawnKey, warm, false);
     }));
     // Defensive: a parked entry whose spawnKey was already forgotten from the
-    // indexes but whose panelId/runId matches the requested identity.
-    for (const [spawnKey, entry] of [...this.warmCodexRuns]) {
+    // indexes but whose panelId/runId matches the requested identity. A killed
+    // run's draining entries stop now too — cancellation skips the drain.
+    for (const [spawnKey, entry] of [...this.warmCodexRuns, ...[...this.drainingCodexEntries].map(
+      ([draining, key]) => [key, draining] as const,
+    )]) {
       if (entry.panelId === identity || entry.runId === identity || spawnKey === identity) {
         await this.closeWarmEntry(spawnKey, entry, false);
       }
@@ -1330,10 +1557,15 @@ export class CodexSdkManager extends AbstractCliManager {
     // turn), so the base sweep would orphan them — close them alongside probes.
     const warm = [...this.warmCodexRuns];
     this.warmCodexRuns.clear();
+    // Draining entries settle what they have and stop, as a cancellation does.
+    const draining = [...this.drainingCodexEntries];
     await Promise.all([
       super.killAllProcesses(),
       ...warm.map(async ([spawnKey, entry]) => {
         await this.closeWarmEntry(spawnKey, entry, true);
+      }),
+      ...draining.map(async ([entry, spawnKey]) => {
+        await this.closeWarmEntry(spawnKey, entry, false);
       }),
       ...probes.map(async (client) => {
         await client.stop().catch((error: unknown) => {
@@ -1517,6 +1749,37 @@ export class CodexSdkManager extends AbstractCliManager {
     } catch (error) {
       this.logger?.warn(
         `[CodexSdkManager] failed to capture Codex thread id for run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * A drain can outlive the run: the last step resolves at its root terminal,
+   * the run finishes and materializes `run_usage`, and descendant rows keep
+   * landing. Re-roll only when that row already exists — before the terminal
+   * seam fires, the seam folds these rows itself.
+   */
+  private rerollRunUsageAfterLateRows(runId: string): void {
+    try {
+      const materialized = this.db.prepare('SELECT 1 FROM run_usage WHERE run_id = ?').get(runId);
+      if (materialized === undefined) return;
+    } catch {
+      return; // no run_usage table (tests, a pre-migration db): nothing to re-roll
+    }
+    rollupRunUsage(this.db, runId, this.logger ? makeLoggerLike(this.logger) : undefined);
+  }
+
+  private recordInvocationCodexTurn(
+    runId: string,
+    agentInvocationId: string,
+    threadId: string,
+    codexTurnId: string,
+  ): void {
+    try {
+      new AgentInvocationStore(this.db).recordCodexTurn({ agentInvocationId, runId, threadId, codexTurnId });
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] failed to link Codex turn ${codexTurnId} to invocation ${agentInvocationId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

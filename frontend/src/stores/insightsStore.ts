@@ -102,6 +102,16 @@ import {
 const REFRESH_DEBOUNCE_MS = 2000;
 
 /**
+ * The `qualityFindings` query's row cap (TASK-291) — the router's max
+ * (`insights.ts` `qualityFindings` input schema caps `limit` at 500). The
+ * tally-first Code-Quality section aggregates client-side, so it needs the
+ * fuller set the old 100-row default silently truncated to; 500 is still a
+ * hard cap (a project with substantially more open findings than that needs a
+ * paginated/backend-aggregated fetch, out of this task's frontend-only scope).
+ */
+export const QUALITY_FINDINGS_LIMIT = 500;
+
+/**
  * Cap on the number of workflows fanned out for the per-workflow stepTokens +
  * usageTrend queries. We keep the most-recently-run workflows so the dashboard
  * surfaces fresh activity without an unbounded N-query fan-out.
@@ -414,6 +424,21 @@ export interface InsightsState {
   selectAllReady: (projectId: number, selected: boolean) => Promise<void>;
   /** Select/deselect every ready finding in ONE bucket (the header checkbox). */
   selectBucket: (projectId: number, bucket: FindingTagBucket, selected: boolean) => Promise<void>;
+  /**
+   * "Seed compounding with these" (TASK-291): hand a Code-Quality drill-down's
+   * filtered finding-id set straight to the compounding tray instead of
+   * one-by-one picking. Only ids that ALSO appear in `triageFindings` (i.e. the
+   * finding is still pending AND its session delivered) are eligible — a
+   * resolved/dismissed/orphaned QualityFinding has no triage row to select and
+   * is silently skipped. Eligible untriaged rows are approved into READY first
+   * (mirroring `approveFinding`), then every eligible row is selected via the
+   * same optimistic `applySelection` the per-row/bucket/all toggles use. The
+   * selection is single-project (mirrors the tray's own invariant): only rows
+   * sharing the FIRST eligible row's project are selected, matching what
+   * `selectLockProjectId`/`selectVisibleFindings` would narrow the surface to
+   * the moment one of them is picked.
+   */
+  seedCompoundingFromFindingIds: (findingIds: string[]) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +576,10 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       safe('workflowUsage', trpc.cyboflow.insights.workflowUsage.query({ projectId })),
       safe('dailyUsage', trpc.cyboflow.insights.dailyUsage.query({ projectId })),
       safe('reviewSummary', trpc.cyboflow.insights.reviewSummary.query({ projectId })),
-      safe('qualityFindings', trpc.cyboflow.insights.qualityFindings.query({ projectId })),
+      safe(
+        'qualityFindings',
+        trpc.cyboflow.insights.qualityFindings.query({ projectId, limit: QUALITY_FINDINGS_LIMIT }),
+      ),
       projectIdsPromise,
     ]);
 
@@ -940,6 +968,47 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       const ids = buckets[bucket].map((f) => f.id);
       if (ids.length === 0) return;
       await applySelection(projectId, ids, selected);
+    },
+
+    seedCompoundingFromFindingIds: async (findingIds) => {
+      const idSet = new Set(findingIds);
+      // Only ids present in triageFindings are triage-eligible at all (pending +
+      // delivered-session); resolved/dismissed/orphaned quality findings have no
+      // row here and are silently skipped.
+      const eligible = get().triageFindings.filter((f) => idSet.has(f.id));
+      if (eligible.length === 0) return;
+
+      // Approve every still-untriaged row into READY first (sequential — each
+      // approve is itself optimistic + snapshot/rollback, so overlapping writes
+      // to the same array could stomp each other's rollback snapshot).
+      for (const f of eligible) {
+        if (f.triageState === 'untriaged') {
+          await get().approveFinding(f.project_id, f.id);
+        }
+      }
+
+      // Re-read post-approval state; select single-project (mirrors the tray's
+      // own invariant). Honor an EXISTING selection lock (a READY finding already
+      // selected elsewhere) rather than always taking the first eligible row's
+      // project — otherwise seeding from a different project's drill-down would
+      // select cross-project rows that `selectLockProjectId` then hides from the
+      // visible surface. Only rows that actually made it to READY (an approve
+      // failure above leaves one behind as 'untriaged') are eligible for
+      // selection — including a stray untriaged id would make the batched
+      // `setSelected` call reject and roll back every id in it, including the
+      // ones that DID approve successfully.
+      const lockProjectId = selectLockProjectId(get().triageFindings) ?? eligible[0].project_id;
+      const toSelect = get()
+        .triageFindings.filter(
+          (f) =>
+            idSet.has(f.id) &&
+            f.project_id === lockProjectId &&
+            f.triageState === 'ready' &&
+            !f.selected,
+        )
+        .map((f) => f.id);
+      if (toSelect.length === 0) return;
+      await applySelection(lockProjectId, toSelect, true);
     },
   };
 });

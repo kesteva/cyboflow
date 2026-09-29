@@ -74,7 +74,7 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
+import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
@@ -95,7 +95,8 @@ import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
-import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
+import { TaskChangeRouter, taskChangeEvents } from './orchestrator/taskChangeRouter';
+import { attachHumanTaskReviewItemCloser } from './orchestrator/humanTaskReviewItemCloser';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
@@ -128,8 +129,10 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
+import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
+import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -154,10 +157,10 @@ import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
-import { createGitOps } from './ipc/gitOps';
+import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setInterruptAndSendDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -165,8 +168,8 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
-import { providerForRuntime } from '../../shared/types/agentRuntime';
-import { setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
+import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
+import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
@@ -294,9 +297,10 @@ import {
   backfillArchivedSessionReviewItems,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
-  backfillRunUsageRollups,
   stampSessionRunsOutcome,
 } from './orchestrator/runRecovery';
+import { runBootUsageBackfills } from './orchestrator/runUsageBackfill';
+import { replayCodexRunUsage } from './services/panels/codex/codexUsageReplay';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import {
   recoverExperiments,
@@ -319,6 +323,7 @@ import { setProjectPermissionTrustResolver } from './orchestrator/permissionRule
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
+import { stripInheritedLaneEnv, checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -371,6 +376,7 @@ for (const key of [
 ]) {
   delete process.env[key];
 }
+stripInheritedLaneEnv(process.env); // Same reason for a hosting lane's build-slot env (laneBuildSlots.ts).
 
 // Set by the boot-time schema-version gate when the user picked "Check for
 // Updates" on a database that a newer build advanced. Consumed once by the
@@ -1081,6 +1087,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // CustomWidgetServerLike's shape, so no adapter is needed.
         customWidgetServer: customWidgetServerManager ?? undefined,
         resolveRunEffectiveAgents: createRunEffectiveAgentsResolver(() => databaseService.getDb()),
+        stepModelGates: { isProviderEnabled: (p) => configManager.isAgentProviderEnabled(p), isModelUsable },
       }),
   });
 }
@@ -1929,6 +1936,7 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
+    additionalOptions: { db: databaseService.getDb() },
     skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {
@@ -1948,7 +1956,6 @@ async function initializeServices(): Promise<boolean> {
     executionTracker,
     getMainWindow: () => mainWindow
   });
-
 
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
@@ -2029,6 +2036,10 @@ async function initializeServices(): Promise<boolean> {
   // construction: every Auto-mode conflict override files a non-blocking audit
   // finding on it.
   const reviewItemRouter = ReviewItemRouter.initialize(cyboflowDb);
+
+  // A human task's standing review item (humanPrerequisites) closes itself when
+  // the task reaches Done / Won't do, is archived, or is deleted — by any writer.
+  attachHumanTaskReviewItemCloser(taskChangeEvents, cyboflowDb, reviewItemRouter, cyboflowLogger);
 
   // Issue-tracker sync loop (migration 093). Started HERE, immediately after the
   // chokepoint it subscribes to: start() does boot crash-recovery (demoting any
@@ -2764,18 +2775,16 @@ async function initializeServices(): Promise<boolean> {
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
       // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
       // written by the MCP workflow-config tools as well as the editor, so a pin
       // naming a provider the user switched off in Settings → Integrations can
       // reach here even though the editor hides it. Drop just the runtime pin
       // (keeping model/effort) so the step falls back to the run-level provider,
       // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop.
-      const pinnedRuntime =
-        a.runtime && !configManager.isAgentProviderEnabled(providerForRuntime(a.runtime))
-          ? undefined
-          : a.runtime;
+      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
+      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
+      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
       if (a.runtime && pinnedRuntime === undefined) {
         cyboflowLogger.warn(
           `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
@@ -2799,6 +2808,11 @@ async function initializeServices(): Promise<boolean> {
         ...(a.effort ? { effort: a.effort } : {}),
       };
     },
+    // Direct step dispatch: the role's effective prompt (same layering as above).
+    resolveStepRole: (runId, agentKey) => {
+      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
+      return systemPrompt ? { systemPrompt } : undefined;
+    },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
@@ -2810,52 +2824,8 @@ async function initializeServices(): Promise<boolean> {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
-    // Systemic-pause gate (the 2026-07-06 planner incident): a step failing with
-    // a usage/session/rate-limit-class error PARKS the run behind a blocking
-    // 'decision' item ("resolve to retry now, dismiss to give up") and
-    // auto-resumes at the parsed limit-reset time, instead of burning the step's
-    // retry / optional-skip / triage budgets on a condition no retry can fix.
-    // Item writes ride the ReviewItemRouter chokepoint (orchestrator actor);
-    // park/resume rides the SAME HumanStepManager primitives as the blocking
-    // gate, so a systemic pause participates in aggregate-unblock.
-    systemicGate: new ReviewQueueSystemicPauseGate({
-      items: {
-        findPending: (runId, source) =>
-          HumanStepManager.getInstance().findPendingItemBySource(runId, source),
-        create: async ({ runId, projectId, title, body, source }) => {
-          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(
-            projectId,
-            {
-              op: 'create',
-              actor: 'orchestrator',
-              kind: 'decision',
-              title,
-              body,
-              blocking: true,
-              source,
-              runId,
-            },
-          );
-          return reviewItemId;
-        },
-        resolve: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'resolve',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-        dismiss: async ({ projectId, reviewItemId, resolution }) => {
-          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-            op: 'dismiss',
-            actor: 'orchestrator',
-            reviewItemId,
-            resolution,
-          });
-        },
-      },
-      parker: HumanStepManager.getInstance(),
+    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
+    systemicGate: buildSystemicPauseGate({
       events: reviewItemChangeEvents,
       channelFor: reviewItemProjectChannel,
       logger: cyboflowLogger,
@@ -3068,10 +3038,25 @@ async function initializeServices(): Promise<boolean> {
           if (worktreePath === null) return undefined;
           const readHead = async (): Promise<string> =>
             (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
+          // `--untracked-files=all` lists files, not collapsed directories, so a new
+          // file inside an already-untracked directory still reads as NEW dirt.
+          const readDirtyPaths = async (): Promise<string[]> =>
+            parsePorcelainPaths(
+              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
+            );
           const startHead = await readHead();
+          // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
+          // not this lane's uncommitted work. A failed read degrades to "unknown"
+          // (newDirtyPaths absent ⇒ every dirty path counts), never to a failure.
+          let startDirty: Set<string> | undefined;
+          try {
+            startDirty = new Set(await readDirtyPaths());
+          } catch {
+            startDirty = undefined;
+          }
           return async () => {
             const endHead = await readHead();
-            const porcelain = await runGitAsync(worktreePath, ['status', '--porcelain']);
+            const dirtyPaths = await readDirtyPaths();
             // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
             // same shared worktree, mid-lane. HEAD then moves for a reason that
             // is not any lane's work — and since the only case that withholds
@@ -3106,7 +3091,15 @@ async function initializeServices(): Promise<boolean> {
                 // Keep the plain comparison.
               }
             }
-            return { headAdvanced, dirty: porcelain.trim().length > 0 };
+            return {
+              headAdvanced,
+              dirty: dirtyPaths.length > 0,
+              dirtyPaths,
+              ...(startDirty !== undefined
+                ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
+                : {}),
+              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
+            };
           };
         },
         // Targeted failed→running un-settle for the controller's MONITOR LANE
@@ -3192,6 +3185,8 @@ async function initializeServices(): Promise<boolean> {
     // for, never as "this project has no runbook".
     verifyRunbookStatus: async (projectId, modality, probePath) =>
       verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
+    // §A6 — the posture reads the runbook-optional kill switch LIVE, like gate 3.
+    verifyLiveConfig: () => configManager.getVisualVerifyConfig(),
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>
@@ -3701,6 +3696,17 @@ async function initializeServices(): Promise<boolean> {
   // mutations are ops closures over this very services object now, not
   // ipcMain.handle registrations.
   sessionOps = createSessionOps(services);
+  // "Switch runtime & retry" on a limit-paused programmatic run (switchRunAgentsHandler.ts).
+  // Wired HERE, not beside setPauseRunDeps: its readiness probe needs this services object.
+  setSwitchRunAgentsDeps({
+    db: cyboflowDb,
+    isProviderEnabled: isAgentProviderAllowed,
+    isProviderReady: async (p) => (await detectProvider(p, services)).state === 'detected',
+    listRunAgentTargets: (runId) => listRunAgentTargets(rawDb, runId, cyboflowLogger),
+    findPendingPause: findPendingSystemicPause,
+    resolveItem: resolveSystemicPauseItem,
+    logger: cyboflowLogger,
+  });
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
@@ -4225,11 +4231,12 @@ app.whenReady().then(async () => {
     // fallback, so the gap is invisible until that log is pruned. Sweeping the
     // invariant here covers every writer at once, including future ones. Must run
     // AFTER the orphan sweeps + outcome backfill so runs force-terminated on this
-    // boot are materialized in the same pass. Fail-soft internally.
-    const usageBackfill = backfillRunUsageRollups(db);
-    if (usageBackfill.materialized > 0) {
-      console.log(`[Main] Materialized ${usageBackfill.materialized} missing run_usage rollup(s) of ${usageBackfill.candidates} candidate(s)`);
-    }
+    // boot are materialized in the same pass. Chained after the usage accounting
+    // v1 backfill (migration 146), NOT awaited: see runBootUsageBackfills.
+    const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
+    const replayCodexRun = (runId: string) =>
+      replayCodexRunUsage(databaseService.getDb(), runId, { notifiedBefore: processStartedAt });
+    void runBootUsageBackfills(db, { replayCodexRun }, loggerLike);
 
     // Boot self-heal (migration 066): the derived 'In development' stage projects
     // a task's live run associations, and the recovery sweeps above force-fail
@@ -4243,6 +4250,7 @@ app.whenReady().then(async () => {
       console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
     }
 
+    await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
     // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
     // a previous process (state intent/snapshotted/folded) forward through the SAME
     // step functions the first-run approve uses — a crash after the body fold cannot
@@ -5782,6 +5790,22 @@ app.whenReady().then(async () => {
       runExecutor,
     });
     console.log('[Main] runs.queueInput deps wired');
+
+    // Interrupt & send (TASK-301): the SAME nudgeDeps bag (db / runQueues /
+    // runExecutor / logger) plus the facade's abort + live-spawn-key seams — the
+    // SAME ones laneRewindDepsBag (above) and rewindRunDepsBag use. Deliberately
+    // does NOT reuse `awaitTurnStart` — the live-spawn branch buffers the text via
+    // `runExecutor.queueInput` and requests the abort, then returns immediately;
+    // delivery is left entirely to the aborted turn's own drain
+    // (`drainQueuedInputAtRest`, reached once `teardownRun` observes the aborted
+    // spawn's 'drained' lifecycle transition), not to this mutation awaiting
+    // anything itself (see interruptAndSendHandler.ts's header note).
+    setInterruptAndSendDeps({
+      ...nudgeDeps,
+      abortRunSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
+      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
+    });
+    console.log('[Main] runs.interruptAndSend deps wired');
 
     // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
     // path into a running interactive REPL). Both methods route through the

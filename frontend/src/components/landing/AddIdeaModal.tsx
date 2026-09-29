@@ -19,6 +19,22 @@ import React from 'react';
 import { Check } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter, ModalHeader } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
+import { ADD_IDEA_MODAL_DRAFT_KEY, clearDraft, readDraft, writeDraft } from '../../utils/ideaDraftStorage';
+
+/** The persisted shape of an in-progress AddIdeaModal capture. */
+interface AddIdeaDraft {
+  text: string;
+  projectId: number | null;
+}
+
+function isAddIdeaDraft(v: unknown): v is AddIdeaDraft {
+  if (typeof v !== 'object' || v === null) return false;
+  const candidate = v as Record<string, unknown>;
+  return (
+    typeof candidate.text === 'string' &&
+    (typeof candidate.projectId === 'number' || candidate.projectId === null)
+  );
+}
 
 /** The slice of a project this modal needs (picker rows + the create call). */
 export interface AddIdeaProjectRef {
@@ -72,10 +88,50 @@ export function AddIdeaModal({
   const [added, setAdded] = React.useState<{ id: string; title: string; projectId: number } | null>(
     null,
   );
+  // Serialization of the last state the write effect below either wrote to
+  // (or found already matching) localStorage. Callers that programmatically
+  // reset text/projectOverride to a known target (seeding from a draft,
+  // clearing on success, resetAll) prime this ref directly to that target's
+  // serialization *before* calling setState, rather than setting a "skip
+  // once" flag for the effect to consume — a flag-based approach breaks when
+  // the setState calls happen to be no-ops (already-default state), since
+  // then the effect never reruns to consume the flag, leaving it stale and
+  // silently swallowing the next real write.
+  const lastWrittenDraftRef = React.useRef<string | null>(null);
+
+  // Seed from a persisted draft whenever the modal opens (isOpen flips
+  // false -> true). A missing/corrupt draft (readDraft -> null) leaves the
+  // existing defaults (blank text, no project override) untouched.
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const draft = readDraft(ADD_IDEA_MODAL_DRAFT_KEY, isAddIdeaDraft);
+    if (draft !== null) {
+      lastWrittenDraftRef.current = JSON.stringify(draft);
+      setText(draft.text);
+      setProjectOverride(draft.projectId);
+    }
+  }, [isOpen]);
 
   const selectedProjectId = projectOverride ?? projects[0]?.id ?? null;
 
+  // Persist the in-progress capture whenever it actually changes, so
+  // closing the modal (overlay/Escape/X/Cancel) doesn't lose it. Guarded by
+  // a ref of the last-written serialization so unrelated re-renders (busy,
+  // error, step) don't churn localStorage.
+  React.useEffect(() => {
+    const serialized = JSON.stringify({ text, projectId: projectOverride });
+    if (lastWrittenDraftRef.current === serialized) return;
+    lastWrittenDraftRef.current = serialized;
+    writeDraft(ADD_IDEA_MODAL_DRAFT_KEY, { text, projectId: projectOverride });
+  }, [text, projectOverride]);
+
   const resetAll = (): void => {
+    // Prime the ref to the reset target so the write effect's next pass (if
+    // it even reruns — text/projectOverride may already be at these
+    // defaults) doesn't re-persist a stray blank draft. The real draft
+    // clear, if any, already happened at the successful-create chokepoint
+    // in handleCreate.
+    lastWrittenDraftRef.current = JSON.stringify({ text: '', projectId: null });
     setStep('capture');
     setText('');
     setProjectOverride(null);
@@ -86,7 +142,9 @@ export function AddIdeaModal({
 
   const handleClose = (): void => {
     if (busy) return;
-    resetAll();
+    // Deliberately no resetAll() here — closing (overlay/Escape/X/Cancel)
+    // must leave text/projectOverride as-is so the write effect's
+    // already-persisted draft still matches on-screen state on reopen.
     onClose();
   };
 
@@ -104,6 +162,11 @@ export function AddIdeaModal({
       });
       setAdded({ id: result.taskId, title, projectId: selectedProjectId });
       setStep('launch');
+      clearDraft(ADD_IDEA_MODAL_DRAFT_KEY);
+      // Prime the ref to match the post-clear target so the write effect's
+      // next pass (triggered by setText('') below) doesn't immediately
+      // re-persist a blank draft over the clear.
+      lastWrittenDraftRef.current = JSON.stringify({ text: '', projectId: projectOverride });
       setText('');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to add the idea');

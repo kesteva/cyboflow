@@ -25,7 +25,7 @@ import { SessionActionToast } from './SessionActionToast';
 import { workflowTitleForName } from './wizard/workflowMeta';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { VariantSelector } from './VariantSelector';
@@ -47,6 +47,7 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import {
   DEFAULT_PERMISSION_MODE,
+  DEFAULT_WORKFLOW_MODEL,
   QUICK_RUN_TYPE_KEY,
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,
@@ -90,7 +91,7 @@ const PROVIDER_MODEL_FLOOR: Readonly<Record<AgentProvider, string>> = {
  * launch never disagree about which provider owns an id. The empty selection
  * belongs to nobody: it is "no pin", which each caller resolves for itself.
  */
-function modelFitsProvider(provider: AgentProvider, model: string | undefined): boolean {
+function modelFitsProvider(provider: AgentProvider, model: string | undefined): model is string {
   return model !== undefined && model !== '' &&
     normalizeAgentModelSelection(provider, model) !== undefined;
 }
@@ -318,16 +319,20 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   // predicates `createRun` normalizes the launch payload with — not a
   // Codex-vs-Claude pair of tests, which left an OMP runtime showing a Claude
   // alias the launch then silently dropped.
+  //
+  // The coerced value is also derived at RENDER time and is what the workflow
+  // launches send: the effect only commits it to state one render later, and a
+  // Start Run click in that window (a slow machine, a CI runner) would otherwise
+  // launch with the stale cross-family model.
   const runtimeProvider: AgentProvider = providerForRuntime(agentRuntime);
+  const launchModel = modelFitsProvider(runtimeProvider, model)
+    ? model
+    : modelFitsProvider(runtimeProvider, launchDefaults.model)
+      ? launchDefaults.model
+      : PROVIDER_MODEL_FLOOR[runtimeProvider];
   useEffect(() => {
-    if (modelFitsProvider(runtimeProvider, model)) return;
-    const seededModel = launchDefaults.model;
-    reseedModel(
-      modelFitsProvider(runtimeProvider, seededModel)
-        ? seededModel
-        : PROVIDER_MODEL_FLOOR[runtimeProvider],
-    );
-  }, [runtimeProvider, model, launchDefaults.model, reseedModel]);
+    if (launchModel !== model) reseedModel(launchModel);
+  }, [launchModel, model, reseedModel]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -489,7 +494,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           forceNew: forceNewSession,
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
-          agentModel: model,
+          agentModel: launchModel,
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -499,7 +504,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentRuntime: workflowRuntime,
           sessionId,
           permissionMode,
-          model,
+          model: launchModel,
           ...(ideaSeed?.ideaIds !== undefined
             ? { ideaIds: ideaSeed.ideaIds }
             : ideaSeed?.ideaId !== undefined
@@ -524,7 +529,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   /**
@@ -553,7 +558,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           forceNew: forceNewSession,
           agentProvider: providerForRuntime(workflowRuntime),
           agentRuntime: workflowRuntime,
-          agentModel: model,
+          agentModel: launchModel,
         });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
@@ -563,7 +568,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           agentRuntime: workflowRuntime,
           sessionId,
           permissionMode,
-          model,
+          model: launchModel,
           taskIds,
           ...variantSelectionToStartInput(variantSelection),
         });
@@ -583,7 +588,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, agentRuntime, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, launchModel, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   const handleStartRun = async () => {
@@ -759,6 +764,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       undefined,
       providerForRuntime(sessionRuntime),
       sessionRuntime,
+      // This surface has no effort control (see isSaveDefaultDirty's comment
+      // above), so there is nothing to honor a "touched" override for — the
+      // stored/global quick effort resolved by `quickDefaults` above is
+      // forwarded verbatim, matching useQuickSession.startWithDefaults and
+      // SessionStartWizard's other quick-launch paths.
+      quickDefaults.reasoningEffort,
     );
   }, [
     agentRuntime,
@@ -971,7 +982,13 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           size="sm"
           fullWidth
           onClick={handleSaveDefault}
-          disabled={isSavingDefault}
+          // Gated the same as Start Run: a runtime this flow cannot actually
+          // launch on (e.g. Codex PTY) must not be persisted as its default —
+          // the launcher would refuse it on every future launch, and the
+          // Settings detail screen's runtime <select> has no matching option
+          // to even show it back (agentRuntimeOptions narrows to
+          // WORKFLOW_AGENT_RUNTIMES for a `workflow:<id>` key).
+          disabled={isSavingDefault || workflowRuntimeBlocked}
           data-testid="workflow-picker-save-default"
         >
           Save as default for {selectedWorkflowTitle}

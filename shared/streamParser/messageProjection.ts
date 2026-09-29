@@ -19,7 +19,7 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskUpdatedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemAssistantInterruptedEvent, SystemTaskStartedEvent, SystemTaskUpdatedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../types/unifiedMessage';
 import { isAgentDispatchToolName } from '../types/agentIdentity';
 import { isFailedTaskStatus } from './taskLifecycle';
@@ -115,7 +115,7 @@ export class MessageProjection {
 
       switch (event.type) {
         case 'system': {
-          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent;
+          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent | SystemAssistantInterruptedEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent;
           return this.projectSystemEvent(sysEvent);
         }
         case 'assistant': {
@@ -143,7 +143,7 @@ export class MessageProjection {
   // ---------------------------------------------------------------------------
 
   private projectSystemEvent(
-    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent,
+    event: SystemInitEvent | SystemCompactBoundaryEvent | SystemAssistantInterruptedEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent,
   ): UnifiedMessage | null {
     const subtype = event.subtype;
 
@@ -217,6 +217,20 @@ export class MessageProjection {
           systemSubtype: 'init',
           sessionInfo: init as unknown as Record<string, unknown>,
         }
+      };
+    }
+
+    // A user-initiated Stop (AgentThreadEventsSink.recordAssistantInterrupted).
+    // Rendered as a muted one-line marker — NOT the error card
+    // `projectResultEvent` produces — so a partial tool-sequence / text
+    // stays readable under it.
+    if (subtype === 'assistant_interrupted') {
+      return {
+        id: `assistant_interrupted_msg_${++this.messageIdCounter}`,
+        role: 'system',
+        timestamp: new Date().toISOString(),
+        segments: [{ type: 'text', content: 'Stopped' }],
+        metadata: { systemSubtype: 'assistant_interrupted' },
       };
     }
 

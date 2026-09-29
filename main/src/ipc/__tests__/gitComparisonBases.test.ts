@@ -71,6 +71,12 @@ vi.mock('../claudePanel', () => ({
 
 import { createGitOps } from '../gitOps';
 import type { AppServices } from '../types';
+import type { ComparisonBases } from '../../../../shared/types/runFiles';
+
+// Real-git suite: several cases clone + clone + push + fetch per test. Under
+// the 5s vitest default that reports machine LOAD (a full-suite run with a
+// fork on every core) as a failure — time out on a genuine hang instead.
+vi.setConfig({ testTimeout: 60_000 });
 
 function inertDb() {
   const stmt = { run: () => ({ changes: 0 }), get: () => undefined, all: () => [] };
@@ -121,12 +127,7 @@ function makeServices(worktreePath: string, sessionOverrides: Record<string, unk
 
 type ComparisonBasesResult = {
   success: boolean;
-  data?: {
-    branchPoint: { ref: string; shortSha: string } | null;
-    defaultBranch: string | null;
-    localDefault: { ref: string; behind: number } | null;
-    originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
-  };
+  data?: ComparisonBases;
   error?: string;
 };
 

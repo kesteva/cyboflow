@@ -50,8 +50,6 @@ export interface ResolvedProposalEntity {
   ref: string;
   type: BacklogTaskItem['type'] | 'finding';
   title: string;
-  priority?: BacklogTaskItem['priority'];
-  stageId?: string;
   /** Only ever set for type==='task' — used to group reprioritize rows by epic. */
   parentEpicId?: string | null;
 }
@@ -95,6 +93,15 @@ function flattenStages(
  * Authoritative answers only: a resolved entity (with its owning project) or
  * `null` for a confirmed not-found. A transport failure is deliberately NOT
  * written here so the next mount retries it.
+ *
+ * STALENESS: this cache is NOT wired to `reviewItems.onReviewItemChanged` — an
+ * answer, once cached, is never invalidated for the renderer's lifetime. A
+ * finding whose title is edited after first resolution keeps showing the
+ * stale title on every proposal card until reload, and a finding resolved
+ * `null` before it was minted stays "(unresolved)" permanently. Acceptable
+ * for a one-shot confirmation card (the proposal itself is a point-in-time
+ * snapshot); {@link resetProposalFindingCacheForTests} is the only way to
+ * clear it, and only in tests.
  */
 const findingCache = new Map<string, ResolvedProposalEntity | null>();
 const findingInflight = new Map<string, Promise<void>>();
@@ -117,10 +124,14 @@ function fetchFinding(id: string): Promise<void> {
           : null,
       );
     })
-    .catch(() => {
+    .catch((err: unknown) => {
       // Transient (transport) failure: leave the id unanswered so it renders
       // as unresolved for THIS mount and is retried on the next one, instead
-      // of pinning "unresolved" for the renderer's lifetime.
+      // of pinning "unresolved" for the renderer's lifetime. Still worth a
+      // trace — mirrors dynamicWorkflowStore's console.warn on the same
+      // failure class — so a persistently failing reviewItems.get isn't
+      // silently invisible.
+      console.warn('[useProposalEntityLabels] reviewItems.get failed for', id, err);
     })
     .finally(() => {
       findingInflight.delete(id);
@@ -188,8 +199,6 @@ export function useProposalEntityLabels(ids: string[], projectId: number): {
           ref: task.ref,
           type: task.type,
           title: task.title,
-          priority: task.priority,
-          stageId: task.stage_id,
           parentEpicId: task.parent_epic_id,
         });
       }

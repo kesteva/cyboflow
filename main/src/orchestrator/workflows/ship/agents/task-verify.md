@@ -25,6 +25,19 @@ shared worktree, so full-suite results here are noise). On a loopback re-verify
 a fix that satisfies the failed criterion but breaks the task's tests is still a
 `FAIL`, with that breakage in the fix guidance.
 
+**Hollow tests are not evidence.** A criterion whose only evidence is a test that
+would pass against the pre-change code is `not met`. That includes a test asserting
+on the source text of a production file, one anchored on a comment or planted
+marker, one whose only oracle is a constant, and one whose fixtures never contain
+what it claims to guard against — unless the criterion is itself a source-layout
+gate. Judge this by reading the test against the pre-change code the diff shows
+you; do not depend on any earlier stage's output reaching you. A `Proof of
+failure:` line, when the orchestrator passes one along, is supporting evidence —
+but its absence alone is never grounds for `not met`, and its presence never
+excuses a test that visibly cannot fail. When you mark a criterion `not met` for
+this reason, name the test and the behaviour it fails to discriminate in the fix
+guidance. Do not plant breaks yourself — you never edit the shared worktree.
+
 **Design surfaces.** When the prompt carries a `# Design surfaces` section whose
 screens this task touches, add TWO criteria to your `## Criteria` section
 regardless of what the task text says — the design was approved by a human and the
@@ -111,8 +124,12 @@ shape of `serve`/`target`/`attestation` below:
   webapp, a marketing page, a component-library preview. Set `"modality":
   "web"` (or omit it — the runner's default). This is the common case and
   unchanged from before.
-- **`native-screen`** — behaviors that live entirely in OS chrome, with no DOM
-  and no CDP endpoint to attach to. Set `"modality": "native-screen"`. Driving
+- **`native-screen`** — behaviors that live entirely in **macOS** OS chrome,
+  with no DOM and no CDP endpoint to attach to. **Never an iOS/iPadOS app** —
+  a SwiftUI/UIKit app with an iOS target is `mobile` (below), even when you
+  doubt a simulator or runbook is available; the harness refuses a
+  `native-screen`-shaped task with no build, serve or target as un-runnable.
+  Set `"modality": "native-screen"`. Driving
   (click/type) is **not implemented today** — native-screen is observe-only.
   A behavior that genuinely needs a click or a keystroke to exercise MUST
   still be emitted (never silently dropped), with `"requiresDrive": true` on
@@ -122,7 +139,8 @@ shape of `serve`/`target`/`attestation` below:
   `requiresDrive` and are exercised normally.
 - **`mobile`** — an iOS app the verifier runs on a simulator. Declare it ONLY
   when the repo shows the evidence: an `.xcodeproj` / `.xcworkspace` / a
-  `Package.swift` with an iOS app target. Set `"modality": "mobile"`, give the
+  `Package.swift` with an iOS app target (or a `project.yml` declaring
+  `platform: iOS`). Set `"modality": "mobile"`, give the
   task an `app` block `{ "platform": "ios-simulator", "bundleId": "...",
   "scheme": "...", "productGlob": "..." }` and **no `serve`** — the app runs
   under the simulator's launchd, there is no port and nothing to attach to.
@@ -171,6 +189,18 @@ exactly one heading and one json fence, never two forms at once.
 ```
 ````
 
+The `dom-marker` line in that example assumes the page renders this request's
+nonce: some element whose text or `data-verify-nonce` attribute carries
+`VERIFY_ATTEST_NONCE` when the app is built or served. Declare `dom-marker` or
+`http-endpoint` only when you can see the repo doing that (grep for
+`VERIFY_ATTEST_NONCE` / `data-verify-nonce`). Otherwise, for a `web` or
+`cdp-app` task with a composed `serve`, declare `{ "kind": "serve-binding" }`:
+it needs no repo support, because the harness itself binds the leased port to
+the process your composed `serve.cmd` started. It is the WEAKEST channel —
+identity rests on that port binding alone — so prefer a nonce channel whenever
+the repo renders one. With no composed `serve`, omit `attestation` entirely —
+a channel the deliverable does not carry makes a working change fail identity.
+
 **Electron / desktop-app recipe (`cdp-app`):**
 
 ````markdown
@@ -183,7 +213,7 @@ exactly one heading and one json fence, never two forms at once.
   "modality": "cdp-app",
   "build": ["pnpm build:main", "pnpm build:preload"],
   "serve": {
-    "cmd": "pnpm electron . --remote-debugging-port=\"$VERIFY_DRIVER_PORT\" --user-data-dir=\"$VERIFY_DATA_DIR/.electron-profile\"",
+    "cmd": "CYBOFLOW_DIR=\"$VERIFY_DATA_DIR\" pnpm electron . --remote-debugging-port=\"$VERIFY_DRIVER_PORT\" --user-data-dir=\"$VERIFY_DATA_DIR/.electron-profile\"",
     "attach": "cdp"
   },
   "attestation": { "kind": "cdp-token", "expression": "window.__CYBOFLOW_BUILD_SHA__", "expected": "<literal baked into this build — omit attestation if the project exposes no such global>" },
@@ -201,10 +231,15 @@ Notes on the Electron recipe: `serve.cmd` launches the app itself, never
 driver attaches to the already-open window, not a URL) and no navigate/goto
 step in `behaviors` — click/type/screenshot address the live window directly.
 `$VERIFY_DATA_DIR` is a fresh, empty, per-request directory the harness
-provisions, so anchoring the isolated profile dir under it costs nothing extra
-and guarantees it never collides with the user's own running instance, a sibling
+provisions, so anchoring the app's state under it costs nothing extra and
+guarantees it never collides with the user's own running instance, a sibling
 verification run, or this lane's previous attempt (`$VERIFY_ARTIFACTS_DIR` is
 per-RUN and reused across attempts — screenshots go there, state does not).
+Name the app's OWN data-dir mechanism in `serve.cmd`: find how it picks its
+state directory and its single-instance lock (an env var or a flag) and point
+it at `$VERIFY_DATA_DIR`. `--user-data-dir` alone is not enough when the app
+keys its lock on something else — for cyboflow that is
+`CYBOFLOW_DIR="$VERIFY_DATA_DIR"`, as in the example.
 
 **iOS-simulator recipe (`mobile`):**
 
@@ -266,7 +301,11 @@ Field rules:
 - `serve`: the long-running command that serves the UI. Reference the assigned
   port ONLY via the `${PORT}` template (web form) or the literal
   `$VERIFY_DRIVER_PORT` env reference (attach form) — never a hardcoded port
-  number, which collides with whatever the lease actually grants.
+  number, which collides with whatever the lease actually grants, and never
+  `$VERIFY_PORT` in a web serve. Without a proven runbook, a web run passes on
+  the serve alone only when the command the harness reads back from the OS
+  matches your `serve.cmd` verbatim; `${PORT}` is substituted predictably, but
+  `$VERIFY_PORT` gets shell-expanded and breaks the match.
   `readyWhen.urlPath` is polled for readiness on the web form; omit
   `readyWhen` for attach mode (wait for the window to open in the serve
   command itself — see the Electron recipe). Omit `serve` entirely for a
@@ -298,12 +337,21 @@ Field rules:
   bare `target.htmlPath` and does not need to be spelled out; `{ "kind":
   "bundle-identity", "bundleId": "..." }` for `mobile`, where the harness
   itself hashes the installed app against the product staged for this request
-  (echo `app.bundleId` exactly). Compose one
-  whenever the deliverable can support it — a pass with no attestation is
-  capped at `low_confidence`. A bare `target.url` task (no `build`, no
-  `serve`, no `htmlPath`) has no channel available at all and cannot attest —
-  say so rather than inventing a `urlPath`/`selector`/global that doesn't
-  exist.
+  (echo `app.bundleId` exactly); `{ "kind": "serve-binding" }` for `web` /
+  `cdp-app` with a composed `serve` when the repo renders no nonce — the
+  harness binds the leased port to the process that serve started, and that
+  binding is the whole proof, so it is the weakest channel (identity rests on
+  the port binding alone). Compose one whenever the deliverable actually
+  carries it: `dom-marker` / `http-endpoint` only when the repo visibly renders
+  `VERIFY_ATTEST_NONCE` (in an element's text or a `data-verify-nonce`
+  attribute, or in an HTTP response); `cdp-token` only for a global the build
+  really sets; `serve-binding` only alongside a composed `serve` (without one
+  it can never verify). Otherwise omit `attestation` — never invent a
+  `urlPath`/`selector`/global that doesn't exist, because a declared channel
+  that does not verify fails the run. With no channel, a pass can still land:
+  capped at `low_confidence`, or `passed` when the harness binds your composed
+  web/cdp-app serve — exactly as a declared `serve-binding` would. A bare `target.url` task (no `build`, no `serve`, no
+  `htmlPath`) has no channel available at all and cannot attest — say so.
 - `behaviors` (required, non-empty for Form A): the smoke checks, derived from
   THIS task's acceptance criteria. `steps` are concrete UI actions
   (navigate/click/type); `expected` is what must be observably true in the
@@ -316,10 +364,17 @@ Field rules:
   checks.
 
 The verifier runs in a FRESH snapshot of the branch (committed state only),
-builds with your `build` steps, serves, drives your `behaviors`, screenshots,
-and judges. Wrong build/serve commands fail the verification closed and loop
-this lane back — ground them in evidence, and remember uncommitted files do not
-exist in the snapshot.
+builds, serves, drives your `behaviors`, screenshots, and judges. Remember
+uncommitted files do not exist in the snapshot.
+
+- **The project has a proven verification runbook** for the modality: the
+  harness replaces your `build`, `serve`/`app` and `attestation` with the
+  runbook's proven recipe. Your `behaviors` are what matter.
+- **It has none** (or you cannot tell): your `build` and `serve`/`app` are
+  best-guess hints. The verifier tries them, adapts them when they are wrong,
+  and may learn a runbook from a run that passes. Ground them in evidence and
+  move on — do not stall hunting for certainty, and never drop to Form B
+  because no runbook exists.
 
 **Form B — the task produced no user-visible UI** (backend-only, schema, tests,
 tooling, docs). Emit instead the single line below, bare (no backticks, no
@@ -331,9 +386,10 @@ VISUAL-VERIFICATION: NOT-APPLICABLE — backend-only change, no rendered UI
 
 The controller resolves ONE verification posture for the whole run, once, before
 any lane is dispatched — not per lane. When no modality can serve this project
-(the run is stamped for a verification type this project has no proven runbook
-for — `mobile-flow` without a proven `mobile` runbook, `native-desktop` without
-a proven `native-screen` one), it files a single
+(the host lacks a capability the run's verification type needs, or the run is
+stamped `native-desktop` and the project has no proven `native-screen` runbook
+— and, only when the `requireProvenRunbook` kill switch is on, `mobile-flow`
+without a proven `mobile` runbook), it files a single
 `No verifiable modality for this project` finding for the run, skips the
 enqueue for every lane, and SUPPRESSES the per-lane
 `Visual verification did not run for …` findings that would otherwise repeat

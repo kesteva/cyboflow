@@ -13,17 +13,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
 import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { StreamEvent } from '../../utils/cyboflowApi';
 
-// -- UnifiedChatView stub: captures mode/running and renders bottomSlot verbatim. --
+// -- UnifiedChatView stub: captures mode/running/liveTail and renders bottomSlot
+//    verbatim (liveTail alongside it, so tests can assert on its presence/absence
+//    the same way a real ChatTranscript would gate its animated fallback). --
 interface UnifiedChatViewStubProps {
   mode: string;
   running?: boolean;
+  liveTail?: ReactNode;
   bottomSlot?: ReactNode;
 }
 
 vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
-  UnifiedChatView: ({ mode, running, bottomSlot }: UnifiedChatViewStubProps) => (
+  UnifiedChatView: ({ mode, running, liveTail, bottomSlot }: UnifiedChatViewStubProps) => (
     <div data-testid="unified-chat-view-stub" data-mode={mode} data-running={String(running)}>
+      <div data-testid="live-tail-slot">{liveTail}</div>
       {bottomSlot}
     </div>
   ),
@@ -46,15 +51,28 @@ vi.mock('./ProposalCardList', () => ({
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
+const mockInterrupt = vi.fn().mockResolvedValue(undefined);
+// TASK-301: Queue + Interrupt & send store surface.
+const mockQueueTurn = vi.fn();
+const mockCancelQueuedTurn = vi.fn();
+const mockInterruptAndSend = vi.fn().mockResolvedValue(undefined);
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
+let mockLiveEvents: StreamEvent[] = [];
+let mockQueuedTurn: { text: string; images?: unknown[] } | null = null;
 
 interface FakeAgentThreadState {
   thread: AgentThread | null;
   sending: boolean;
   sendMessage: typeof mockSendMessage;
+  interrupt: typeof mockInterrupt;
   proposals: AgentProposal[];
+  liveEvents: StreamEvent[];
+  queuedTurn: { text: string; images?: unknown[] } | null;
+  queueTurn: typeof mockQueueTurn;
+  cancelQueuedTurn: typeof mockCancelQueuedTurn;
+  interruptAndSend: typeof mockInterruptAndSend;
 }
 
 vi.mock('../../stores/agentThreadStore', () => ({
@@ -63,9 +81,25 @@ vi.mock('../../stores/agentThreadStore', () => ({
       thread: mockThread,
       sending: mockSending,
       sendMessage: mockSendMessage,
+      interrupt: mockInterrupt,
       proposals: mockProposals,
+      liveEvents: mockLiveEvents,
+      queuedTurn: mockQueuedTurn,
+      queueTurn: mockQueueTurn,
+      cancelQueuedTurn: mockCancelQueuedTurn,
+      interruptAndSend: mockInterruptAndSend,
     }),
 }));
+
+/** A synthetic `stream_event` envelope matching the wrapper shape AgentThreadService
+ *  publishes and agentThreadStore captures into `liveEvents`. */
+function makeStreamEventEnvelope(event: Record<string, unknown>): StreamEvent {
+  return {
+    type: 'stream_event',
+    payload: { type: 'stream_event', event },
+    timestamp: '2026-09-21T00:00:00.000Z',
+  } as StreamEvent;
+}
 
 function makeThread(overrides: Partial<AgentThread> = {}): AgentThread {
   return {
@@ -88,10 +122,16 @@ async function loadAgentThreadView(): Promise<ComponentType> {
 beforeEach(() => {
   vi.resetModules();
   mockSendMessage.mockClear();
+  mockInterrupt.mockClear();
+  mockQueueTurn.mockClear();
+  mockCancelQueuedTurn.mockClear();
+  mockInterruptAndSend.mockClear();
   mockThread = null;
   mockSending = false;
   mockProposals = [];
   mockMessages = [];
+  mockLiveEvents = [];
+  mockQueuedTurn = null;
 });
 
 describe('AgentThreadView — UnifiedChatView wiring', () => {
@@ -178,6 +218,131 @@ describe('AgentThreadView — composer + chips wiring', () => {
     render(<AgentThreadView />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
+  });
+
+  it('while sending, the composer stays enabled and shows Stop (TASK-297)', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.getByTestId('agent-composer-input')).not.toBeDisabled();
+    expect(screen.getByTestId('agent-composer-stop')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-composer-send')).not.toBeInTheDocument();
+  });
+
+  it('clicking Stop while sending calls store.interrupt', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.click(screen.getByTestId('agent-composer-stop'));
+
+    expect(mockInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('Esc while sending calls store.interrupt', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Escape' });
+
+    expect(mockInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------
+  // Queue + Interrupt & send (TASK-301)
+  // -------------------------------------------------------------------
+
+  it('while sending with a draft, clicking Queue calls store.queueTurn (not sendMessage/interrupt)', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'queue this' } });
+    fireEvent.click(screen.getByTestId('agent-composer-queue'));
+
+    expect(mockQueueTurn).toHaveBeenCalledWith('queue this', undefined);
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('while sending with a draft, clicking Interrupt & send calls store.interruptAndSend', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'abort and send' } });
+    fireEvent.click(screen.getByTestId('agent-composer-interrupt-send'));
+
+    expect(mockInterruptAndSend).toHaveBeenCalledWith('abort and send', undefined);
+    expect(mockQueueTurn).not.toHaveBeenCalled();
+    expect(mockInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('renders the "Queued" notice when store.queuedTurn is set, and Cancel calls store.cancelQueuedTurn', async () => {
+    mockThread = makeThread();
+    mockSending = true;
+    mockQueuedTurn = { text: 'queued text' };
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.getByTestId('agent-composer-queued')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('agent-composer-queued-cancel'));
+    expect(mockCancelQueuedTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the suggestion chips while a turn is queued, even once sending clears', async () => {
+    mockThread = makeThread();
+    mockSending = false;
+    mockQueuedTurn = { text: 'queued text' };
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    fireEvent.click(screen.getByText('Status update'));
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentThreadView — live tail (claude-sdk stream_event wiring, assistant rail parity)', () => {
+  it('renders progressive LiveTail content when liveEvents carries visible text', async () => {
+    mockThread = makeThread();
+    mockLiveEvents = [
+      makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+      makeStreamEventEnvelope({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi there' } }),
+    ];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.getByTestId('live-tail')).toBeInTheDocument();
+    expect(screen.getByTestId('live-tail')).toHaveTextContent('Hi there');
+  });
+
+  it('renders no LiveTail node (keeps the animated fallback) when liveEvents is empty (e.g. codex-sdk runtime)', async () => {
+    mockThread = makeThread();
+    mockLiveEvents = [];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.queryByTestId('live-tail')).not.toBeInTheDocument();
+    expect(screen.getByTestId('live-tail-slot')).toBeEmptyDOMElement();
+  });
+
+  it('gates on VISIBLE content — an opened-but-empty block does not render a bare header', async () => {
+    mockThread = makeThread();
+    // content_block_start only: the block is open but carries no text yet.
+    mockLiveEvents = [
+      makeStreamEventEnvelope({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+    ];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    expect(screen.queryByTestId('live-tail')).not.toBeInTheDocument();
   });
 });
 

@@ -131,7 +131,21 @@ function useCrossProjectWorkflowInventory(): WorkflowInventory {
   return { workflows, error, loaded, retry: () => setAttempt((a) => a + 1) };
 }
 
-export function RunTypeOverridesSection(): React.JSX.Element {
+export interface RunTypeOverridesSectionProps {
+  /**
+   * Fires whenever the {@link RunTypeOverrideDetail} sub-screen opens/closes.
+   * Its own Save/Cancel are the ONLY sanctioned way to leave a draft there —
+   * see the RunTypeOverrideDetail module doc — so `Settings.tsx` uses this to
+   * disable the modal's shared footer Save while the sub-screen is open,
+   * rather than let that footer's `handleSubmit` silently discard whatever
+   * override edits are in progress (they are not part of its payload at all).
+   */
+  onDetailScreenOpenChange?: (open: boolean) => void;
+}
+
+export function RunTypeOverridesSection({
+  onDetailScreenOpenChange,
+}: RunTypeOverridesSectionProps = {}): React.JSX.Element {
   const config = useConfigStore((s) => s.config);
   const {
     workflows,
@@ -140,6 +154,14 @@ export function RunTypeOverridesSection(): React.JSX.Element {
     retry: retryWorkflows,
   } = useCrossProjectWorkflowInventory();
   const [selected, setSelected] = useState<RunTypeRow | null>(null);
+
+  useEffect(() => {
+    onDetailScreenOpenChange?.(selected !== null);
+    // Reset on unmount too (e.g. the settings modal closes while the
+    // sub-screen is open) so the flag never sticks "open" for a screen that
+    // no longer exists.
+    return () => onDetailScreenOpenChange?.(false);
+  }, [selected, onDetailScreenOpenChange]);
 
   const runTypeDefaults = config?.runTypeDefaults;
 

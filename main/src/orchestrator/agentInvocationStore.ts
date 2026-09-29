@@ -102,6 +102,26 @@ export class AgentInvocationStore {
   }
 
   /**
+   * Link a Codex turn to the invocation that ran it (migration 146), written
+   * when `turn/start` returns. Stored notifications carry (thread, turn) but no
+   * invocation id; this row maps them back. Idempotent.
+   */
+  recordCodexTurn(input: {
+    agentInvocationId: string;
+    runId: string;
+    threadId: string;
+    codexTurnId: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO codex_invocation_turns
+           (agent_invocation_id, run_id, thread_id, codex_turn_id)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(input.agentInvocationId, input.runId, input.threadId, input.codexTurnId);
+  }
+
+  /**
    * Resolve the newest captured top-level invocation FOR ONE CHAT PANEL.
    *
    * A quick session's chat_run_id is SESSION-scoped: every chat panel resolves

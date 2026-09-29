@@ -879,6 +879,122 @@ describe('reconcile-by-id against the subscription (no duplicate/flicker)', () =
 });
 
 // ---------------------------------------------------------------------------
+// seedCompoundingFromFindingIds (TASK-291 — Code-Quality drill-down bulk seed)
+// ---------------------------------------------------------------------------
+
+describe('seedCompoundingFromFindingIds', () => {
+  it('approves an untriaged eligible row into READY then selects it', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['f1']);
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.triageState).toBe('ready');
+    expect(row?.selected).toBe(true);
+    expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'f1' });
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['f1'],
+      selected: true,
+    });
+  });
+
+  it('selects an already-ready-but-unselected row without re-approving', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['f1']);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['f1'],
+      selected: true,
+    });
+  });
+
+  it('skips ids with no matching triageFindings row (resolved/dismissed/orphaned)', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['not-a-triage-row']);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op for an empty id list', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds([]);
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('scopes selection to the FIRST eligible row project (single-project invariant)', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'p1', project_id: 1, staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+      makeReviewItem({ id: 'p2', project_id: 2, staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['p1', 'p2']);
+
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['p1'],
+      selected: true,
+    });
+  });
+
+  it('honors an EXISTING selection lock instead of the seeded ids’ own project, refusing a cross-project select', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      // Already selected+ready in project 1 — this is the active lock.
+      makeReviewItem({ id: 'locked', project_id: 1, staged_at: '2026-06-06T00:00:00.000Z', selected: true }),
+      // The drill-down being seeded is entirely in a DIFFERENT project.
+      makeReviewItem({ id: 'p2', project_id: 2, staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['p2']);
+
+    // p2 is still approved into READY (approving is not project-scoped)...
+    expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 2, reviewItemId: 'p2' });
+    // ...but never selected: selecting it would hide it behind the project-1
+    // lock (selectLockProjectId still resolves to 1) rather than surface it.
+    expect(mockSetSelectedMutate).not.toHaveBeenCalled();
+  });
+
+  it('excludes an id whose approve failed from the batch select, so it cannot poison the others’ transaction', async () => {
+    mockApproveMutate.mockImplementation(({ reviewItemId }: { reviewItemId: string }) =>
+      reviewItemId === 'bad' ? Promise.reject(new Error('approve boom')) : Promise.resolve({ reviewItemId, staged: true }),
+    );
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'good', project_id: 1, staged_at: null, selected: false }),
+      makeReviewItem({ id: 'bad', project_id: 1, staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().seedCompoundingFromFindingIds(['good', 'bad']);
+
+    const s = useInsightsStore.getState();
+    expect(s.triageFindings.find((f) => f.id === 'good')?.triageState).toBe('ready');
+    expect(s.triageFindings.find((f) => f.id === 'bad')?.triageState).toBe('untriaged');
+    // Only the successfully-approved row is selected — 'bad' staying untriaged
+    // must never reach setSelected, where it would reject the whole batch.
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['good'],
+      selected: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // UI toggles
 // ---------------------------------------------------------------------------
 

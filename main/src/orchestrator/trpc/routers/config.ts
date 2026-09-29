@@ -24,7 +24,12 @@ import { PERMISSION_MODES } from '../../../../../shared/types/workflows';
 import type { ConfigOpsResult, SessionCreationPreferences } from '../contracts/configOps';
 
 const runTypeDefaultsFields = {
-  model: z.string().optional().nullable(),
+  // trim().min(1): a whitespace-only or empty model string still passes a
+  // bare `z.string()`, and getDefaultLaunchModel resolves via `stored?.model
+  // ?? globals?.model ?? floor` — an empty string is neither null (delete)
+  // nor undefined (fall through), so it suppresses the floor and can produce
+  // an invalid launch model with no error anywhere.
+  model: z.string().trim().min(1).optional().nullable(),
   permissionMode: z.enum(PERMISSION_MODES).optional().nullable(),
   substrate: z.enum(['sdk', 'interactive']).optional().nullable(),
   // The persisted run-type default is not scoped to one launch kind, so it
@@ -43,7 +48,7 @@ const runTypeDefaultsOpSchema = z.discriminatedUnion('kind', [
     kind: z.literal('replace'),
     value: z.object({
       ...runTypeDefaultsFields,
-      model: z.string().optional(),
+      model: z.string().trim().min(1).optional(),
       permissionMode: z.enum(PERMISSION_MODES).optional(),
       substrate: z.enum(['sdk', 'interactive']).optional(),
       agentRuntime: z.enum(ALL_AGENT_RUNTIMES).optional(),
@@ -79,7 +84,10 @@ export const configRouter = router({
     }),
 
   applyRunTypeDefault: protectedProcedure
-    .input(z.object({ key: z.string().min(1), op: runTypeDefaultsOpSchema }))
+    // trim().min(1): a whitespace-only key passes a bare min(1) (its length is
+    // still >= 1) and would persist as a run-type-defaults entry no launch
+    // surface's runTypeKindForKey/`workflow:` parsing can ever resolve back to.
+    .input(z.object({ key: z.string().trim().min(1), op: runTypeDefaultsOpSchema }))
     .mutation(async ({
       ctx,
       input,

@@ -41,7 +41,7 @@ import type { WebViewerNavigatedEvent } from './services/webViewer/webViewerMana
 export interface WebViewerCompositionDeps {
   configManager: ConfigManager;
   sessionManager: SessionManager;
-  /** Tab rows + the web audit trail (migration 146). */
+  /** Tab rows + the web audit trail (migration 147). */
   databaseService: DatabaseService;
   /**
    * ACCESSOR, never a captured window: macOS re-creates the main window on dock

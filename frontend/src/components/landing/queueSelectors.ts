@@ -87,6 +87,28 @@ export function nonTerminalFlowRunBySession(runs: ActiveRunRow[]): Map<string, A
 }
 
 /**
+ * Whether a TERMINAL flow run is recent enough to still speak for its
+ * session — the "most recent activity wins" gate on
+ * {@link significantFlowRunBySession} (product decision, 2026-09-25).
+ * `chatActivityIso` is the session's own last-rest boundary
+ * (`QuickSessionRow.restedAtIso`, stamped only at a real busy→resting
+ * transition — a flow launch parking the chat does NOT by itself read as
+ * "newer chat activity", so an interrupted `__quick__` run beside a
+ * still-fresh flow run is not mistaken for a later reuse of the session). A
+ * missing or unparseable timestamp on either side FAILS OPEN to the run —
+ * nothing to compare against keeps the pre-existing flow-always-wins
+ * behavior — so a caller with no activity signal need not special-case it.
+ */
+function flowRunIsRecentEnough(run: ActiveRunRow, chatActivityIso: string | null): boolean {
+  if (chatActivityIso === null) return true;
+  const chatMs = parseDbTimestampMs(chatActivityIso);
+  if (Number.isNaN(chatMs)) return true;
+  const finishMs = parseDbTimestampMs(run.ended_at ?? run.created_at);
+  if (Number.isNaN(finishMs)) return true;
+  return finishMs >= chatMs;
+}
+
+/**
  * The MOST SIGNIFICANT flow run per session, INCLUDING a terminal one — the
  * navigation/label counterpart of {@link nonTerminalFlowRunBySession} for the
  * Ready-for-review band (TASK-226 address-review). Once a session's flow run
@@ -98,21 +120,37 @@ export function nonTerminalFlowRunBySession(runs: ActiveRunRow[]): Map<string, A
  * "stopped by you" just because its parked chat run reads `stopped`).
  *
  * Precedence: a non-terminal run always wins; otherwise the NEWEST terminal
- * run (by `created_at`, then list order). Feed this the store's RETAINED rows
- * (`useAggregatedRetainedRuns`), which keep the newest terminal run per
- * session — the active-only `useAggregatedRuns` list never contains one.
+ * run (by `created_at`, then list order) — UNLESS the session has since been
+ * reused as a plain chat: "most recent activity wins" (product decision,
+ * 2026-09-25). `chatActivityBySession` (keyed by session id, holding the
+ * session's `restedAtIso`) lets a TERMINAL run be skipped outright — never
+ * entered into the map at all — when its finish (`ended_at`, falling back to
+ * `created_at` when it never ended) is OLDER than that session's own
+ * activity: a session hosting fresh commits/turns after its old flow run
+ * wrapped up must read, navigate, and merge as the plain chat it now is, not
+ * as leftovers of that run (see {@link flowRunIsRecentEnough}). Omit the map
+ * (or leave a session out of it) to keep the old flow-always-wins behavior.
+ * Feed this the store's RETAINED rows (`useAggregatedRetainedRuns`), which
+ * keep the newest terminal run per session — the active-only
+ * `useAggregatedRuns` list never contains one.
  */
-export function significantFlowRunBySession(runs: ActiveRunRow[]): Map<string, ActiveRunRow> {
+export function significantFlowRunBySession(
+  runs: ActiveRunRow[],
+  chatActivityBySession: ReadonlyMap<string, string | null> = new Map(),
+): Map<string, ActiveRunRow> {
   const map = new Map<string, ActiveRunRow>();
   for (const run of runs) {
     if (typeof run.session_id !== 'string' || run.session_id === '') continue;
+    const runTerminal = classifyRun(run.status) === 'terminal';
+    if (runTerminal && !flowRunIsRecentEnough(run, chatActivityBySession.get(run.session_id) ?? null)) {
+      continue;
+    }
     const current = map.get(run.session_id);
     if (current === undefined) {
       map.set(run.session_id, run);
       continue;
     }
     const currentTerminal = classifyRun(current.status) === 'terminal';
-    const runTerminal = classifyRun(run.status) === 'terminal';
     if (currentTerminal && !runTerminal) {
       map.set(run.session_id, run);
     } else if (currentTerminal && runTerminal && run.created_at > current.created_at) {
@@ -153,11 +191,14 @@ export type OpenSessionTarget =
  * Resolve the ONE navigation target for a session row, so the flow-vs-quick
  * routing rule can't drift between call sites (Needs-input, Working,
  * Ready-for-review, and the Recommended-actions dispatch all funnel through
- * this). A session a non-terminal flow run already represents always opens
+ * this). A session a flow run in `flowRunBySession` already represents opens
  * THAT run — never the (possibly interrupted/dead) `__quick__` chat sitting
- * beside it; only a session with no live flow run falls back to opening the
- * quick session itself. Pure so the routing decision is testable without
- * mocking navigation stores — the caller performs the actual side effect.
+ * beside it; a session with no entry in the map (no live flow run, or — for
+ * the Ready-for-review map — a terminal flow run the session has since aged
+ * past, see {@link significantFlowRunBySession}'s "most recent activity
+ * wins" rule) falls back to opening the quick session itself. Pure so the
+ * routing decision is testable without mocking navigation stores — the
+ * caller performs the actual side effect.
  */
 export function resolveOpenTarget(
   row: Pick<QuickSessionRow, 'sessionId' | 'runId' | 'projectId'>,

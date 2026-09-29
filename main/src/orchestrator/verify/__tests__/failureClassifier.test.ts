@@ -256,3 +256,27 @@ describe('classifyVerificationFailure — precedence ordering', () => {
     expect(deliverableOnly.failureClass).toBe('deliverable');
   });
 });
+
+// The runbook-optional widening (F6): the two new report outcomes are
+// MODEL-AUTHORED, so neither may reach 'env' from the report alone (only harness
+// evidence does), and neither is a judged 'fail', so neither is 'deliverable'.
+describe('classifyVerificationFailure — the unverifiable / wrong_environment outcomes', () => {
+  for (const reportOutcome of ['unverifiable', 'wrong_environment'] as const) {
+    it(`${reportOutcome} with no harness evidence classifies ambiguous, never env or deliverable`, () => {
+      for (const provisionMode of ['snapshot', 'fallback', null] as const) {
+        const result = classifyVerificationFailure(baseInputs({ reportOutcome, provisionMode }));
+        expect(result.failureClass).toBe('ambiguous');
+        expect(result.evidence[0]?.source).toBe('runner');
+        expect(result.evidence[0]?.detail).toContain(reportOutcome);
+      }
+    });
+
+    it(`${reportOutcome} still yields to real harness env evidence`, () => {
+      const result = classifyVerificationFailure(
+        baseInputs({ reportOutcome, provisionMode: 'snapshot', instanceLockContention: true }),
+      );
+      expect(result.failureClass).toBe('env');
+      expect(result.evidence.every((e) => e.source !== 'report')).toBe(true);
+    });
+  }
+});

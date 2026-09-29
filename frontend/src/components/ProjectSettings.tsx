@@ -190,6 +190,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
                       const result = await API.dialog.openDirectory({
                         title: 'Select Repository Directory',
                         buttonLabel: 'Select',
+                        properties: ['openDirectory', 'createDirectory'],
                       });
                       if (result.success && result.data) {
                         setPath(result.data);
@@ -257,6 +258,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
                       const result = await API.dialog.openDirectory({
                         title: 'Select Worktree Directory',
                         buttonLabel: 'Select',
+                        properties: ['openDirectory', 'createDirectory'],
                       });
                       if (result.success && result.data) {
                         setWorktreeFolder(result.data);

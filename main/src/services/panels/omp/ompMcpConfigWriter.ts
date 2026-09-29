@@ -118,8 +118,8 @@ export interface OmpMcpConfigWriteResult {
  * IDEMPOTENT: rewrites the file only when the merged content actually differs
  * from what a re-parse of the existing file would produce (structural
  * equality, not raw-string equality, so re-running this with the same inputs
- * against a file IT already wrote is a true no-op regardless of surrounding
- * whitespace).
+ * against a file IT already wrote never rewrites it, regardless of surrounding
+ * whitespace). The `.omp/` git exclusion is still (idempotently) ensured.
  *
  * Malformed existing JSON is NOT silently discarded — a corrupt hand-edited
  * file may still name servers the user cares about, so this logs a warning
@@ -130,6 +130,14 @@ export function writeOmpMcpConfig(options: WriteOmpMcpConfigOptions): OmpMcpConf
   const { worktreeRoot, nodeExecutablePath, bridgeScriptPath, logger } = options;
   const configPath = ompMcpConfigPath(worktreeRoot);
   const cyboflowEntry = buildOmpCyboflowMcpServerEntry(nodeExecutablePath, bridgeScriptPath);
+
+  // On EVERY call, before any write — not only when this call rewrites the
+  // file. A worktree whose `.omp/mcp.json` already matches (a second lane, a
+  // respawn, a file restored by hand) would otherwise return "unchanged" below
+  // and never exclude `.omp/`, leaving it to the diff rail and to a checkpoint
+  // `git add -A`. The append is idempotent, so a repeat call costs one
+  // `git rev-parse`.
+  ensureWorktreeExcludesOmpDir(worktreeRoot, logger);
 
   let existing: OmpMcpConfigFile = { mcpServers: {} };
   if (fs.existsSync(configPath)) {
@@ -167,7 +175,6 @@ export function writeOmpMcpConfig(options: WriteOmpMcpConfigOptions): OmpMcpConf
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
   logger?.info(`[OMP] wrote MCP config: ${configPath}`);
-  ensureWorktreeExcludesOmpDir(worktreeRoot, logger);
   return { configPath, wrote: true };
 }
 
@@ -175,9 +182,11 @@ const OMP_EXCLUDE_LINE = '.omp/';
 
 /**
  * Append `.omp/` to the worktree's LOCAL git exclude (`$GIT_DIR/info/exclude`,
- * never the tracked `.gitignore`) so `.omp/mcp.json` never shows up in the
- * session diff rail or gets swept into a `git add -A` checkpoint commit —
- * `.omp/` joins `.cyboflow/` in that file, per proposal §5.4.
+ * never the tracked `.gitignore`) so nothing cyboflow writes under `.omp/` —
+ * `mcp.json` here, the role files `ompAgentWriter` registers under
+ * `.omp/agents/` — ever shows up in the session diff rail or gets swept into a
+ * `git add -A` checkpoint commit. `.omp/` joins `.cyboflow/` in that file, per
+ * proposal §5.4. Exported so both writers share the one exclusion.
  *
  * Delegates the git-path resolution, idempotent append and fail-soft error
  * handling to the shared `gitExcludeWriter` — the single implementation that
@@ -187,7 +196,7 @@ const OMP_EXCLUDE_LINE = '.omp/';
  * bundle globs), per this doc comment's own note that a fourth copy should
  * not land.
  */
-function ensureWorktreeExcludesOmpDir(worktreePath: string, logger?: Logger): void {
+export function ensureWorktreeExcludesOmpDir(worktreePath: string, logger?: Logger): void {
   const result = ensureGitExcludeEntries(worktreePath, [OMP_EXCLUDE_LINE], {
     logger: makeLoggerLike(logger),
     label: 'OMP',

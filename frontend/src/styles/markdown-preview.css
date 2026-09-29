@@ -169,5 +169,5 @@
  * dark themes without a separate override block.
  */
 ::highlight(cyboflow-feedback) {
-  background-color: rgba(var(--color-interactive-rgb), 0.25);
+  background-color: rgb(var(--color-interactive-rgb) / 0.25);
 }

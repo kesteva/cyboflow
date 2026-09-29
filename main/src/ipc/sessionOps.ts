@@ -491,7 +491,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
   };
 
   // Session statistics handler
-  const getStatistics = async ({ sessionId }: OpsInput<'getStatistics'>): Promise<OpsResult<'getStatistics'>> => {
+  const getStatistics = async ({ sessionId, baseRef }: OpsInput<'getStatistics'>): Promise<OpsResult<'getStatistics'>> => {
     try {
       console.log('[IPC] sessions:get-statistics called for sessionId:', sessionId);
 
@@ -503,8 +503,9 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
 
       // Resolve the LIVE worktree branch once per session (worktree-level,
       // not per-panel) — falls back to the stored baseBranch only when the
-      // worktree is unreadable or in a detached HEAD state (getCurrentBranch
-      // returns null). baseBranch itself is untouched below.
+      // worktree is unreadable or has no resolvable ref (getCurrentBranch
+      // returns null — a detached HEAD does NOT: it resolves to the short
+      // commit sha). baseBranch itself is untouched below.
       const liveBranch = getCurrentBranch(session.worktreePath);
       const resolvedBranch = liveBranch ?? (session.baseBranch || 'main');
 
@@ -537,6 +538,10 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // ipc/sessionFileStats.ts for the full rationale.
       const gitFileStats = await computeSessionFileStats({
         worktreePath: session.worktreePath,
+        // TASK-278: the caller's persisted BaseSelector selection (when any)
+        // wins over the recorded branch point, so the card agrees with
+        // whatever base the Diff panel beside it is showing.
+        baseRef,
         baseCommit: session.baseCommit,
         // Only consulted when the recorded branch point no longer resolves —
         // which is the normal case for a main-repo session, since those are
@@ -633,7 +638,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
           duration: duration,
           worktreePath: session.worktreePath,
           // Live worktree branch (resolved once above), falling back to
-          // baseBranch only on detached HEAD / unreadable worktree.
+          // baseBranch only when no ref resolves / unreadable worktree.
           branch: resolvedBranch
         },
         tokens: {

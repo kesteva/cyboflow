@@ -15,17 +15,51 @@
  *
  * Uses the shared Modal primitives so it matches the rest of the app shell.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { IdeaAttachmentStrip } from '../cyboflow/IdeaAttachmentStrip';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { CATEGORY_LABEL } from './markers';
+import {
+  readDraft,
+  writeDraft,
+  clearDraft,
+  isIdeaAttachmentArray,
+  NEW_TASK_DIALOG_DRAFT_KEY,
+} from '../../utils/ideaDraftStorage';
 import type { EntityCategory, IdeaAttachment, IdeaScope, Priority } from '../../../../shared/types/tasks';
 
 /** Empty seed for the attachment hook (stable reference). */
 const NO_ATTACHMENTS: IdeaAttachment[] = [];
+
+/** Persisted draft shape (localStorage) — only the fields that survive a close. */
+interface NewTaskDialogDraft {
+  title: string;
+  body: string;
+  pendingKey: string;
+  attachments: IdeaAttachment[];
+}
+
+function isNewTaskDialogDraft(v: unknown): v is NewTaskDialogDraft {
+  if (typeof v !== 'object' || v === null) return false;
+  const candidate = v as Record<string, unknown>;
+  return (
+    typeof candidate.title === 'string' &&
+    typeof candidate.body === 'string' &&
+    typeof candidate.pendingKey === 'string' &&
+    isIdeaAttachmentArray(candidate.attachments)
+  );
+}
+
+function mintPendingKey(): string {
+  return `pending_${Math.random().toString(36).slice(2)}`;
+}
+
+function serializeDraft(title: string, body: string, pendingKey: string, attachments: IdeaAttachment[]): string {
+  return JSON.stringify({ title, body, pendingKey, attachments });
+}
 
 interface NewTaskDialogProps {
   isOpen: boolean;
@@ -47,29 +81,64 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const projects = useBacklogStore((s) => s.projects);
   const filterProjectId = useBacklogStore((s) => s.filterProjectId);
 
-  const [title, setTitle] = useState('');
-  const [summary, setSummary] = useState('');
+  // Restored once on mount — a persisted draft from an earlier accidental close.
+  // Corrupt/stale/shape-invalid data degrades to `null` (readDraft's contract).
+  const [initialDraft] = useState<NewTaskDialogDraft | null>(() =>
+    readDraft(NEW_TASK_DIALOG_DRAFT_KEY, isNewTaskDialogDraft),
+  );
+
+  const [title, setTitle] = useState(() => initialDraft?.title ?? '');
+  const [summary, setSummary] = useState(() => initialDraft?.body ?? '');
   const [priority, setPriority] = useState<Priority>('P2');
   const [category, setCategory] = useState<EntityCategory>('feature');
   // Idea size hint (IDEA-009) — '' = unset, the planner's triage judges it.
   // A pre-stamped value feeds the picker's S/L badges + plan-separately split
-  // and the planner's "trust existing scope" path. Ideas only.
+  // and the planner's "trust existing scope" path. Ideas only. Not part of the
+  // persisted draft shape — always defaults fresh, even on restore.
   const [scope, setScope] = useState<'' | IdeaScope>('');
   // null = "track the default" — the board's project filter, then the pane's
   // projectId prop, then the first known project. An explicit user pick pins
-  // the override; reset() drops back to tracking.
+  // the override; reset() drops back to tracking. Not part of the persisted
+  // draft shape.
   const [projectOverride, setProjectOverride] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Attachments (ideas only, migration 028). The item has no id yet, so files
-  // save under a stable pending key; their paths ride the create mutation.
-  const [pendingKey] = useState(() => `pending_${Math.random().toString(36).slice(2)}`);
-  const attachmentsCtl = useIdeaAttachments(pendingKey, NO_ATTACHMENTS);
+  // save under a stable pending key; their paths ride the create mutation. A
+  // restored draft reuses its pendingKey (so useIdeaAttachments re-hydrates the
+  // SAME on-disk files) and seeds `initial` with the restored metadata.
+  const [pendingKey, setPendingKey] = useState(() => initialDraft?.pendingKey ?? mintPendingKey());
+  const attachmentsCtl = useIdeaAttachments(pendingKey, initialDraft?.attachments ?? NO_ATTACHMENTS);
+
+  // Last-written serialized draft — guards the write effect below so it only
+  // calls writeDraft on an actual content change, not on every render (the
+  // attachments array is a fresh reference each render even when unchanged).
+  // Seeded from THIS render's initial state so mounting on an unchanged
+  // (or absent) draft doesn't immediately re-write it.
+  const lastWrittenDraftRef = useRef<string>(
+    serializeDraft(title, summary, pendingKey, attachmentsCtl.attachments),
+  );
+
+  useEffect(() => {
+    const serialized = serializeDraft(title, summary, pendingKey, attachmentsCtl.attachments);
+    if (serialized === lastWrittenDraftRef.current) return;
+    lastWrittenDraftRef.current = serialized;
+    writeDraft(NEW_TASK_DIALOG_DRAFT_KEY, {
+      title,
+      body: summary,
+      pendingKey,
+      attachments: attachmentsCtl.attachments,
+    });
+  }, [title, summary, pendingKey, attachmentsCtl.attachments]);
 
   const defaultProjectId = filterProjectId ?? projectId ?? projects[0]?.id ?? null;
   const selectedProjectId = projectOverride ?? defaultProjectId;
 
-  const reset = (): void => {
+  // Clears in-memory fields for the next open and mints a fresh pendingKey (so
+  // a later draft never reuses a just-submitted idea's attachment directory).
+  // Returns the new pendingKey so the caller can pre-seed the write-effect ref.
+  const reset = (): string => {
+    const newPendingKey = mintPendingKey();
     setTitle('');
     setSummary('');
     setPriority('P2');
@@ -78,10 +147,14 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
     setProjectOverride(null);
     setError(null);
     attachmentsCtl.reset();
+    setPendingKey(newPendingKey);
+    return newPendingKey;
   };
 
+  // Closing (overlay/Escape/X/Cancel) leaves field state as-is — it becomes the
+  // persisted draft via the write effect above, so an accidental close no
+  // longer wipes a typed-but-unsaved idea.
   const handleClose = (): void => {
-    reset();
     onClose();
   };
 
@@ -103,7 +176,12 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
         category,
       });
       onCreated?.(result.taskId);
-      reset();
+      const newPendingKey = reset();
+      clearDraft(NEW_TASK_DIALOG_DRAFT_KEY);
+      // Pre-seed the ref to the post-reset (empty) state so the write effect's
+      // next run — reacting to the reset() state updates above — sees no
+      // change and doesn't immediately re-persist a blank draft.
+      lastWrittenDraftRef.current = serializeDraft('', '', newPendingKey, []);
       onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create task');

@@ -16,6 +16,7 @@
  */
 import type { LoggerLike } from '../types';
 import type { LeaseHandle, ResourceLeasePool } from './verificationLeases';
+import type { MobileDriveEngine } from '../../../../shared/types/visualVerification';
 import { VERIFY_SCREEN_LEASE, verifyPortLease } from './verificationLeases';
 import type {
   VerificationModality,
@@ -73,6 +74,39 @@ export function mobileSlotCount(configured: number): number {
   const floored = Math.floor(configured);
   if (!Number.isFinite(floored)) return MOBILE_SLOT_MIN;
   return Math.max(MOBILE_SLOT_MIN, Math.min(MOBILE_SLOT_MAX, floored));
+}
+
+/**
+ * The count-1 lease that serialises Xcode DeviceInteraction sessions
+ * (runbook-optional-verification.md §B3 "Concurrency"). The xcode rung was
+ * designed and measured with ONE simulator slot; when `mobileSimSlots` is
+ * raised, a second concurrent mobile row must wait for this lease rather than
+ * open a second DeviceInteraction session beside the first. On a miss the row
+ * stays QUEUED — contention never degrades the drive rung.
+ */
+export const VERIFY_XCODE_LEASE = 'verify:xcode';
+
+/**
+ * Whether a mobile row takes {@link VERIFY_XCODE_LEASE}: only when more than one
+ * simulator slot exists (with one slot the slot lease already serialises), and
+ * only when the engine may choose xcode. The engine is resolved ONCE per row
+ * from the live config and the same value is handed to the runner, so the
+ * lease decision and the rung actually driven can never disagree.
+ */
+export function mobileNeedsXcodeLease(mobileSimSlots: number, engine: MobileDriveEngine | undefined): boolean {
+  if (mobileSlotCount(mobileSimSlots) <= 1) return false;
+  return engine === undefined || engine === 'auto' || engine === 'xcode';
+}
+
+/** One handle over two leases: releasing it releases both (the xcode lease rides the slot lease). */
+function combinedLease(primary: LeaseHandle, secondary: LeaseHandle): LeaseHandle {
+  return {
+    name: primary.name,
+    release: () => {
+      secondary.release();
+      primary.release();
+    },
+  };
 }
 
 /** Build the lease name for mobile simulator slot `index`. */
@@ -151,6 +185,13 @@ export async function mobileToolchainDetail(
  * The CEILING still wins over the floor — an installation that configured a
  * floor above the 20-minute cap gets the cap and one warn line saying the
  * floor was clipped, never a request that outlives the scheduler's contract.
+ *
+ * EXPLORE raises it once more (docs/proposals/runbook-optional-verification.md
+ * §A1.1): a request with no proven recipe spends turns finding how the
+ * deliverable stands up before the first behavior is driven, so its floor is
+ * `max(modality floor, exploreFloorMs)`. The caller passes `exploreFloorMs`
+ * ONLY for an explore-mode request; pinned and legacy requests are unchanged,
+ * and the ceiling still wins.
  */
 export function resolveAgentDeadlineMs(args: {
   task: Pick<VerificationTaskV1, 'timeoutMs'>;
@@ -161,16 +202,21 @@ export function resolveAgentDeadlineMs(args: {
   ceilingMs: number;
   /** `ResolvedVisualVerifyConfig.mobileDeadlineFloorMs` — the mobile floor. */
   mobileFloorMs: number;
+  /** `ResolvedVisualVerifyConfig.exploreDeadlineFloorMs`, for an explore request only; absent ⇒ no explore floor. */
+  exploreFloorMs?: number;
   logger?: LoggerLike;
 }): number {
-  const { task, modality, defaultMs, ceilingMs, mobileFloorMs, logger } = args;
+  const { task, modality, defaultMs, ceilingMs, mobileFloorMs, exploreFloorMs, logger } = args;
   const requested = typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : defaultMs;
-  const floor = modality === 'mobile' ? Math.max(defaultMs, mobileFloorMs) : defaultMs;
+  const modalityFloor = modality === 'mobile' ? Math.max(defaultMs, mobileFloorMs) : defaultMs;
+  const floor = exploreFloorMs === undefined ? modalityFloor : Math.max(modalityFloor, exploreFloorMs);
   const deadline = Math.min(ceilingMs, Math.max(floor, requested));
   if (deadline < floor) {
-    logger?.warn('[VerificationScheduler] mobile deadline floor clipped by the request ceiling', {
+    logger?.warn('[VerificationScheduler] agent deadline floor clipped by the request ceiling', {
       floorMs: floor,
       ceilingMs,
+      modality,
+      explore: exploreFloorMs !== undefined,
     });
   }
   return deadline;
@@ -213,6 +259,8 @@ export async function acquireModalityLeases(args: {
   leasePool: Pick<ResourceLeasePool, 'tryAcquire' | 'tryAcquireOneOf'>;
   modality: VerificationModality;
   mobileSimSlots: number;
+  /** §B3 — decides whether a mobile row also takes {@link VERIFY_XCODE_LEASE}. Absent ⇒ `'auto'`. */
+  mobileDriveEngine?: MobileDriveEngine;
   devServerPorts: readonly number[];
   portFromLease: (name: string | null) => number | null;
   requestId: string;
@@ -232,6 +280,17 @@ export async function acquireModalityLeases(args: {
     if (!mobileLease) {
       logger?.debug('[VerificationScheduler] no free mobile simulator slot; leaving queued', { requestId });
       return null;
+    }
+    if (mobileNeedsXcodeLease(args.mobileSimSlots, args.mobileDriveEngine)) {
+      const xcodeLease = await leasePool.tryAcquire(VERIFY_XCODE_LEASE);
+      if (!xcodeLease) {
+        mobileLease.release();
+        logger?.debug('[VerificationScheduler] the Xcode drive lease is held; leaving the mobile row queued', {
+          requestId,
+        });
+        return null;
+      }
+      mobileLease = combinedLease(mobileLease, xcodeLease);
     }
   }
   let portLease: LeaseHandle | null = null;

@@ -371,7 +371,7 @@ A worked mobile entry:
 proves the surface it drove IS this deliverable, or it does not pass — there is
 no low-confidence escape hatch. Readiness alone is not identity: a port answering
 `200` may be a stale dev server from an unrelated worktree, or the user's own
-running app. There are **exactly six** kinds, and a seventh is a parse error:
+running app. There are **exactly seven** kinds, and an eighth is a parse error:
 
 - `web` → `{ "kind": "http-endpoint", "urlPath": "/__cyboflow_verify__" }` (the
   serve step exposes a route echoing the per-request nonce) or
@@ -382,10 +382,15 @@ running app. There are **exactly six** kinds, and a seventh is a parse error:
   in attach mode, where the driver never navigates and there is no HTTP status to
   check.
 - `native-screen` → `{ "kind": "window-identity", "titlePattern": "...", "app":
-  "<the application name>" }`. `app` is REQUIRED: peekaboo has no host-wide
-  window listing, and a match against any window on the machine would not be an
-  identity check. Record that it is the WEAKEST channel; a window title is
-  spoofable and coincidental in a way an in-page nonce is not.
+  "<bundle id, e.g. com.example.MyApp, or PID:<n>>" }`. `app` is REQUIRED and
+  MUST be a bundle id or `PID:<n>`, never a bare application name: peekaboo
+  resolves `--app` by fuzzy match over both the display name and the bundle
+  id, which has produced both a false positive (matched an unrelated app whose
+  bundle id happens to contain the name) and a hard `Ambiguous application
+  identifier` failure — at app-resolution time, before `titlePattern` gets a
+  chance to discriminate. A bundle id or PID resolves exactly. Record that
+  this is still the WEAKEST channel; a window title is spoofable and
+  coincidental in a way an in-page nonce is not.
 - `mobile` → `{ "kind": "bundle-identity", "bundleId": "com.example.MyApp" }` —
   after the session the harness re-hashes the executable inside the installed
   app container and requires it to be byte-identical to the exactly-one product
@@ -394,11 +399,17 @@ running app. There are **exactly six** kinds, and a seventh is a parse error:
   does NOT prove: the agent ran `xcodebuild` itself through Bash, exactly as it
   runs a web build, so this channel proves the identity of what was STAGED, not
   who compiled it.
+- `web` / `cdp-app` with a `serve` → `{ "kind": "serve-binding" }` when the project
+  renders no nonce: no channel probe — the harness requires the leased port's
+  listener to be the process group the driver started for the entry's VERBATIM
+  `serve.cmd`. It needs no repo change, but identity rests on that port binding
+  alone, so it is the WEAKEST web channel; record that, and prefer a nonce
+  channel when the project can carry one. Without a `serve` it is a parse error.
 - `{ "kind": "file-identity" }` — ONLY for the degenerate pre-live path, a
   `target.htmlPath` the runner itself wrote and opens. A project you SERVE over a
   leased port is a live process on a socket you do not own, even if it is a
-  directory of plain HTML: it needs `http-endpoint` or `dom-marker` like any
-  other web deliverable. "The runner owns the directory and leases the port" is
+  directory of plain HTML: it needs `http-endpoint`, `dom-marker` or
+  `serve-binding` like any other web deliverable. "The runner owns the directory and leases the port" is
   exactly the reasoning this requirement exists to defeat — the lease is an
   in-process mutex guarding a logical slot, not the OS socket.
 

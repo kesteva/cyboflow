@@ -52,7 +52,11 @@ interface DialogOptions {
   defaultPath?: string;
   buttonLabel?: string;
   filters?: { name: string; extensions: string[] }[];
-  properties?: string[];
+  // Reuses Electron's own union instead of a loose string[] so this can't drift
+  // from frontend/src/types/electron.d.ts's `Electron.OpenDialogOptions` (the
+  // renderer-facing type these calls forward through) — see docs/CODE-PATTERNS.md
+  // "IPC / type-parity rules".
+  properties?: Electron.OpenDialogOptions['properties'];
 }
 
 interface DashboardUpdateData {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SpawnStepRunner, programmaticDisallowedTools } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
@@ -45,6 +45,8 @@ describe('SpawnStepRunner', () => {
     expect(passed.agentPermissionMode).toBe('auto');
     expect(passed.agentInvocationStepId).toBe('epics');
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
+    // Workflow turns never inherit a premium tier from the user's CLI config.
+    expect(passed.standardServiceTier).toBe(true);
   });
 
   it('denies the visual-verification enqueue tool on every step turn (live-smoke fix 2026-07-22)', async () => {
@@ -203,7 +205,22 @@ describe('SpawnStepRunner', () => {
 
     const result = await runner.runStep(step({ id: 'sprint-verify' }), ctx);
 
-    expect(result).toEqual({ status: 'failed', error, systemic: true });
+    // provider/runtime: what the attempt ran on (the run default here — no pin).
+    expect(result).toEqual({ status: 'failed', error, systemic: true, provider: 'claude', runtime: 'claude-sdk' });
+  });
+
+  it('stamps the PINNED provider/runtime on a failed result (the pause names what was blocked)', async () => {
+    const spawner = makeSpawner(() => Promise.reject(new Error("You've hit your session limit")));
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      resolveStepAgent: () => ({ runtime: 'codex-sdk', providerModel: 'gpt-5.6-sol' }),
+    });
+
+    const result = await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    expect(result.status).toBe('failed');
+    expect(result.provider).toBe('codex');
+    expect(result.runtime).toBe('codex-sdk');
   });
 
   it('omits agentPermissionMode from the spawn when none is bound', async () => {
@@ -384,6 +401,85 @@ describe('SpawnStepRunner', () => {
 
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.prompt).not.toContain('## Operator guidance');
+  });
+
+  // ── per-slot lane build directory (laneBuildSlots.ts) ─────────────────────
+  describe('lane build slot', () => {
+    const scratch = {
+      slot: 1,
+      dir: '/wt/.cyboflow/build-slots/slot-1',
+      env: {
+        CYBOFLOW_LANE_SCRATCH_DIR: '/wt/.cyboflow/build-slots/slot-1',
+        CLANG_MODULE_CACHE_PATH: '/wt/.cyboflow/build-slots/slot-1/clang-module-cache',
+        SWIFTPM_MODULECACHE_OVERRIDE: '/wt/.cyboflow/build-slots/slot-1/clang-module-cache',
+      },
+    };
+    const noSlotCtx: ControllerStepContext = { ...ctx, item: { id: 't1', over: 'tasks' }, spawnKey: 'r:t1' };
+    const laneCtx: ControllerStepContext = { ...noSlotCtx, laneSlot: 1 };
+    const passedOf = (spawner: ClaudeSpawnerLike): ClaudeSpawnerOptions =>
+      (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+
+    it('resolves ctx.laneSlot and threads the slot env + prompt section into the spawn', async () => {
+      const spawner = makeSpawner();
+      const laneScratch = vi.fn(async (_slot: number) => scratch);
+      const runner = new SpawnStepRunner(spawner, { ...opts, laneScratch });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), laneCtx);
+
+      expect(laneScratch).toHaveBeenCalledWith(1);
+      const passed = passedOf(spawner);
+      expect(passed.laneEnv).toEqual(scratch.env);
+      expect(passed.prompt).toContain('## Lane build directory');
+      expect(passed.prompt).toContain('`/wt/.cyboflow/build-slots/slot-1`');
+    });
+
+    it('spawns with no laneEnv and an unchanged prompt when the ctx carries no laneSlot', async () => {
+      const laneScratch = vi.fn(async (_slot: number) => scratch);
+      const withOption = makeSpawner();
+      const without = makeSpawner();
+
+      await new SpawnStepRunner(withOption, { ...opts, laneScratch }).runStep(
+        step({ id: 'implement', agent: 'implement' }),
+        noSlotCtx,
+      );
+      await new SpawnStepRunner(without, opts).runStep(step({ id: 'implement', agent: 'implement' }), noSlotCtx);
+
+      expect(laneScratch).not.toHaveBeenCalled();
+      expect('laneEnv' in passedOf(withOption)).toBe(false);
+      expect(passedOf(withOption).prompt).toBe(passedOf(without).prompt);
+      expect(passedOf(withOption).prompt).not.toContain('## Lane build directory');
+    });
+
+    it('spawns with no laneEnv and an unchanged prompt when no laneScratch option is bound', async () => {
+      const spawner = makeSpawner();
+      const baseline = makeSpawner();
+
+      await new SpawnStepRunner(spawner, opts).runStep(step({ id: 'implement', agent: 'implement' }), laneCtx);
+      await new SpawnStepRunner(baseline, opts).runStep(step({ id: 'implement', agent: 'implement' }), noSlotCtx);
+
+      expect('laneEnv' in passedOf(spawner)).toBe(false);
+      expect(passedOf(spawner).prompt).toBe(passedOf(baseline).prompt);
+    });
+
+    it('spawns without a build slot when the resolver rejects or resolves undefined', async () => {
+      for (const laneScratch of [
+        vi.fn(async (_slot: number) => {
+          throw new Error('mkdir EACCES');
+        }),
+        vi.fn(async (_slot: number) => undefined),
+      ]) {
+        const spawner = makeSpawner();
+        const result = await new SpawnStepRunner(spawner, { ...opts, laneScratch }).runStep(
+          step({ id: 'implement', agent: 'implement' }),
+          laneCtx,
+        );
+
+        expect(result.status).toBe('ok');
+        expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+        expect('laneEnv' in passedOf(spawner)).toBe(false);
+        expect(passedOf(spawner).prompt).not.toContain('## Lane build directory');
+      }
+    });
   });
 
   it('adds NO guidance section when the bound thunk returns undefined for this step id', async () => {
@@ -665,6 +761,43 @@ describe('SpawnStepRunner', () => {
       expect(passed.model).toBe('gpt-5.2-codex');
     });
 
+    it('honors a providerModel-ONLY resolver return on a non-Claude run (a run-level switch that set only the model)', async () => {
+      // The index.ts resolver guard used to drop an agent carrying ONLY a
+      // providerModel; the runner itself must honour one when it arrives.
+      const spawner = makeSpawner();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const runner = new SpawnStepRunner(
+        spawner,
+        {
+          ...opts,
+          model: 'gpt-5.6-codex',
+          promptRenderContext: { provider: 'codex', runtime: 'codex-sdk', executionModel: 'programmatic' },
+          resolveStepAgent: () => ({ providerModel: 'gpt-5.6-sol' }),
+        },
+        logger,
+      );
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('gpt-5.6-sol');
+      // One info line per pinned spawn names where the step actually ran.
+      expect(logger.info).toHaveBeenCalledWith(
+        "[SpawnStepRunner] step 'implement' spawning on codex/codex-sdk model=gpt-5.6-sol effort=default",
+        expect.objectContaining({ stepId: 'implement' }),
+      );
+    });
+
+    it('logs nothing extra for an UNPINNED spawn', async () => {
+      const spawner = makeSpawner();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+      const runner = new SpawnStepRunner(spawner, { ...opts, resolveStepAgent: () => undefined }, logger);
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      expect(logger.info).not.toHaveBeenCalled();
+    });
+
     it('resolveStepAgent returning undefined for this step (agent unoverridden) omits agentProvider/agentRuntime and keeps opts.model', async () => {
       const spawner = makeSpawner();
       const runner = new SpawnStepRunner(spawner, {
@@ -875,5 +1008,64 @@ describe('SpawnStepRunner — gateRevision review document (CX-4)', () => {
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.prompt).not.toContain('4242');
     expect(passed.prompt).toContain('AR-1 — last round’s defect');
+  });
+});
+
+// ── CYBOFLOW_FAKE_SYSTEMIC_STEP dev lever ───────────────────────────────────
+describe('SpawnStepRunner — CYBOFLOW_FAKE_SYSTEMIC_STEP dev lever', () => {
+  const saved = { step: process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP, error: process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR };
+  afterEach(() => {
+    if (saved.step === undefined) delete process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP;
+    else process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = saved.step;
+    if (saved.error === undefined) delete process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR;
+    else process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR = saved.error;
+  });
+
+  it('fails the named step as systemic WITHOUT spawning when it would run on Claude', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    delete process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR;
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.systemic).toBe(true);
+    expect(result.provider).toBe('claude');
+    expect(result.runtime).toBe('claude-sdk');
+    expect(result.error).toMatch(/^Claude AI usage limit reached\|\d{10}$/);
+  });
+
+  it('uses CYBOFLOW_FAKE_SYSTEMIC_ERROR verbatim and still runs it through the classifier', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_ERROR = 'Command failed: eslint';
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('unreachable');
+    expect(result.error).toBe('Command failed: eslint');
+    expect(result.systemic).toBeUndefined();
+  });
+
+  it('spawns for real on every other step and on a step switched onto another provider', async () => {
+    process.env.CYBOFLOW_FAKE_SYSTEMIC_STEP = 'interview';
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      resolveStepAgent: (key: string) => (key === 'interview' ? { runtime: 'codex-sdk' as const } : undefined),
+    });
+
+    const other = await runner.runStep(step({ id: 'epics', agent: 'epics' }), ctx);
+    const switched = await runner.runStep(step({ id: 'interview', agent: 'interview' }), ctx);
+
+    expect(other.status).toBe('ok');
+    expect(switched.status).toBe('ok');
+    expect(spawner.spawnCliProcess).toHaveBeenCalledTimes(2);
   });
 });

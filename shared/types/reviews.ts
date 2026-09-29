@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------------------
 
 import type { QuestionPayload } from './questions';
+import type { AgentProvider } from './agentRuntime';
 // The ONE fence-aware markdown line walker (artifacts.ts). Imported rather than
 // re-derived so this module's section boundaries can never drift from the
 // arch-design / design-spec extractors' reading of the same syntax.
@@ -219,7 +220,8 @@ export interface DecisionPayload {
     | 'approve-plan'
     | 'idea-size-guard'
     | 'ask-user-question-recovery'
-    | 'experiment-comparison';
+    | 'experiment-comparison'
+    | 'systemic-pause';
   /** Optional summary the gate wants the human to confirm. */
   summary?: string;
   /**
@@ -264,6 +266,33 @@ export interface DecisionPayload {
    * orchestrated-plane gate and on a gate opened without a bound (no constraint).
    */
   reviewReportedSince?: string;
+  /**
+   * Only for `gate: 'systemic-pause'` (source `gate:systemic-pause:<stepId>` —
+   * a PROGRAMMATIC run parked on a usage/session/rate limit): the OUTER step the
+   * pause parks. The pause card offers Retry now / Switch runtime & retry / Stop
+   * waiting; the switch reads the fields below to scope the re-target.
+   */
+  stepId?: string;
+  /**
+   * (systemic-pause) the agents a "Switch runtime & retry" must cover: the
+   * failing step's agent, or EVERY inner-chain agent of a fan-out (its retry
+   * replays every parked lane from inner step 0).
+   */
+  agentKeys?: string[];
+  /** (systemic-pause) the provider the failing spawn ran on, when known. */
+  blockedProvider?: AgentProvider;
+  /** (systemic-pause) the runtime the failing spawn ran on, when known. */
+  blockedRuntime?: string;
+  /**
+   * (systemic-pause) 'step' — a step agent's own spawn hit the limit; 'triage' —
+   * only the lane-triage consult (the run's Claude-only supervisor) did, which a
+   * switch of the step agents does not move.
+   */
+  origin?: 'step' | 'triage';
+  /** (systemic-pause) the pause parks a whole fan-out (a step-scoped switch is unavailable). */
+  fanOut?: boolean;
+  /** (systemic-pause) the error's classified pattern bucket (classifyErrorPattern). */
+  errorClass?: string;
   /** (experiment-comparison) the experiment whose comparison is ready. */
   experimentId?: string;
   /** (experiment-comparison) the aggregate pairwise preference. */

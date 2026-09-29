@@ -61,8 +61,11 @@ const ROLLUP: RunUsageRollup = {
   costUsd: 3.95,
   numTurns: 173,
   assistantMessageCount: 173,
+  accountingVersion: 1,
+  coverage: 'complete',
   startedAt: null,
   endedAt: null,
+  gateReachedAt: null,
 };
 
 /** A complete eval fixture; override per-test. */
@@ -279,6 +282,14 @@ describe('WorkflowSummaryPanel', () => {
       ...ROLLUP,
       model: null,
       multiModel: true,
+      // Run-level input/output are ALSO zero here (this run's usage is 100%
+      // cache) so the per-model shortfall check — which compares the
+      // breakdown's input+output sum against usage.totalTokens — sees 0 vs 0
+      // and never trips; see the dedicated shortfall tests below for the
+      // pruned-breakdown case.
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
       perModelUsage: [
         // opus cache-write rate = 1.25 * $5/MTok = $6.25/MTok:
         // 1,000,000 * $6.25/MTok = $6.25, input/output both zero.
@@ -291,6 +302,64 @@ describe('WorkflowSummaryPanel', () => {
     renderPanel();
     // If cache tokens were dropped from the per-model sum this would render $0.00.
     expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $6.55');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-shortfall-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('flags a per-model SHORTFALL and shows the authoritative run-level cost when the breakdown sum is < 97% of the run total', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      // Authoritative run-level totals (the durable run_usage row).
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      totalTokens: 1_000_000,
+      costUsd: 5, // must be what renders — the priced per-model sum must NOT win.
+      // The breakdown's raw_events were partially pruned: only 600,000 of the
+      // run's 1,000,000 input tokens still resolve per-model (60% < 97%
+      // tolerance) even though 2 distinct models still show up.
+      perModelUsage: [
+        { model: 'claude-opus-4-5', inputTokens: 400_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'claude-sonnet-4-5', inputTokens: 200_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $5.00');
+    expect(screen.getByTestId('run-summary-shortfall-model-cost-note')).toHaveTextContent(
+      'Per-model breakdown incomplete — some event history was pruned',
+    );
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('does NOT flag a shortfall when the breakdown sum is within the 97% tolerance of the run total', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      totalTokens: 1_000_000,
+      costUsd: 5,
+      // 700,000 + 280,000 = 980,000 of 1,000,000 = 98% — inside the 3%
+      // tolerance, so the priced per-model sum (opus $3.50 + sonnet $0.84 =
+      // $4.34) wins as usual, not the shortfall fallback.
+      perModelUsage: [
+        { model: 'claude-opus-4-5', inputTokens: 700_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'claude-sonnet-4-5', inputTokens: 280_000, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $4.34');
+    expect(screen.queryByTestId('run-summary-shortfall-model-cost-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
   });
@@ -807,11 +876,11 @@ describe('WorkflowSummaryPanel — dismiss / continue-in-chat controls', () => {
 describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)', () => {
   it('groups steps by label, sorted by descending count with first-appearance tiebreak', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
-      { stepId: 's5', stepName: 'Final gate', phaseId: 'p3', agentKey: 'gate', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's5', stepName: 'Final gate', phaseId: 'p3', label: 'Opus 5', family: 'opus' },
     ]);
     renderPanel();
 
@@ -828,9 +897,9 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('uses singular "1 step" and plural "N steps" correctly', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
     ]);
     renderPanel();
 
@@ -843,10 +912,10 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('renders exactly as many chips as returned step-model entries', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', agentKey: 'reviewer', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Review code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's4', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
     ]);
     renderPanel();
 
@@ -879,10 +948,10 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('paints each group dot from MODEL_FAMILY_COLORS — the shared swatch source, not a local palette', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
-      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', agentKey: 'executor', label: 'Sonnet 5', family: 'sonnet' },
-      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', agentKey: 'judge', label: 'gpt-5.6-sol', family: 'other' },
-      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', agentKey: 'verifier', label: 'Auto', family: 'auto' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      { stepId: 's2', stepName: 'Write code', phaseId: 'p2', label: 'Sonnet 5', family: 'sonnet' },
+      { stepId: 's3', stepName: 'Judge diff', phaseId: 'p3', label: 'gpt-5.6-sol', family: 'other' },
+      { stepId: 's4', stepName: 'Verify', phaseId: 'p3', label: 'Auto', family: 'auto' },
     ]);
     renderPanel();
 
@@ -900,7 +969,7 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
 
   it('carries the "not a per-step cost split" disclaimer — the section must never read as cost attribution', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
     ]);
     renderPanel();
 
@@ -908,12 +977,12 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
     expect(section).toHaveTextContent(
       'Not a per-step cost split — the cost above is reported per run and cannot be attributed to individual steps.',
     );
-    expect(section).toHaveTextContent('Human review gates are excluded.');
+    expect(section).toHaveTextContent('Human review gates and per-task sprint-lane steps are excluded.');
   });
 
   it('clears the previous run\'s groups when runId changes (panel is mounted without a key)', async () => {
     getStepModelsQuery.mockResolvedValue([
-      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', agentKey: 'planner', label: 'Opus 5', family: 'opus' },
+      { stepId: 's1', stepName: 'Draft plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
     ]);
     const { rerender } = renderPanel();
     expect(await screen.findByText('Opus 5 — 1 step')).toBeInTheDocument();
@@ -936,5 +1005,46 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
     await waitFor(() =>
       expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument(),
     );
+  });
+
+  it('excludes fanOutStepId-carrying rows (sprint-lane steps) from the chip-sum groups (TASK-298)', async () => {
+    // Negative control: WITHOUT the fanOutStepId filter, this fixture would
+    // produce THREE distinct groups (Opus 5 / Sonnet 5 / gpt-5.6-sol) and a
+    // chip-sum of 4 — the pre-change behavior this test guards against.
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 'plan', stepName: 'Plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      // Two fan-out inner rows sharing the OUTER 'plan' step's label but
+      // carrying fanOutStepId — must not fold into the outer 'Opus 5' group,
+      // must not create their own 'Sonnet 5' / 'gpt-5.6-sol' groups, and must
+      // not inflate the chip count.
+      {
+        stepId: 'implement',
+        stepName: 'Implement',
+        phaseId: 'execute',
+        label: 'Sonnet 5',
+        family: 'sonnet',
+        fanOutStepId: 'fan-step',
+      },
+      {
+        stepId: 'code-review',
+        stepName: 'Code review',
+        phaseId: 'execute',
+        label: 'gpt-5.6-sol',
+        family: 'other',
+        fanOutStepId: 'fan-step',
+      },
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText('Models used — configuration')).toBeInTheDocument();
+    const labels = screen
+      .getAllByTestId('run-summary-step-model-group-label')
+      .map((el) => el.textContent);
+    // Only the outer 'plan' step's group — the two fan-out rows contribute
+    // neither their own groups nor extra chips to 'Opus 5'.
+    expect(labels).toEqual(['Opus 5 — 1 step']);
+    const chips = screen.getAllByTestId('run-summary-step-model-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips.map((c) => c.textContent)).toEqual(['Plan']);
   });
 });

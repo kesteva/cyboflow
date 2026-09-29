@@ -106,6 +106,12 @@ export function toCompactWorkflow(row: WorkflowRow): Record<string, unknown> {
     // definition stays mix-free and this stamp is the only place a reader sees it.
     runtime_mix: row.runtime_mix,
     created_at: row.created_at,
+    // Soft-archive stamp (migration 078) — projected so an agent reading
+    // cyboflow_workflow(s) can see archive status instead of only inferring
+    // it from absence (handleAgentWorkflows filters archived rows out of the
+    // list by default, mirroring tRPC workflows.list; this field still lets
+    // a direct cyboflow_workflow lookup by id report it).
+    archived_at: row.archived_at,
   };
 }
 

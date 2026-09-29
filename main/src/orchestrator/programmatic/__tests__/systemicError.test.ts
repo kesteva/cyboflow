@@ -6,6 +6,7 @@ import {
   describeErrorShape,
   digestErrorSkeleton,
   unclassifiedErrorTags,
+  isSystemicErrorClass,
 } from '../systemicError';
 
 describe('isSystemicStepError', () => {
@@ -381,5 +382,28 @@ describe("classifyErrorPattern: the SDK's own unspecified-result literal", () =>
     expect(classifyErrorPattern('The agent session ended with an error. usage limit reached')).toBe(
       'usage-limit-reached',
     );
+  });
+});
+
+describe('isSystemicErrorClass', () => {
+  it('agrees with isSystemicStepError through classifyErrorPattern', () => {
+    // The telemetry chokepoint only ever sees the label; it must reach the same
+    // verdict the park decision reached from the raw text.
+    for (const text of [
+      "You've hit your limit · resets 3am",
+      'Failed to authenticate: OAuth session expired and could not be refreshed',
+      'API Error: Connection closed mid-response.',
+      'Request timed out',
+      'The agent session ended with an error.',
+      'Command failed: eslint src',
+    ]) {
+      expect(isSystemicErrorClass(classifyErrorPattern(text))).toBe(isSystemicStepError(text));
+    }
+  });
+
+  it('is false for unclassified and missing labels', () => {
+    expect(isSystemicErrorClass('other')).toBe(false);
+    expect(isSystemicErrorClass('unknown')).toBe(false);
+    expect(isSystemicErrorClass(undefined)).toBe(false);
   });
 });

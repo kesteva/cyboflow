@@ -60,7 +60,8 @@ vi.mock('../../../trpc/client', () => ({
 
 // Import after mocks so vi.mock hoisting is in effect.
 import { SprintSwimlaneCanvas } from '../SprintSwimlaneCanvas';
-import { MODEL_FAMILY_COLORS, type ModelFamily } from '../../../../../shared/types/agents';
+import { MODEL_FAMILY_COLORS, stepModelKey, type ModelFamily } from '../../../../../shared/types/agents';
+import { indexStepModels } from '../../../hooks/useRunStepModels';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -200,6 +201,7 @@ async function renderCanvas(
     projectId?: number | null;
     sessionKey?: string;
     stepModels?: ReadonlyMap<string, { label: string; family: ModelFamily }> | null;
+    pausedStepId?: string | null;
   } = {},
 ) {
   render(
@@ -385,8 +387,8 @@ describe('SprintSwimlaneCanvas — summary, merge gate, plan + verify columns', 
     // cards are ordinary phases[].steps that getStepModels already resolves.
     await renderCanvas({
       stepModels: new Map([
-        ['analyze-dependencies', { label: 'Opus 5', family: 'opus' as const }],
-        ['sprint-verify', { label: 'Sonnet 5', family: 'sonnet' as const }],
+        [stepModelKey('plan', 'analyze-dependencies'), { label: 'Opus 5', family: 'opus' as const }],
+        [stepModelKey('verify', 'sprint-verify'), { label: 'Sonnet 5', family: 'sonnet' as const }],
       ]),
     });
 
@@ -522,6 +524,233 @@ describe('SprintSwimlaneCanvas — generalized fanOut lane strip', () => {
     expect(
       screen.getByTestId('swimlane-step-tc1-deploy').getAttribute('data-status'),
     ).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane-step-model header row (TASK-298) — one shared row above the per-lane
+// step strip, one dot per column, keyed via the 3-arg stepModelKey(phaseId,
+// laneStep.id, fanOutStepId) so a collision with an outer step id in the same
+// phase resolves to the correct (inner) entry.
+// ---------------------------------------------------------------------------
+
+/** Same fan-out fixture as the "generalized fanOut lane strip" suite above:
+ * a 3-step chain (build / lint / deploy) under phase 'execute', step
+ * 'fan-step'. Reused here so the header row's key derivation
+ * (`activeFanOutStepRef`) has a real fanOut step to resolve. */
+function buildFanOutPhaseState(): UseWorkflowPhaseStateResult {
+  return {
+    definition: {
+      id: 'custom-fan',
+      phases: [
+        {
+          id: 'plan',
+          label: 'Plan',
+          color: '#3b6dd6',
+          steps: [{ id: 'scope', name: 'Scope', agent: 'planner', mcps: [], retries: 0 }],
+        },
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'fan-step',
+              name: 'Fan step',
+              agent: 'executor',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'build', agent: 'builder', name: 'Build' },
+                  { id: 'lint', agent: 'linter', name: 'Lint' },
+                  { id: 'deploy', agent: 'deployer', optional: true },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          id: 'verify',
+          label: 'Verify',
+          color: '#2d8a5b',
+          steps: [{ id: 'final-review', name: 'Final review', agent: 'reviewer', mcps: [], retries: 0 }],
+        },
+      ],
+    },
+    currentStepId: 'fan-step',
+    stepStates: [],
+    isLoading: false,
+    error: null,
+  };
+}
+
+const FANOUT_LANES: SprintLaneRow[] = [
+  {
+    ...baseLane,
+    taskId: 'tc1',
+    status: 'running',
+    currentStepId: 'lint',
+    ref: 'TASK-C1',
+    title: 'Custom task',
+    attempts: 0,
+    blockedByRefs: [],
+  },
+];
+
+describe('SprintSwimlaneCanvas — lane-step-model header row (TASK-298)', () => {
+  it('renders one family-color dot per column with the full label reachable via title, keyed via the 3-arg stepModelKey', async () => {
+    lanesQuerySpy.mockResolvedValue(FANOUT_LANES);
+    render(
+      <SprintSwimlaneCanvas
+        runId="run-2"
+        phaseState={buildFanOutPhaseState()}
+        sprintStatus="running"
+        stepModels={
+          new Map([
+            [stepModelKey('execute', 'build', 'fan-step'), { label: 'Opus 5', family: 'opus' as const }],
+            [stepModelKey('execute', 'lint', 'fan-step'), { label: 'gpt-5.6-sol', family: 'other' as const }],
+            // 'deploy' deliberately has no entry — must render an empty cell,
+            // not a placeholder, and must not disturb the other cells.
+          ])
+        }
+      />,
+    );
+    await screen.findByTestId('swimlane-lane-tc1');
+
+    const row = screen.getByTestId('swimlane-lane-step-models');
+    expect(row).toBeInTheDocument();
+
+    const buildCell = screen.getByTestId('swimlane-lane-step-model-build');
+    expect(buildCell).toHaveAttribute('title', 'Build · Opus 5');
+    expect(buildCell.querySelector('span')).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.opus });
+
+    const lintCell = screen.getByTestId('swimlane-lane-step-model-lint');
+    expect(lintCell).toHaveAttribute('title', 'Lint · gpt-5.6-sol');
+    expect(lintCell.querySelector('span')).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.other });
+
+    // No resolved entry for 'deploy' -> no dot, no title, but the cell
+    // itself still renders (keeps the row's column alignment).
+    const deployCell = screen.getByTestId('swimlane-lane-step-model-deploy');
+    expect(deployCell).not.toHaveAttribute('title');
+    expect(deployCell.querySelector('span')).toBeNull();
+
+    expect(row).toContainElement(buildCell);
+    expect(row).toContainElement(lintCell);
+    expect(row).toContainElement(deployCell);
+  });
+
+  it('renders no header row at all when stepModels is omitted (degrades to exactly today\'s rendering)', async () => {
+    lanesQuerySpy.mockResolvedValue(FANOUT_LANES);
+    render(<SprintSwimlaneCanvas runId="run-2" phaseState={buildFanOutPhaseState()} sprintStatus="running" />);
+    await screen.findByTestId('swimlane-lane-tc1');
+
+    expect(screen.queryByTestId('swimlane-lane-step-models')).not.toBeInTheDocument();
+  });
+
+  it('renders no header row when the definition has no fanOut step (legacy/sprint fallback), even with stepModels supplied', async () => {
+    // PHASE_STATE's execute-tasks step carries no fanOut at all, so no
+    // (phaseId, fanOutStepId) pair exists to key a lookup by.
+    await renderCanvas({
+      stepModels: new Map([
+        [stepModelKey('execute', 'execute-tasks', 'implement'), { label: 'Opus 5', family: 'opus' as const }],
+      ]),
+    });
+
+    expect(screen.queryByTestId('swimlane-lane-step-models')).not.toBeInTheDocument();
+  });
+
+  it('an inner step id colliding with an outer (verify-phase) step id resolves each to its own distinct model via indexStepModels', async () => {
+    // Regression for the load-bearing key-collision fix: 'final-review' is
+    // BOTH the verify phase's outer step id in this fixture's own
+    // definition... to actually collide we reuse the SAME id, 'build', for
+    // an outer verify-phase step AND the fanOut inner 'build' step, in a
+    // dedicated definition below.
+    const collidingPhaseState: UseWorkflowPhaseStateResult = {
+      definition: {
+        id: 'custom-fan-collision',
+        phases: [
+          {
+            id: 'plan',
+            label: 'Plan',
+            color: '#3b6dd6',
+            steps: [{ id: 'scope', name: 'Scope', agent: 'planner', mcps: [], retries: 0 }],
+          },
+          {
+            id: 'execute',
+            label: 'Execute',
+            color: '#c96442',
+            steps: [
+              {
+                id: 'fan-step',
+                name: 'Fan step',
+                agent: 'executor',
+                mcps: [],
+                retries: 0,
+                fanOut: {
+                  over: 'tasks',
+                  inner: [{ id: 'build', agent: 'builder', name: 'Build' }],
+                },
+              },
+            ],
+          },
+          {
+            id: 'verify',
+            label: 'Verify',
+            color: '#2d8a5b',
+            // Outer step id 'build' — COLLIDES with the fanOut inner step's
+            // id above, but in a DIFFERENT phase ('verify' vs 'execute').
+            steps: [{ id: 'build', name: 'Outer build', agent: 'reviewer', mcps: [], retries: 0 }],
+          },
+        ],
+      },
+      currentStepId: 'fan-step',
+      stepStates: [],
+      isLoading: false,
+      error: null,
+    };
+
+    // Rows as `runs.getStepModels`/`indexStepModels` would actually produce —
+    // the outer 'build' row carries no fanOutStepId, the inner one does.
+    const stepModels = indexStepModels([
+      {
+        stepId: 'build',
+        stepName: 'Outer build',
+        phaseId: 'verify',
+        agentKey: 'reviewer',
+        label: 'Sonnet 5',
+        family: 'sonnet',
+      },
+      {
+        stepId: 'build',
+        stepName: 'Build',
+        phaseId: 'execute',
+        agentKey: 'builder',
+        label: 'Opus 5',
+        family: 'opus',
+        fanOutStepId: 'fan-step',
+      },
+    ]);
+
+    lanesQuerySpy.mockResolvedValue(FANOUT_LANES);
+    render(
+      <SprintSwimlaneCanvas
+        runId="run-2"
+        phaseState={collidingPhaseState}
+        sprintStatus="running"
+        stepModels={stepModels}
+      />,
+    );
+    await screen.findByTestId('swimlane-lane-tc1');
+
+    // Outer 'build' (verify phase) -> its own WorkflowStepCard model segment.
+    expect(screen.getByTestId('step-card-build')).toHaveTextContent('Sonnet 5');
+    // Inner 'build' (fanOut.inner, execute phase) -> its own header-row dot,
+    // distinct from the outer entry.
+    const innerCell = screen.getByTestId('swimlane-lane-step-model-build');
+    expect(innerCell).toHaveAttribute('title', 'Build · Opus 5');
+    expect(innerCell.querySelector('span')).toHaveStyle({ backgroundColor: MODEL_FAMILY_COLORS.opus });
   });
 });
 
@@ -734,5 +963,19 @@ describe('SprintSwimlaneCanvas — visual-check state (F8)', () => {
     expect(stepStatus('vr', 'code-review')).toBe('running');
     expect(stepStatus('vr', 'visual-verify')).toBe('pending');
     expect(stepTitle('vr', 'visual-verify')).toBeNull();
+  });
+});
+
+describe('SprintSwimlaneCanvas — systemic pause on an outer step', () => {
+  it('renders the collapsed PLAN card as PAUSED when the run is parked on a plan step', async () => {
+    await renderCanvas({ pausedStepId: 'analyze-dependencies' });
+    const plan = screen.getByTestId('swimlane-plan');
+    expect(plan.querySelector('[data-testid="step-card-analyze-dependencies"]')).toHaveTextContent('PAUSED');
+  });
+
+  it('renders a SPRINT-REVIEW card as PAUSED when the run is parked on it, leaving the lanes alone', async () => {
+    await renderCanvas({ pausedStepId: 'sprint-verify' });
+    expect(screen.getByTestId('step-card-sprint-verify')).toHaveTextContent('PAUSED');
+    expect(screen.getByTestId('step-card-sprint-review')).toHaveTextContent('PENDING');
   });
 });

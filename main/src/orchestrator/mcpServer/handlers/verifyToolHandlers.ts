@@ -716,6 +716,18 @@ export class VerifyToolHandlers {
   ): Promise<{ ok: true; data: RequestVerificationAck } | { ok: false; error: string }> {
     const { runId, projectId, effectiveType, chain, authorizedPin } = args;
     let { task, input } = args;
+    // §A2 — the tree the project-surface rung reads when the preparation
+    // resolves the modality itself (the immediate path). The scheduler's own
+    // probe ladder keeps `probePath` unset there, as before; the deferred path
+    // already resolved the task and passes both.
+    let surfaceRoot: string | undefined;
+    if (args.modality === undefined && task !== undefined) {
+      try {
+        surfaceRoot = this.resolveRunWorktree(runId) ?? undefined;
+      } catch {
+        surfaceRoot = undefined;
+      }
+    }
     const prepared = await prepareVerificationEnqueue({
       projectId,
       runId,
@@ -727,6 +739,7 @@ export class VerifyToolHandlers {
       // threads them. Absent ⇒ the function resolves them itself, as before.
       ...(args.modality !== undefined ? { modality: args.modality } : {}),
       ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+      ...(surfaceRoot !== undefined ? { surfaceRoot } : {}),
       ...(this.logger ? { logger: this.logger } : {}),
     });
     if (!prepared.ok) return { ok: false, error: prepared.error };
@@ -1204,8 +1217,11 @@ export class VerifyToolHandlers {
       // to trust a proven runbook needs to be able to tell the two apart — both
       // are proven by the same engine-enforced run, and they did not earn the
       // same amount of trust. Fail-soft: a badge that could not be written must
-      // never undo a registration that succeeded.
-      store.setOrigin(ctx.projectId, msg.modality, 'setup-flow');
+      // never undo a registration that succeeded. Skipped on A8's `unchanged`
+      // no-op: nothing was written, so the proven record keeps the provenance
+      // it earned (a lane-derived or learned proof must not be relabelled
+      // 'setup-flow' by a register call that changed nothing).
+      if (result.unchanged !== true) store.setOrigin(ctx.projectId, msg.modality, 'setup-flow');
       // COMMITTED-AT-HEAD backstop. registerDraft reads the WORKING TREE, but
       // the proof runs against a detached snapshot at a commit — so a runbook
       // that never reached HEAD registers cleanly and then proves against a
@@ -1319,7 +1335,9 @@ export class VerifyToolHandlers {
 
       // F5 — the modality resolved ONCE and shared by the preflight, the
       // bootstrap and the eventual preparation, as the controller seam does.
-      const modality = await resolveEnqueueModality({
+      // §A2 — and the TASK with it: a project-surface hit carries an inferred
+      // `app` block the bootstrap and the deferred preparation must both see.
+      const resolution = await resolveEnqueueModality({
         type: args.effectiveType,
         task,
         projectId,
@@ -1327,7 +1345,9 @@ export class VerifyToolHandlers {
         probePath,
         ...(this.logger ? { logger: this.logger } : {}),
       });
-      const bootstrapArgs = { projectId, runId, laneTaskRef: lane.taskId, modality, task, probePath };
+      const { modality } = resolution;
+      const resolvedTask = resolution.task;
+      const bootstrapArgs = { projectId, runId, laneTaskRef: lane.taskId, modality, task: resolvedTask, probePath };
       const decision = await scheduler.evaluateRunbookBootstrap(bootstrapArgs);
       if (!decision.proceed) return null;
 
@@ -1337,7 +1357,13 @@ export class VerifyToolHandlers {
         laneTaskRef: input.taskRef,
         modality,
       });
-      void this.bootstrapThenEnqueue(scheduler, bootstrapArgs, { ...args, enqueueKey, modality, probePath });
+      void this.bootstrapThenEnqueue(scheduler, bootstrapArgs, {
+        ...args,
+        task: resolvedTask,
+        enqueueKey,
+        modality,
+        probePath,
+      });
       return ack;
     } catch (err) {
       this.logger?.warn('[Cyboflow MCP Query] request-verification: bootstrap deferral failed; enqueuing now', {

@@ -60,6 +60,15 @@ vi.mock('../../AskUserQuestion/AskUserQuestionCard', () => ({
   ),
 }));
 
+// AgentTargetOverridesChip.test.tsx covers the chip's own query/group/revert
+// behavior; stand it in here so these composition tests don't pull in a real
+// trpc client call.
+vi.mock('../AgentTargetOverridesChip', () => ({
+  AgentTargetOverridesChip: ({ runId, standalone }: { runId: string; standalone?: boolean }) => (
+    <div data-testid="agent-targets-chip-stub" data-run-id={runId} data-standalone={standalone ? 'true' : undefined} />
+  ),
+}));
+
 import { RunPendingInputStrip } from '../RunPendingInputStrip';
 
 // ---------------------------------------------------------------------------
@@ -118,9 +127,13 @@ beforeEach(() => {
 });
 
 describe('RunPendingInputStrip', () => {
-  it('renders null when there are no pending review items and no live questions', () => {
-    const { container } = render(<RunPendingInputStrip runId="run-1" projectId={5} />);
-    expect(container).toBeEmptyDOMElement();
+  it('renders no strip when there are no pending review items and no live questions', () => {
+    render(<RunPendingInputStrip runId="run-1" projectId={5} />);
+    // Only the standalone overrides chip may remain (it renders null itself when
+    // the run carries no overrides — the stub here always renders, which is what
+    // the dedicated case below asserts).
+    expect(screen.queryByTestId('run-pending-input-strip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('pending-input-chip')).not.toBeInTheDocument();
   });
 
   it('calls reviewItemsSlice.init(projectId) (guarded on null) and questionStore.init() on mount, and unsubscribes reviewItemsSlice (but NOT questionStore) on unmount', () => {
@@ -163,6 +176,22 @@ describe('RunPendingInputStrip', () => {
     expect(screen.getByTestId('pending-input-count')).toHaveTextContent('1');
   });
 
+  it('renders AgentTargetOverridesChip for this run, above the pending items, while the strip is visible', () => {
+    mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1', kind: 'decision' })];
+    render(<RunPendingInputStrip runId="run-1" projectId={5} />);
+    expect(screen.getByTestId('agent-targets-chip-stub')).toHaveAttribute('data-run-id', 'run-1');
+  });
+
+  it('keeps the overrides chip mounted STANDALONE when the strip itself has nothing pending', () => {
+    // A switch made from a pause clears that pause — the chip (and its Revert)
+    // must not vanish with the strip at exactly that moment.
+    render(<RunPendingInputStrip runId="run-1" projectId={5} />);
+    const chip = screen.getByTestId('agent-targets-chip-stub');
+    expect(chip).toHaveAttribute('data-run-id', 'run-1');
+    expect(chip).toHaveAttribute('data-standalone', 'true');
+    expect(screen.queryByTestId('run-pending-input-strip')).not.toBeInTheDocument();
+  });
+
   it('caps max-height with an internal scroll region and a top border on the strip', () => {
     mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1', kind: 'decision' })];
     render(<RunPendingInputStrip runId="run-1" projectId={5} />);
@@ -183,8 +212,9 @@ describe('RunPendingInputStrip', () => {
 
   it('ignores a live question for a different run', () => {
     mockQuestionQueue = [makeQuestion({ toolUseId: 'tool-other', runId: 'run-2' })];
-    const { container } = render(<RunPendingInputStrip runId="run-1" projectId={5} />);
-    expect(container).toBeEmptyDOMElement();
+    render(<RunPendingInputStrip runId="run-1" projectId={5} />);
+    expect(screen.queryByTestId('run-pending-input-strip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ask-question-card')).toBeNull();
   });
 
   it('surfaces the live question card on Terminal/Agent fallback surfaces', () => {
@@ -220,13 +250,11 @@ describe('RunPendingInputStrip', () => {
   it('stands down the live question card when the chat transcript is the visible surface (Chat tab)', () => {
     // Chat tab active + dock open: RunChatView renders the SAME question inline,
     // so the strip must NOT render a duplicate. With nothing else pending the
-    // strip collapses to null.
+    // strip collapses to just the standalone overrides chip.
     mockQuestionQueue = [makeQuestion({ toolUseId: 'tool-live', runId: 'run-1' })];
-    const { container } = render(
-      <RunPendingInputStrip runId="run-1" projectId={5} chatSurfaceVisible />,
-    );
+    render(<RunPendingInputStrip runId="run-1" projectId={5} chatSurfaceVisible />);
     expect(screen.queryByTestId('ask-question-card')).toBeNull();
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByTestId('run-pending-input-strip')).not.toBeInTheDocument();
   });
 
   it('on the Chat tab still shows OTHER pending items and suppresses the folded question row', () => {

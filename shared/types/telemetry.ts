@@ -95,9 +95,16 @@ export interface TelemetryEventMap {
     // without logging") — an approve whose MODIFIER suppresses the accepted-risk
     // findings, counted apart from a plain approve because that is the thing
     // worth counting: how often people drop a critique rather than carry it.
+    // 'retry' / 'stop_waiting' / 'switch_agents' are the systemic-pause card's
+    // three actions (a limit-paused programmatic run): a plain retry, a dismiss
+    // that lets the step fail, and a retry after re-targeting the blocked agents
+    // — counted apart from the generic resolve/dismiss so a switch is visible.
     action:
       | 'resolve'
       | 'dismiss'
+      | 'retry'
+      | 'stop_waiting'
+      | 'switch_agents'
       | 'promote_to_task'
       | 'approve'
       | 'approve[no-findings]'

@@ -1030,7 +1030,11 @@ export class GlobalAgentToolHandlers {
     // per-project repetition to dedupe here.
     const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
     const placeholders = excluded.map(() => '?').join(', ');
-    const clauses = [`name NOT IN (${placeholders})`];
+    // Hide archived rows by default, mirroring tRPC workflows.list /
+    // WorkflowRegistry.listByProject's default-HIDE policy — an archived
+    // workflow should not surface in an agent's cross-project listing any
+    // more than it does in the human-facing picker.
+    const clauses = [`name NOT IN (${placeholders})`, 'archived_at IS NULL'];
     const params: unknown[] = [...excluded];
     if (msg.projectId !== undefined) {
       clauses.push('(project_id = ? OR project_id IS NULL)');

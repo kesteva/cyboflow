@@ -66,6 +66,19 @@ const TEST_SPEC = {
         // model===null inherit — this is the fourth combination of the
         // {runtime, model} pair the precedence chain must handle).
         { id: 'claude-runtime-and-model-step', name: 'Claude runtime + model', agent: 'claude-interactive-sonnet-agent' },
+        // providerModel pinned WITHOUT a runtime pin — meaningful only on a
+        // run whose own provider is non-Claude (spawn-seam precedence).
+        { id: 'provider-model-only-step', name: 'Provider model only', agent: 'provider-model-only-agent' },
+        // Non-Claude runtime pinned with NO providerModel.
+        { id: 'codex-runtime-only-step', name: 'Codex runtime only', agent: 'codex-runtime-only-agent' },
+        // `human: true` with a non-'human' agent — still a gate, omitted.
+        { id: 'flagged-human-step', name: 'Flagged human', agent: 'opus-agent', human: true },
+        // Non-Claude runtime pinned with providerModel 'auto' — a pin that
+        // names no concrete model and must resolve as UNPINNED (family
+        // 'auto'), not as a literal model string named "auto".
+        { id: 'codex-auto-pin-step', name: 'Codex auto pin', agent: 'codex-agent-auto-providerModel' },
+        // Same, with providerModel '' instead of 'auto'.
+        { id: 'codex-empty-pin-step', name: 'Codex empty pin', agent: 'codex-agent-empty-providerModel' },
       ],
     },
   ],
@@ -120,6 +133,20 @@ const FAKE_EFFECTIVE_AGENTS: EffectiveAgent[] = [
     model: 'sonnet',
     runtime: 'claude-interactive',
   }),
+  effectiveAgent({ agentKey: 'provider-model-only-agent', model: null, providerModel: 'gpt-5.6-sol' }),
+  effectiveAgent({ agentKey: 'codex-runtime-only-agent', model: null, runtime: 'codex-sdk' }),
+  effectiveAgent({
+    agentKey: 'codex-agent-auto-providerModel',
+    model: null,
+    runtime: 'codex-sdk',
+    providerModel: 'auto',
+  }),
+  effectiveAgent({
+    agentKey: 'codex-agent-empty-providerModel',
+    model: null,
+    runtime: 'codex-sdk',
+    providerModel: '',
+  }),
   // 'inherit-agent' deliberately absent — a step whose agentKey has no
   // effective-agent row at all must still resolve (fully inherits).
 ];
@@ -139,7 +166,7 @@ describe('resolveRunStepModels', () => {
     const inheritStep = result.find((s) => s.stepId === 'inherit-step');
 
     expect(inheritStep).toBeDefined();
-    expect(inheritStep?.label).toBe('Sonnet 5');
+    expect(inheritStep?.label).toBe('Sonnet 5.5');
     expect(inheritStep?.family).toBe('sonnet');
   });
 
@@ -229,7 +256,7 @@ describe('resolveRunStepModels', () => {
     const step = result.find((s) => s.stepId === 'claude-runtime-and-model-step');
 
     expect(step).toBeDefined();
-    expect(step?.label).toBe('Sonnet 5');
+    expect(step?.label).toBe('Sonnet 5.5');
     expect(step?.family).toBe('sonnet');
   });
 
@@ -244,6 +271,101 @@ describe('resolveRunStepModels', () => {
     expect(step?.family).toBe('other');
   });
 
+  // -- Spawn-seam parity (stepSpawnTarget.resolveStepSpawnTarget) ----------
+
+  it('a Claude-runtime pin on a Codex run spawns the Claude default, never the run\'s Codex model id', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-flip-to-claude', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-flip-to-claude', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'claude-runtime-only-step');
+
+    expect(step?.label).toBe('Auto');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('a Claude alias pin with no runtime on a Codex run is ignored at spawn -> inherits the run model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-alias-on-codex', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-alias-on-codex', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'opus-step');
+
+    expect(step?.label).toBe('gpt-5.6-sol');
+    expect(step?.family).toBe('other');
+  });
+
+  it('a Codex runtime pin with no providerModel on a Codex run inherits the run model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-inherit', { model: 'gpt-5.6-sol', agentProvider: 'codex' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-inherit', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-runtime-only-step');
+
+    expect(step?.label).toBe('gpt-5.6-sol');
+    expect(step?.family).toBe('other');
+  });
+
+  it('a Codex runtime pin with no providerModel on a Claude run is the Codex default, family "auto"', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-default', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-default', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-runtime-only-step');
+
+    expect(step?.label).toBe('Codex SDK');
+    expect(step?.family).toBe('auto');
+  });
+
+  it('a providerModel-only pin never renders the "inherits run model" sentinel as a model name', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-pm-only-claude', { model: 'haiku', agentProvider: 'claude' });
+    seedStepModelsRun(db, 'run-pm-only-codex', { model: 'gpt-5.5', agentProvider: 'codex' });
+
+    const onClaude = resolveRunStepModels(dbAdapter(db), 'run-pm-only-claude', fakeResolveEffectiveAgents).find(
+      (s) => s.stepId === 'provider-model-only-step',
+    );
+    const onCodex = resolveRunStepModels(dbAdapter(db), 'run-pm-only-codex', fakeResolveEffectiveAgents).find(
+      (s) => s.stepId === 'provider-model-only-step',
+    );
+
+    // Claude run: a provider model id is meaningless -> inherits the run model.
+    expect(onClaude?.label).toBe(AGENT_MODEL_LABELS.haiku);
+    expect(onClaude?.family).toBe('haiku');
+    // Codex run: the spawn seam reads providerModel for the run's provider.
+    expect(onCodex?.label).toBe('gpt-5.6-sol');
+    expect(onCodex?.family).toBe('other');
+  });
+
+  it('a concrete Claude snapshot id on the run is labeled by family/version, never as the raw wire id', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-concrete-claude', { model: 'claude-opus-4-8[1m]', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-concrete-claude', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'inherit-step');
+
+    expect(step?.label).toBe('Opus 4.8 · 1M');
+    expect(step?.family).toBe('opus');
+  });
+
+  it('applies the spawn gates: a disabled provider drops the runtime pin, an unusable guarded model falls back', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-gated', { model: 'fable', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-gated', fakeResolveEffectiveAgents, {
+      isProviderEnabled: (p) => p !== 'codex',
+      isModelUsable: () => false,
+    });
+
+    // Codex disabled -> the codex-sdk pin is dropped; the step falls back to the
+    // run's Claude provider, whose Fable model is unavailable -> Opus.
+    const codexStep = result.find((s) => s.stepId === 'codex-step');
+    expect(codexStep?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(codexStep?.family).toBe('opus');
+    const inheritStep = result.find((s) => s.stepId === 'inherit-step');
+    expect(inheritStep?.family).toBe('opus');
+  });
+
   it('omits the human-gate step entirely, while keeping every other step', () => {
     const db = makeDb();
     seedStepModelsRun(db, 'run-human-gate', { model: 'sonnet', agentProvider: 'claude' });
@@ -251,6 +373,7 @@ describe('resolveRunStepModels', () => {
     const result = resolveRunStepModels(dbAdapter(db), 'run-human-gate', fakeResolveEffectiveAgents);
 
     expect(result.some((s) => s.stepId === 'human-gate')).toBe(false);
+    expect(result.some((s) => s.stepId === 'flagged-human-step')).toBe(false);
     expect(result.map((s) => s.stepId).sort()).toEqual(
       [
         'inherit-step',
@@ -258,8 +381,36 @@ describe('resolveRunStepModels', () => {
         'opus-step',
         'codex-step',
         'claude-runtime-and-model-step',
+        'provider-model-only-step',
+        'codex-runtime-only-step',
+        'codex-auto-pin-step',
+        'codex-empty-pin-step',
       ].sort(),
     );
+  });
+
+  it('a non-Claude runtime pin with providerModel "auto" resolves as UNPINNED (family "auto"), never as a literal "auto" model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-auto-pin', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-auto-pin', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-auto-pin-step');
+
+    expect(step?.family).toBe('auto');
+    expect(step?.label).not.toBe('auto');
+    expect(step?.label).toBe('Codex SDK');
+  });
+
+  it('a non-Claude runtime pin with providerModel "" resolves as UNPINNED (family "auto"), never as a literal "" model', () => {
+    const db = makeDb();
+    seedStepModelsRun(db, 'run-codex-empty-pin', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-codex-empty-pin', fakeResolveEffectiveAgents);
+    const step = result.find((s) => s.stepId === 'codex-empty-pin-step');
+
+    expect(step?.family).toBe('auto');
+    expect(step?.label).not.toBe('');
+    expect(step?.label).toBe('Codex SDK');
   });
 
   it('produces stepIds identical to what getPhaseState would flatten for the same fixture', async () => {
@@ -269,10 +420,10 @@ describe('resolveRunStepModels', () => {
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const phaseState = await caller.cyboflow.runs.getPhaseState({ runId: 'run-parity' });
     const allFlattenedSteps = phaseState.definition.phases.flatMap((p) =>
-      p.steps.map((s) => ({ stepId: s.id, agent: s.agent })),
+      p.steps.map((s) => ({ stepId: s.id, agent: s.agent, human: s.human })),
     );
     const expectedNonHumanIds = allFlattenedSteps
-      .filter((s) => resolveStepAgentKey(s.stepId, s.agent) !== null)
+      .filter((s) => resolveStepAgentKey(s.stepId, s.agent) !== null && s.human !== true)
       .map((s) => s.stepId);
 
     const result = resolveRunStepModels(dbAdapter(db), 'run-parity', fakeResolveEffectiveAgents);
@@ -316,6 +467,257 @@ describe('resolveRunStepModels', () => {
       );
       expect(JSON.stringify(info)).not.toContain('SECRET_SYSTEM_PROMPT_SHOULD_NEVER_LEAK');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunStepModels — fan-out inner steps (TASK-298)
+//
+// A SEPARATE spec fixture (not TEST_SPEC) so these additions cannot perturb
+// the exact-stepId-list assertions above (the human-gate-omission list, the
+// getPhaseState-parity list, the leak-check key-set list).
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliberately declares an OUTER step ('code-review') whose id collides with
+ * an INNER fanOut step's id in the SAME phase — the load-bearing regression
+ * this task exists to fix: the 2-arg `(phaseId, stepId)` key alone cannot
+ * disambiguate the two. Also carries an inner human-gate step ('review-gate')
+ * to cover the omission case.
+ */
+const FANOUT_SPEC = {
+  id: 'step-models-fanout-test',
+  phases: [
+    {
+      id: 'plan',
+      label: 'Plan',
+      color: '#3b6dd6',
+      steps: [{ id: 'scope', name: 'Scope', agent: 'planner-agent' }],
+    },
+    {
+      id: 'execute',
+      label: 'Execute',
+      color: '#2db67a',
+      steps: [
+        // Outer step id 'code-review' — pinned to opus-agent.
+        { id: 'code-review', name: 'Outer code review', agent: 'opus-agent' },
+        {
+          id: 'fan-step',
+          name: 'Fan step',
+          agent: 'executor-agent',
+          fanOut: {
+            over: 'tasks',
+            inner: [
+              // Inner step id ALSO 'code-review' — pinned to codex-agent.
+              // Must resolve to its OWN entry, distinct from the outer one.
+              { id: 'code-review', name: 'Inner code review', agent: 'codex-agent' },
+              { id: 'implement', name: 'Implement', agent: 'opus-agent' },
+              // Inner human gate — must be omitted, mirroring the outer
+              // human-gate omission (resolveStepAgentKey(..., 'human') -> null).
+              { id: 'review-gate', name: 'Review gate', agent: 'human' },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+function seedFanOutRun(
+  db: Database.Database,
+  runId: string,
+  opts?: { model?: string | null; agentProvider?: string },
+): void {
+  const workflowId = `wf-${runId}`;
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(workflowId, 'step-models-fanout-test', JSON.stringify(FANOUT_SPEC));
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, model, agent_provider)
+     VALUES (?, ?, 1, '/tmp/test', 'running', '{}', ?, ?)`,
+  ).run(runId, workflowId, opts?.model ?? null, opts?.agentProvider ?? 'claude');
+}
+
+describe('resolveRunStepModels — fan-out inner steps (TASK-298)', () => {
+  it('emits an entry for every non-human fanOut.inner step, reusing the outer-step precedence verbatim', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-basic', { model: 'haiku', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-basic', fakeResolveEffectiveAgents);
+
+    // 'implement' -> opus-agent -> pinned Opus, exactly the same precedence
+    // path an OUTER opus-agent step resolves through (`resolveStepModelLabel`
+    // is shared, not re-derived).
+    const implement = result.find((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step');
+    expect(implement).toBeDefined();
+    expect(implement?.stepName).toBe('Implement');
+    expect(implement?.phaseId).toBe('execute');
+    expect(implement?.agentKey).toBe('opus-agent');
+    expect(implement?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(implement?.family).toBe('opus');
+
+    // The outer fan-step itself still resolves normally (agent
+    // 'executor-agent' has no effective-agent row -> inherits the run
+    // model) and is unaffected by the new inner-step walk.
+    const fanStep = result.find((s) => s.stepId === 'fan-step');
+    expect(fanStep).toBeDefined();
+    expect(fanStep?.fanOutStepId).toBeUndefined();
+    expect(fanStep?.label).toBe(AGENT_MODEL_LABELS.haiku);
+  });
+
+  it('omits an inner fanOut.inner step whose resolveStepAgentKey is null (human gate), exactly like an outer human gate', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-human-gate', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-human-gate', fakeResolveEffectiveAgents);
+
+    // 'review-gate' (agent: 'human') never fabricates a model — omitted
+    // entirely, the same rule the outer-step loop applies.
+    expect(result.some((s) => s.stepId === 'review-gate')).toBe(false);
+    // Its siblings in the same fanOut.inner chain are unaffected.
+    expect(result.some((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step')).toBe(true);
+  });
+
+  it('an inner step id colliding with an outer step id in the SAME phase resolves to two DISTINCT entries', () => {
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-collision', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-collision', fakeResolveEffectiveAgents);
+
+    const codeReviewEntries = result.filter((s) => s.stepId === 'code-review');
+    // Both entries exist — neither clobbered the other.
+    expect(codeReviewEntries).toHaveLength(2);
+
+    const outerCodeReview = codeReviewEntries.find((s) => s.fanOutStepId === undefined);
+    const innerCodeReview = codeReviewEntries.find((s) => s.fanOutStepId === 'fan-step');
+    expect(outerCodeReview).toBeDefined();
+    expect(innerCodeReview).toBeDefined();
+
+    // Outer 'code-review' -> opus-agent -> pinned Opus.
+    expect(outerCodeReview?.agentKey).toBe('opus-agent');
+    expect(outerCodeReview?.stepName).toBe('Outer code review');
+    expect(outerCodeReview?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(outerCodeReview?.family).toBe('opus');
+
+    // Inner 'code-review' -> codex-agent -> pinned gpt-5.6-sol, family 'other'
+    // — its own, correct resolution, not the outer entry's.
+    expect(innerCodeReview?.agentKey).toBe('codex-agent');
+    expect(innerCodeReview?.stepName).toBe('Inner code review');
+    expect(innerCodeReview?.phaseId).toBe('execute');
+    expect(innerCodeReview?.label).toBe('gpt-5.6-sol');
+    expect(innerCodeReview?.family).toBe('other');
+  });
+
+  it('resolveStepModelLabel extraction: the SAME agentKey resolves to the IDENTICAL {label, family} whether reached via the outer-step loop or the fan-out inner-step loop', () => {
+    // Direct proof the extraction (`resolveStepModelLabel`) did not silently
+    // change behavior for either call site: FANOUT_SPEC pins 'opus-agent' to
+    // BOTH the outer 'code-review' step and the inner 'implement' step, under
+    // the identical run-level substrate (same runModel/runProvider/gates —
+    // there are none here). If the two loops had drifted (e.g. one still
+    // read `usableModelAlias`/`gateRuntimePin` inline while the other used a
+    // stale copy), this would be the test to catch it: the two resolved
+    // values would differ even though the input (agentKey -> effective agent)
+    // is identical.
+    const db = makeDb();
+    seedFanOutRun(db, 'run-fanout-label-parity', { model: 'sonnet', agentProvider: 'claude' });
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-fanout-label-parity', fakeResolveEffectiveAgents);
+
+    const outerOpusStep = result.find((s) => s.stepId === 'code-review' && s.fanOutStepId === undefined);
+    const innerOpusStep = result.find((s) => s.stepId === 'implement' && s.fanOutStepId === 'fan-step');
+    expect(outerOpusStep).toBeDefined();
+    expect(innerOpusStep).toBeDefined();
+    expect(outerOpusStep?.agentKey).toBe('opus-agent');
+    expect(innerOpusStep?.agentKey).toBe('opus-agent');
+
+    // The load-bearing assertion: identical {label, family} from both loops
+    // for the same agentKey/effective-agent/run substrate.
+    expect({ label: innerOpusStep?.label, family: innerOpusStep?.family }).toEqual({
+      label: outerOpusStep?.label,
+      family: outerOpusStep?.family,
+    });
+    // Pinned to a concrete value too, so a future accidental change to BOTH
+    // loops in lockstep (which the cross-equality check above cannot catch)
+    // still fails this test.
+    expect(outerOpusStep?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(outerOpusStep?.family).toBe('opus');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunStepModels — outer step is BOTH a trailing human gate AND a
+// fan-out.
+// ---------------------------------------------------------------------------
+
+const HUMAN_FANOUT_SPEC = {
+  id: 'step-models-human-fanout-test',
+  phases: [
+    {
+      id: 'execute',
+      label: 'Execute',
+      color: '#2db67a',
+      steps: [
+        {
+          id: 'fan-step',
+          name: 'Fan step',
+          // A REAL (non-'human') agent with a trailing human checkpoint —
+          // the exact shape `workflowController.ts`'s `hasTrailingGate`
+          // documents ("the planner's `context` step... runs its agent
+          // first, then opens the gate"), just also carrying `fanOut`.
+          agent: 'executor-agent',
+          human: true,
+          fanOut: {
+            over: 'tasks',
+            inner: [{ id: 'implement', name: 'Implement', agent: 'opus-agent' }],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+function seedHumanFanOutRun(db: Database.Database, runId: string): void {
+  const workflowId = `wf-${runId}`;
+  db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`).run(
+    workflowId,
+    'step-models-human-fanout-test',
+    JSON.stringify(HUMAN_FANOUT_SPEC),
+  );
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, model, agent_provider)
+     VALUES (?, ?, 1, '/tmp/test', 'running', '{}', ?, ?)`,
+  ).run(runId, workflowId, 'sonnet', 'claude');
+}
+
+describe('resolveRunStepModels — outer step is human:true AND has fanOut', () => {
+  it('omits the outer human-gate step from the result, but still resolves its non-human fanOut.inner step', () => {
+    // A step can legally be BOTH a real agent's trailing human checkpoint
+    // AND a fan-out (`workflowController.ts`'s `hasTrailingGate`): the agent
+    // fans out real work, THEN the gate opens. The outer entry must still be
+    // omitted (never fabricate a model for the gate step itself), but the
+    // fan-out inner-step walk must not be skipped just because the OUTER
+    // step happens to be a human gate.
+    const db = makeDb();
+    seedHumanFanOutRun(db, 'run-human-fanout');
+
+    const result = resolveRunStepModels(dbAdapter(db), 'run-human-fanout', fakeResolveEffectiveAgents);
+
+    // Outer 'fan-step' (the human gate) is omitted.
+    expect(result.some((s) => s.stepId === 'fan-step')).toBe(false);
+
+    // Its non-human, pinned inner step IS present, keyed to the outer step's id.
+    expect(result).toHaveLength(1);
+    const implement = result.find((s) => s.stepId === 'implement');
+    expect(implement).toBeDefined();
+    expect(implement?.fanOutStepId).toBe('fan-step');
+    expect(implement?.stepName).toBe('Implement');
+    expect(implement?.phaseId).toBe('execute');
+    expect(implement?.agentKey).toBe('opus-agent');
+    expect(implement?.label).toBe(AGENT_MODEL_LABELS.opus);
+    expect(implement?.family).toBe('opus');
   });
 });
 

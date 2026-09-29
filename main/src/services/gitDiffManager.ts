@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
-import { GitOperationalError } from './gitPlumbingCommands';
+import { GitOperationalError, isAbortError, isOperationalFailure } from './gitPlumbingCommands';
 import type { WorktreeStatusEntry, DiffGroupRollup, WorktreeStatusPayload } from '../../../shared/types/runFiles';
 
 export interface GitDiffStats {
@@ -89,30 +89,6 @@ export interface GitCommit {
 const CONFLICTED_STATUS_CODES: ReadonlySet<string> = new Set([
   'UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD',
 ]);
-
-/**
- * An AbortError means WE cancelled the git child (superseded/torn-down
- * fetch), not that git reported something meaningful. Mirrors
- * gitPlumbingCommands.ts's isAbortError (not exported there, so duplicated
- * here rather than reaching into that module's internals).
- */
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError';
-}
-
-/**
- * An operational git failure — killed by timeout/signal, or failed to spawn
- * (ENOENT) — as opposed to git running to completion and reporting a semantic
- * non-zero exit. Mirrors gitPlumbingCommands.ts's isOperationalFailure.
- */
-function isOperationalFailure(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null };
-  if (e.killed === true) return true;
-  if (typeof e.signal === 'string' && e.signal.length > 0) return true;
-  if (e.code === 'ENOENT') return true;
-  return false;
-}
 
 /**
  * Parse one `git status --porcelain=v1 -z --untracked-files=all` NUL-field
@@ -320,7 +296,7 @@ export class GitDiffManager {
     worktreePath: string,
     ref: string = 'HEAD',
   ): Promise<{ stats: GitDiffStats; changedFiles: string[] }> {
-    const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+    const resolvedRef = await resolveGitRefToSha(worktreePath, ref);
     if (resolvedRef === null) {
       this.logger?.warn(`Could not resolve ref "${ref}" for diff stats in ${worktreePath}`);
       return { stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] };
@@ -532,7 +508,7 @@ export class GitDiffManager {
    * a plain two-dot diff.
    *
    * Ref safety (TASK-208 discipline, defense-in-depth): `resolvedBase` is
-   * re-resolved via resolveRefForDiff (assertNotOptionLike + `rev-parse
+   * re-resolved via resolveGitRefToSha (assertNotOptionLike + `rev-parse
    * --verify --end-of-options`) even though the caller contract already
    * guarantees a resolved sha, and the merge-base command's OWN output is
    * re-resolved the same way before it is fed into the following `diff`
@@ -545,7 +521,7 @@ export class GitDiffManager {
     const empty: DiffGroupRollup = { scope: 'committed', files: [], additions: 0, deletions: 0 };
     if (!resolvedBase) return { group: empty, unavailable: true };
 
-    const safeBase = await this.resolveRefForDiff(worktreePath, resolvedBase);
+    const safeBase = await resolveGitRefToSha(worktreePath, resolvedBase);
     if (safeBase === null) return { group: empty, unavailable: true };
 
     let mergeBaseRaw: string;
@@ -560,7 +536,7 @@ export class GitDiffManager {
     }
     if (!mergeBaseRaw) return { group: empty, unavailable: true };
 
-    const safeMergeBase = await this.resolveRefForDiff(worktreePath, mergeBaseRaw);
+    const safeMergeBase = await resolveGitRefToSha(worktreePath, mergeBaseRaw);
     if (safeMergeBase === null) return { group: empty, unavailable: true };
 
     try {
@@ -821,32 +797,6 @@ export class GitDiffManager {
     };
   }
 
-  /**
-   * Resolve a caller-supplied `ref` (branch, tag, or sha) to a concrete commit
-   * sha before it reaches `git diff` argv (TASK-208).
-   *
-   * A ref like `--output=/tmp/pwn` is a valid `git diff` OPTION, not a
-   * revision — git happily parses it as a flag and writes an arbitrary file,
-   * returning empty stdout instead of erroring. `execFile` blocks shell
-   * injection but not this git-argv option-injection class. Routing every
-   * caller-supplied ref through `git rev-parse --verify --end-of-options
-   * <ref>^{commit}` closes it: END_OF_OPTIONS forces the ref into a value
-   * position, and `^{commit}` forces a commit-ish resolution that an
-   * option-like string can never satisfy (it fails to resolve, same as any
-   * other unresolvable ref).
-   *
-   * Returns null when the ref is falsy or fails to resolve — callers treat
-   * that as "unresolvable ref", falling back to their normal safe
-   * empty/zeroed result rather than throwing.
-   */
-  private async resolveRefForDiff(worktreePath: string, ref: string): Promise<string | null> {
-    // Delegates to the module-scope {@link resolveGitRefToSha} (TASK-273 moved
-    // it into this file for the index.ts size ratchet) rather than repeating
-    // its body: two byte-identical copies of a ref-SAFETY routine is exactly
-    // the shape in which one copy later drifts and loses its hardening.
-    return resolveGitRefToSha(worktreePath, ref);
-  }
-
   async getCurrentCommitHash(worktreePath: string): Promise<string> {
     try {
       return (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
@@ -905,7 +855,7 @@ export class GitDiffManager {
       // Get diff of the working tree against <ref> (default HEAD), including both
       // staged and unstaged changes. With a base ref this also surfaces commits
       // made since <ref>; with HEAD it is committed-agnostic (uncommitted only).
-      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      const resolvedRef = await resolveGitRefToSha(worktreePath, ref);
       if (resolvedRef === null) {
         throw new Error(`Could not resolve ref "${ref}" for diff in ${worktreePath}`);
       }
@@ -941,7 +891,7 @@ export class GitDiffManager {
 
   private async getChangedFiles(worktreePath: string, ref: string = 'HEAD'): Promise<string[]> {
     try {
-      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      const resolvedRef = await resolveGitRefToSha(worktreePath, ref);
       if (resolvedRef === null) {
         throw new Error(`Could not resolve ref "${ref}" for changed files in ${worktreePath}`);
       }
@@ -972,7 +922,7 @@ export class GitDiffManager {
 
   private async getDiffStats(worktreePath: string, ref: string = 'HEAD'): Promise<GitDiffStats> {
     try {
-      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      const resolvedRef = await resolveGitRefToSha(worktreePath, ref);
       if (resolvedRef === null) {
         throw new Error(`Could not resolve ref "${ref}" for diff stats in ${worktreePath}`);
       }
@@ -1144,10 +1094,18 @@ export function createUntrackedFileDiffBlock(relPath: string, content: string): 
 
 /**
  * Resolve a caller-supplied ref (branch, tag, sha) to a concrete commit sha for
- * a run-scoped `gitDiff` context closure (TASK-211), or `null` when the ref is
- * falsy or fails to resolve. THE single implementation of the TASK-208
- * ref-safety discipline in this file — `GitDiffManager.resolveRefForDiff`
- * delegates here rather than keeping a second copy: `END_OF_OPTIONS` forces
+ * a run-scoped `gitDiff` context closure (TASK-211) or any GitDiffManager
+ * method that puts a caller-supplied ref into `git diff` argv (TASK-208), or
+ * `null` when the ref is falsy or fails to resolve (callers fall back to their
+ * normal safe empty/zeroed result rather than throwing).
+ *
+ * Why this exists: a ref like `--output=/tmp/pwn` is a valid `git diff`
+ * OPTION, not a revision — git parses it as a flag and writes an arbitrary
+ * file. `execFile` blocks shell injection but not this git-argv
+ * option-injection class. THE single implementation of the TASK-208
+ * ref-safety discipline — GitDiffManager's own ref-taking methods and
+ * sessionFileStats.ts `resolveSessionDiffBaseRef` all call it rather than
+ * keeping a second copy: `END_OF_OPTIONS` forces
  * the ref into a value position and `^{commit}` forces a commit-ish
  * resolution that an option-like string can never satisfy.
  *
@@ -1160,7 +1118,7 @@ export async function resolveGitRefToSha(worktreePath: string, ref: string | und
   try {
     assertNotOptionLike(ref, 'diff ref');
     const resolved = (
-      await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
+      await runGitAsync(worktreePath, ['rev-parse', '--verify', '--quiet', END_OF_OPTIONS, `${ref}^{commit}`])
     ).trim();
     return resolved || null;
   } catch {

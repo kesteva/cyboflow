@@ -128,9 +128,34 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
       expect(result.data.changedFiles).toEqual(expect.arrayContaining(['a.txt', 'b.txt']));
       expect(result.data.diff).toContain('+a1');
       expect(result.data.diff).toContain('+b1');
-      // No baseCommit recorded — falls back to the resolved 'main' branch tip,
-      // which must be echoed back as a resolved SHA, not the branch name.
+      // No baseCommit recorded — falls back to the merge-base of HEAD and the
+      // resolved 'main' branch, echoed back as a resolved SHA, not a branch name.
       expect(result.data.resolvedBase).toMatch(SHA_RE);
+    });
+  });
+
+  it('no executionIds, no baseCommit, main ADVANCED past the branch point: anchors on the merge-base, not the main tip', async () => {
+    await withTempDir('combined-diff-advanced-main-', async (repo) => {
+      initRepoMain(repo);
+      const branchPoint = commitFile(repo, 'base.txt', 'base\n', 'base commit');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'a.txt', 'a1\n', 'feature commit');
+      // main advances with a file the feature branch never touched.
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'main-only.txt', 'main-only\n', 'main advances');
+      execSync('git checkout feature', { cwd: repo, stdio: 'pipe' });
+
+      const ops = createGitOps(makeServices(repo));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
+        success: boolean;
+        data: { diff: string; changedFiles: string[]; resolvedBase: string | null };
+      };
+
+      expect(result.success).toBe(true);
+      expect(result.data.resolvedBase).toBe(branchPoint);
+      expect(result.data.changedFiles).toEqual(['a.txt']);
+      // A two-dot diff vs the advanced main tip would carry a reverse hunk here.
+      expect(result.data.diff).not.toContain('main-only');
     });
   });
 

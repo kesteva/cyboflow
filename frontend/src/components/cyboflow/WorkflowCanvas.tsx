@@ -37,7 +37,7 @@ import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
-import { modelFamilyColor, type ModelFamily } from '../../../../shared/types/agents';
+import { modelFamilyColor, stepModelKey, type ModelFamily } from '../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +64,16 @@ export interface WorkflowCanvasProps {
    */
   paused?: boolean;
   /**
+   * The step the run is parked on by a SYSTEMIC pause (a usage / session
+   * limit — `gate:systemic-pause:<stepId>`), or null/undefined when it is not
+   * parked. Distinct from `paused`: the run row stays 'running' while parked,
+   * so RunCenterPane derives this from the run's pending review items
+   * (`pendingSystemicPauseStepId`). That step's card renders 'paused' instead
+   * of 'running', the meta row shows the amber paused pill, and the running
+   * pill + token animation are suppressed exactly as for `paused`.
+   */
+  pausedStepId?: string | null;
+  /**
    * The run's raw lifecycle status. When it is a terminal self-completion
    * ('completed' / 'failed'), the meta row renders a static outcome pill (green /
    * red) so the finished state reads clearly while the operator decides to "End
@@ -81,7 +91,8 @@ export interface WorkflowCanvasProps {
   sessionKey?: string | null;
   /**
    * Per-step resolved model info (IDEA-061 per-step model rail), keyed by
-   * step id — from `runs.getStepModels` via RunCenterPane. A step with no
+   * `stepModelKey(phaseId, stepId)` (a step id is unique only within its
+   * phase) — from `runs.getStepModels` via RunCenterPane. A step with no
    * entry (a human/gate step the backend omits, or the query hasn't
    * resolved yet) renders its card's agent row exactly as before this prop
    * existed. `null`/`undefined` (loading/errored/no-query-yet) is equivalent
@@ -213,20 +224,26 @@ export function WorkflowCanvas({
   tokenCount,
   isRunning = false,
   paused = false,
+  pausedStepId = null,
   status,
   sessionKey,
   stepModels,
 }: WorkflowCanvasProps) {
-  // A paused run is, by definition, not actively running — suppress the running
-  // pill and the token animation regardless of the isRunning prop so the canvas
-  // is self-consistent even if a caller passes a stale isRunning.
-  const effectiveRunning = isRunning && !paused;
+  // A paused run — the SDK Pause (`paused`) OR a systemic pause parking a step
+  // (`pausedStepId`) — is, by definition, not actively running: suppress the
+  // running pill and the token animation regardless of the isRunning prop so
+  // the canvas is self-consistent even if a caller passes a stale isRunning.
+  const parked = pausedStepId !== null && pausedStepId !== undefined;
+  const showPausedPill = paused || parked;
+  const effectiveRunning = isRunning && !showPausedPill;
   // ── Flatten all step ids for state derivation ─────────────────────────────
   const stepIds = definition.phases.flatMap((p) => p.steps.map((s) => s.id));
   const currentIdx = currentStepId != null ? stepIds.indexOf(currentStepId) : -1;
 
-  // Derive per-step status
+  // Derive per-step status. The parked step wins over the ordering rule: the
+  // pause item names where the run actually sits, even if currentStepId lags.
   const statusFor = (flatIdx: number): StepStatus => {
+    if (parked && stepIds[flatIdx] === pausedStepId) return 'paused';
     if (currentIdx === -1) return 'pending';
     if (flatIdx < currentIdx) return 'done';
     if (flatIdx === currentIdx) return 'running';
@@ -393,7 +410,7 @@ export function WorkflowCanvas({
             <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>{tokenCount}</b>
           </span>
         )}
-        {paused ? (
+        {showPausedPill ? (
           <span
             style={{
               padding: '2px 8px',
@@ -569,7 +586,7 @@ export function WorkflowCanvas({
                   const flatIdx = phaseFlatStart + stepInPhase;
                   const derivedStatus = statusFor(flatIdx);
                   const globalStepIndex = flatIdx + 1; // 1-based
-                  const modelEntry = stepModels?.get(step.id);
+                  const modelEntry = stepModels?.get(stepModelKey(phase.id, step.id));
 
                   return (
                     <div

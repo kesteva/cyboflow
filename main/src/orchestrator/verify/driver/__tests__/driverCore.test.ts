@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Browser } from 'playwright';
 import {
+  ATTEST_KIND_BY_CHANNEL,
   attestFilePath,
   createDefaultDriverDeps,
   MOBILE_CDP_REFUSAL,
@@ -34,6 +35,7 @@ import {
   windowsScreenCaptureArgs,
   type DriverAttestRecord,
   type DriverDeps,
+  headlessShellSibling,
 } from '../driverCore';
 import { ShellDetector } from '../../../../utils/shellDetector';
 
@@ -1805,5 +1807,73 @@ describe.skipIf(process.platform === 'win32')('attest bundle', () => {
     const parsed = parseArgv(['attest', 'nonsense']);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) expect(parsed.message).toContain('http|dom|cdp|window|bundle');
+  });
+});
+
+describe('attest binding — serve-binding is harness-verified (§A1.2)', () => {
+  it('parses with no arguments, rejects any, and maps to serve-binding', () => {
+    expect(parseArgv(['attest', 'binding'])).toEqual({ ok: true, command: { kind: 'attest', channel: 'binding' } });
+    expect(parseArgv(['attest', 'binding', '/__verify__'])).toMatchObject({ ok: false });
+    expect(ATTEST_KIND_BY_CHANNEL.binding).toBe('serve-binding');
+    expect(USAGE).toContain('attest binding');
+  });
+
+  it('reports ok — the rest is the harness\'s — once a serve was started through the driver, with no browser', async () => {
+    const calls = freshCalls();
+    const out: string[] = [];
+    const deps = makeDeps(calls, { stdout: (line) => out.push(line), readPidFile: vi.fn(async () => 4242) });
+
+    const code = await runDriverCommand(['attest', 'binding'], { ...ENV, VERIFY_MODALITY: 'web' }, deps);
+
+    expect(code).toBe(0);
+    expect(deps.readPidFile).toHaveBeenCalledWith(servePidFilePath(ENV.VERIFY_ARTIFACTS_DIR));
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: true, kind: 'serve-binding' });
+    expect(record.detail).toContain('harness-verified');
+    expect(record.detail).toContain('4242');
+    expect(deps.connectOverCDP).not.toHaveBeenCalled();
+  });
+
+  it('fails with an actionable message when no serve was started through the driver', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+
+    const code = await runDriverCommand(['attest', 'binding'], { ...ENV, VERIFY_MODALITY: 'web' }, deps);
+
+    expect(code).toBe(1);
+    const record = soleAttestRecord(calls);
+    expect(record).toMatchObject({ ok: false, kind: 'serve-binding' });
+    expect(record.detail).toContain('$VERIFY_DRIVER serve');
+  });
+});
+
+describe('headlessShellSibling — the driver prefers chrome-headless-shell', () => {
+  const full =
+    '/Users/me/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
+  // Built with path.join, as the resolver does, so the separators match on win32.
+  const shell = join('/Users/me/Library/Caches/ms-playwright/chromium_headless_shell-1234', 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell');
+
+  it('resolves the same-revision headless shell when it is installed', () => {
+    expect(headlessShellSibling(full, (p) => p === shell)).toBe(shell);
+  });
+
+  it('is null when the shell is absent, so the full browser is used as before', () => {
+    expect(headlessShellSibling(full, () => false)).toBeNull();
+  });
+
+  it('never crosses revisions', () => {
+    const other = shell.replace('1234', '1233');
+    expect(headlessShellSibling(full, (p) => p === other)).toBeNull();
+  });
+
+  it('is null for a path outside the Playwright cache layout', () => {
+    expect(headlessShellSibling('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', () => true)).toBeNull();
+  });
+
+  it('finds the Windows shell', () => {
+    const win = 'C:\\Users\\me\\AppData\\Local\\ms-playwright\\chromium-1234\\chrome-win64\\chrome.exe';
+    const seen: string[] = [];
+    headlessShellSibling(win, (p) => (seen.push(p), false));
+    expect(seen.some((p) => p.includes('chromium_headless_shell-1234') && p.endsWith('chrome-headless-shell.exe'))).toBe(true);
   });
 });

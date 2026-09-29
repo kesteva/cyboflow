@@ -1461,3 +1461,105 @@ describe('resolveReviewItem — orchestrated gate side-effects arm', () => {
     expect(applied[0]).not.toHaveProperty('reviewItemId');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Systemic-pause item: the generic decision verdicts translated to the pause
+// gate's resolve ⇒ retry / dismiss ⇒ stop-waiting contract.
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — systemic-pause item', () => {
+  const PAUSE_SOURCE = 'gate:systemic-pause:implement';
+
+  function seedPause(db: Database.Database): void {
+    seedItem(db, { id: 'rvw_pause', kind: 'decision', source: PAUSE_SOURCE, blocking: true, runId: 'run-1' });
+  }
+
+  function withDismiss(deps: SpiedDeps, db: Database.Database): SpiedDeps & { applyReviewItemDismiss: ReturnType<typeof vi.fn> } {
+    const applyReviewItemDismiss = vi
+      .fn<NonNullable<ResolveReviewItemDeps['applyReviewItemDismiss']>>()
+      .mockImplementation(async (_projectId, args) => {
+        db.prepare("UPDATE review_items SET status = 'dismissed', resolution = ? WHERE id = ?").run(
+          args.resolution ?? null,
+          args.reviewItemId,
+        );
+        return { reviewItemId: args.reviewItemId };
+      });
+    return { ...deps, applyReviewItemDismiss };
+  }
+
+  it("outcome 'reject' DISMISSES (stop waiting) instead of resolving (which the gate reads as retry)", async () => {
+    const db = buildDb();
+    seedPause(db);
+    const deps = withDismiss(makeDeps(db), db);
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_pause', outcome: 'reject' }), deps);
+
+    expect(result).toEqual({ ok: true, reviewItemId: 'rvw_pause', resumed: false, gateStepId: null, outcome: 'reject' });
+    expect(deps.applyReviewItemDismiss).toHaveBeenCalledWith(1, {
+      reviewItemId: 'rvw_pause',
+      actor: 'user',
+      resolution: 'stop waiting',
+    });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    // The pause gate resumes the run itself when it settles on the dismiss event.
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled();
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_pause') as { status: string }).status,
+    ).toBe('dismissed');
+  });
+
+  it("fails CLOSED: a 'reject' with no dismiss seam wired is refused and the item stays pending", async () => {
+    const db = buildDb();
+    seedPause(db);
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_pause', outcome: 'reject' }), deps);
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_pause') as { status: string }).status,
+    ).toBe('pending');
+  });
+
+  it("refuses 'revise' (a pause has no revision)", async () => {
+    const db = buildDb();
+    seedPause(db);
+    const deps = withDismiss(makeDeps(db), db);
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_pause', outcome: 'revise' }), deps);
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(deps.applyReviewItemDismiss).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no outcome (Retry now)', undefined],
+    ["outcome 'approve'", 'approve' as const],
+  ])('%s resolves as today (the gate retries)', async (_label, outcome) => {
+    const db = buildDb();
+    seedPause(db);
+    const deps = withDismiss(makeDeps(db), db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_pause', ...(outcome !== undefined ? { outcome } : {}) }),
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: true, reviewItemId: 'rvw_pause' });
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledOnce();
+    expect(deps.applyReviewItemDismiss).not.toHaveBeenCalled();
+  });
+
+  it("a 'reject' on any OTHER decision item is untouched (still a resolve)", async () => {
+    const db = buildDb();
+    seedItem(db, { id: 'rvw_gate', kind: 'decision', source: 'gate:human-step:approve-idea', blocking: true, runId: 'run-2' });
+    const deps = withDismiss(makeDeps(db), db);
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_gate', outcome: 'reject' }), deps);
+
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledOnce();
+    expect(deps.applyReviewItemDismiss).not.toHaveBeenCalled();
+  });
+});

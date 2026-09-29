@@ -867,24 +867,38 @@ describe('McpQueryHandler global-agent tool family', () => {
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'not_a_global_agent_run' });
     });
 
-    it('the underlying SELECT tolerates an archived row (migration 078 archived_at column) without throwing', async () => {
+    it('the underlying SELECT tolerates an archived row (migration 078 archived_at column) without throwing, and the list hides it by default', async () => {
       // readWorkflowRow / handleAgentWorkflows's SQL now projects
       // workflows.archived_at (migration 078) — this asserts the SELECT
       // still succeeds once a row actually carries a non-NULL stamp (a schema
-      // drift / typo'd column name would throw a SQLITE_ERROR here).
+      // drift / typo'd column name would throw a SQLITE_ERROR here), and that
+      // handleAgentWorkflows now hides archived rows by default, mirroring
+      // tRPC workflows.list's default-HIDE policy.
       seedWorkflowRow(db, 'wf-p1', 1, 'flow-one', CUSTOM_DEFINITION);
+      seedWorkflowRow(db, 'wf-p2', 1, 'flow-two', CUSTOM_DEFINITION);
       db.prepare("UPDATE workflows SET archived_at = datetime('now') WHERE id = 'wf-p1'").run();
 
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage({ type: 'mcp-workflows', requestId: 'r1', runId: 'agent:thread-1' }, socket);
       const res = parseLastWrite(writes);
       expect(res.ok).toBe(true);
-      // Current behavior: the global-agent list applies no archived-filter, so
-      // the archived row still surfaces here (unlike tRPC workflows.list,
-      // which hides archived rows by default) — this documents that gap
-      // rather than asserting a filter that does not exist.
       const data = res.data as { workflows: Array<{ id: string }> };
-      expect(data.workflows.map((w) => w.id)).toContain('wf-p1');
+      expect(data.workflows.map((w) => w.id)).not.toContain('wf-p1');
+      expect(data.workflows.map((w) => w.id)).toContain('wf-p2');
+    });
+
+    it('projects archived_at into the compact workflow wire shape', async () => {
+      seedWorkflowRow(db, 'wf-p1', 1, 'flow-one', CUSTOM_DEFINITION);
+
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-workflow', requestId: 'r1', runId: 'agent:thread-1', workflowId: 'wf-p1' },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const data = res.data as { workflow: { id: string; archived_at: string | null } };
+      expect(data.workflow.archived_at).toBeNull();
     });
   });
 

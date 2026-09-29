@@ -32,6 +32,11 @@ export type ReadyRow =
        * TASK-226: the session's finished FLOW run, when it hosted one (see
        * `significantFlowRunBySession`). Drives the status label — the run that
        * finished, not the chat it interrupted, is what the row describes.
+       * Absent — even for a session that once hosted a flow run — once that
+       * run is older than the session's own chat activity ("most recent
+       * activity wins", product decision 2026-09-25): `significantFlowRunBySession`
+       * leaves a stale terminal run out of its map entirely, so the row falls
+       * through to `describeReadyState`'s own row-signal branch below.
        */
       flowRun?: ActiveRunRow;
     }

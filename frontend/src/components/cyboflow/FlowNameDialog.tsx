@@ -96,6 +96,10 @@ export function FlowNameDialog({
       setError('A workflow name is required.');
       return;
     }
+    // Clear a stale local validation error from an earlier empty-name attempt
+    // so a corrected, now-valid submission doesn't permanently mask a later
+    // server-side rejection (the render guard below is `!error && ...`).
+    setError(null);
     onConfirm(trimmed, scopeProjectId);
   };
 
@@ -111,6 +115,7 @@ export function FlowNameDialog({
               value={name}
               onChange={(e) => {
                 setName(e.target.value);
+                setError(null);
                 setShowServerError(false);
               }}
               onKeyDown={(e) => {

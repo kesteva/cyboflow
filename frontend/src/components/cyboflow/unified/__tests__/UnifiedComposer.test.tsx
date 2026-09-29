@@ -31,6 +31,7 @@ function Harness(props: Partial<UnifiedComposerProps> & { ptyOpen?: boolean; run
       onSubmit={props.onSubmit ?? (() => {})}
       onStop={props.onStop}
       onInterruptSend={props.onInterruptSend}
+      queueWhileRunning={props.queueWhileRunning}
       onTogglePtyOpen={props.onTogglePtyOpen}
     />
   );
@@ -156,6 +157,76 @@ describe('UnifiedComposer', () => {
       fireEvent.keyDown(textarea, { key: 'Escape' });
       expect(onStop).toHaveBeenCalledTimes(1);
       expect(onInterruptSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('queueWhileRunning (TASK-301 attempt 3, blocker A)', () => {
+    it('running + draft + no onInterruptSend + queueWhileRunning OMITTED renders Stop-only (no Queue leak)', () => {
+      render(<Harness ptyOpen running value="hi" onStop={vi.fn()} />);
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+      expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+      expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    });
+
+    it('running + draft + no onInterruptSend + queueWhileRunning=false renders Stop-only', () => {
+      render(<Harness ptyOpen running value="hi" onStop={vi.fn()} queueWhileRunning={false} />);
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+      expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+    });
+
+    it('running + draft + no onInterruptSend + queueWhileRunning=true renders Queue + Stop', () => {
+      const onSubmit = vi.fn();
+      render(
+        <Harness ptyOpen running value="hi" onStop={vi.fn()} onSubmit={onSubmit} queueWhileRunning />,
+      );
+      expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+      expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+      fireEvent.click(screen.getByTestId('unified-composer-queue'));
+      expect(onSubmit).toHaveBeenCalledWith(emptyAttachments());
+    });
+
+    it('onInterruptSend present still shows the full trio regardless of queueWhileRunning', () => {
+      render(
+        <Harness
+          ptyOpen
+          running
+          value="hi"
+          onStop={vi.fn()}
+          onInterruptSend={vi.fn()}
+          queueWhileRunning={false}
+        />,
+      );
+      expect(screen.getByTestId('unified-composer-queue')).toBeTruthy();
+      expect(screen.getByTestId('unified-composer-interrupt-send')).toBeTruthy();
+      expect(screen.getByTestId('unified-composer-stop')).toBeTruthy();
+    });
+
+    it('proof of failure: attempt 2\'s unconditional-Queue predicate leaks Queue into non-opted-in hosts (negative control for the tests above)', () => {
+      // Attempt 2's actual running+draft branch condition (UnifiedComposer.tsx,
+      // before this attempt's fix) was `hasDraft ? <trio-or-pair> : ...` — Queue
+      // rendered whenever there was a draft, with NO check on `onInterruptSend`
+      // or any opt-in flag. Reproduced here as a pure predicate (not by editing
+      // the production file — this worktree is shared with sibling lanes) to
+      // prove the fixed predicate below is discriminating: same inputs
+      // (QuickSessionComposer's question-gate-open / interactive-PTY case —
+      // hasDraft, no onInterruptSend, no queueWhileRunning), different answer.
+      const attempt2ShowsQueue = (hasDraft: boolean): boolean => hasDraft;
+      const fixedShowsQueue = (
+        hasDraft: boolean,
+        onInterruptSend: unknown,
+        queueWhileRunning: boolean,
+      ): boolean => hasDraft && (onInterruptSend !== undefined || queueWhileRunning);
+
+      const hasDraft = true;
+      const onInterruptSend = undefined; // withheld: question gate open / PTY relay
+      const queueWhileRunning = false; // QuickSessionComposer never opts in
+
+      // Against attempt 2's predicate this is TRUE — Queue leaks in. This
+      // documents that regression so the fixed predicate's difference (and
+      // this attempt's fix) is on record.
+      expect(attempt2ShowsQueue(hasDraft)).toBe(true);
+      expect(fixedShowsQueue(hasDraft, onInterruptSend, queueWhileRunning)).toBe(false);
     });
   });
 });

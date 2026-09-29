@@ -1,0 +1,977 @@
+{
+  "_source": "tools/list from `xcrun mcpbridge` (Xcode 27.0, 27A266a), captured 2026-09-24. Trimmed: every tool NAME is kept; name + inputSchema + outputSchema are kept only for the tools docs/proposals/runbook-optional-verification.md uses. Descriptions dropped.",
+  "toolNames": [
+    "AddEntitlement",
+    "AddInfoPlist",
+    "BuildProject",
+    "DeviceInteractionEndSession",
+    "DeviceInteractionInstallAndRun",
+    "DeviceInteractionStartSession",
+    "DeviceInteractionStartWorkspaceSession",
+    "DeviceInteractionSynthesize",
+    "GetBuildLog",
+    "GetConsoleOutput",
+    "GetCrashIssueLogs",
+    "GetFieldPerformanceIssueLogs",
+    "GetFileCompilerFlags",
+    "GetTargetBuildSettings",
+    "GetTestList",
+    "GetTopCrashIssues",
+    "GetTopFieldPerformanceIssues",
+    "InvokeDebuggerCommand",
+    "LocalizationPlanner",
+    "RenderPreview",
+    "RunAllTests",
+    "RunCodeSnippet",
+    "RunProject",
+    "RunSomeTests",
+    "StopProject",
+    "StringCatalogContext",
+    "StringCatalogEdit",
+    "StringCatalogRead",
+    "UpdateFileCompilerFlags",
+    "UpdateTargetBuildSetting",
+    "XcodeCloseWorkspace",
+    "XcodeGlob",
+    "XcodeGrep",
+    "XcodeLS",
+    "XcodeListRunDestinations",
+    "XcodeListSchemes",
+    "XcodeListTargets",
+    "XcodeListTemplates",
+    "XcodeListTestPlans",
+    "XcodeListWorkspaces",
+    "XcodeMV",
+    "XcodeMakeDir",
+    "XcodeNewProject",
+    "XcodeNewTarget",
+    "XcodeOpenWorkspace",
+    "XcodeRM",
+    "XcodeRead",
+    "XcodeRefreshCodeIssuesInFile",
+    "XcodeSwitchRunDestination",
+    "XcodeSwitchScheme",
+    "XcodeSwitchTestPlan",
+    "XcodeUpdate",
+    "XcodeWrite"
+  ],
+  "tools": [
+    {
+      "name": "DeviceInteractionStartSession",
+      "inputSchema": {
+        "properties": {
+          "deviceIdentifier": {
+            "description": "The UUID/ECID/name/OS version/type of the device to perform interaction. Accepts any values and tries to match the best candidate.",
+            "type": "string"
+          },
+          "sessionIdentifier": {
+            "description": "Unique human-friendly identifier for this session (e.g. \"Verify Login Flow\"). Used in logs and UI - use Title Case.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deviceIdentifier",
+          "sessionIdentifier"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "deviceIsSimulator": {
+            "description": "true if the device for this session is a simulator, otherwise false",
+            "type": "boolean"
+          },
+          "deviceUUID": {
+            "description": "UUID of the device to be used for the interaction session",
+            "type": "string"
+          },
+          "interactionSessionKey": {
+            "description": "A secret key to identify the interaction session",
+            "type": "string"
+          },
+          "skillToTrigger": {
+            "description": "The name of the skill that will handle the next step(s)",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Notes about the session and guidance on next steps for a caller",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "skillToTrigger",
+          "interactionSessionKey",
+          "deviceUUID",
+          "deviceIsSimulator"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "DeviceInteractionSynthesize",
+      "inputSchema": {
+        "properties": {
+          "activationBundleId": {
+            "description": "Bundle identifier of the app to activate before any interactions",
+            "type": "string"
+          },
+          "interactSessionKey": {
+            "description": "Device Interaction session key to work with. Taken from DeviceInteractionStartSession or DeviceInteractionStartWorkspaceSession",
+            "type": "string"
+          },
+          "interactionCommand": {
+            "description": "The interaction command to execute (e.g., 't 100 200' for tap)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "interactSessionKey"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "applicationState": {
+            "description": "State of the run application: NotRun, Running, Stopped, Crashed, Disconnected, Hanging, RunningInBackground.",
+            "type": "string"
+          },
+          "hierarchyPath": {
+            "description": "Path to the captured UI hierarchy file (incl. device orientation). If missing, retry as that might be AX transient issue",
+            "type": "string"
+          },
+          "logsPath": {
+            "description": "Path to the file where collected console logs of the application are stored",
+            "type": "string"
+          },
+          "screenshotPath": {
+            "description": "Path to the captured full-size screenshot",
+            "type": "string"
+          },
+          "thumbnailScreenshotPath": {
+            "description": "Path to a screenshot file with small resolution",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thumbnailScreenshotPath",
+          "screenshotPath",
+          "hierarchyPath",
+          "logsPath",
+          "applicationState"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "DeviceInteractionEndSession",
+      "inputSchema": {
+        "properties": {
+          "interactionSessionKey": {
+            "description": "Device Interaction session to close. Taken from DeviceInteractionStartSession or DeviceInteractionStartWorkspaceSession",
+            "type": "string"
+          }
+        },
+        "required": [
+          "interactionSessionKey"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "userMessage": {
+            "description": "A summary of the action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userMessage"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "DeviceInteractionStartWorkspaceSession",
+      "inputSchema": {
+        "properties": {
+          "deviceIdentifier": {
+            "description": "The UUID/ECID/name/OS version/type of the device to perform interaction. Accepts any values and tries to match the best candidate.",
+            "type": "string"
+          },
+          "sessionIdentifier": {
+            "description": "Unique human-friendly identifier for this session (e.g. \"Verify Login Flow\"). Used in logs and UI - use Title Case.",
+            "type": "string"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sessionIdentifier"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "deviceIsSimulator": {
+            "description": "true if the device for this session is a simulator, otherwise false",
+            "type": "boolean"
+          },
+          "deviceUUID": {
+            "description": "UUID of the device to be used for the interaction session",
+            "type": "string"
+          },
+          "interactionSessionKey": {
+            "description": "A secret key to identify the interaction session",
+            "type": "string"
+          },
+          "skillToTrigger": {
+            "description": "The name of the skill that will handle the next step(s)",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Notes about the session and guidance on next steps for a caller",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "skillToTrigger",
+          "interactionSessionKey",
+          "deviceUUID",
+          "deviceIsSimulator"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "DeviceInteractionInstallAndRun",
+      "inputSchema": {
+        "properties": {
+          "commandLineArguments": {
+            "description": "Arguments that the application should be run with. Can include '$(inherited)' placeholder string for scheme-provided arguments",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "environmentVariables": {
+            "description": "Environment variables that the application should be run with. Can contain '$(inherited)' as a key to include scheme-provided environment variables",
+            "type": "object"
+          },
+          "interactionSessionKey": {
+            "description": "Device Interaction session identifier that initiates this call. Taken from DeviceInteractionStartWorkspaceSession",
+            "type": "string"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "interactionSessionKey"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "userMessage": {
+            "description": "A summary of the action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userMessage"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeOpenWorkspace",
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "description": "Absolute path to the .xcworkspace or .xcodeproj to open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "activeRunDestination": {
+            "description": "The active run destination of the opened workspace, if any",
+            "type": "string"
+          },
+          "activeScheme": {
+            "description": "The active scheme of the opened workspace, if any",
+            "type": "string"
+          },
+          "message": {
+            "description": "A warning or informational message about the workspace state",
+            "type": "string"
+          },
+          "workspaceIdentifier": {
+            "description": "The identifier of the opened workspace",
+            "type": "string"
+          },
+          "workspacePath": {
+            "description": "The resolved path of the opened workspace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceIdentifier"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeNewProject",
+      "inputSchema": {
+        "properties": {
+          "destinationPath": {
+            "description": "Filesystem path to the directory where the project will be created (e.g. '/Users/<username>/projects'). The project is created in a subdirectory named after productName.",
+            "type": "string"
+          },
+          "options": {
+            "description": "Optional dictionary of template-specific options. Keys are option identifiers from XcodeListTemplates (e.g. 'languageChoice', 'coreData', 'sceneLifecycle'). All values are strings. Checkbox options accept 'true'/'false', 'YES'/'NO', or '1'/'0' (case-insensitive). Popup options must be one of OptionInfo.possibleValues. Reserved: do NOT include 'productName' or 'organizationIdentifier' here.",
+            "type": "object"
+          },
+          "organizationIdentifier": {
+            "description": "Optional bundle identifier prefix (e.g. 'com.example'). Sets the organization identifier used to derive the PRODUCT_BUNDLE_IDENTIFIER.",
+            "type": "string"
+          },
+          "productName": {
+            "description": "The new project's product name (e.g. 'MyApp'). This becomes the project filename and default target name.",
+            "type": "string"
+          },
+          "teamIdentifier": {
+            "description": "Optional Apple Development Team ID for code signing (e.g. 'A1B2C3D4E5'). Sets DEVELOPMENT_TEAM on the created targets.",
+            "type": "string"
+          },
+          "templateIdentifier": {
+            "description": "Template identifier to instantiate (e.g. 'com.apple.dt.unit.storyboardApplication'). Discover values with XcodeListTemplates (kind='project').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "templateIdentifier",
+          "productName",
+          "destinationPath"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "createdTargets": {
+            "description": "Names of all targets created in the new project, sorted alphabetically.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "projectPath": {
+            "description": "Filesystem path to the created .xcodeproj.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectPath",
+          "createdTargets"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeListWorkspaces",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "message": {
+            "description": "Description of all open workspaces",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeCloseWorkspace",
+      "inputSchema": {
+        "properties": {
+          "workspaceIdentifier": {
+            "description": "The identifier of the workspace to close (as returned by XcodeOpenWorkspace or XcodeListWorkspaces)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceIdentifier"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "message": {
+            "description": "Confirmation message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeListSchemes",
+      "inputSchema": {
+        "properties": {
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "activeSchemeName": {
+            "description": "The name of the currently active scheme, or null if no scheme is active.",
+            "type": "string"
+          },
+          "fullSchemeListPath": {
+            "description": "Path to a file containing the complete scheme list in grep-friendly format.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Optional message with additional information about truncation.",
+            "type": "string"
+          },
+          "schemes": {
+            "description": "Visible, non-transient schemes in the workspace, limited to 100 entries with the active scheme listed first.",
+            "items": {
+              "properties": {
+                "containerName": {
+                  "description": "The display name of the project or workspace container that hosts this scheme.",
+                  "type": "string"
+                },
+                "disambiguatedName": {
+                  "description": "The scheme's name with the container name appended in parentheses when multiple schemes share the same name. Pass this value to XcodeSwitchScheme to resolve ambiguity.",
+                  "type": "string"
+                },
+                "isActive": {
+                  "description": "True if this is the currently active scheme.",
+                  "type": "boolean"
+                },
+                "isShared": {
+                  "description": "True if this scheme is shared (committed to source control alongside the project); false if it is a user-only scheme.",
+                  "type": "boolean"
+                },
+                "name": {
+                  "description": "The scheme's name as it appears in the Xcode scheme picker.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "disambiguatedName",
+                "isActive",
+                "isShared"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "totalSchemes": {
+            "description": "Total number of schemes before truncation.",
+            "type": "integer"
+          },
+          "truncated": {
+            "description": "True if the inline schemes array was truncated because more than 100 schemes exist.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schemes",
+          "truncated",
+          "totalSchemes",
+          "fullSchemeListPath"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeSwitchScheme",
+      "inputSchema": {
+        "properties": {
+          "schemeName": {
+            "description": "The name of the scheme to make active. To resolve ambiguity when multiple schemes share the same name, use the disambiguated name returned by XcodeListSchemes (for example, \"MyScheme (MyProject)\").",
+            "type": "string"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemeName"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "activeDestinationDisplayTitle": {
+            "description": "The disambiguated displayTitle of the active run destination \u2014 the same string XcodeListRunDestinations returns. Use this to detect when Xcode auto-resolved the destination to a different variant (e.g. from 'My Mac' to 'My Mac (Mac Catalyst)') because the previous destination wasn't compatible with the new scheme.",
+            "type": "string"
+          },
+          "activeSchemeName": {
+            "description": "The name of the scheme that is now active.",
+            "type": "string"
+          },
+          "activeTestPlanName": {
+            "description": "The name of the new scheme's active test plan, or null if the scheme does not use test plans. Each scheme has its own active test plan, so switching schemes changes which plan testing and build-for-testing operate on. Use XcodeListTestPlans / XcodeSwitchTestPlan to inspect or change it.",
+            "type": "string"
+          },
+          "message": {
+            "description": "A human-readable description of the result.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "activeSchemeName",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeListRunDestinations",
+      "inputSchema": {
+        "properties": {
+          "includeIncompatible": {
+            "description": "When true, destinations in the 'Incompatible' group are included in the inline `destinations` array. When false or omitted (the default), they are skipped to save context but are still counted in the `groups` summary and listed in fullRunDestinationListPath.",
+            "type": "boolean"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "activeDestinationDisplayTitle": {
+            "description": "The disambiguated displayTitle of the currently active run destination, or null if no destination is active. This value round-trips: pass it back to XcodeSwitchRunDestination to re-select the same destination.",
+            "type": "string"
+          },
+          "activeSchemeName": {
+            "description": "The name of the currently active scheme, or null if no scheme is active. Run destinations are scoped to the active scheme.",
+            "type": "string"
+          },
+          "destinations": {
+            "description": "Inline run destination entries. By default the 'Incompatible' group is omitted; pass `includeIncompatible: true` to include it. Always capped at 40 entries, with the active destination listed first.",
+            "items": {
+              "properties": {
+                "architecture": {
+                  "description": "The destination's target architecture (for example, 'arm64' or 'x86_64').",
+                  "type": "string"
+                },
+                "displayTitle": {
+                  "description": "The destination's name as shown in the Xcode picker, including any disambiguation suffix when needed. This is the handle to pass back to XcodeSwitchRunDestination \u2014 it always round-trips.",
+                  "type": "string"
+                },
+                "group": {
+                  "description": "The destination's group as shown in the picker (for example: 'Devices', 'Simulators', 'Virtual Machines', 'Build', 'Incompatible').",
+                  "type": "string"
+                },
+                "ineligibilityMessage": {
+                  "description": "Human-readable explanation of why this destination is ineligible, if any.",
+                  "type": "string"
+                },
+                "isActive": {
+                  "description": "True if this is the currently active run destination.",
+                  "type": "boolean"
+                },
+                "isEligible": {
+                  "description": "True if this destination can be used to build, run, or test the active scheme. Destinations in the 'Incompatible' group return false.",
+                  "type": "boolean"
+                },
+                "isGenericDevice": {
+                  "description": "True if this destination represents a generic build target such as 'Any iOS Device'.",
+                  "type": "boolean"
+                },
+                "isSimulator": {
+                  "description": "True if this destination represents a simulator device.",
+                  "type": "boolean"
+                },
+                "osVersion": {
+                  "description": "The operating system version of the destination's device (for example, '18.4'), if known.",
+                  "type": "string"
+                },
+                "platformIdentifier": {
+                  "description": "The platform identifier of the destination's device (for example, 'com.apple.platform.iphonesimulator').",
+                  "type": "string"
+                },
+                "sdkDisplayName": {
+                  "description": "The display name of the destination's target SDK (for example, 'iOS 18.4 Simulator').",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "displayTitle",
+                "group",
+                "isActive",
+                "isEligible",
+                "isSimulator",
+                "isGenericDevice"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "fullRunDestinationListPath": {
+            "description": "Path to a file containing every destination \u2014 including incompatible ones \u2014 in grep-friendly format.",
+            "type": "string"
+          },
+          "groups": {
+            "description": "Summary of every destination group in picker order, each with a name and total count (independent of any inline filtering).",
+            "items": {
+              "properties": {
+                "count": {
+                  "description": "The number of run destinations in this group (independent of inline filtering).",
+                  "type": "integer"
+                },
+                "name": {
+                  "description": "The group's display name as shown in the picker.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "Optional message explaining why the inline list differs from totalDestinations or noting other context (such as no active scheme).",
+            "type": "string"
+          },
+          "totalDestinations": {
+            "description": "Total number of destinations available for the active scheme, before any filtering or truncation.",
+            "type": "integer"
+          },
+          "truncated": {
+            "description": "True if the inline `destinations` array contains fewer entries than `totalDestinations` (because of incompatible filtering, the 40-entry cap, or both).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "destinations",
+          "groups",
+          "truncated",
+          "totalDestinations",
+          "fullRunDestinationListPath"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "XcodeSwitchRunDestination",
+      "inputSchema": {
+        "properties": {
+          "displayTitle": {
+            "description": "The destination's `displayTitle` \u2014 the disambiguated label shown in the Xcode picker. Round-trips through any of these prior tool outputs without needing a fresh XcodeListRunDestinations call: this tool's own `activeDestinationDisplayTitle`, XcodeSwitchScheme's `activeDestinationDisplayTitle`, or any `displayTitle` / `activeDestinationDisplayTitle` from XcodeListRunDestinations.",
+            "type": "string"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayTitle"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "activeDestinationDisplayTitle": {
+            "description": "The disambiguated displayTitle of the run destination that is now active, read from Xcode after the switch (so it reflects any auto-resolution Xcode applied). This value round-trips through XcodeSwitchRunDestination.",
+            "type": "string"
+          },
+          "activeSchemeName": {
+            "description": "The name of the scheme the run destination is associated with (unchanged by this action).",
+            "type": "string"
+          },
+          "message": {
+            "description": "A human-readable description of the result.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "activeDestinationDisplayTitle",
+          "activeSchemeName",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "BuildProject",
+      "inputSchema": {
+        "properties": {
+          "buildForTesting": {
+            "description": "Whether to also build test targets that would not usually be included in a regular build",
+            "type": "boolean"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "buildResult": {
+            "description": "The message indicating the result of the build operation",
+            "type": "string"
+          },
+          "elapsedTime": {
+            "description": "The time it took to finish the build, in seconds",
+            "type": "number"
+          },
+          "errors": {
+            "description": "List of build errors",
+            "items": {
+              "properties": {
+                "classification": {
+                  "description": "The type of error (error, warning, etc.)",
+                  "type": "string"
+                },
+                "filePath": {
+                  "description": "The file path where the error occurred",
+                  "type": "string"
+                },
+                "lineNumber": {
+                  "description": "The line number where the error occurred",
+                  "type": "integer"
+                },
+                "message": {
+                  "description": "The error message",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "classification",
+                "message"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "fullLogPath": {
+            "description": "Path of the full log in textual format, containing the complete command lines and any output from the build tasks",
+            "type": "string"
+          }
+        },
+        "required": [
+          "buildResult",
+          "errors",
+          "fullLogPath"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "GetConsoleOutput",
+      "inputSchema": {
+        "properties": {
+          "contextLines": {
+            "description": "Number of context lines to include around pattern matches (like grep -C). Use this with 'pattern' to see surrounding context. Default: 0",
+            "type": "integer"
+          },
+          "includeMetadata": {
+            "description": "Include detailed OSLog metadata (subsystem, category, pid, tid, sender info). Only applies to OSLog items. Default: false",
+            "type": "boolean"
+          },
+          "launchSessionReference": {
+            "description": "Optional launch session reference. Omit to use the current/most recent launch session.",
+            "type": "string"
+          },
+          "oslogSeverity": {
+            "description": "Filter OSLog by severity levels. Array of: 'error', 'fault', 'info', 'debug', 'default'. Only filters OSLog items, not stdout/stderr. Omit to include all severities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "outputType": {
+            "description": "Type of output to retrieve: 'stdio' (stdout/stderr only), 'oslog' (OSLog only), or 'all' (both). Default: 'all'",
+            "enum": [
+              "stdio",
+              "oslog",
+              "all"
+            ],
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Optional regex pattern to filter console output. Uses full regex syntax (e.g., 'error.*failed', 'Exception.*\\n.*at line'). Filters both stdout/stderr text and OSLog message content.",
+            "type": "string"
+          },
+          "tailLimit": {
+            "description": "Maximum number of lines to return from the END of output (tail behavior). Returns the last N lines. Default: 500.",
+            "type": "integer"
+          },
+          "workspaceIdentifier": {
+            "description": "Identifies the target workspace directly (used in headless mode): its workspace identifier (e.g. workspace1) or its absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "launchSessionInfo": {
+            "description": "Information about the launch session: app name, reference, PID, and state (running/expired/etc). Useful for verifying which session was queried.",
+            "type": "string"
+          },
+          "totalCount": {
+            "description": "Total line count before limits applied. Use this to understand how much output was available.",
+            "type": "integer"
+          },
+          "truncated": {
+            "description": "True if results were truncated due to tailLimit.",
+            "type": "boolean"
+          },
+          "units": {
+            "description": "Array of console output units. Each unit is a message/log entry with content, timestamp, kind (stdio/oslog), and optional severity.",
+            "items": {
+              "properties": {
+                "content": {
+                  "description": "The console output text. For stdio: raw stdout/stderr text. For OSLog: the log message (without metadata unless includeMetadata=true, then this is the parsed message).",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "The type of console output: 'stdio' for stdout/stderr, 'oslog' for OSLog system logs",
+                  "type": "string"
+                },
+                "metadata": {
+                  "description": "Detailed OSLog metadata when includeMetadata=true. Includes: subsystem, category, pid, tid, process name, sender function/file/line, and more. Only present for kind='oslog' and when requested.",
+                  "properties": {
+                    "category": {
+                      "description": "OSLog category within the subsystem (e.g., 'networking', 'database'). Used for finer-grained filtering.",
+                      "type": "string"
+                    },
+                    "format": {
+                      "description": "OSLog format string with placeholders (e.g., 'Request failed: %{public}@')",
+                      "type": "string"
+                    },
+                    "library": {
+                      "description": "Library/framework that logged this message",
+                      "type": "string"
+                    },
+                    "messageType": {
+                      "description": "OSLog severity: 'default', 'info', 'debug', 'error', or 'fault'",
+                      "type": "string"
+                    },
+                    "pid": {
+                      "description": "Process ID that generated this log",
+                      "type": "integer"
+                    },
+                    "processName": {
+                      "description": "Name of the process that generated this log",
+                      "type": "string"
+                    },
+                    "senderFunctionName": {
+                      "description": "Function/method name that called the logging API (e.g., '-[UIViewController viewDidLoad]'). Useful for code location.",
+                      "type": "string"
+                    },
+                    "senderImagePath": {
+                      "description": "Path to the executable/library that sent this log (e.g., '/System/Library/Frameworks/UIKit.framework/UIKit')",
+                      "type": "string"
+                    },
+                    "senderImageUUID": {
+                      "description": "UUID of the sender's binary image. Used for symbolication and crash analysis.",
+                      "type": "string"
+                    },
+                    "senderSourceLine": {
+                      "description": "Line number in source file where log was called (if available)",
+                      "type": "integer"
+                    },
+                    "senderSourcePath": {
+                      "description": "Source file path where log was called (if available)",
+                      "type": "string"
+                    },
+                    "sessionUUID": {
+                      "description": "Unique identifier for the logging session",
+                      "type": "string"
+                    },
+                    "subsystem": {
+                      "description": "OSLog subsystem identifier (e.g., 'com.apple.UIKit'). Used for grouping related logs.",
+                      "type": "string"
+                    },
+                    "tid": {
+                      "description": "Thread ID that generated this log. Useful for identifying multi-threading issues.",
+                      "type": "integer"
+                    },
+                    "timestamp": {
+                      "description": "Formatted timestamp string from OSLog",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "pid",
+                    "tid"
+                  ],
+                  "type": "object"
+                },
+                "severity": {
+                  "description": "OSLog severity level: 'error', 'fault', 'info', 'debug', or 'default'. Only present for kind='oslog'. Errors and faults indicate problems.",
+                  "type": "string"
+                },
+                "timestamp": {
+                  "description": "Unix timestamp (seconds since epoch) of when this message appeared. Use this for chronological ordering and time-based analysis.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "content",
+                "kind",
+                "timestamp"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "units",
+          "totalCount",
+          "truncated",
+          "launchSessionInfo"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

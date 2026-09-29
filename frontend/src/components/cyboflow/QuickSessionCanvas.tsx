@@ -20,7 +20,7 @@
  * task-batch picker gate, Launch via the seed-prompt gate). "Browse all" opens
  * the full WorkflowPicker.
  */
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
@@ -28,7 +28,7 @@ import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
 import { useSessionSummary } from '../../hooks/useSessionSummary';
 import { computeSessionCostUsd, formatCostUsd } from '../../utils/modelPricing';
-import { DEFAULT_QUICK_MODEL } from './ModelSelector';
+import { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
@@ -41,6 +41,7 @@ import {
 import { DynamicWorkflowPanel } from './DynamicWorkflowPanel';
 import { ConfirmDialog } from '../ConfirmDialog';
 import type { Session } from '../../types/session';
+import type { SessionSummaryPayload } from '../../../../shared/types/sessionSummary';
 
 interface QuickSessionCanvasProps {
   session: Session;
@@ -235,6 +236,224 @@ function QuickSessionEdge() {
 }
 
 // ---------------------------------------------------------------------------
+// Summary & History node — rolling summary (session-summary-plan.md §7, a
+// Haiku call updates it after the session sits idle) plus the append-only
+// per-sitting history, expanded by default. The caller gates on
+// (hasSummary || hasHistory) and wraps this with its leading QuickSessionEdge;
+// this component renders unconditionally once mounted. Extracted out of the
+// main render (previously ~150 inline lines) so edits to the neighboring
+// session / add-workflow nodes don't require scrolling past unrelated markup.
+// ---------------------------------------------------------------------------
+
+function QuickSessionSummaryHistoryNode({
+  hasSummary,
+  summaryText,
+  hasHistory,
+  historyEntries,
+  historyOpen,
+  onToggleHistory,
+}: {
+  hasSummary: boolean;
+  summaryText: string | null;
+  hasHistory: boolean;
+  historyEntries: SessionSummaryPayload['entries'];
+  historyOpen: boolean;
+  onToggleHistory: () => void;
+}) {
+  return (
+    <div
+      style={{
+        width: 300,
+        flexShrink: 0,
+        background: 'var(--color-surface-primary)',
+        border: '1.4px solid var(--color-text-primary)',
+      }}
+      data-testid="quick-session-summary-history"
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '8px 12px',
+          background: 'var(--color-bg-secondary)',
+          borderBottom: '1px solid var(--color-border-primary)',
+        }}
+      >
+        <span aria-hidden style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>◷</span>
+        <span
+          data-testid="quick-session-summary-history-label"
+          style={{
+            fontSize: 9,
+            letterSpacing: '0.16em',
+            textTransform: 'uppercase',
+            color: 'var(--color-text-primary)',
+            fontWeight: 700,
+          }}
+        >
+          {hasSummary && hasHistory ? 'Summary & History' : hasHistory ? 'History' : 'Summary'}
+        </span>
+        {hasHistory && (
+          <span
+            style={{
+              marginLeft: 'auto',
+              fontSize: 9,
+              color: 'var(--color-text-tertiary)',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {historyEntries.length} {historyEntries.length === 1 ? 'sitting' : 'sittings'}
+          </span>
+        )}
+      </div>
+      <div style={{ padding: '13px 14px' }}>
+        {hasSummary && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 5,
+              borderLeft: '2px solid var(--color-interactive-primary)',
+              // Slash-alpha form is REQUIRED here: --color-interactive-rgb is a
+              // SPACE-separated triple ("201 100 66"), and `rgba(<space triple>, a)`
+              // mixes modern components with the legacy comma alpha — an invalid
+              // declaration Chromium drops outright, leaving the well transparent on
+              // every palette (verified over CDP on paper/dark/light).
+              background: 'rgb(var(--color-interactive-rgb) / 0.045)',
+              padding: '9px 11px',
+              margin: '2px 0 0 -2px',
+            }}
+            data-testid="quick-session-summary"
+          >
+            <span
+              style={{
+                fontSize: 8.5,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                fontWeight: 700,
+                color: 'var(--color-interactive-primary)',
+              }}
+            >
+              Summary
+            </span>
+            <p style={{ fontSize: 11.5, lineHeight: 1.5, fontWeight: 500, color: 'var(--color-text-primary)', margin: 0 }}>
+              {summaryText}
+            </p>
+          </div>
+        )}
+
+        {hasHistory && (
+          <div
+            data-testid="quick-session-history-section"
+            style={
+              hasSummary
+                ? {
+                    marginTop: 12,
+                    paddingTop: 10,
+                    borderTop: '1px solid var(--color-border-primary)',
+                  }
+                : undefined
+            }
+          >
+            <button
+              type="button"
+              aria-expanded={historyOpen}
+              data-testid="quick-session-history-toggle"
+              onClick={onToggleHistory}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                fontSize: 10.5,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                fontWeight: 700,
+                color: 'var(--color-text-secondary)',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+              }}
+            >
+              <span aria-hidden>{historyOpen ? '▾' : '▸'}</span> History ({historyEntries.length})
+            </button>
+            {historyOpen && (
+              <div
+                data-testid="quick-session-history-list"
+                style={{
+                  marginTop: 8,
+                  maxHeight: 180,
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 7,
+                }}
+              >
+                {historyEntries.map((entry) => (
+                  <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 8.5, color: 'var(--color-text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+                      {formatHistoryDate(entry.createdAt)}
+                    </span>
+                    <span style={{ fontSize: 10.5, color: 'var(--color-text-primary)', lineHeight: 1.4 }}>
+                      {entry.entry}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Summary & History skeleton — same 300px footprint as
+// QuickSessionSummaryHistoryNode, rendered while the summary fetch's initial
+// load is in flight (`useSessionSummary`'s `loading`). Reserves the node's
+// width up front so the layout doesn't shift once the real content (or
+// nothing, if the session has none) lands — see the QuickSessionCanvas
+// render below, which swaps this for the real node or drops it entirely.
+// Reuses the same border/background tokens as the real node plus the
+// existing `animate-pulse` convention (used elsewhere on this canvas for the
+// live-session dot) for the subtle pulse.
+// ---------------------------------------------------------------------------
+
+function QuickSessionSkeletonNode() {
+  return (
+    <div
+      aria-hidden
+      className="animate-pulse motion-reduce:animate-none"
+      style={{
+        width: 300,
+        flexShrink: 0,
+        background: 'var(--color-surface-primary)',
+        border: '1.4px solid var(--color-border-primary)',
+      }}
+      data-testid="quick-session-summary-history-skeleton"
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: '8px 12px',
+          background: 'var(--color-bg-secondary)',
+          borderBottom: '1px solid var(--color-border-primary)',
+        }}
+      >
+        <span style={{ width: 90, height: 9, background: 'var(--color-border-primary)' }} />
+      </div>
+      <div style={{ padding: '13px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <span style={{ width: '85%', height: 9, background: 'var(--color-border-primary)' }} />
+        <span style={{ width: '95%', height: 9, background: 'var(--color-border-primary)' }} />
+        <span style={{ width: '60%', height: 9, background: 'var(--color-border-primary)' }} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // QuickSessionCanvas
 // ---------------------------------------------------------------------------
 
@@ -246,8 +465,21 @@ export function QuickSessionCanvas({
   onAddWorkflowToNewSession,
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
-  const { summary: summaryPayload } = useSessionSummary(session.id);
+  const { summary: summaryPayload, loading: summaryLoading } = useSessionSummary(session.id);
   const [historyOpen, setHistoryOpen] = useState(true);
+  // Reset the disclosure to its expanded-by-default state whenever the
+  // canvas is handed a DIFFERENT session — without this, collapsing history
+  // in one session (this component has no key/remount per session) leaked
+  // into the next session's initial render. Guarded against the initial
+  // mount (where the ref already matches and the state is already `true`)
+  // so mounting never fires a spurious extra state update.
+  const prevSessionIdRef = useRef(session.id);
+  useEffect(() => {
+    if (prevSessionIdRef.current !== session.id) {
+      prevSessionIdRef.current = session.id;
+      setHistoryOpen(true);
+    }
+  }, [session.id]);
   // Interactive (PTY) sessions can't host a second workflow inside their live
   // REPL (descoped) — every add-a-workflow click routes to the confirm + config
   // flow that launches in a SEPARATE session instead of the fast-lane launch.
@@ -453,6 +685,15 @@ export function QuickSessionCanvas({
   const model = metrics.model ?? '—';
   const { plus, minus } = metrics.diff;
   const diffIsEmpty = plus === 0 && minus === 0;
+  // TASK-278: FILES SEEN / DIFF are computed against whichever base the Diff
+  // tab's BaseSelector currently has selected for this session (falling back
+  // to "branch point" with no persisted selection) — label both cells with
+  // it so the card can never again silently disagree with the panel beside
+  // it. `metrics.baseLabel` is already either "branch point" or the raw ref
+  // string ("main", "origin/main", …), matching BaseSelector's own label
+  // vocabulary.
+  const diffBaseLabel = `diff vs ${metrics.baseLabel}`;
+  const filesBaseLabel = `files seen vs ${metrics.baseLabel}`;
   const { input, output, cacheWrite, cacheRead } = metrics.tokenBreakdown;
   const tokenCategories = [
     { key: 'input', label: 'Input', value: input },
@@ -471,12 +712,14 @@ export function QuickSessionCanvas({
 
   // Summary / history — hidden entirely while the feature is disabled (config
   // toggle) or before the idle-debounced summarizer has ever fired for this
-  // session (session-summary-plan.md §7).
+  // session (session-summary-plan.md §7). Named for what each predicate GATES
+  // (not "block"/"card" — neither renders as either anymore; both live in the
+  // single Summary & History node below).
   const summaryEnabled = summaryPayload?.enabled === true;
   const summaryText = summaryEnabled ? summaryPayload?.summary ?? null : null;
-  const showSummaryBlock = summaryText !== null && summaryText.length > 0;
+  const hasSummary = summaryText !== null && summaryText.length > 0;
   const historyEntries = summaryEnabled ? (summaryPayload?.entries ?? []) : [];
-  const showHistoryCard = historyEntries.length > 0;
+  const hasHistory = historyEntries.length > 0;
 
   return (
     <div
@@ -603,14 +846,22 @@ export function QuickSessionCanvas({
         )}
 
         {/* ── Canvas body — 24px graph-paper grid: session node → edge →
-            summary/history node → edge → add-workflow node ─────────────────── */}
+            summary/history node → edge → add-workflow node ───────────────────
+            Wraps (flexWrap) rather than scrolling horizontally forever on a
+            narrow pane: each [edge, node] pair below is grouped into its own
+            flex item so an edge never lands on a row by itself when a wrap
+            occurs — it always travels with the node it leads into. `rowGap`
+            gives wrapped rows breathing room; at full width nothing wraps and
+            the layout is pixel-identical to before. */}
         <div
           style={{
             position: 'relative',
             flex: 1,
             overflow: 'auto',
             display: 'flex',
+            flexWrap: 'wrap',
             alignItems: 'flex-start',
+            rowGap: 20,
             padding: '26px 30px',
             background:
               'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
@@ -687,10 +938,10 @@ export function QuickSessionCanvas({
               >
                 <StatCell value={metrics.elapsed} label="elapsed" testId="quick-session-stat-elapsed" />
                 <StatCell value={metrics.tokens} label="tokens" testId="quick-session-stat-tokens" />
-                <StatCell value={metrics.filesSeen} label="files seen" testId="quick-session-stat-files" />
+                <StatCell value={metrics.filesSeen} label={filesBaseLabel} testId="quick-session-stat-files" />
                 <StatCell
                   testId="quick-session-stat-diff"
-                  label="diff"
+                  label={diffBaseLabel}
                   value={
                     <span>
                       <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>
@@ -785,163 +1036,39 @@ export function QuickSessionCanvas({
             </div>
           </div>
 
-          {(showSummaryBlock || showHistoryCard) && (
-            <>
+          {(hasSummary || hasHistory) ? (
+            // Grouped into one flex item (edge + node) so flex-wrap never
+            // strands the dashed edge alone on a row — it wraps together
+            // with the node it leads into.
+            <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
               <QuickSessionEdge />
 
-              {/* 2 · Summary & History node — rolling summary (session-summary-plan.md
-                  §7, a Haiku call updates it after the session sits idle) plus the
-                  append-only per-sitting history, expanded by default. Hidden
-                  entirely (gated with its leading edge above) until either section
-                  has content. */}
-              <div
-                style={{
-                  width: 300,
-                  flexShrink: 0,
-                  background: 'var(--color-surface-primary)',
-                  border: '1.4px solid var(--color-text-primary)',
-                }}
-                data-testid="quick-session-summary-history"
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 12px',
-                    background: 'var(--color-bg-secondary)',
-                    borderBottom: '1px solid var(--color-border-primary)',
-                  }}
-                >
-                  <span style={{ fontSize: 11, color: 'var(--color-text-secondary)' }}>◷</span>
-                  <span
-                    style={{
-                      fontSize: 9,
-                      letterSpacing: '0.16em',
-                      textTransform: 'uppercase',
-                      color: 'var(--color-text-primary)',
-                      fontWeight: 700,
-                    }}
-                  >
-                    {showHistoryCard ? 'Summary & History' : 'Summary'}
-                  </span>
-                  {historyEntries.length > 0 && (
-                    <span
-                      style={{
-                        marginLeft: 'auto',
-                        fontSize: 9,
-                        color: 'var(--color-text-tertiary)',
-                        fontVariantNumeric: 'tabular-nums',
-                      }}
-                    >
-                      {historyEntries.length} {historyEntries.length === 1 ? 'sitting' : 'sittings'}
-                    </span>
-                  )}
-                </div>
-                <div style={{ padding: '13px 14px' }}>
-                  {showSummaryBlock && (
-                    <div
-                      style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 5,
-                        borderLeft: '2px solid var(--color-interactive-primary)',
-                        // Slash-alpha form is REQUIRED here: --color-interactive-rgb is a
-                        // SPACE-separated triple ("201 100 66"), and `rgba(<space triple>, a)`
-                        // mixes modern components with the legacy comma alpha — an invalid
-                        // declaration Chromium drops outright, leaving the well transparent on
-                        // every palette (verified over CDP on paper/dark/light).
-                        background: 'rgb(var(--color-interactive-rgb) / 0.045)',
-                        padding: '9px 11px',
-                        margin: '2px 0 0 -2px',
-                      }}
-                      data-testid="quick-session-summary"
-                    >
-                      <span
-                        style={{
-                          fontSize: 8.5,
-                          letterSpacing: '0.14em',
-                          textTransform: 'uppercase',
-                          fontWeight: 700,
-                          color: 'var(--color-interactive-primary)',
-                        }}
-                      >
-                        Summary
-                      </span>
-                      <p style={{ fontSize: 11.5, lineHeight: 1.5, fontWeight: 500, color: 'var(--color-text-primary)', margin: 0 }}>
-                        {summaryText}
-                      </p>
-                    </div>
-                  )}
+              {/* 2 · Summary & History node — hidden entirely (gated with its
+                  leading edge above) until either section has content. */}
+              <QuickSessionSummaryHistoryNode
+                hasSummary={hasSummary}
+                summaryText={summaryText}
+                hasHistory={hasHistory}
+                historyEntries={historyEntries}
+                historyOpen={historyOpen}
+                onToggleHistory={() => setHistoryOpen((v) => !v)}
+              />
+            </div>
+          ) : summaryLoading ? (
+            // Reserves the summary/history node's footprint (edge + 300px
+            // node) while the initial fetch is in flight, so the add-workflow
+            // node doesn't jump right once the real content resolves. Goes
+            // away entirely once loading settles with nothing to show.
+            <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
+              <QuickSessionEdge />
+              <QuickSessionSkeletonNode />
+            </div>
+          ) : null}
 
-                  {showHistoryCard && (
-                    <div
-                      style={
-                        showSummaryBlock
-                          ? {
-                              marginTop: 12,
-                              paddingTop: 10,
-                              borderTop: '1px solid var(--color-border-primary)',
-                            }
-                          : undefined
-                      }
-                    >
-                      <button
-                        type="button"
-                        aria-expanded={historyOpen}
-                        data-testid="quick-session-history-toggle"
-                        onClick={() => setHistoryOpen((v) => !v)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 5,
-                          fontSize: 8.5,
-                          letterSpacing: '0.14em',
-                          textTransform: 'uppercase',
-                          fontWeight: 700,
-                          color: 'var(--color-text-tertiary)',
-                          background: 'none',
-                          border: 'none',
-                          padding: 0,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        {historyOpen ? '▾' : '▸'} History ({historyEntries.length})
-                      </button>
-                      {historyOpen && (
-                        <div
-                          data-testid="quick-session-history-list"
-                          style={{
-                            marginTop: 8,
-                            maxHeight: 180,
-                            overflowY: 'auto',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: 7,
-                          }}
-                        >
-                          {historyEntries.map((entry) => (
-                            <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                              <span style={{ fontSize: 8.5, color: 'var(--color-text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
-                                {formatHistoryDate(entry.createdAt)}
-                              </span>
-                              <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', lineHeight: 1.4 }}>
-                                {entry.entry}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
+          {/* 3 · Add-workflow node — grouped with its leading edge for the
+              same flex-wrap reason as above. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', flexShrink: 0 }}>
           <QuickSessionEdge />
-
-          {/* 3 · Add-workflow node */}
           <div
             onMouseEnter={() => setAddHovered(true)}
             onMouseLeave={() => setAddHovered(false)}
@@ -1019,6 +1146,7 @@ export function QuickSessionCanvas({
                 {error}
               </p>
             )}
+          </div>
           </div>
         </div>
         </>

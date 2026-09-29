@@ -59,6 +59,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { resetProposalFindingCacheForTests } from './useProposalEntityLabels';
 import { trpc } from '../../trpc/client';
 
 // setup.ts stubs `reviewItems.get` to resolve `null` by default (see its
@@ -306,6 +307,10 @@ beforeEach(() => {
   useBacklogStore.setState({ tasks: [], boards: [] });
   useActiveRunsStore.setState({ runsByProject: {} });
   useSessionStore.setState({ sessions: [] });
+  // useProposalEntityLabels' findingCache is module-scoped (persists across
+  // tests/files); clear it so a finding id reused across tests can't silently
+  // hit a stale cache entry and skip the reviewItems.get query assertion.
+  resetProposalFindingCacheForTests();
 });
 
 // ---------------------------------------------------------------------------

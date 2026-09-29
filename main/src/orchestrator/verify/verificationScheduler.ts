@@ -46,6 +46,7 @@ import {
   VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
   isVerificationModality,
+  requireProvenRunbookEngaged,
   resolveTaskModality,
   runbookBootstrapKillSwitchEngaged,
 } from '../../../../shared/types/visualVerification';
@@ -53,7 +54,7 @@ import type { VerifyRunbookStatusDetail, VerifyRunbookStore } from './runbookSto
 import { type BootstrapDecision, type BootstrapDeclineReason } from './bootstrapEligibility';
 import { runbookBootstrapPreflight } from './runbookBootstrapPreflight';
 import type { BootstrapRunOutcome, RunbookBootstrapArgs } from './runbookBootstrapRunner';
-import type { VerifyRunbookModality } from '../../../../shared/types/verifyRunbook';
+import { resolveRunbookRevision } from './learnedRunbook';
 import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
@@ -66,6 +67,7 @@ import type {
   DevServerContextResolver,
   OnVerdict,
   ProvenRunbookRevision,
+  RunbookRevisionArgs,
   VerificationSchedulerDeps,
 } from './verificationSchedulerContracts';
 import {
@@ -91,6 +93,7 @@ import type {
   VerificationRequestSummary,
 } from './verificationRequestRows';
 import { TerminalDelivery } from './terminalDelivery';
+import { QueuedAgeDeadline } from './queuedAgeDeadline';
 import { CapturePipeline } from './capturePipeline';
 import { AgentEngine } from './agentEngine';
 
@@ -192,7 +195,6 @@ export class VerificationScheduler {
   private readonly requestTimeoutMs: number;
   private readonly devServerContextResolver?: DevServerContextResolver;
   private readonly now: () => number;
-  private readonly queuedAgeCeilingMs: number;
   private readonly legacyKillSwitch: () => boolean;
   private readonly runbookStatus: (
     projectId: number,
@@ -200,17 +202,17 @@ export class VerificationScheduler {
     probePath?: string,
   ) => Promise<VerifyRunbookStatusDetail>;
   private readonly runbookStore?: VerifyRunbookStore;
+  private readonly staleProofFinding?: VerificationSchedulerDeps['staleProofFinding'];
   private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
-   * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
-   * fires nudge() at the earliest queued-age expiry so a starved row is terminalized
-   * even when NO lease release / enqueue would otherwise wake the drain (the
-   * hasQueuedRequests re-nudge only fires when this pass leased in-flight work). One
-   * timer at a time — re-armed at the end of every drain pass, cleared when the
-   * queue empties. Never a second drain loop; it merely wakes the existing one.
+   * The §5.6 queued-age deadline — its progress-aware anchor (A9) and the single
+   * COALESCED fallback timer that nudge()s the drain at the earliest expiry, so a
+   * starved row is terminalized even when NO lease release / enqueue would wake the
+   * drain (the hasQueuedRequests re-nudge only fires when a pass leased work). Owned
+   * by {@link QueuedAgeDeadline} (queuedAgeDeadline.ts); the SELECTs stay here.
    */
-  private queuedAgeTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly queuedAge: QueuedAgeDeadline;
 
   /**
    * Terminal write + verdict delivery (§5.6 delivery outbox), including the
@@ -274,16 +276,19 @@ export class VerificationScheduler {
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.devServerContextResolver = deps.devServerContextResolver;
     this.now = deps.now ?? (() => Date.now());
-    this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
+    this.queuedAge = new QueuedAgeDeadline({
+      ceilingMs: deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs,
+      now: this.now,
+    });
     this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
     this.runbookStatus =
       deps.runbookStatus ??
-      // Unwired ⇒ the honest pre-phase-2 answer: nothing was ever derived.
       (async (): Promise<VerifyRunbookStatusDetail> => ({ status: 'absent', reason: 'no-record' }));
     this.runbookStore = deps.runbookStore;
+    this.staleProofFinding = deps.staleProofFinding;
     this.runbookBootstrap = deps.runbookBootstrap;
     this.capture = new CapturePipeline({
       judge: deps.judge,
@@ -308,6 +313,8 @@ export class VerificationScheduler {
       db: this.db,
       logger: this.logger,
       config: this.config,
+      liveConfig: this.liveConfig,
+      nudge: () => this.nudge(),
       leasePool: this.leasePool,
       artifactsDirResolver: this.artifactsDirResolver,
       agentRunner: deps.agentRunner,
@@ -322,6 +329,7 @@ export class VerificationScheduler {
       mobileToolchainProbe: deps.mobileToolchainProbe,
       runbookStatus: this.runbookStatus,
       runbookStore: this.runbookStore,
+      learningFinding: deps.runbookLearningFinding,
       delivery: this.delivery,
       inFlight: this.inFlight,
       agentGateColumnsForRow: (id) => this.agentGateColumnsForRow(id),
@@ -1039,9 +1047,9 @@ export class VerificationScheduler {
    */
   async drain(): Promise<void> {
     // §5.6 queued-age deadline: BEFORE lease selection, terminalize any queued row
-    // whose enqueue-age exceeds the ceiling (it never leased in time). Runs every
-    // pass so a released-lease re-nudge OR the fallback timer both expire starved
-    // rows through the normal delivery path. Expired rows drop out of selectQueued.
+    // that has aged past the ceiling (it never leased in time). Runs every pass so
+    // a released-lease re-nudge OR the fallback timer both expire starved rows
+    // through the normal delivery path. Expired rows drop out of selectQueued.
     await this.expireOverAgeQueued();
 
     // §5.4 priority classes, applied to the FIFO SELECT rather than folded into
@@ -1067,6 +1075,9 @@ export class VerificationScheduler {
     }
     if (inFlight.length > 0) {
       await Promise.allSettled(inFlight);
+      // A9: the pool moved, so every still-queued row's ceiling restarts from here —
+      // a row queued behind a long run is not expired at the boundary that frees it.
+      this.queuedAge.markProgress();
       // RE-NUDGE ON LEASE RELEASE (R1 #2): the in-flight work we just awaited has
       // released its lease(s). A row left 'queued' this pass may have been blocked
       // ONLY on a lease that just freed (lease contention — e.g. two lanes wanting
@@ -1091,33 +1102,29 @@ export class VerificationScheduler {
   }
 
   /**
-   * Terminalize every 'queued' row whose enqueue-age exceeds `queuedAgeCeilingMs`
-   * (§5.6) as 'skipped' (fail-open) with the concrete lease/queue reason, through
-   * the NORMAL markTerminalAndDeliver path (never a silent UPDATE) so its parked
-   * merge-gate lane is driven off awaiting-verify with a non-blocking finding.
-   * Returns the count expired. Fail-soft per row: a delivery throw is swallowed by
-   * markTerminalAndDeliver's own wrapper. The cancel-guarded markTerminal means a
-   * row swept concurrently to 'timeout' is a 0-change no-op (no double delivery).
+   * Terminalize every 'queued' row past its queued-age deadline (§5.6; the anchor
+   * and hard cap are {@link QueuedAgeDeadline}'s) as 'skipped' (fail-open) with the
+   * concrete lease/queue reason, through the NORMAL markTerminalAndDeliver path
+   * (never a silent UPDATE) so its parked merge-gate lane is driven off
+   * awaiting-verify with a non-blocking finding. Returns the count expired.
+   * Fail-soft per row: a delivery throw is swallowed by markTerminalAndDeliver's
+   * own wrapper. The cancel-guarded markTerminal means a row swept concurrently to
+   * 'timeout' is a 0-change no-op (no double delivery).
    */
   private async expireOverAgeQueued(): Promise<number> {
     const nowMs = this.now();
     const rows = this.selectQueued();
     let expired = 0;
     for (const row of rows) {
-      const enqueuedMs = Date.parse(row.enqueued_at);
-      // An unparseable enqueued_at (should not happen — the column is a DB default
-      // ISO string) is treated as NOT expired so a clock/parse glitch never mass-
-      // skips the live backlog.
-      if (!Number.isFinite(enqueuedMs)) continue;
-      const ageMs = nowMs - enqueuedMs;
-      if (ageMs < this.queuedAgeCeilingMs) continue;
+      // null ⇒ within its deadline, or an unparseable enqueued_at (never mass-skip).
+      const error = this.queuedAge.overAgeError(row, nowMs);
+      if (error === null) continue;
       const input = parseRequestInput(row.deliverable_json) ?? undefined;
-      const ageMin = Math.round(ageMs / 60000);
       await this.delivery.markTerminalAndDeliver(
         row,
         'skipped',
         {
-          error: `queued-age deadline exceeded — request never acquired a lease within ${ageMin} min (persistent resource contention or a wedged pool)`,
+          error,
           ...(this.isAgentEngineRequest(row) ? { captureOrigin: 'agent' as const } : {}),
         },
         undefined,
@@ -1135,32 +1142,15 @@ export class VerificationScheduler {
   /**
    * Arm the single coalesced queued-age fallback timer at the EARLIEST remaining
    * queued-age expiry, or clear it when nothing is queued (§5.6). Re-armed at the
-   * end of every drain pass — cheap (one min-scan + one setTimeout). On fire it
-   * calls nudge(), funneling into the EXISTING drain loop (no second loop); the
-   * next drain's expireOverAgeQueued does the terminalization. `unref`ed so it
-   * never keeps the process alive.
+   * end of every drain pass — cheap (one index-only scan + one setTimeout). On fire
+   * it calls nudge(), funneling into the EXISTING drain loop (no second loop); the
+   * next drain's expireOverAgeQueued does the terminalization, on the same anchor.
    */
   private armQueuedAgeTimer(): void {
-    if (this.queuedAgeTimer !== null) {
-      clearTimeout(this.queuedAgeTimer);
-      this.queuedAgeTimer = null;
-    }
-    const row = this.db
-      .prepare(`SELECT MIN(enqueued_at) AS earliest FROM verification_requests WHERE status = 'queued'`)
-      .get() as { earliest: string | null } | undefined;
-    const earliest = row?.earliest ?? null;
-    if (earliest === null) return; // nothing queued — no timer
-    const earliestMs = Date.parse(earliest);
-    if (!Number.isFinite(earliestMs)) return;
-    const delay = Math.max(0, earliestMs + this.queuedAgeCeilingMs - this.now());
-    const timer = setTimeout(() => {
-      this.queuedAgeTimer = null;
-      this.nudge();
-    }, delay);
-    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
-      (timer as { unref: () => void }).unref();
-    }
-    this.queuedAgeTimer = timer;
+    const rows = this.db
+      .prepare(`SELECT enqueued_at FROM verification_requests WHERE status = 'queued'`)
+      .all() as Array<{ enqueued_at: string | null }>;
+    this.queuedAge.arm(rows, () => this.nudge());
   }
 
   /** True when at least one request row is still awaiting a drain ('queued'). */
@@ -1453,29 +1443,6 @@ export class VerificationScheduler {
   }
 
   /**
-   * §5.2 seam 3, ENQUEUE half — resolve the PROVEN runbook revision a request
-   * for this (project, modality) must be pinned to, or `null` when there is
-   * none. Public because BOTH enqueue entry points (the MCP handler and the
-   * programmatic `enqueueTaskVerification` seam) need the identical answer and
-   * the store is injected HERE, not into either of them; the shared merge +
-   * validation logic that consumes this lives in one place too
-   * (`enqueueFromTask.prepareVerificationEnqueue`).
-   *
-   * WHY THE PROBE PATH IS THE RUN'S WORKTREE FIRST. `status()` re-validates the
-   * proof against the portable file at a specific tree, and the tree that
-   * matters is the one the requesting run is actually changing — a run whose
-   * branch edited (or has not yet merged) the runbook must be judged by ITS
-   * copy, not by the project's main checkout. That is the same worktree-first
-   * ladder `verifyConfigLoader` walks, for the same reason. The project path is
-   * the fallback for a run with no worktree; with neither, there is nothing to
-   * probe and the answer is `null` (no pin ⇒ the §3.2 degrade gate decides).
-   *
-   * A null answer is NEVER an error path — it is "this request executes
-   * unpinned", which for a build/serve task means the degrade gate skips it with
-   * a setup CTA, and for a degenerate pre-live task means nothing changes at
-   * all.
-   */
-  /**
    * F5 ∘ F4 composition — does ANY runbook record (proven, drifted, or a
    * registered/file-only draft) exist for this (project, modality) on the probed
    * tree? `resolveProvenRunbook` answers only for a PROVEN one, and since F4 made
@@ -1510,41 +1477,51 @@ export class VerificationScheduler {
     }
   }
 
-  async resolveProvenRunbook(args: {
-    projectId: number;
-    runId: string;
-    modality: VerificationModality;
-    /** The caller's own worktree, when it has one (skips the run-row lookup). */
-    probePath?: string;
-  }): Promise<ProvenRunbookRevision | null> {
-    const store = this.runbookStore;
-    if (!store) return null;
-    const probePath =
-      args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
-    if (probePath === null || probePath === undefined) return null;
-    try {
-      const status = await store.status(args.projectId, probePath, args.modality);
-      if (status !== 'proven') return null;
-      const current = store.getCurrent(args.projectId, args.modality);
-      if (current === null) return null;
-      // The cast is safe by construction: `parseVerifyRunbookV1` only ever
-      // populates keys from VERIFY_RUNBOOK_MODALITIES, so a VerificationModality
-      // outside that subset ('mobile') simply misses — the same narrowing the
-      // store's own `declaresModality` does.
-      const entry = current.runbook.modalities[args.modality as VerifyRunbookModality];
-      if (entry === undefined) return null;
-      return { hash: current.hash, version: current.version, entry };
-    } catch (err) {
-      // A resolution hiccup must never fail an enqueue: answer "unpinned" and
-      // let the gate speak.
-      this.logger?.warn('[VerificationScheduler] proven-runbook resolution failed (fail-soft)', {
-        projectId: args.projectId,
-        runId: args.runId,
-        modality: args.modality,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
+  /**
+   * §5.2 seam 3, ENQUEUE half — resolve the PROVEN runbook revision a request
+   * for this (project, modality) must be pinned to, or `null` when there is
+   * none. Public because BOTH enqueue entry points (the MCP handler and the
+   * programmatic `enqueueTaskVerification` seam) need the identical answer and
+   * the store is injected HERE, not into either of them; the shared merge +
+   * validation logic that consumes this lives in one place too
+   * (`enqueueFromTask.prepareVerificationEnqueue`).
+   *
+   * WHY THE PROBE PATH IS THE RUN'S WORKTREE FIRST. `status()` re-validates the
+   * proof against the portable file at a specific tree, and the tree that
+   * matters is the one the requesting run is actually changing — a run whose
+   * branch edited (or has not yet merged) the runbook must be judged by ITS
+   * copy, not by the project's main checkout. That is the same worktree-first
+   * ladder `verifyConfigLoader` walks, for the same reason. The project path is
+   * the fallback for a run with no worktree; with neither, there is nothing to
+   * probe and the answer is `null` (no pin ⇒ the §3.2 degrade gate decides).
+   *
+   * A null answer is NEVER an error path — it is "this request executes
+   * unpinned", which for a build/serve task means the degrade gate skips it with
+   * a setup CTA, and for a degenerate pre-live task means nothing changes at
+   * all.
+   */
+  async resolveProvenRunbook(args: RunbookRevisionArgs): Promise<ProvenRunbookRevision | null> {
+    return this.resolveRevision(args, 'proven');
+  }
+
+  /**
+   * §A5 — the LEARNED-draft twin of {@link resolveProvenRunbook}: the record
+   * when it is an unproven LEARNED draft and the tree carries no committed
+   * entry for the modality (`resolveRunbookRevision`), so the lane's own
+   * ordinary request pins it and its verdict is the promotion proof. Always
+   * `null` with the kill switch on (§A1: no learned pins), read LIVE.
+   */
+  async resolveLearnedDraft(args: RunbookRevisionArgs): Promise<ProvenRunbookRevision | null> {
+    if (requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config)) return null;
+    return this.resolveRevision(args, 'learned');
+  }
+
+  /** Both resolvers' worktree → project-root probe ladder; `null` with no store or no tree. */
+  private async resolveRevision(args: RunbookRevisionArgs, which: 'proven' | 'learned'): Promise<ProvenRunbookRevision | null> {
+    const probePath = args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
+    if (!this.runbookStore || probePath === null || probePath === undefined) return null;
+    const { projectId, modality } = args;
+    return resolveRunbookRevision({ store: this.runbookStore, projectId, modality, probePath, which, logger: this.logger });
   }
 
   /**
@@ -1591,6 +1568,12 @@ export class VerificationScheduler {
           (this.liveConfig?.() ?? this.config).autoBootstrapRunbook === true &&
           !runbookBootstrapKillSwitchEngaged(),
         status: (projectId, modality, path) => this.runbookStatus(projectId, modality, path),
+        // §A7 — the SAME kill-switch read and record the engine's gate 3 uses.
+        explore: {
+          requireProvenRunbook: requireProvenRunbookEngaged(this.liveConfig?.() ?? this.config),
+          record: (projectId, modality) => this.runbookStore?.getCurrent(projectId, modality) ?? null,
+        },
+        ...(this.staleProofFinding ? { reportStaleProofFinding: this.staleProofFinding } : {}),
         ...(this.logger ? { logger: this.logger } : {}),
       },
     );
@@ -1670,7 +1653,7 @@ export class VerificationScheduler {
       // Codex #2 — see RunbookBootstrapArgs).
       return await this.runbookBootstrap(
         decision.mode === 'derive'
-          ? { ...common, mode: 'derive', adopt: decision.adopt, proveRegistered: decision.proveRegistered }
+          ? { ...common, mode: 'derive', adopt: decision.adopt, proveRegistered: decision.proveRegistered, ...(decision.proveOnly ? { proveOnly: true } : {}) }
           : { ...common, mode: 'reprove' },
       );
     } catch (err) {

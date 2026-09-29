@@ -56,7 +56,7 @@ function buildDb(): Database.Database {
     '006_cyboflow_schema.sql', '011_workflow_step_tracking.sql', '014_native_tasks.sql',
     '015_entity_model_rebuild.sql', '016_review_items.sql', '024_archive_in_place.sql', '026_run_usage_spec_hash_revisions.sql',
     '028_idea_attachments.sql', '043_run_evals.sql', '069_run_eval_jury.sql',
-    '085_review_item_audience.sql',
+    '071_raw_events_dedup.sql', '085_review_item_audience.sql', '146_usage_accounting_v1.sql',
   ]) db.exec(readFileSync(join(migDir, f), 'utf-8'));
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
@@ -69,6 +69,8 @@ function buildDb(): Database.Database {
   // Migration 022's soft batch link + sprint_batch_tasks (lanes), so decide's
   // clone->original lane remap (remapWinnerSeedLane) has real rows to rewrite.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT;');
+  // Migration 145: gate_reached_at, selected by insightsQueries.fetchRunTimestamps.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN gate_reached_at DATETIME;');
   db.exec(`CREATE TABLE sprint_batch_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, task_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued', current_step_id TEXT, run_id TEXT, error_message TEXT,
@@ -377,12 +379,22 @@ describe('experiments router orchestration (slice B)', () => {
       experimentId: started.experimentId,
     });
 
-    expect(payload?.verdict?.judgeModel).toBe('fake-model');
-    expect(payload?.verdict?.judgeBuildId).toBe('build-1');
-    expect(payload?.verdict?.perSample).toEqual(LEGACY_PER_SAMPLE);
-    expect(payload?.verdict?.aCount).toBe(2);
-    expect(payload?.verdict?.bCount).toBe(0);
-    expect(payload?.verdict?.tieCount).toBe(0);
+    // Exact-shape assertion (TST-6): pins the COMPLETE verdict object the router
+    // hands the renderer, so a future field silently dropped (or an unintended
+    // one added) at the tRPC boundary fails this test instead of surviving
+    // unnoticed behind a partial per-field assertion.
+    expect(payload?.verdict).toEqual({
+      preference: 'A',
+      confidence: 0.85,
+      rationale: 'A wins',
+      aCount: 2,
+      bCount: 0,
+      tieCount: 0,
+      sampleCount: 2,
+      perSample: LEGACY_PER_SAMPLE,
+      judgeModel: 'fake-model',
+      judgeBuildId: 'build-1',
+    });
   });
 
   it('startSideBySide (idea-seeded): pins base sha, clones per arm, launches both tagged', async () => {

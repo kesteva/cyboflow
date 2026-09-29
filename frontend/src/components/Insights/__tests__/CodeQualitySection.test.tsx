@@ -1,20 +1,29 @@
 /**
- * CodeQualitySection bucketing + status-chip tests.
+ * CodeQualitySection tests (TASK-291 tally-first redesign).
  *
  * The insights store is mocked to supply a fixed `qualityFindings` array; the
- * REAL shared `classifyQualityFinding` runs (not mocked) so this asserts the
- * component routes each finding to the column the shared rule dictates. Fixtures
- * are crafted so exactly one finding lands in each of the three buckets:
+ * REAL shared `classifyQualityFinding` / `computeCodeQualityTally` run (not
+ * mocked) so this asserts the component's default TALLY render and its
+ * drill-down wiring against the shared aggregation, never a re-implementation.
  *
- *   in_workflow   — plain finding, no verification step, not merged/categorized.
- *   verification  — sourceStep matches /verify|review|test/i.
- *   post_merge    — runOutcome='merged' AND createdAt > runEndedAt (the time rule).
- *
- * Plus the status-chip mapping (pending → OPEN / resolved → RESOLVED /
- * dismissed → DISMISSED) and the severity-dot + empty-column placeholder.
+ * Coverage:
+ *   - Default render shows tallies only — no `quality-finding-row` is mounted,
+ *     and per-bucket badge counts match the bucket totals (unchanged contract
+ *     from the pre-redesign flat list).
+ *   - Category / severity / source / recurring-title tallies render and are
+ *     clickable (the exhaustive count math itself is covered by
+ *     shared/insights/__tests__/codeQualityTally.test.ts).
+ *   - Clicking a tally cell opens a drill-down whose row content (title, meta
+ *     line, status chip, severity dot, post-merge lag) matches the ORIGINAL
+ *     flat-list rendering contract, and whose count equals the tally.
+ *   - Pagination caps a page at 50 rows.
+ *   - "Seed compounding with these" calls the store's bulk seed action with
+ *     every id in the filtered set (not just the current page).
+ *   - A 400+ finding project renders the default tally view without mounting
+ *     one row per finding.
  */
 import '@testing-library/jest-dom';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent, cleanup } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { QualityFinding } from '../../../../../shared/types/insights';
 import {
@@ -25,20 +34,24 @@ import {
 } from '../../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
-// Store mock — only qualityFindings matters for this section.
+// Store mock — qualityFindings drives the component; seedCompoundingFromFindingIds
+// is a spy so the "Seed compounding" wiring can be asserted without a real store.
 // ---------------------------------------------------------------------------
 
 let mockQualityFindings: QualityFinding[] = [];
+const mockSeedCompounding = vi.fn().mockResolvedValue(undefined);
 
 function snapshot() {
-  return { qualityFindings: mockQualityFindings };
+  return { qualityFindings: mockQualityFindings, seedCompoundingFromFindingIds: mockSeedCompounding };
 }
 
 vi.mock('../../../stores/insightsStore', () => {
   const useInsightsStore = (selector: (s: ReturnType<typeof snapshot>) => unknown) =>
     selector(snapshot());
   useInsightsStore.getState = () => snapshot();
-  return { useInsightsStore };
+  // Mirrors the real store's export exactly (see insightsStore.ts) — the
+  // component imports this constant directly, not through the store hook.
+  return { useInsightsStore, QUALITY_FINDINGS_LIMIT: 500 };
 });
 
 import { CodeQualitySection } from '../CodeQualitySection';
@@ -70,20 +83,28 @@ function finding(over: Partial<QualityFinding> = {}): QualityFinding {
 
 beforeEach(() => {
   mockQualityFindings = [];
+  mockSeedCompounding.mockClear();
 });
 
 // ---------------------------------------------------------------------------
-// Tests
+// Default render — tallies only, no per-finding rows.
 // ---------------------------------------------------------------------------
 
-describe('CodeQualitySection bucketing', () => {
-  it('routes exactly one finding into each of the three columns', () => {
+describe('CodeQualitySection default render (tallies)', () => {
+  it('mounts no finding rows by default, even with data present', () => {
     mockQualityFindings = [
-      // in_workflow — plain executor step, no merge / category.
       finding({ id: 'qf-in', title: 'In-flow issue', sourceStep: 'executor' }),
-      // verification — step id matches /verify|review|test/i.
       finding({ id: 'qf-verify', title: 'Caught at verify', sourceStep: 'verify-step' }),
-      // post_merge — merged run, created after it ended.
+    ];
+    render(<CodeQualitySection />);
+    expect(screen.queryAllByTestId('quality-finding-row')).toHaveLength(0);
+    expect(screen.getByTestId('quality-tally-overview')).toBeInTheDocument();
+  });
+
+  it('routes findings into the three bucket columns with correct badge totals', () => {
+    mockQualityFindings = [
+      finding({ id: 'qf-in', title: 'In-flow issue', sourceStep: 'executor' }),
+      finding({ id: 'qf-verify', title: 'Caught at verify', sourceStep: 'verify-step' }),
       finding({
         id: 'qf-post',
         title: 'Regression after merge',
@@ -94,146 +115,199 @@ describe('CodeQualitySection bucketing', () => {
       }),
     ];
     render(<CodeQualitySection />);
-
     const inCol = screen.getByTestId('quality-column-in_workflow');
     const verifyCol = screen.getByTestId('quality-column-verification');
     const postCol = screen.getByTestId('quality-column-post_merge');
-
-    expect(within(inCol).getByText('In-flow issue')).toBeInTheDocument();
-    expect(within(verifyCol).getByText('Caught at verify')).toBeInTheDocument();
-    expect(within(postCol).getByText('Regression after merge')).toBeInTheDocument();
-
-    // Count badges reflect one each.
     expect(within(inCol).getByTestId('quality-column-count')).toHaveTextContent('1');
     expect(within(verifyCol).getByTestId('quality-column-count')).toHaveTextContent('1');
     expect(within(postCol).getByTestId('quality-column-count')).toHaveTextContent('1');
   });
 
-  it('honors the explicit post-merge category over the verification step', () => {
+  it('shows a per-status tally cell inside a bucket column (Open) with the right count', () => {
+    mockQualityFindings = [
+      finding({ id: 'a', status: 'pending', sourceStep: 'executor' }),
+      finding({ id: 'b', status: 'pending', sourceStep: 'executor' }),
+    ];
+    render(<CodeQualitySection />);
+    expect(screen.getByTestId('quality-tally-in_workflow-open')).toHaveTextContent('2');
+  });
+
+  it('shows a quiet placeholder for an empty bucket column', () => {
+    mockQualityFindings = [finding({ id: 'qf-only', sourceStep: 'executor' })];
+    render(<CodeQualitySection />);
+    // in_workflow has the one item; verification + post_merge are empty.
+    expect(screen.getAllByTestId('quality-column-empty')).toHaveLength(2);
+  });
+
+  it('renders category, severity, and source tally panels', () => {
+    mockQualityFindings = [
+      finding({ id: 'a', category: 'security', severity: 'error', source: 'agent:eval' }),
+    ];
+    render(<CodeQualitySection />);
+    expect(screen.getByTestId('quality-categories-security')).toBeInTheDocument();
+    expect(screen.getByTestId('quality-severities-error')).toBeInTheDocument();
+    expect(screen.getByTestId('quality-sources-agent:eval')).toBeInTheDocument();
+  });
+
+  it('collapses build-break-group sources into one tally line', () => {
+    mockQualityFindings = [
+      finding({ id: 'a', source: 'build-break-group:run-1:aaa' }),
+      finding({ id: 'b', source: 'build-break-group:run-2:bbb' }),
+    ];
+    render(<CodeQualitySection />);
+    expect(screen.getByTestId('quality-sources-build-break-group')).toHaveTextContent('2');
+  });
+
+  it('renders recurring titles normalized (build-break prefix + run id stripped)', () => {
     mockQualityFindings = [
       finding({
-        id: 'qf-cat',
-        title: 'Explicitly post-merge',
-        sourceStep: 'verify', // would otherwise be verification
-        category: 'post-merge-bug',
+        id: 'a',
+        title: 'Shared build break (2 lanes): TS2304 cannot find name foo',
+      }),
+      finding({
+        id: 'b',
+        title: 'Shared build break (5 lanes): TS2304 cannot find name foo',
       }),
     ];
     render(<CodeQualitySection />);
-    const postCol = screen.getByTestId('quality-column-post_merge');
-    expect(within(postCol).getByText('Explicitly post-merge')).toBeInTheDocument();
-    expect(within(screen.getByTestId('quality-column-verification')).queryByText('Explicitly post-merge')).toBeNull();
+    const row = screen.getByTestId('quality-recurring-title-0');
+    expect(row).toHaveTextContent('TS2304 cannot find name foo');
+    expect(row).toHaveTextContent('2');
   });
 
-  it('maps finding status to the OPEN / RESOLVED / DISMISSED chips', () => {
+  it('renders 400+ findings without mounting one row per finding', () => {
+    mockQualityFindings = Array.from({ length: 471 }, (_v, i) =>
+      finding({ id: `qf-${i}`, title: `Finding ${i}`, sourceStep: 'executor' }),
+    );
+    render(<CodeQualitySection />);
+    expect(screen.queryAllByTestId('quality-finding-row')).toHaveLength(0);
+    expect(screen.getByTestId('quality-column-in_workflow')).toHaveTextContent('471');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drill-down — clicking a tally cell.
+// ---------------------------------------------------------------------------
+
+describe('CodeQualitySection drill-down', () => {
+  it('opens a filtered list whose count equals the tally, and hides the overview', () => {
     mockQualityFindings = [
-      finding({ id: 'qf-p', title: 'Pending one', status: 'pending', sourceStep: 'executor' }),
-      finding({ id: 'qf-r', title: 'Resolved one', status: 'resolved', sourceStep: 'executor' }),
-      finding({ id: 'qf-d', title: 'Dismissed one', status: 'dismissed', sourceStep: 'executor' }),
+      finding({ id: 'a', status: 'pending', sourceStep: 'executor' }),
+      finding({ id: 'b', status: 'pending', sourceStep: 'executor' }),
+      finding({ id: 'c', status: 'resolved', resolution: 'fixed:x', sourceStep: 'executor' }),
     ];
     render(<CodeQualitySection />);
-    const chips = screen.getAllByTestId('quality-status-chip').map((n) => n.textContent);
-    expect(chips).toContain('Open');
-    expect(chips).toContain('Resolved');
-    expect(chips).toContain('Dismissed');
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+
+    expect(screen.queryByTestId('quality-tally-overview')).not.toBeInTheDocument();
+    const drilldown = screen.getByTestId('quality-drilldown');
+    expect(within(drilldown).getByTestId('quality-drilldown-count')).toHaveTextContent('2');
+    expect(within(drilldown).getAllByTestId('quality-finding-row')).toHaveLength(2);
   });
 
-  // Helper: render a single finding and read back its one chip. Calls cleanup()
-  // first so the tests that invoke chipFor twice in one it() do not leave two
-  // renders mounted in document.body (getByTestId would then throw on the
-  // duplicate chip — RTL's afterEach cleanup only runs between it() blocks).
-  function chipFor(over: Partial<QualityFinding>): string | null {
-    cleanup();
-    mockQualityFindings = [finding({ id: 'qf-chip', sourceStep: 'executor', ...over })];
-    render(<CodeQualitySection />);
-    return screen.getByTestId('quality-status-chip').textContent;
-  }
-
-  it('refines a resolved chip by its resolution prefix (FIXED / TRIAGED / PROMOTED)', () => {
-    // Each resolved item carries a prefixed resolution; the chip text reflects the
-    // parseResolutionKind classification (the full prefix matrix, via the component).
-    expect(chipFor({ status: 'resolved', resolution: 'fixed:patched the null guard' })).toBe('Fixed');
-  });
-
-  it('maps a triaged: resolution to the TRIAGED chip', () => {
-    expect(chipFor({ status: 'resolved', resolution: 'triaged:dispositioned, no code change' })).toBe('Triaged');
-  });
-
-  it('maps a promoted: resolution to the PROMOTED chip', () => {
-    expect(chipFor({ status: 'resolved', resolution: 'promoted:tsk_abc123' })).toBe('Promoted');
-  });
-
-  it('falls back to RESOLVED for a free-text (unprefixed) resolution and for a null resolution', () => {
-    expect(chipFor({ status: 'resolved', resolution: 'looked at it, fine as-is' })).toBe('Resolved');
-    expect(chipFor({ status: 'resolved', resolution: null })).toBe('Resolved');
-  });
-
-  it('ignores the resolution prefix for pending / dismissed items (status wins)', () => {
-    // A stray resolution on a non-resolved item must NOT change the OPEN/DISMISSED chip.
-    expect(chipFor({ status: 'pending', resolution: 'fixed:should be ignored' })).toBe('Open');
-    expect(chipFor({ status: 'dismissed', resolution: 'promoted:should be ignored' })).toBe('Dismissed');
-  });
-
-  it('renders the location path · sourceStep · workflowName meta line', () => {
+  it('renders the original row content (title, meta line, status chip, severity dot) in the drill-down', () => {
     mockQualityFindings = [
       finding({
         id: 'qf-meta',
         title: 'Has meta',
+        severity: 'error',
         sourceStep: 'executor',
         workflowName: 'Sprint',
         locations: [{ path: 'src/foo.ts', line: 42 }],
       }),
     ];
     render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+
     const row = screen.getByTestId('quality-finding-row');
+    expect(within(row).getByText('Has meta')).toBeInTheDocument();
     expect(within(row).getByText('src/foo.ts · executor · Sprint')).toBeInTheDocument();
+    expect(within(row).getByTestId('quality-status-chip')).toHaveTextContent('Open');
+    expect(within(row).getByTestId('quality-severity-dot').className).toContain('bg-status-error');
   });
 
-  it('shows a quiet placeholder for empty columns', () => {
+  it('refines the resolved status chip by resolution prefix inside the drill-down', () => {
     mockQualityFindings = [
-      finding({ id: 'qf-only', title: 'Only in-flow', sourceStep: 'executor' }),
+      finding({
+        id: 'qf-r',
+        status: 'resolved',
+        resolution: 'promoted:tsk_abc',
+        sourceStep: 'executor',
+      }),
     ];
     render(<CodeQualitySection />);
-    // in_workflow column has the item, the other two are empty.
-    expect(screen.getAllByTestId('quality-column-empty')).toHaveLength(2);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-promoted'));
+    expect(screen.getByTestId('quality-status-chip')).toHaveTextContent('Promoted');
   });
 
-  it('applies the severity dot color class per severity', () => {
+  it('ignores a stray resolution prefix on a pending or dismissed finding (status wins over resolution)', () => {
+    // A resolution string can be left over from a prior state (or set by mistake)
+    // on a non-resolved item; chipLabel() keys on status FIRST, so it must never
+    // leak a Fixed/Promoted label onto an Open or Dismissed chip.
     mockQualityFindings = [
-      finding({ id: 'qf-err', title: 'Error sev', severity: 'error', sourceStep: 'executor' }),
+      finding({ id: 'qf-pending', status: 'pending', resolution: 'fixed:should be ignored', sourceStep: 'executor' }),
+      finding({ id: 'qf-dismissed', status: 'dismissed', resolution: 'promoted:should be ignored', sourceStep: 'executor' }),
     ];
     render(<CodeQualitySection />);
-    const dot = screen.getByTestId('quality-severity-dot');
-    expect(dot.className).toContain('bg-status-error');
+
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+    expect(screen.getByTestId('quality-status-chip')).toHaveTextContent('Open');
+
+    fireEvent.click(screen.getByTestId('quality-drilldown-back'));
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-dismissed'));
+    expect(screen.getByTestId('quality-status-chip')).toHaveTextContent('Dismissed');
   });
-});
 
-// ---------------------------------------------------------------------------
-// POST-MERGE lag annotation (Q3) — the "<N>d after merge" meta tail.
-// ---------------------------------------------------------------------------
+  it('shows the post-merge lag annotation for a post-merge row', () => {
+    mockQualityFindings = [
+      finding({
+        id: 'qf-pm',
+        sourceStep: 'executor',
+        runOutcome: 'merged',
+        runEndedAt: '2026-06-08T00:00:00.000Z',
+        createdAt: '2026-06-10T00:00:00.000Z', // 2 days later
+      }),
+    ];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-post_merge-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    expect(row.querySelector('.text-\\[10px\\]')?.textContent).toContain('2d after merge');
+  });
 
-describe('CodeQualitySection post-merge lag annotation', () => {
-  /** Render a single post-merge finding and return its rendered meta-line text. */
-  function metaTextFor(over: Partial<QualityFinding>): string | null {
+  it('falls back to the category label as post-merge meta when there is no run linkage to compute a lag', () => {
+    mockQualityFindings = [
+      finding({
+        id: 'qf-pm-cat',
+        category: 'post-merge-bug',
+        sourceStep: 'executor',
+        runOutcome: null,
+        runEndedAt: null,
+      }),
+    ];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-post_merge-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    expect(row.querySelector('.text-\\[10px\\]')?.textContent).toContain('post-merge-bug');
+  });
+
+  /**
+   * Render a single post-merge-bucket finding, drill into it, and return its
+   * rendered meta-line text (or null when the row has no meta at all). Calls
+   * `cleanup()` first so a test that invokes this more than once does not
+   * leave two mounted trees behind (RTL's afterEach cleanup only runs
+   * between `it()` blocks, not within one).
+   */
+  function postMergeMetaTextFor(over: Partial<QualityFinding>): string | null {
     cleanup();
     mockQualityFindings = [finding({ id: 'qf-pm', sourceStep: 'executor', ...over })];
     render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-post_merge-open'));
     const row = screen.getByTestId('quality-finding-row');
-    // The meta line is the second div inside the title/meta column (the truncate
-    // [10px] node); read it via its text content if present.
     return row.querySelector('.text-\\[10px\\]')?.textContent ?? null;
   }
 
-  it("appends '<N>d after merge' for a multi-day merge→discovery lag", () => {
-    const meta = metaTextFor({
-      runOutcome: 'merged',
-      runEndedAt: '2026-06-08T00:00:00.000Z',
-      createdAt: '2026-06-10T00:00:00.000Z', // 2 days later
-    });
-    expect(meta).toContain('2d after merge');
-  });
-
   it("appends '<N>h after merge' for a sub-day (under 24h) lag", () => {
-    const meta = metaTextFor({
+    const meta = postMergeMetaTextFor({
       runOutcome: 'merged',
       runEndedAt: '2026-06-10T00:00:00.000Z',
       createdAt: '2026-06-10T05:00:00.000Z', // 5 hours later
@@ -244,17 +318,17 @@ describe('CodeQualitySection post-merge lag annotation', () => {
   });
 
   it('floors the lag to whole days (≥24h) and whole hours (<24h)', () => {
-    // 50h → 2d (floor of 2.08).
+    // 50h -> 2d (floor of 2.08).
     expect(
-      metaTextFor({
+      postMergeMetaTextFor({
         runOutcome: 'merged',
         runEndedAt: '2026-06-08T00:00:00.000Z',
         createdAt: '2026-06-10T02:00:00.000Z',
       }),
     ).toContain('2d after merge');
-    // 90m → 1h (floor of 1.5).
+    // 90m -> 1h (floor of 1.5).
     expect(
-      metaTextFor({
+      postMergeMetaTextFor({
         runOutcome: 'merged',
         runEndedAt: '2026-06-10T00:00:00.000Z',
         createdAt: '2026-06-10T01:30:00.000Z',
@@ -262,73 +336,122 @@ describe('CodeQualitySection post-merge lag annotation', () => {
     ).toContain('1h after merge');
   });
 
-  it('shows the category chip text (no fabricated lag) for a category-only post-merge finding', () => {
-    // Categorized post-merge but no merged-run linkage / time stamps → render the
-    // category text, never an invented lag.
-    const meta = metaTextFor({
-      category: 'post-merge-bug',
-      runOutcome: null,
-      runEndedAt: null,
-      sourceStep: 'executor',
-    });
-    expect(meta).toContain('post-merge-bug');
-    expect(meta).not.toContain('after merge');
-  });
-
   it('renders no lag (and no NaN) when the merge stamp is an invalid date', () => {
-    const meta = metaTextFor({
+    const meta = postMergeMetaTextFor({
       runOutcome: 'merged',
       runEndedAt: 'not-a-date',
       createdAt: '2026-06-10T00:00:00.000Z',
-      category: 'post-merge-bug', // still post_merge via category → category fallback shown
+      category: 'post-merge-bug', // still post_merge via category -> category fallback shown
     });
     expect(meta).not.toContain('NaN');
     expect(meta).not.toContain('after merge');
     expect(meta).toContain('post-merge-bug');
   });
 
-  it('renders no lag when discovery precedes the merge (createdAt ≤ runEndedAt)', () => {
-    // Such a finding is not post_merge by the time rule; with no category it lands
-    // in_workflow and carries no lag annotation at all.
-    const meta = metaTextFor({
-      runOutcome: 'merged',
-      runEndedAt: '2026-06-10T00:00:00.000Z',
-      createdAt: '2026-06-09T00:00:00.000Z',
-    });
-    expect(meta).not.toContain('after merge');
-    expect(meta).not.toContain('NaN');
-  });
-
-  it('does NOT annotate findings in the in-workflow or verification buckets', () => {
+  it('renders no lag when discovery precedes the merge (createdAt <= runEndedAt)', () => {
+    // Such a finding is not post_merge by the time rule; with no category it
+    // lands in_workflow instead and carries no lag annotation at all.
     cleanup();
     mockQualityFindings = [
-      // in_workflow — merged stamps present but createdAt is BEFORE runEndedAt, so
-      // it never lands in post_merge; the annotation is post_merge-only regardless.
       finding({
-        id: 'qf-inflow',
-        title: 'In-flow',
+        id: 'qf-early',
         sourceStep: 'executor',
         runOutcome: 'merged',
         runEndedAt: '2026-06-10T00:00:00.000Z',
         createdAt: '2026-06-09T00:00:00.000Z',
       }),
-      // verification — verify step; no post-merge annotation even if dates exist.
+    ];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    const meta = row.querySelector('.text-\\[10px\\]')?.textContent ?? '';
+    expect(meta).not.toContain('after merge');
+    expect(meta).not.toContain('NaN');
+  });
+
+  it('does NOT annotate a row in the in-workflow bucket even when it carries merge stamps', () => {
+    cleanup();
+    mockQualityFindings = [
       finding({
-        id: 'qf-verify',
-        title: 'At verify',
-        sourceStep: 'verify-step',
+        id: 'qf-inflow',
+        sourceStep: 'executor',
+        runOutcome: 'merged',
+        runEndedAt: '2026-06-10T00:00:00.000Z',
+        createdAt: '2026-06-09T00:00:00.000Z', // before the merge -> in_workflow, not post_merge
       }),
     ];
     render(<CodeQualitySection />);
-    const inCol = screen.getByTestId('quality-column-in_workflow');
-    const verifyCol = screen.getByTestId('quality-column-verification');
-    expect(within(inCol).queryByText(/after merge/)).toBeNull();
-    expect(within(verifyCol).queryByText(/after merge/)).toBeNull();
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    expect(within(row).queryByText(/after merge/)).toBeNull();
+  });
+
+  it('does NOT annotate a row in the verification bucket', () => {
+    cleanup();
+    mockQualityFindings = [finding({ id: 'qf-verify', sourceStep: 'verify-step' })];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-verification-open'));
+    const row = screen.getByTestId('quality-finding-row');
+    expect(within(row).queryByText(/after merge/)).toBeNull();
+  });
+
+  it('drills into a category tally and back out to the overview', () => {
+    mockQualityFindings = [
+      finding({ id: 'a', category: 'security', sourceStep: 'executor' }),
+      finding({ id: 'b', category: 'robustness', sourceStep: 'executor' }),
+    ];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-categories-security'));
+    expect(screen.getAllByTestId('quality-finding-row')).toHaveLength(1);
+    expect(screen.getByTestId('quality-drilldown')).toHaveTextContent('security');
+
+    fireEvent.click(screen.getByTestId('quality-drilldown-back'));
+    expect(screen.getByTestId('quality-tally-overview')).toBeInTheDocument();
+    expect(screen.queryByTestId('quality-drilldown')).not.toBeInTheDocument();
+  });
+
+  it('caps a drill-down page at 50 rows and pages through the rest', () => {
+    mockQualityFindings = Array.from({ length: 120 }, (_v, i) =>
+      finding({ id: `qf-${i}`, title: `Finding ${i}`, sourceStep: 'executor' }),
+    );
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+
+    expect(screen.getAllByTestId('quality-finding-row')).toHaveLength(50);
+    expect(screen.getByTestId('quality-drilldown-count')).toHaveTextContent('120');
+    expect(screen.getByTestId('quality-drilldown-page')).toHaveTextContent('Page 1 of 3');
+
+    fireEvent.click(screen.getByTestId('quality-drilldown-next'));
+    expect(screen.getAllByTestId('quality-finding-row')).toHaveLength(50);
+    expect(screen.getByTestId('quality-drilldown-page')).toHaveTextContent('Page 2 of 3');
+
+    fireEvent.click(screen.getByTestId('quality-drilldown-next'));
+    expect(screen.getAllByTestId('quality-finding-row')).toHaveLength(20);
+    expect(screen.getByTestId('quality-drilldown-page')).toHaveTextContent('Page 3 of 3');
+    expect(screen.getByTestId('quality-drilldown-next')).toBeDisabled();
+  });
+
+  it('shows a quiet empty state when a filter matches nothing', () => {
+    // Every finding is 'info' severity; SEVERITY_KEYS is a FIXED axis
+    // (error/warning/info/unset), so the by-severity panel still renders a
+    // clickable 'error' bar at count 0 (unlike TallyRow, TallyBarPanel's
+    // bars carry no disabled={count===0} guard) — a real, reachable path to
+    // an empty drill-down, not merely a defensive state.
+    mockQualityFindings = [finding({ id: 'a', severity: 'info', sourceStep: 'executor' })];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-severities-error'));
+
+    expect(screen.getByTestId('quality-drilldown-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('quality-drilldown-empty')).toBeInTheDocument();
+    expect(screen.queryAllByTestId('quality-finding-row')).toHaveLength(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// parseResolutionKind matrix — the shared classifier the chip mapping keys on.
+// parseResolutionKind matrix — the shared classifier chipLabel()/postMergeMeta
+// key on. Dedicated coverage (not just the indirect exercise through the
+// drill-down chip-text assertions above) so a change to the prefix matching
+// itself gets caught here rather than only surfacing as a wrong chip label.
 // ---------------------------------------------------------------------------
 
 describe('parseResolutionKind', () => {
@@ -352,5 +475,41 @@ describe('parseResolutionKind', () => {
     expect(parseResolutionKind('')).toBe('other');
     // Prefix must be LEADING — a mid-string occurrence does not match.
     expect(parseResolutionKind('see fixed: note below')).toBe('other');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seed compounding.
+// ---------------------------------------------------------------------------
+
+describe('CodeQualitySection "Seed compounding with these"', () => {
+  it('calls seedCompoundingFromFindingIds with EVERY id in the filtered set, not just the current page', () => {
+    mockQualityFindings = Array.from({ length: 60 }, (_v, i) =>
+      finding({ id: `qf-${i}`, sourceStep: 'executor' }),
+    );
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+    fireEvent.click(screen.getByTestId('quality-drilldown-seed'));
+
+    expect(mockSeedCompounding).toHaveBeenCalledTimes(1);
+    const idsPassed = mockSeedCompounding.mock.calls[0][0] as string[];
+    expect(idsPassed).toHaveLength(60);
+  });
+
+  it('is enabled for a populated drill-down', () => {
+    mockQualityFindings = [finding({ id: 'a', sourceStep: 'executor' })];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-tally-in_workflow-open'));
+    expect(screen.getByTestId('quality-drilldown-seed')).not.toBeDisabled();
+  });
+
+  it('is disabled when the filtered set is empty', () => {
+    // Same reachable-empty-state path as the drill-down suite above: a
+    // zero-count severity bar is still clickable, and the seed button binds
+    // directly to `pageResult.total === 0`.
+    mockQualityFindings = [finding({ id: 'a', severity: 'info', sourceStep: 'executor' })];
+    render(<CodeQualitySection />);
+    fireEvent.click(screen.getByTestId('quality-severities-error'));
+    expect(screen.getByTestId('quality-drilldown-seed')).toBeDisabled();
   });
 });

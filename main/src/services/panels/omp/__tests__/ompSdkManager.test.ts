@@ -12,6 +12,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionManager } from '../../../sessionManager';
+import { createTestDb, seedRun } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
+import { materializeForLevel } from '../../../../../../shared/tuning/workflowTuning';
+import { resolveRunDeployableAgents } from '../../claude/agentOverlayWriter';
 import { OMP_RAW_EVENT_TYPE } from '../ompRawEventSink';
 import {
   assertOmpSdkSpawnFlags,
@@ -33,6 +36,8 @@ import type { ClaudeSpawnerOptions } from '../../../../orchestrator/runExecutor'
 
 vi.mock('../ompMcpConfigWriter', () => ({
   writeOmpMcpConfig: vi.fn(() => ({ configPath: '/tmp/worktree/.omp/mcp.json', wrote: true })),
+  // ompAgentWriter's git-exclude step; the real one is covered by its own suite.
+  ensureWorktreeExcludesOmpDir: vi.fn(),
 }));
 // A login-shell PATH probe would really spawn a shell; the merge itself is
 // covered by the env assertions below.
@@ -243,21 +248,25 @@ class FakeOmpClient implements OmpRpcClientLike {
   }
 }
 
+const AGENT_INVOCATIONS_DDL = `
+  CREATE TABLE agent_invocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_invocation_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL,
+    step_id TEXT,
+    agent_provider TEXT NOT NULL,
+    agent_runtime TEXT NOT NULL,
+    model TEXT,
+    external_session_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    panel_id TEXT
+  );
+`;
+
 function createDb(): Database.Database {
   const db = new Database(':memory:');
+  db.exec(AGENT_INVOCATIONS_DDL);
   db.exec(`
-    CREATE TABLE agent_invocations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_invocation_id TEXT NOT NULL UNIQUE,
-      run_id TEXT NOT NULL,
-      step_id TEXT,
-      agent_provider TEXT NOT NULL,
-      agent_runtime TEXT NOT NULL,
-      model TEXT,
-      external_session_id TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      panel_id TEXT
-    );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -373,6 +382,35 @@ async function waitForClients(clients: FakeOmpClient[], count: number): Promise<
 /** Per-spawn `--session-dir` roots created by `makeManager`, removed after each test. */
 const tempDirs: string[] = [];
 
+/**
+ * A DB carrying a REAL run: `run-1` walks the built-in sprint definition, so
+ * `resolveRunDeployableAgents` resolves the sprint roles exactly as it does live
+ * (the in-memory {@link createDb} has no workflow tables, so it resolves none).
+ * `setSpec` edits that definition in place — the run has no frozen revision, so
+ * the live spec is what the resolver reads.
+ */
+function createSprintRunDb(): {
+  db: Database.Database;
+  setSpec: (edit: (definition: Record<string, unknown>) => void) => void;
+} {
+  const db = createTestDb();
+  db.exec(AGENT_INVOCATIONS_DDL);
+  const { workflowId } = seedRun(db, { id: 'run-1', workflowName: 'sprint' });
+  const setSpec = (edit: (definition: Record<string, unknown>) => void): void => {
+    const definition = JSON.parse(materializeForLevel('sprint', '', 'standard')) as Record<string, unknown>;
+    edit(definition);
+    db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?').run(JSON.stringify(definition), workflowId);
+  };
+  setSpec(() => undefined);
+  return { db, setSpec };
+}
+
+function makeWorktree(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omp-worktree-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
 beforeEach(() => {
   vi.mocked(writeOmpMcpConfig).mockClear();
 });
@@ -472,6 +510,37 @@ describe('OmpSdkManager — the spawn', () => {
       expect(gateConfig.cyboflowMcpToolNames).toContain('mcp__cyboflow_report_finding');
       await manager.killAllProcesses();
     } finally {
+      db.close();
+    }
+  });
+
+  it('merges a lane build-slot env (laneEnv) last, and adds nothing without one', async () => {
+    const saved = process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    // This suite may itself run inside a cyboflow lane whose env carries it.
+    delete process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    const db = createDb();
+    try {
+      const { manager, clients } = makeManager(db);
+      const slot = '/tmp/worktree/.cyboflow/build-slots/slot-0';
+      await manager.spawnCliProcess(
+        turn({
+          spawnKey: 'run-1:TASK-1',
+          laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: slot, CYBOFLOW_RUN_ARTIFACTS_DIR: '/lane/wins' },
+        }),
+      );
+      await manager.spawnCliProcess(turn({ spawnKey: 'run-1:TASK-2' }));
+
+      const laneEnv = clients[0].options.env ?? {};
+      expect(laneEnv.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      // LAST: it beats even a key the manager itself sets.
+      expect(laneEnv.CYBOFLOW_RUN_ARTIFACTS_DIR).toBe('/lane/wins');
+      expect(laneEnv.CYBOFLOW_RUN_ID).toBe('run-1');
+      const plainEnv = clients[1].options.env ?? {};
+      expect(plainEnv.CYBOFLOW_LANE_SCRATCH_DIR).toBeUndefined();
+      expect(plainEnv.CYBOFLOW_RUN_ARTIFACTS_DIR).toContain('run-1');
+      await manager.killAllProcesses();
+    } finally {
+      if (saved !== undefined) process.env.CYBOFLOW_LANE_SCRATCH_DIR = saved;
       db.close();
     }
   });
@@ -1151,6 +1220,87 @@ describe('OmpSdkManager — the system-prompt suffix', () => {
       );
 
       expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * An OMP orchestrator delegates to `cyboflow-<key>` through OMP's task tool, which
+ * resolves project agents from `<worktree>/.omp/agents/`. These arms pin that the
+ * run's resolved roles land there, where OMP reads them.
+ */
+describe('OmpSdkManager — cyboflow roles as OMP project agents', () => {
+  it('registers the run`s roles in the worktree on a cold spawn', async () => {
+    const { db } = createSprintRunDb();
+    try {
+      const worktreePath = makeWorktree();
+      const { manager } = makeManager(db);
+      await manager.spawnCliProcess(turn({ worktreePath }));
+
+      const agentsDir = path.join(worktreePath, '.omp', 'agents');
+      const implement = fs.readFileSync(path.join(agentsDir, 'cyboflow-implement.md'), 'utf8');
+      expect(implement.startsWith('---\nname: "cyboflow-implement"\n')).toBe(true);
+      // The body is the run's RESOLVED role prompt — the one the Claude overlay writes.
+      const resolved = resolveRunDeployableAgents(db, 'run-1').find((a) => a.agentKey === 'implement');
+      expect(resolved?.systemPrompt.length).toBeGreaterThan(0);
+      expect(implement.endsWith(`---\n\n${resolved?.systemPrompt ?? '<unresolved>'}`)).toBe(true);
+
+      // Only the roles the sprint binds — never another flow's.
+      const files = fs.readdirSync(agentsDir);
+      expect(files).toEqual(expect.arrayContaining(['cyboflow-code-review.md', 'cyboflow-task-verify.md']));
+      expect(files).not.toContain('cyboflow-interview.md');
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('registers nothing for an in-place session', async () => {
+    const { db } = createSprintRunDb();
+    try {
+      const worktreePath = makeWorktree();
+      const inPlace = makeManager(db, {}, { inPlace: true });
+      await inPlace.manager.spawnCliProcess(turn({ worktreePath }));
+      await inPlace.manager.killAllProcesses();
+      expect(fs.existsSync(path.join(worktreePath, '.omp'))).toBe(false);
+
+      // Control: the same run and directory as a worktree session does register.
+      const worktree = makeManager(db);
+      await worktree.manager.spawnCliProcess(turn({ panelId: 'panel-2', worktreePath }));
+      await worktree.manager.killAllProcesses();
+      expect(fs.existsSync(path.join(worktreePath, '.omp', 'agents', 'cyboflow-implement.md'))).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cold-respawns a warm session when a role prompt changes, and rewrites the role', async () => {
+    // OMP may read its agents once at process start, and only the cold path
+    // writes them — so a changed role must not ride a parked child.
+    const { db, setSpec } = createSprintRunDb();
+    try {
+      const worktreePath = makeWorktree();
+      const implementPath = path.join(worktreePath, '.omp', 'agents', 'cyboflow-implement.md');
+      const { manager, clients } = makeManager(db);
+      await manager.spawnCliProcess(turn({ worktreePath, prompt: 'first' }));
+
+      // Control: an unchanged role set keeps the parked child.
+      await manager.spawnCliProcess(turn({ worktreePath, prompt: 'second', resumeSessionId: SESSION_FILE }));
+      expect(clients).toHaveLength(1);
+
+      setSpec((definition) => {
+        const configs = (definition.agentConfigs ?? {}) as Record<string, Record<string, unknown>>;
+        configs.implement = { ...(configs.implement ?? {}), promptAddendum: 'Always run the linter.' };
+        definition.agentConfigs = configs;
+      });
+      await manager.spawnCliProcess(turn({ worktreePath, prompt: 'third', resumeSessionId: SESSION_FILE }));
+
+      expect(clients).toHaveLength(2);
+      expect(clients[1].options.args).toContain('--resume');
+      expect(fs.readFileSync(implementPath, 'utf8')).toContain('Always run the linter.');
       await manager.killAllProcesses();
     } finally {
       db.close();

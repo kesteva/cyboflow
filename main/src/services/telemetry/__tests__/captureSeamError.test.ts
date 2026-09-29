@@ -137,3 +137,44 @@ describe('captureSeamError explicit fingerprinting', () => {
     expect(sentry.captureException).not.toHaveBeenCalled();
   });
 });
+
+describe('captureSeamError drops systemic environment conditions', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    sentry.init.mockClear();
+    sentry.captureException.mockClear();
+  });
+
+  afterEach(() => {
+    delete process.env.SENTRY_DSN;
+  });
+
+  // The three live 0.4.2 shapes (CYBOFLOW-APP-29, -26, -27): each correctly
+  // classified systemic, each previously reported as an app defect.
+  it.each([
+    ['sdk-session-terminal-result', 'limit-verb-first'],
+    ['sdk-session-terminal-result', 'auth-failed-to-authenticate'],
+    ['monitor-query-failed', 'auth-failed-to-authenticate'],
+    ['sdk-session-error', 'net-connection-closed'],
+  ])('does not send %s (%s) to Sentry', async (seam, errorClass) => {
+    const captureSeamError = await loadWithActiveSentry();
+    captureSeamError(seam, new Error(`${seam} (${errorClass})`), { substrate: 'sdk', errorClass });
+    expect(sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('still records a dropped systemic error in the local bug-report buffer', async () => {
+    const captureSeamError = await loadWithActiveSentry();
+    const { getRecentErrors } = await import('../diagnostics');
+    captureSeamError('sdk-session-terminal-result', new Error('sdk terminal result (limit-verb-first)'), {
+      errorClass: 'limit-verb-first',
+    });
+    expect(getRecentErrors().some((e) => e.seam === 'sdk-session-terminal-result')).toBe(true);
+  });
+
+  it('still reports non-systemic and unclassified classes', async () => {
+    const captureSeamError = await loadWithActiveSentry();
+    captureSeamError('monitor-query-failed', new Error('x'), { errorClass: 'timed-out' });
+    captureSeamError('sdk-session-terminal-result', new Error('y'), { errorClass: 'other', errorDigest: '01cebb29' });
+    expect(sentry.captureException).toHaveBeenCalledTimes(2);
+  });
+});

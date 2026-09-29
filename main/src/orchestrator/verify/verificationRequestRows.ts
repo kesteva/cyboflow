@@ -1,13 +1,15 @@
 /**
  * The verification_requests ROW vocabulary: the drain SELECT's row shape, the
  * §5.4 setup-proof drain ordering, the terminal/non-terminal status predicates,
- * the verdict-feedback reader, and the awaitTerminal / listRequestsForRun result
- * shapes + messages. Extracted verbatim from verificationScheduler.ts (issue #19
- * step 5); that file re-exports everything here, so existing importers are
- * unchanged.
+ * the verdict-feedback reader, the awaitTerminal / listRequestsForRun result
+ * shapes + messages, and the one UTC read of `enqueued_at` ({@link enqueuedAtMs},
+ * added by A9). Extracted verbatim from verificationScheduler.ts (issue #19 step
+ * 5); that file re-exports everything that was extracted, so existing importers
+ * are unchanged (the A9 helper is imported from here directly).
  */
 import { REQUEST_STATUS } from '../../../../shared/types/visualVerification';
 import type { RequestStatus, VerificationRequestInput } from '../../../../shared/types/visualVerification';
+import { parseTimestamp } from '../../utils/timestampUtils';
 
 // ---------------------------------------------------------------------------
 // Row shape
@@ -24,8 +26,30 @@ export interface VerificationRequestRow {
   chain_json: string | null;
   current_backend: string | null;
   attempt: number;
-  /** ISO enqueue time — the anchor for the queued-age deadline (§5.6). */
+  /**
+   * Enqueue time as the column DEFAULT writes it (`CURRENT_TIMESTAMP`: UTC with
+   * no zone marker) — the anchor for the queued-age deadline (§5.6). Read it
+   * through {@link enqueuedAtMs}, never `Date.parse`.
+   */
   enqueued_at: string;
+}
+
+/**
+ * A row's `enqueued_at` as epoch ms, read as UTC — the ONE parse every
+ * queued-age site shares (drain ordering below, the scheduler's §5.6 expiry
+ * sweep and its fallback timer). `NaN` when the value is missing or
+ * unparseable, which every caller treats as "cannot be aged": never promoted,
+ * never expired.
+ *
+ * The column is `DEFAULT CURRENT_TIMESTAMP` ("2026-09-24 10:15:00"), and a bare
+ * `Date.parse` reads that unzoned shape as LOCAL time (A9). East of UTC that
+ * aged every fresh row by the host's offset, so on any host at UTC+0:15 or
+ * further east every request expired at its first drain; west of UTC the
+ * ceiling could not bite for hours. `parseTimestamp` allow-lists the unzoned
+ * shape and passes an already-zoned ISO string through untouched.
+ */
+export function enqueuedAtMs(row: { readonly enqueued_at: string | null }): number {
+  return typeof row.enqueued_at === 'string' ? parseTimestamp(row.enqueued_at).getTime() : Number.NaN;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +70,7 @@ export const SETUP_PROOF_PROMOTION_MS = 5 * 60 * 1000;
 /** The two fields drain ordering keys on, plus the migration-095 setup-proof flag. */
 export interface AgentDrainOrderRow {
   id: string;
-  /** ISO enqueue time — the promotion clock's anchor. */
+  /** Enqueue time (see {@link VerificationRequestRow.enqueued_at}) — the promotion clock's anchor. */
   enqueued_at: string;
   /**
    * Migration-095 `setup_proof`, read through the scheduler's DEFENSIVE
@@ -94,7 +118,7 @@ export function orderAgentDrainRows<T extends AgentDrainOrderRow>(
 ): T[] {
   const priorityClass = (row: T): 0 | 1 => {
     if (!row.setupProof) return 0;
-    const enqueuedMs = Date.parse(row.enqueued_at);
+    const enqueuedMs = enqueuedAtMs(row);
     // An unparseable enqueued_at cannot be aged, so it is NOT promoted — the same
     // conservative posture expireOverAgeQueued takes with the same column (a
     // clock/parse glitch must not silently reprioritize the backlog).

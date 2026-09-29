@@ -151,6 +151,19 @@ export interface SystemCompactBoundaryEvent {
 }
 
 /**
+ * SYNTHETIC-ONLY: the real CLI/app-server wire never emits this. Minted
+ * exclusively by `AgentThreadEventsSink.recordAssistantInterrupted` to mark a
+ * user-initiated Stop in the transcript — `MessageProjection` renders it as a
+ * muted one-line "Stopped" marker, distinct from `recordAssistantError`'s
+ * red error card, so a partial tool-sequence / text above it stays readable.
+ */
+export interface SystemAssistantInterruptedEvent {
+  type: 'system';
+  subtype: 'assistant_interrupted';
+  session_id?: string;
+}
+
+/**
  * Emitted for each assistant message, including those containing tool_use blocks.
  * The `content` array may be mixed (text + tool_use + thinking in any order).
  */
@@ -504,6 +517,7 @@ export type ClaudeStreamEvent =
   | SystemApiRetryEvent
   | SystemCompactEvent
   | SystemCompactBoundaryEvent
+  | SystemAssistantInterruptedEvent
   | SystemHookStartedEvent
   | SystemHookResponseEvent
   | SystemStatusEvent
@@ -554,7 +568,7 @@ export type StreamEventType =
  * Updated alongside StreamEventType — keep the two unions in sync.
  */
 export type StreamEnvelopePayload =
-  | { type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent }
+  | { type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemAssistantInterruptedEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent | SystemTaskStartedEvent | SystemTaskUpdatedEvent | SystemTaskNotificationEvent }
   | { type: 'assistant';         payload: AssistantEvent }
   | { type: 'user';              payload: UserEvent }
   | { type: 'result';            payload: ResultEvent }

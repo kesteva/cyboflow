@@ -29,6 +29,7 @@ import type {
   ParsedAdversarialReview,
 } from '../../../../shared/types/adversarialReview';
 import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../../shared/types/reviews';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { PendingBlockingItem } from './blockingItemsGate';
 
 /**
@@ -69,6 +70,37 @@ export interface StepRunResult {
    * (interactive, codex).
    */
   resultText?: string | null;
+  /**
+   * The provider this attempt actually spawned under (the per-agent runtime pin's
+   * provider, else the run's). Set ONLY on a `failed` result, so the controller
+   * can tell a systemic pause WHICH provider was blocked (the pause item's
+   * `blockedProvider`, which scopes "Switch runtime & retry").
+   */
+  provider?: AgentProvider;
+  /** The runtime this attempt spawned on (pin, else the run's). Set ONLY on `failed`. */
+  runtime?: string;
+}
+
+/**
+ * What a systemic pause blocked — threaded controller → host → gate → the pause
+ * item's `DecisionPayload` (gate 'systemic-pause') so the operator's "Switch
+ * runtime & retry" re-targets exactly the agents a retry will spawn.
+ *   - `blockedAgentKeys` — the agents a switch must cover: the failing step's
+ *     agent for a single step; EVERY inner-chain agent for a fan-out (its 'retry'
+ *     replays every parked lane from inner step 0).
+ *   - `blockedProvider` / `blockedRuntime` — what the failing spawn ran on, when
+ *     known (a fan-out whose step-origin lanes disagree leaves them undefined).
+ *   - `origin` — 'step' when a step agent's own spawn died; 'triage' when only
+ *     the lane-triage consult (the run's Claude-only supervisor) died.
+ *   - `fanOut` — the pause parks a whole fan-out (a 'step'-scoped switch is then
+ *     unavailable: the retry replays every lane).
+ */
+export interface SystemicPauseInfo {
+  blockedAgentKeys: readonly string[];
+  blockedProvider?: AgentProvider;
+  blockedRuntime?: string;
+  origin: 'step' | 'triage';
+  fanOut: boolean;
 }
 
 /**
@@ -255,6 +287,16 @@ export interface ControllerStepContext {
    * (byte-identical prompts).
    */
   laneGuidance?: string;
+  /**
+   * The CONCURRENCY SLOT this fan-out lane's walk occupies (0-based): the
+   * lowest index no other live lane held when it was dispatched, kept for every
+   * re-drive inside the walk and released when the walk settles, so the next
+   * lane dispatched into it reuses the same slot. The step runner resolves it to
+   * the slot's private build directory (laneBuildSlots.ts) — a prompt section
+   * plus spawn env. Pure bookkeeping here: the controller never sees a path.
+   * Absent on every non-fan-out step (byte-identical prompts and spawn env).
+   */
+  laneSlot?: number;
 }
 
 /**
@@ -333,11 +375,49 @@ export interface SupervisorEvent {
  * `headAdvanced` — the worktree's HEAD sha moved since the lane was dispatched.
  * `dirty` — `git status --porcelain` is non-empty, i.e. tracked edits and/or
  * untracked files are still sitting in the worktree uncommitted.
+ * `buildSlots` — whether lane build output made it INTO the committed tree.
  */
 export interface CommitIntegrityReading {
   headAdvanced: boolean;
   dirty: boolean;
+  /**
+   * The paths `git status --porcelain` reports right now. OPTIONAL (a probe that
+   * cannot list them leaves it absent) — evidence for the monitor's
+   * commit-integrity triage, never a decision input on its own.
+   */
+  dirtyPaths?: string[];
+  /**
+   * The subset of `dirtyPaths` that were NOT already dirty when the lane was
+   * dispatched. Lanes share ONE worktree, so dirt that predates the lane (a
+   * failed sibling's leftovers, a pre-existing edit) cannot be this lane's
+   * uncommitted work: an EMPTY list lets the lane integrate. Absent ⇒ the probe
+   * could not tell, and every dirty path counts as possibly this lane's.
+   */
+  newDirtyPaths?: string[];
+  /**
+   * Whether the COMMITTED TREE at the lane-end HEAD carries lane build output
+   * under `.cyboflow/build-slots/` (laneBuildSlots.ts) — see
+   * {@link BuildSlotCheck} and `checkCommittedBuildSlots`. Read from the end
+   * HEAD alone, on every lane end, so it needs no lane-start state and survives
+   * an app restart. Absent ⇒ the probe does not run this check (treated as
+   * clean). 'leak' or 'unknown' ⇒ the controller refuses to integrate even
+   * though HEAD advanced: build output must never be merged, whoever committed
+   * it.
+   */
+  buildSlots?: BuildSlotCheck;
 }
+
+/**
+ * The build-slot half of a commit-integrity reading, deliberately TRI-STATE:
+ * - `clean` — the lane-end HEAD's tree has nothing under `.cyboflow/build-slots/`
+ *   (or git could not tell, but the directory does not exist on disk, so no lane
+ *   ever built there and nothing could have leaked);
+ * - `leak` — it does; `paths` lists them (a placeholder when git could not list
+ *   them — never empty);
+ * - `unknown` — git could not answer (twice) AND the directory exists on disk,
+ *   so something may have leaked. FAIL-CLOSED: refused like a leak.
+ */
+export type BuildSlotCheck = { kind: 'clean' } | { kind: 'leak'; paths: string[] } | { kind: 'unknown' };
 
 /** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
 export type CommitIntegrityProbe = () => Promise<CommitIntegrityReading>;
@@ -406,7 +486,10 @@ export interface FanOutDriver {
    * would stamp 'integrated'. A lane that ran every inner step green but left
    * HEAD where it was AND the worktree dirty never committed its work — observed
    * live when a `git commit` was denied by a permission gate and the lane still
-   * reported integrated with the changes untracked on disk.
+   * reported integrated with the changes untracked on disk. Lanes share the
+   * worktree, so the reading also lists the dirty paths and which of them are
+   * NEW since lane start: the controller ignores pre-existing dirt and asks the
+   * monitor whose the rest is before failing anything.
    *
    * OPTIONAL and fail-soft at every seam, like `dependencies`/`expectedFiles`:
    * absent, resolving undefined, or throwing (in either half) ⇒ no probe ⇒ the
@@ -440,7 +523,7 @@ export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
  * Canonical HERE (not in monitor.ts) so the controller/host protocol stays free
  * of the monitor brain's heavier import graph; `monitor.ts` re-exports it.
  */
-export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate' | 'commit-integrity';
 
 /**
  * The lane/failure facts the controller already holds when a lane exhausts an
@@ -467,8 +550,48 @@ export interface LaneTriageFailure {
   errorExcerpt: string;
   /** The lane's configured inner chain, in execution order. */
   innerStepIds: readonly string[];
+  /**
+   * The failures earlier rescues of THIS lane already answered, oldest first.
+   * Absent on a lane's first consult. Present ⇒ a re-drive is only allowed when
+   * the supervisor attests the lane is converging (see MONITOR_LANE_RESCUE_CAP).
+   */
+  priorRescues?: LanePriorRescue[];
+  /**
+   * 'exhausted' (the default) — the lane spent its automatic budget and settles
+   * 'failed' unless the supervisor intervenes. 'early' — the lane is about to
+   * start its FINAL automatic attempt; the supervisor may steer or accept it, and
+   * a give_up there means "loop back as usual", never "fail the lane".
+   */
+  stage?: LaneTriageStage;
+  /**
+   * Not-yet-started lanes (item ids) that list this lane as a blocking
+   * prerequisite. Present ⇒ a give_up may RELEASE them (`releaseDependents`).
+   */
+  dependents?: string[];
+  /**
+   * True when an 'accept' verdict cannot let this lane through — the lane-end
+   * committed tree carries lane build output, or git could not verify that it
+   * does not (`CommitIntegrityReading.buildSlots`), which no ownership judgment
+   * can waive. The monitor's parse then downgrades an accept to give_up, so the
+   * chat and the review queue never record an accept the controller would
+   * refuse anyway.
+   */
+  acceptUnavailable?: boolean;
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
+}
+
+/** When a lane-triage consult happens — see `LaneTriageFailure.stage`. */
+export type LaneTriageStage = 'early' | 'exhausted';
+
+/** One failure an earlier monitor rescue of the same lane answered. */
+export interface LanePriorRescue {
+  stepId: string;
+  failureKind: LaneFailureKind;
+  /** The failure excerpt the supervisor saw at the time. */
+  errorExcerpt: string;
+  /** The guidance that rescue threaded into the re-run. */
+  guidance: string;
 }
 
 /**
@@ -494,9 +617,28 @@ export interface LaneTriageFailure {
  * (a target it cannot locate is treated as a give_up).
  */
 export type LaneRescueOutcome =
-  | { kind: 'give_up' }
+  /**
+   * `releaseDependents` — the lane fails, but what its dependents build on is
+   * committed and works, so they may run instead of settling 'blocked'.
+   */
+  | { kind: 'give_up'; releaseDependents?: boolean }
   | { kind: 'systemic'; error: string }
-  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
+  /**
+   * `free` — the rescue follows an ENVIRONMENT fix (e.g. dependencies were
+   * installed): the lane failed on the worktree, not on its work, so the re-drive
+   * is not charged to the run's rescue pool. It still counts toward the lane's own
+   * MONITOR_LANE_RESCUE_CAP, so a lane cannot loop on it.
+   */
+  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean; free?: boolean }
+  /**
+   * 'accept' — proceed past the failing step as if it had passed. The supervisor
+   * judged the task's substance done and what is left waivable: cosmetic
+   * residue, or checks the environment could not run (a missing toolchain, UI
+   * criteria on a backend task, a simulator that cannot grant a permission). The
+   * host files each waived item as a follow-up finding. For a commit-integrity
+   * failure it means the uncommitted paths are not this lane's work.
+   */
+  | { kind: 'accept'; reason: string };
 
 // ---------------------------------------------------------------------------
 // Adversarial-review LOOP protocol (the supervisor steering each automatic lap)
@@ -1026,6 +1168,13 @@ export interface ControllerHost {
    * controller settles the lane failed exactly as before the seam existed.
    */
   triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
+  /**
+   * Optional PREFLIGHT, awaited once when a fan-out starts, before any lane is
+   * dispatched: repair what would fail EVERY lane the same way (today: a worktree
+   * with no installed dependencies). Must never throw and never fail the run;
+   * absent ⇒ no preflight.
+   */
+  prepareFanOutEnvironment?(runId: string): Promise<void>;
 
   /**
    * Optional REVIEW-LOOP seam — `triageLaneFailure`'s design-phase sibling.
@@ -1091,12 +1240,14 @@ export interface ControllerHost {
    * MAX_SYSTEMIC_PAUSES per step id. Absent (tests / hosts built without the
    * gate) ⇒ systemic failures follow the normal failure path (today's behavior).
    * Fail-soft is the host's responsibility; the controller only branches on the
-   * returned verdict.
+   * returned verdict. `info` (optional — a host/test may ignore it) says what
+   * was blocked, so the pause item can offer "Switch runtime & retry".
    */
   awaitSystemicPause?(
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    info?: SystemicPauseInfo,
   ): Promise<SystemicPauseVerdict>;
 
   /**

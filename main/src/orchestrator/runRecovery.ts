@@ -23,6 +23,7 @@ import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter'
 import { DELIVERED_RUN_OUTCOMES_SQL_IN } from '../../../shared/types/cyboflow';
 import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
+import { writeRunUsageRow } from './runUsageRollup';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -835,6 +836,39 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
 }
 
 /**
+ * Stamp `outcome='merged'` (plus `merge_sha` when known) on a session's runs
+ * whose branch has been PROVEN landed on main by a path we never observed —
+ * `markComplete`'s landed arm (ipc/gitOps.ts). The merged-outcome twin of
+ * {@link stampSessionRunsCompleted}, for the same reason: under
+ * {@link stampSessionRunsOutcome}'s `outcome IS NULL` guard the stamp no-ops
+ * on exactly the runs this action exists for (a sprint run that reads
+ * 'canceled' after teardown, a boot-recovered 'interrupted' one), the op still
+ * reports success, and the archive that follows sweeps the findings.
+ *
+ * Same predicate as stampSessionRunsCompleted: BOTH session link shapes
+ * (direct `workflow_runs.session_id` and the legacy `sessions.run_id`
+ * back-link), guarded by "not already delivered" so a run that recorded
+ * 'merged' / 'integrated' / 'pr_open' / 'completed' keeps its stamp.
+ *
+ * Returns the number of rows stamped. Pure over {@link DatabaseLike}.
+ */
+export function stampSessionRunsLanded(db: DatabaseLike, sessionId: string, mergeSha?: string): number {
+  const sha = typeof mergeSha === 'string' && mergeSha.length > 0 ? mergeSha : null;
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET outcome = 'merged', merge_sha = COALESCE(?, merge_sha), updated_at = CURRENT_TIMESTAMP
+        WHERE (
+                session_id = ?
+                OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = workflow_runs.id)
+              )
+          AND COALESCE(outcome, '') NOT IN ${DELIVERED_RUN_OUTCOMES_SQL_IN}`,
+    )
+    .run(sha, sessionId, sessionId) as { changes: number };
+  return info.changes;
+}
+
+/**
  * Close out a session's runs as a SUCCESSFUL pull request, used by the
  * session-scoped Create-PR flow (the `push` op in ipc/gitOps.ts).
  *
@@ -912,7 +946,8 @@ export interface RunUsageBackfillResult {
  * Uses the FORCE-SCAN rollup helper for the same reason rollupRunUsage does its
  * DELETE first: the materialized-first reader would happily return the row we
  * are trying to create. Batched — one scan for every candidate, one
- * transaction — rather than N per-run round trips.
+ * transaction — rather than N per-run round trips. Rows go through the shared
+ * `writeRunUsageRow`, so each records the fold version and coverage.
  *
  * `INSERT OR IGNORE` (not REPLACE): if a row appeared between the SELECT and the
  * write, the existing one wins. This can only ever ADD a missing row, never
@@ -939,37 +974,11 @@ export function backfillRunUsageRollups(
     if (rows.length === 0) return empty;
 
     const runIds = rows.map((r) => r.runId);
-    const rollups = selectRunUsageRollupsFromRawEvents(db, runIds);
+    const rollups = selectRunUsageRollupsFromRawEvents(db, runIds, logger);
 
     const tx = db.transaction(() => {
-      const stmt = db.prepare(
-        `INSERT OR IGNORE INTO run_usage (
-           run_id,
-           input_tokens,
-           output_tokens,
-           cache_read_tokens,
-           cache_creation_tokens,
-           total_tokens,
-           cost_usd,
-           num_turns,
-           assistant_message_count
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
       let written = 0;
-      for (const rollup of rollups) {
-        const info = stmt.run(
-          rollup.runId,
-          rollup.inputTokens,
-          rollup.outputTokens,
-          rollup.cacheReadTokens,
-          rollup.cacheCreationTokens,
-          rollup.totalTokens,
-          rollup.costUsd,
-          rollup.numTurns,
-          rollup.assistantMessageCount,
-        ) as { changes: number };
-        written += info.changes;
-      }
+      for (const rollup of rollups) written += writeRunUsageRow(db, rollup, 'ignore');
       return written;
     });
 

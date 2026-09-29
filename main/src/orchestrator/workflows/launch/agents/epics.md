@@ -14,9 +14,11 @@ orchestrator creates the epics and links them to the originating idea.
 
 Every task the run creates ends up under an epic unless its idea yields exactly one
 task, so cover the whole idea: an epic set that leaves part of the idea unaccounted
-for forces the orchestrator to invent a catch-all. (For a `small` idea you are not
-invoked at all — the orchestrator files its tasks under a single epic named after
-the idea.)
+for forces the orchestrator to invent a catch-all. (For a `small` idea you are
+normally not invoked — the orchestrator files its tasks under a single epic named
+after the idea. The exception is a run whose definition merged task decomposition
+into this step: there you ARE invoked for a `small` idea, and you propose no epics
+for it, only its complete task list.)
 
 ## Result
 

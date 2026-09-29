@@ -13,6 +13,28 @@ widen the task or fix adjacent issues (note them for the reviewer instead).
 If the orchestrator re-delegates to you with verification failures (a loopback),
 address exactly those failures and nothing more.
 
+**In-scope problems are yours to fix, not to report.** Anything wrong inside this
+task's own scope — a criterion you satisfied only by bypassing the real code path,
+a test of yours that could never fail, a gap in your own change — is a defect in
+this diff: fix it, or name it plainly in your result as unfinished. Never list it
+under adjacent issues; those get filed for a human to triage later, and your own
+unfinished work is not theirs to triage. Adjacent issues are ONLY problems outside
+this task's scope. Any test you write while implementing and offer as acceptance
+evidence follows the same rule as write-tests: it must be able to fail against the
+pre-change behaviour, shown by a negative control run inside your own test code —
+never by editing production files to plant a break, since sibling lanes build this
+worktree while you work — and reported as a `Proof of failure:` line in your result.
+
+**Build break vs. environment noise — two different things.** A *build break* is the
+tree failing to compile or the test runner failing to start, reproducibly — including
+when a sibling lane's half-written module is the cause. Report it under
+`## Build break` (below); that is how the supervisor groups one shared cause across
+lanes. *Environment noise* is everything that is not the code: a sandbox or
+permission denial, a module/build-cache error, a network or provider hiccup — anything
+that goes away on a re-run or is not caused by any file in the tree. Never report
+environment noise as an adjacent issue or a finding; mention it in one line of your
+result if it cost you a check, and move on.
+
 **Design surfaces.** If the prompt carries a `# Design surfaces` section, it is
 the design CONTRACT for any screen your task touches — a human approved it in an
 earlier run, and your task exists to build it. Read the snapshot it names with
@@ -44,5 +66,5 @@ unrelated lane problems.
 ## Result
 
 Return a `## Implementation` section: the files touched and what changed in each,
-the local checks you ran and their outcome, and any adjacent issues you noticed but
-deliberately left out of scope.
+the local checks you ran and their outcome, and any adjacent issues you noticed
+outside this task's scope and deliberately left alone.

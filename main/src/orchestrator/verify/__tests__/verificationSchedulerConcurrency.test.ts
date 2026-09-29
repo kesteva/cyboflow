@@ -29,6 +29,7 @@ import { VerifyCapabilityStore } from '../capabilityStore';
 import {
   MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL,
   MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
+  VERIFY_XCODE_LEASE,
   verifyMobileSlot,
 } from '../mobileGates';
 import { Mutex } from '../../../utils/mutex';
@@ -137,6 +138,9 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
   mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
+  requireProvenRunbook: VISUAL_VERIFY_DEFAULTS.requireProvenRunbook,
+  exploreDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.exploreDeadlineFloorMs,
+  mobileDriveEngine: VISUAL_VERIFY_DEFAULTS.mobileDriveEngine,
 };
 
 const PASS_VERDICT: VerdictV1 = {
@@ -677,7 +681,8 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
       const scheduler = initScheduler({
         agentRunner: runner,
         mobileToolchainProbe: async () => true,
-        config: { ...CONFIG, mobileSimSlots: configured, agentSlots: 8 },
+        // Maestro: the §B3 count-1 xcode lease would otherwise serialise the pool.
+        config: { ...CONFIG, mobileSimSlots: configured, agentSlots: 8, mobileDriveEngine: 'maestro' },
       });
 
       for (let i = 0; i < 5; i++) enqueueOne(scheduler, 'run-clamp', 'mobile-flow');
@@ -688,6 +693,40 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
       releaseAll();
       await flushDrain();
     }
+  });
+
+  it('X-3: the verify:xcode lease follows the LIVE engine, and the runner is handed the same value', async () => {
+    seedRun(db, 'run-mobile-live-engine');
+    const { runner, run, releaseAll } = gatedRunner();
+    // Booted on maestro (no xcode lease), then flipped to xcode in Settings.
+    const boot: ResolvedVisualVerifyConfig = { ...CONFIG, mobileSimSlots: 2, mobileDriveEngine: 'maestro' };
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      mobileToolchainProbe: async () => true,
+      config: boot,
+      liveConfig: () => ({ ...boot, mobileDriveEngine: 'xcode' }),
+    });
+
+    const ids = [
+      enqueueOne(scheduler, 'run-mobile-live-engine', 'mobile-flow'),
+      enqueueOne(scheduler, 'run-mobile-live-engine', 'mobile-flow'),
+    ];
+    await flushDrain();
+
+    // Two simulator slots, but ONE Xcode session at a time: the second row waits.
+    const queued = ids.filter((id) => statusOf(id) === 'queued');
+    expect(ids.filter((id) => statusOf(id) === 'running')).toHaveLength(1);
+    expect(queued).toHaveLength(1);
+    expect(mutex.isLocked(VERIFY_XCODE_LEASE)).toBe(true);
+    expect(mutex.isLocked(verifyMobileSlot(1))).toBe(false);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect((run.mock.calls[0][0] as VerificationAgentRequest).mobileDriveEngine).toBe('xcode');
+
+    releaseAll();
+    await flushDrain();
+    expect(statusOf(queued[0])).toBe('running');
+    releaseAll();
+    await flushDrain();
   });
 
   it('runs a mobile row on a port-EXHAUSTED pool (it needs no port at all)', async () => {

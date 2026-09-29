@@ -252,6 +252,59 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
   });
 
   // -------------------------------------------------------------------------
+  // (2a-pid) Every stored event carries the identity of the SDK process that
+  //          produced it: warm turns share one, a cold respawn mints a new one
+  //          (the usage fold segments modelUsage on it — usageFold.ts).
+  // -------------------------------------------------------------------------
+  it('stamps one process_instance_id across warm turns and a new one on a cold respawn', async () => {
+    const panelId = 'p-warm-pid';
+    seedRun(db, { id: panelId }); // raw_events.run_id FK
+    fakeSdk.setScenario(twoTurnScenario());
+    // SDK-produced rows only: the prompt echo is persisted before query() starts.
+    const stampsByType = (): Array<{ type: unknown; pid: unknown }> =>
+      (db.prepare(`SELECT payload_json FROM raw_events WHERE event_type != 'user' ORDER BY id`).all() as Array<{
+        payload_json: string;
+      }>)
+        .map((r) => JSON.parse(r.payload_json) as Record<string, unknown>)
+        .map((p) => ({ type: p.type, pid: p.cyboflow_process_instance_id }));
+
+    await mgr.spawnCliProcess({ panelId, sessionId: panelId, worktreePath: '/tmp/wt', prompt: 'first', permissionMode: 'ignore' });
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'second',
+      permissionMode: 'ignore',
+      isResume: true,
+    });
+    const warm = stampsByType();
+    expect(warm.map((r) => r.type)).toEqual(expect.arrayContaining(['system', 'assistant', 'result']));
+    const warmIds = new Set(warm.map((r) => r.pid));
+    expect(warmIds.size).toBe(1);
+    const [warmId] = Array.from(warmIds);
+    expect(typeof warmId).toBe('string');
+
+    // Fingerprint drift → a second query(), i.e. a new SDK process.
+    fakeSdk.setScenario(twoTurnScenario());
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'third',
+      permissionMode: 'ignore',
+      isResume: true,
+      model: 'opus',
+    });
+    expect(fakeSdk.calls).toHaveLength(2);
+    const respawned = stampsByType().slice(warm.length);
+    expect(respawned.length).toBeGreaterThan(0);
+    const respawnIds = new Set(respawned.map((r) => r.pid));
+    expect(respawnIds.size).toBe(1);
+    expect(respawnIds.has(warmId)).toBe(false);
+    expect(typeof Array.from(respawnIds)[0]).toBe('string');
+  });
+
+  // -------------------------------------------------------------------------
   // (2a') Effective-agent drift → close warm + cold-spawn WITH --resume.
   //       A mid-run Agents-pane edit (a new agent_overrides row) changes the
   //       run's effective agent set, which the overlay .md files are written

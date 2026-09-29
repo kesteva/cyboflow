@@ -1,5 +1,5 @@
 /**
- * webTabsRepository — tab rows and the web audit trail (migration 146).
+ * webTabsRepository — tab rows and the web audit trail (migration 147).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebTabsRepository } from '../webTabsRepository';
 
-const SQL = readFileSync(join(__dirname, '..', 'migrations', '146_session_web_tabs.sql'), 'utf-8');
+const SQL = readFileSync(join(__dirname, '..', 'migrations', '147_session_web_tabs.sql'), 'utf-8');
 
 let db: Database.Database;
 let repo: WebTabsRepository;

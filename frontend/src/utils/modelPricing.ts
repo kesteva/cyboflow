@@ -14,11 +14,10 @@
  * is at standard pricing) and the 5-minute cache-write tier.
  */
 import type { SessionTokenBreakdown } from '../hooks/useSessionMetrics';
+import { claudeModelFamily, type AgentModelAlias } from '../../../shared/types/agents';
 
-type ModelFamily = 'fable' | 'opus' | 'sonnet' | 'haiku';
-
-/** Per-MTok list prices (USD per million tokens) by model family. */
-const PER_MTOK: Record<ModelFamily, { input: number; output: number }> = {
+/** Per-MTok list prices (USD per million tokens) by Claude model family. */
+const PER_MTOK: Record<AgentModelAlias, { input: number; output: number }> = {
   fable: { input: 10, output: 50 },
   opus: { input: 5, output: 25 },
   sonnet: { input: 3, output: 15 },
@@ -37,20 +36,11 @@ export interface ModelRates {
   cacheRead: number;
 }
 
-/** Resolve a model string to its family, or null when unrecognized. */
-function modelFamily(model: string | null): ModelFamily | null {
-  if (!model) return null;
-  const m = model.toLowerCase();
-  if (m.includes('fable')) return 'fable';
-  if (m.includes('opus')) return 'opus';
-  if (m.includes('sonnet')) return 'sonnet';
-  if (m.includes('haiku')) return 'haiku';
-  return null;
-}
-
 /** Per-token rates for a model string, or null when the family is unknown. */
 export function ratesForModel(model: string | null): ModelRates | null {
-  const family = modelFamily(model);
+  // The shared family derivation (also used by the per-step model rail), so
+  // a concrete id like 'claude-opus-4-8[1m]' prices and colors the same.
+  const family = claudeModelFamily(model);
   if (family === null) return null;
   const base = PER_MTOK[family];
   return {

@@ -26,9 +26,21 @@ import type { ExecutionDiffStats } from '../database/database';
  * earlier rows in a same-before_commit_hash run are cumulative subsets of
  * it. Totals are then summed across runs. A row with before_commit_hash
  * === null is treated like any other value for the "same run" comparison
- * (null === null groups together, same as any other equal hash) — this
- * keeps the comparison simple with no special-casing, and matches legacy
- * rows created before before_commit_hash was populated.
+ * (null === null groups together, same as any other equal hash).
+ *
+ * A null hash arrives two ways: legacy rows created before the column was
+ * populated, and a turn whose HEAD lookup failed (getCurrentCommitHash
+ * returns '' on a git error, which createExecutionDiff stores as null).
+ * Grouping nulls is deliberate: legacy sessions are all-null cumulative
+ * working-directory rows, and splitting them into singleton runs would
+ * reintroduce exactly the N-fold overcount this function exists to fix.
+ * The accepted cost is on the transient-failure path: two or more
+ * CONSECUTIVE failed lookups spanning a real commit collapse into one run,
+ * so the earlier rows' stats are dropped (an undercount). A single failed
+ * lookup between two known hashes is unaffected — its neighbours differ, so
+ * it is already its own run. The two null sources are indistinguishable in
+ * the stored row, so the undercount cannot be avoided here without a schema
+ * change.
  *
  * files_changed dedup is UNCHANGED: it is a union of all rows' file lists
  * regardless of run — a union of subsets is already correct, since a file

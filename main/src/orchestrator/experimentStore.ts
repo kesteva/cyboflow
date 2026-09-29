@@ -439,6 +439,34 @@ export function isArmSettledForGrading(db: DatabaseLike, runId: string, status: 
   return true;
 }
 
+/**
+ * Stamp `workflow_runs.gate_reached_at` the first time a run lands on its FINAL
+ * human-review gate — i.e. it is at `awaiting_review` AND
+ * {@link isArmSettledForGrading} says so (not paused behind an open MID-RUN gate).
+ * No-op for every other status (a mid-run gate, or any of the other three settled
+ * statuses — completed/failed/canceled have no "gate wait" to measure).
+ *
+ * First-write-wins: the guarded `gate_reached_at IS NULL` UPDATE makes repeat
+ * calls (a re-fired terminal event, a run that re-parks at the same gate) a
+ * no-op once stamped. try/catch guards a minimal test schema predating this
+ * column (mirrors the fail-soft pattern used throughout this module).
+ */
+export function stampArmGateReachedAt(db: DatabaseLike, runId: string, status: string): void {
+  if (status !== 'awaiting_review') return;
+  if (!isArmSettledForGrading(db, runId, status)) return;
+  try {
+    db.prepare(
+      `UPDATE workflow_runs SET gate_reached_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND gate_reached_at IS NULL`,
+    ).run(runId);
+  } catch (err) {
+    // Pre-145 DB (no gate_reached_at column) or a minimal test schema — no-op.
+    // Any other write failure propagates to the caller's logged fail-soft catch.
+    if (err instanceof Error && /no such column: gate_reached_at/.test(err.message)) return;
+    throw err;
+  }
+}
+
 /** Outcome of a reconcile pass (returned so callers can log / drive the clone sweep). */
 export type ReconcileOutcome =
   | { changed: false; status: ExperimentStatus }

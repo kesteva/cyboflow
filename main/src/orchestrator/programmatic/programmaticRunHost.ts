@@ -46,6 +46,7 @@ import type {
   ReviewLoopRequest,
   SetAsideFindingInput,
   StepReport,
+  SystemicPauseInfo,
   SystemicPauseVerdict,
   TriageDecision,
   VerificationPosture,
@@ -64,6 +65,7 @@ import type { ReviewItemKind, SupervisorRecommendationChoice } from '../../../..
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
 import { buildBreakGroupKey } from './buildBreakDetector';
+import type { EnvironmentActionKind, EnvironmentActionResult } from './environmentActions';
 
 /**
  * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
@@ -282,6 +284,9 @@ export interface StepReporter {
   report(runId: string, stepId: string, status: WorkflowStepReportStatus): void;
 }
 
+/** Title of the once-per-run finding that lane build slots are unavailable. */
+export const LANE_BUILD_SLOTS_UNAVAILABLE_TITLE = 'Lane build slots unavailable — lanes may share build caches';
+
 export interface ProgrammaticRunHostArgs {
   runId: string;
   projectId: number;
@@ -445,6 +450,32 @@ export interface ProgrammaticRunHostArgs {
    */
   fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
   /**
+   * The run worktree's ENVIRONMENT ACTIONS (a closed, host-run set — see
+   * environmentActions.ts). Present ⇒ lane triage sees an environment report and
+   * may request `fix_environment`, and the fan-out preflight installs missing
+   * dependencies. Absent ⇒ neither (the pre-seam behavior).
+   */
+  environmentActions?: {
+    describe(): string;
+    available(): EnvironmentActionKind[];
+    missingDependencyDirs(): string[];
+    run(action: EnvironmentActionKind): Promise<EnvironmentActionResult>;
+  };
+  /**
+   * The run's LANE BUILD SLOTS (laneBuildSlots.ts — the `LaneBuildSlots`
+   * instance whose resolver the step runner holds). Present ⇒ the fan-out
+   * preflight prepares them EAGERLY (exclude + git verification) so a failure
+   * surfaces before any lane dispatches, and the host subscribes to their
+   * once-per-run "unavailable" signal: one monitor chat line plus one
+   * NON-BLOCKING finding. Never blocks anything — a lane without a slot spawns
+   * as it did before slots existed. Absent (kill switch, no worktree) ⇒ neither,
+   * and no notice: a deliberate off switch is not a surprise.
+   */
+  laneBuildSlots?: {
+    prepare(): Promise<boolean>;
+    setUnavailableListener(listener: (reason: string) => void): void;
+  };
+  /**
    * SUPERVISOR-AUDIT sink. Files the NON-BLOCKING record of ONE review-loop
    * consult — the verdict, its rationale, and the steering the re-run will be
    * given — so an autonomous decision to spend (or not spend) another design
@@ -605,7 +636,14 @@ export class ProgrammaticRunHost implements ControllerHost {
   /** Autonomous resolves spent on this walk — see {@link MONITOR_WALK_RESOLVE_CAP}. */
   private walkResolveCount = 0;
 
-  constructor(private readonly args: ProgrammaticRunHostArgs) {}
+  constructor(private readonly args: ProgrammaticRunHostArgs) {
+    // The slots report their FIRST failure once (whether in the eager preflight
+    // or a later lane's mkdir); the notice itself is fail-soft, so the floating
+    // promise never rejects.
+    args.laneBuildSlots?.setUnavailableListener((reason) => {
+      void this.reportLaneBuildSlotsUnavailable(reason);
+    });
+  }
 
   reportStep(stepId: string, status: WorkflowStepReportStatus): void {
     try {
@@ -1230,10 +1268,11 @@ export class ProgrammaticRunHost implements ControllerHost {
     step: WorkflowStep,
     ctx: ControllerStepContext,
     error: string | undefined,
+    info?: SystemicPauseInfo,
   ): Promise<SystemicPauseVerdict> {
     if (!this.args.systemicGate) return 'giveup';
     this.injectMonitorTurn(
-      `⏸ Run paused — step **${step.name}** hit a systemic failure (${(error ?? 'no error text').slice(0, 200)}). It will auto-resume when the limit resets, or resolve the pause item in the review queue to retry now.`,
+      `⏸ Run paused — step **${step.name}** hit a systemic failure (${(error ?? 'no error text').slice(0, 200)}). It will auto-resume when the limit resets. On the pause item: **Retry now**, **Switch runtime & retry** (re-target the blocked agents and retry at once), or **Stop waiting**.`,
     );
     try {
       const verdict = await this.args.systemicGate.awaitClear({
@@ -1241,6 +1280,7 @@ export class ProgrammaticRunHost implements ControllerHost {
         projectId: this.args.projectId,
         step,
         error,
+        ...(info ? { info } : {}),
         signal: ctx.signal,
       });
       if (verdict === 'retry') this.injectMonitorTurn(`▶ Resuming — retrying step **${step.name}**.`);
@@ -1441,7 +1481,8 @@ export class ProgrammaticRunHost implements ControllerHost {
   /**
    * LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted when ONE
    * sprint fan-out lane exhausts an automatic budget, BEFORE the controller
-   * settles it 'failed'. Resolves the executable verdict only (give_up | rescue),
+   * settles it 'failed' (or, for a commit-integrity flag, before it refuses to
+   * integrate). Resolves the executable verdict only (give_up | rescue | accept),
    * so the controller never learns what a monitor, a task edit, or a finding is.
    *
    * Order of business, each arm short-circuiting to the pre-seam behavior:
@@ -1524,6 +1565,15 @@ export class ProgrammaticRunHost implements ControllerHost {
           innerStepIds: [...req.innerStepIds],
           taskTitle: facts?.taskTitle ?? '',
           taskBody: previousBody ?? '',
+          ...(req.priorRescues !== undefined && req.priorRescues.length > 0
+            ? { priorRescues: [...req.priorRescues] }
+            : {}),
+          ...(req.stage !== undefined ? { stage: req.stage } : {}),
+          ...(req.dependents !== undefined && req.dependents.length > 0
+            ? { dependents: req.dependents.map((id) => this.dependentFacts(id)) }
+            : {}),
+          ...(req.acceptUnavailable === true ? { acceptUnavailable: true } : {}),
+          ...(this.environmentForTriage() ?? {}),
         },
         req.signal,
       );
@@ -1539,6 +1589,10 @@ export class ProgrammaticRunHost implements ControllerHost {
             error: decision.systemicError,
           });
           return { kind: 'systemic', error: decision.systemicError };
+        }
+        if (decision.releaseDependents === true) {
+          await this.fileDependentsReleasedFinding({ taskRef, req, reason: decision.reason ?? '' });
+          return { kind: 'give_up', releaseDependents: true };
         }
         return { kind: 'give_up' };
       }
@@ -1561,7 +1615,30 @@ export class ProgrammaticRunHost implements ControllerHost {
           reason: decision.reason,
           ...(decision.guidance !== undefined ? { guidance: decision.guidance } : {}),
         });
+        if (decision.releaseDependents === true) {
+          await this.fileDependentsReleasedFinding({ taskRef, req, reason: decision.reason });
+          return { kind: 'give_up', releaseDependents: true };
+        }
         return { kind: 'give_up' };
+      }
+
+      if (decision.verdict === 'fix_environment') {
+        return await this.runLaneEnvironmentFix({ taskRef, req, decision });
+      }
+
+      if (decision.verdict === 'accept') {
+        // The brain judged the task's substance done and waived the rest (for a
+        // commit-integrity flag: the uncommitted paths are not this lane's). The
+        // lane proceeds past the failing step. Audited like a rescue — it
+        // overrides a gate — and every waived item becomes its own follow-up so
+        // nothing waived is lost. Re-drives nothing, so it costs no rescue budget.
+        await this.fileLaneAcceptFinding({
+          taskRef,
+          req,
+          reason: decision.reason,
+          followUps: decision.followUps ?? [],
+        });
+        return { kind: 'accept', reason: decision.reason };
       }
 
       let adjusted = false;
@@ -1852,7 +1929,9 @@ export class ProgrammaticRunHost implements ControllerHost {
     if (!this.args.fileLaneTriageFinding) return;
     try {
       const lines = [
-        `The run supervisor rescued task **${args.taskRef}** after its lane exhausted an automatic budget.`,
+        args.req.stage === 'early'
+          ? `The run supervisor steered task **${args.taskRef}**'s FINAL automatic attempt before it ran, changing its approach.`
+          : `The run supervisor rescued task **${args.taskRef}** after its lane exhausted an automatic budget.`,
         '',
         `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
         `- Verdict: ${args.adjusted ? 'adjust_and_retry (task body REPLACED)' : 'retry'} — re-driving from \`${args.targetStepId}\``,
@@ -1890,7 +1969,7 @@ export class ProgrammaticRunHost implements ControllerHost {
         }
       }
       await this.args.fileLaneTriageFinding({
-        title: `Monitor rescued ${args.taskRef} (${args.req.failureKind})`,
+        title: `Monitor ${args.req.stage === 'early' ? 'steered' : 'rescued'} ${args.taskRef} (${args.req.failureKind})`,
         body: lines.join('\n'),
       });
     } catch (err) {
@@ -1940,6 +2019,279 @@ export class ProgrammaticRunHost implements ControllerHost {
       });
     } catch (err) {
       this.args.logger?.warn('[ProgrammaticRunHost] lane-correction finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Audit an ACCEPT: the supervisor let a lane past a gate that failed it (or,
+   * for commit-integrity, past the backstop that refuses to integrate a lane with
+   * uncommitted work). One audit finding, then ONE follow-up finding per waived
+   * item so each can be triaged on its own. Fail-soft — a broken review queue
+   * must never cost the lane its verdict.
+   */
+  private async fileLaneAcceptFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+    followUps: string[];
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    const commitIntegrity = args.req.failureKind === 'commit-integrity';
+    try {
+      const lines = [
+        commitIntegrity
+          ? `The run supervisor let task **${args.taskRef}** integrate although its lane made no git commit while the shared worktree held uncommitted changes.`
+          : `The run supervisor let task **${args.taskRef}** proceed past \`${args.req.stepId}\`, which had failed it, judging the task's substance done and the rest waivable.`,
+        '',
+        `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        commitIntegrity
+          ? '- Verdict: accept — the supervisor judged the uncommitted changes are not this lane\'s work. Check the worktree before merging if that looks wrong.'
+          : `- Verdict: accept — ${args.followUps.length} waived item(s), each filed as its own follow-up.`,
+        '',
+        '## Reason',
+        '',
+        args.reason.trim(),
+      ];
+      if (args.followUps.length > 0) {
+        lines.push('', '## Waived', '', ...args.followUps.map((f) => `- ${f}`));
+      }
+      lines.push('', commitIntegrity ? '## Probe evidence' : '## Failure excerpt', '', args.req.errorExcerpt.trim());
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor accepted ${args.taskRef} (${args.req.failureKind})`,
+        body: lines.join('\n'),
+      });
+      for (const followUp of args.followUps) {
+        const headline = followUp.split('\n')[0].trim();
+        await this.args.fileLaneTriageFinding({
+          title: `Follow-up for ${args.taskRef}: ${headline.length > 90 ? `${headline.slice(0, 89)}…` : headline}`,
+          body: [
+            `Waived by the run supervisor when it accepted **${args.taskRef}** past a failing \`${args.req.stepId}\` (${args.req.failureKind}). It still needs doing or checking:`,
+            '',
+            followUp,
+          ].join('\n'),
+        });
+      }
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-accept finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** The `environment` field of a lane-triage request, or undefined when unwired. */
+  private environmentForTriage(): { environment: { report: string; actions: EnvironmentActionKind[] } } | undefined {
+    const env = this.args.environmentActions;
+    if (!env) return undefined;
+    try {
+      return { environment: { report: env.describe(), actions: env.available() } };
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment report failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Execute a supervisor's `fix_environment`: run the host-owned action, audit it,
+   * and on success re-drive the lane as a FREE rescue (the lane failed on the
+   * worktree, not its work, so the run pool is not charged). A failed or
+   * unavailable action lets the lane fail, with the command output on record.
+   */
+  private async runLaneEnvironmentFix(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    decision: { action: EnvironmentActionKind; targetStepId: string; guidance: string; reason: string };
+  }): Promise<LaneRescueOutcome> {
+    const env = this.args.environmentActions;
+    const { taskRef, req, decision } = args;
+    if (!env) return { kind: 'give_up' };
+    this.injectMonitorTurn(`🔧 Running environment action \`${decision.action}\` for **${taskRef}**…`);
+    let result: EnvironmentActionResult;
+    try {
+      result = await env.run(decision.action);
+    } catch (err) {
+      result = { ok: false, summary: 'the action threw', detail: err instanceof Error ? err.message : String(err) };
+    }
+    this.injectMonitorTurn(
+      result.ok
+        ? `✔ \`${decision.action}\`: ${result.summary}. Re-driving **${taskRef}** from \`${decision.targetStepId}\`.`
+        : `✖ \`${decision.action}\`: ${result.summary} — letting **${taskRef}** fail.`,
+    );
+    await this.fileEnvironmentFinding({
+      title: result.ok
+        ? `Monitor fixed the environment for ${taskRef} (${decision.action})`
+        : `Environment fix failed for ${taskRef} (${decision.action})`,
+      lines: [
+        `The run supervisor judged that **${taskRef}** failed on the worktree environment, not its work (\`${req.failureKind}\` at \`${req.stepId}\`), and ran \`${decision.action}\`.`,
+        '',
+        `- Result: ${result.summary}`,
+        `- Reason: ${decision.reason.trim().length > 0 ? decision.reason.trim() : '(none given)'}`,
+        result.ok ? `- Re-driving the lane from \`${decision.targetStepId}\`.` : '- The lane settles failed.',
+        '',
+        '## Output (tail)',
+        '',
+        '```',
+        result.detail,
+        '```',
+      ],
+    });
+    if (!result.ok) return { kind: 'give_up' };
+    return { kind: 'rescue', targetStepId: decision.targetStepId, guidance: decision.guidance, adjusted: false, free: true };
+  }
+
+  /**
+   * Fan-out PREFLIGHT (see `ControllerHost.prepareFanOutEnvironment`), both
+   * halves fail-soft and neither blocks the fan-out:
+   *   1. prepare the lane BUILD SLOTS' root (exclude + git verification) now, so
+   *      a failure's notice lands before any lane runs instead of mid-lane;
+   *   2. when the worktree has a lockfile but packages with no `node_modules`,
+   *      install before any lane runs, so no lane spends an attempt on `command
+   *      not found`. A failed install is reported and the fan-out proceeds (lane
+   *      triage can still see the report and act).
+   */
+  async prepareFanOutEnvironment(): Promise<void> {
+    await this.prepareLaneBuildSlots();
+    await this.installMissingDependencies();
+  }
+
+  /**
+   * Eager root preparation of the lane build slots. The result is not needed
+   * here — a failure reaches `reportLaneBuildSlotsUnavailable` through the
+   * listener, and a lane without a slot spawns as before.
+   */
+  private async prepareLaneBuildSlots(): Promise<void> {
+    const slots = this.args.laneBuildSlots;
+    if (!slots) return;
+    try {
+      await slots.prepare();
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane build-slot preflight failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * The ONE notice that lane build slots are unavailable (laneBuildSlots.ts
+   * delivers at most one reason per run): a monitor chat line plus a
+   * NON-BLOCKING finding, the same two channels a failed dependency install
+   * uses. The sprint continues either way — this only makes the fallback
+   * visible. Worded as "some or all lanes": only a failed git verification is
+   * sticky for the run; a failed exclude write is retried on the next lane, and
+   * a failed mkdir costs only that slot.
+   */
+  private async reportLaneBuildSlotsUnavailable(reason: string): Promise<void> {
+    this.injectMonitorTurn(
+      `⚠ Lane build slots unavailable — ${reason}. Some or all lanes may run without one and share the default build caches; the sprint continues.`,
+    );
+    await this.fileEnvironmentFinding({
+      title: LANE_BUILD_SLOTS_UNAVAILABLE_TITLE,
+      lines: [
+        'Cyboflow could not give some or all of this run\'s sprint lanes their private build directories (`.cyboflow/build-slots/slot-<n>/`).',
+        '',
+        `- Reason: ${reason}.`,
+        '- Scope: a failed git verification (a `.gitignore` re-include, files already tracked there) turns build slots off for the rest of the run; a failed exclude write or directory creation may be temporary, so later lanes can still get a slot.',
+        '- Consequence: a lane without a slot builds with the toolchains\' shared default caches, as lanes did before build slots existed. Concurrent Xcode builds can fail on `XCBuildData/build.db: database is locked`, and Codex lanes can hit `Operation not permitted` (sandbox EPERM) on the clang/Swift module cache.',
+        '- The sprint continues: nothing is blocked, parked or serialized.',
+        '',
+        'To be sure every lane gets a build slot, fix the reason above (for example remove a `.gitignore` rule that re-includes `.cyboflow/build-slots/`, or untrack files there with `git rm -r --cached -- .cyboflow/build-slots`) and start a new run. `CYBOFLOW_DISABLE_LANE_BUILD_SLOTS=1` turns build slots off deliberately, without this notice.',
+      ],
+    });
+  }
+
+  /** The dependency half of the fan-out preflight (see `prepareFanOutEnvironment`). */
+  private async installMissingDependencies(): Promise<void> {
+    const env = this.args.environmentActions;
+    if (!env) return;
+    try {
+      const missing = env.missingDependencyDirs();
+      if (missing.length === 0 || !env.available().includes('install_dependencies')) return;
+      const where = missing.map((rel) => (rel === '.' ? 'node_modules' : `${rel}/node_modules`)).join(', ');
+      this.injectMonitorTurn(`🔧 The worktree is missing installed dependencies (${where}). Installing before any lane runs…`);
+      const result = await env.run('install_dependencies');
+      this.injectMonitorTurn(
+        result.ok
+          ? `✔ Dependencies installed (${result.summary}).`
+          : `✖ Dependency install failed (${result.summary}). Lanes will run anyway; typecheck/lint may fail until this is fixed.`,
+      );
+      if (!result.ok) {
+        await this.fileEnvironmentFinding({
+          title: 'Dependency install failed before the sprint started',
+          lines: [
+            `The worktree was missing installed dependencies (${where}), and the pre-dispatch install failed: ${result.summary}.`,
+            '',
+            '## Output (tail)',
+            '',
+            '```',
+            result.detail,
+            '```',
+          ],
+        });
+      }
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment preflight failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async fileEnvironmentFinding(args: { title: string; lines: string[] }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      await this.args.fileLaneTriageFinding({ title: args.title, body: args.lines.join('\n') });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] environment finding failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** A dependent lane's display facts for the triage prompt (fail-soft to its id). */
+  private dependentFacts(itemId: string): { taskRef: string; taskTitle: string } {
+    try {
+      const facts = this.args.readLaneTask?.(itemId);
+      return { taskRef: facts?.taskRef ?? itemId, taskTitle: facts?.taskTitle ?? '' };
+    } catch {
+      return { taskRef: itemId, taskTitle: '' };
+    }
+  }
+
+  /**
+   * Audit a RELEASE: the supervisor let this lane fail but un-blocked the lanes
+   * waiting on it. Fail-soft.
+   */
+  private async fileDependentsReleasedFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const deps = (args.req.dependents ?? []).map((id) => this.dependentFacts(id).taskRef);
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor released the lanes waiting on ${args.taskRef}`,
+        body: [
+          `Task **${args.taskRef}** failed (\`${args.req.failureKind}\` at \`${args.req.stepId}\`), but the run supervisor judged that what its dependents build on is committed and working, so they were allowed to run instead of being blocked.`,
+          '',
+          `- Released: ${deps.join(', ')}`,
+          `- Reason: ${args.reason.trim().length > 0 ? args.reason.trim() : '(none given)'}`,
+          '',
+          `${args.taskRef} itself still needs your attention at the run's gate.`,
+        ].join('\n'),
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] dependents-released finding failed (fail-soft)', {
         runId: this.args.runId,
         taskRef: args.taskRef,
         error: err instanceof Error ? err.message : String(err),

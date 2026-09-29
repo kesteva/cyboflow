@@ -150,6 +150,42 @@ describe('cyboflow.config', () => {
       ).rejects.toSatisfy(isBadRequest);
       expect(configOps.applyRunTypeDefault).not.toHaveBeenCalled();
     });
+
+    it('a whitespace-only key is rejected, not just an empty one', async () => {
+      const configOps = makeFakeConfigOps();
+      const caller = appRouter.createCaller(createContext({ configOps }));
+      await expect(
+        caller.cyboflow.config.applyRunTypeDefault({
+          key: '   ',
+          op: { kind: 'merge', value: {} },
+        }),
+      ).rejects.toSatisfy(isBadRequest);
+      expect(configOps.applyRunTypeDefault).not.toHaveBeenCalled();
+    });
+
+    it('a blank/whitespace-only merge model is rejected rather than suppressing the launch-model floor', async () => {
+      const configOps = makeFakeConfigOps();
+      const caller = appRouter.createCaller(createContext({ configOps }));
+      await expect(
+        caller.cyboflow.config.applyRunTypeDefault({
+          key: 'quick',
+          op: { kind: 'merge', value: { model: '   ' } },
+        }),
+      ).rejects.toSatisfy(isBadRequest);
+      expect(configOps.applyRunTypeDefault).not.toHaveBeenCalled();
+    });
+
+    it('a blank/whitespace-only replace model is rejected', async () => {
+      const configOps = makeFakeConfigOps();
+      const caller = appRouter.createCaller(createContext({ configOps }));
+      await expect(
+        caller.cyboflow.config.applyRunTypeDefault({
+          key: 'quick',
+          op: { kind: 'replace', value: { model: '' } },
+        }),
+      ).rejects.toSatisfy(isBadRequest);
+      expect(configOps.applyRunTypeDefault).not.toHaveBeenCalled();
+    });
   });
 
   // -------------------------------------------------------------------------

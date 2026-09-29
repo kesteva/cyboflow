@@ -199,6 +199,19 @@ function probe(over: Partial<VerifyProbeRow> = {}): VerifyProbeRow {
   return { id: 'browser-driving', state: 'ok', detail: '', fix: null, ...over };
 }
 
+describe('the xcode-mcp row (§B2/§B8)', () => {
+  it('is labelled for the capability and offers "Approve Xcode access"', () => {
+    expect(PROBE_LABEL['xcode-mcp']).toBe('Xcode device control');
+    expect(probeFixLabel(probe({ id: 'xcode-mcp', state: 'missing', fix: 'approve-xcode-access' }))).toBe(
+      'Approve Xcode access',
+    );
+    // A missing grant with a button is a step remaining, not a fault.
+    expect(probeStatus(probe({ id: 'xcode-mcp', state: 'missing', fix: 'approve-xcode-access' }))).toBe(
+      'pending action',
+    );
+  });
+});
+
 describe('probeFixLabel', () => {
   it('labels the offered remediation, or none', () => {
     expect(probeFixLabel(probe({ state: 'missing', fix: 'provision-chromium' }))).toBe('Install');

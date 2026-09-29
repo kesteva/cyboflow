@@ -93,6 +93,7 @@ class TestableClaudeCodeManager extends ClaudeCodeManager {
     sessionId: string;
     worktreePath: string;
     prompt: string;
+    laneEnv?: Readonly<Record<string, string>>;
   }): Promise<Options> {
     return (
       this as unknown as { buildSdkOptions(o: unknown): Promise<Options> }
@@ -176,6 +177,55 @@ describe('ClaudeCodeManager — SDK spawn PATH', () => {
       expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeTruthy();
     } finally {
       delete process.env.CYBOFLOW_SPAWN_PATH_PROBE;
+    }
+  });
+
+  // A programmatic fan-out lane's build-slot env (laneBuildSlots.ts) rides
+  // ClaudeSpawnOptions.laneEnv and is merged LAST, so it beats the inherited env.
+  it('merges a lane build-slot env last, overriding an inherited value', async () => {
+    const savedModuleCache = process.env.CLANG_MODULE_CACHE_PATH;
+    process.env.CLANG_MODULE_CACHE_PATH = '/inherited/module-cache';
+    try {
+      const env = spawnEnv(
+        await mgr.publicBuildSdkOptions({
+          panelId: 'panel-1',
+          sessionId: 'sess-1',
+          worktreePath: '/tmp/w',
+          prompt: 'hi',
+          laneEnv: {
+            CYBOFLOW_LANE_SCRATCH_DIR: '/tmp/w/.cyboflow/build-slots/slot-0',
+            CLANG_MODULE_CACHE_PATH: '/tmp/w/.cyboflow/build-slots/slot-0/clang-module-cache',
+          },
+        }),
+      );
+      expect(env.CYBOFLOW_LANE_SCRATCH_DIR).toBe('/tmp/w/.cyboflow/build-slots/slot-0');
+      expect(env.CLANG_MODULE_CACHE_PATH).toBe('/tmp/w/.cyboflow/build-slots/slot-0/clang-module-cache');
+      // The run keys are untouched.
+      expect(env.PATH).toBe(`${NODE_DIR}:${SHELL_PATH}`);
+      expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeTruthy();
+    } finally {
+      if (savedModuleCache === undefined) delete process.env.CLANG_MODULE_CACHE_PATH;
+      else process.env.CLANG_MODULE_CACHE_PATH = savedModuleCache;
+    }
+  });
+
+  it('adds no lane keys when no laneEnv is passed', async () => {
+    // Cleared first: this suite may itself run inside a cyboflow lane, whose
+    // process env already carries them.
+    const saved = {
+      CYBOFLOW_LANE_SCRATCH_DIR: process.env.CYBOFLOW_LANE_SCRATCH_DIR,
+      SWIFTPM_MODULECACHE_OVERRIDE: process.env.SWIFTPM_MODULECACHE_OVERRIDE,
+    };
+    delete process.env.CYBOFLOW_LANE_SCRATCH_DIR;
+    delete process.env.SWIFTPM_MODULECACHE_OVERRIDE;
+    try {
+      const env = spawnEnv(await build());
+      expect(env.CYBOFLOW_LANE_SCRATCH_DIR).toBeUndefined();
+      expect(env.SWIFTPM_MODULECACHE_OVERRIDE).toBeUndefined();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value !== undefined) process.env[key] = value;
+      }
     }
   });
 

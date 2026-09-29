@@ -75,6 +75,16 @@ export function composeMonitorReviewQueueActions(deps: MonitorReviewQueueComposi
             TaskChangeRouter.getInstance().deleteRunCreatedEntities(pid, rid),
           maybeResumeRun: (rid) => HumanStepManager.getInstance().maybeResumeRun(rid),
           wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
+          // Same seam as reviewItems.ts's buildResolveDeps: a 'reject' on a
+          // systemic-pause item means "stop waiting" — without it the handler
+          // refuses such a reject rather than let it silently retry.
+          applyReviewItemDismiss: (pid, dismissArgs) =>
+            ReviewItemRouter.getInstance().applyReviewItem(pid, {
+              op: 'dismiss',
+              actor: dismissArgs.actor,
+              reviewItemId: dismissArgs.reviewItemId,
+              ...(dismissArgs.resolution !== undefined ? { resolution: dismissArgs.resolution } : {}),
+            }),
           logger: loggerLike,
         },
       );

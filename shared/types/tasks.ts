@@ -127,6 +127,14 @@ export interface FlowOverlay {
   sessionId: string | null;
   /** The hosting session's display name (`sessions.name`), or null if unresolved. */
   sessionName: string | null;
+  /**
+   * `workflows.name` for the run (e.g. 'planner', 'ship'), via `workflow_runs.workflow_id`
+   * (TASK-224). OPTIONAL: only the idea-seed overlay populates it today (where it also
+   * restricts matches to Planner/Ship — see `gatherIdeaRunOverlayRows` in taskListing.ts /
+   * taskChangeRouter.ts); the task/epic arm's FlowMarker never needed workflow identity, so
+   * it is left `undefined` there rather than widening every existing FlowOverlay call site.
+   */
+  workflowName?: string | null;
 }
 
 /**

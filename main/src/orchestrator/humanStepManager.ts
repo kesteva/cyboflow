@@ -506,23 +506,25 @@ export class HumanStepManager {
    * pause is neither failed nor resting, so retryRunHandler refuses it as
    * not_retryable — the host instead RESOLVES this item, which the
    * ReviewQueueSystemicPauseGate settles as a 'retry' verdict and the walk
-   * re-runs the interrupted step. Read-only; no transition. Fail-soft when the
-   * inbox table is absent.
+   * re-runs the interrupted step. Also backs the "Switch runtime & retry"
+   * handler, which reads the gate-minted `payloadJson` (raw, unparsed — the
+   * wiring module narrows it) for the blocked agents/provider. Read-only; no
+   * transition. Fail-soft when the inbox table is absent.
    */
   async findPendingSystemicPauseItem(
     runId: string,
-  ): Promise<{ reviewItemId: string; projectId: number } | null> {
+  ): Promise<{ reviewItemId: string; projectId: number; payloadJson: string | null } | null> {
     if (!hasReviewItemsTable(this.db)) return null;
     const row = this.db
       .prepare(
-        `SELECT id, project_id FROM review_items
+        `SELECT id, project_id, payload_json FROM review_items
           WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND source LIKE ? LIMIT 1`,
       )
       .get(runId, `${SYSTEMIC_PAUSE_SOURCE}:%`) as
-      | { id?: string; project_id?: number | null }
+      | { id?: string; project_id?: number | null; payload_json?: string | null }
       | undefined;
     if (!row?.id || row.project_id === null || row.project_id === undefined) return null;
-    return { reviewItemId: row.id, projectId: row.project_id };
+    return { reviewItemId: row.id, projectId: row.project_id, payloadJson: row.payload_json ?? null };
   }
 
   /**

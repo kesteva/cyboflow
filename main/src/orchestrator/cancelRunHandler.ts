@@ -23,6 +23,7 @@ import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import {
   TERMINAL_RUN_STATUSES,
 } from '../../../shared/types/cyboflow';
+import { rollupRunUsage } from './runUsageRollup';
 
 // ---------------------------------------------------------------------------
 // Dependency bag
@@ -349,6 +350,12 @@ export async function cancelRunHandler(
     emitRunStatusChanged(runId, 'canceled');
     return { success: true as const };
   });
+
+  // run_usage for the now-terminal run. A programmatic cancel returns from
+  // execute() without a lifecycle transition ("cancel path owns terminal"), so
+  // nothing else materializes it until the next boot's sweep. Fail-soft inside
+  // rollupRunUsage; a Codex drain that lands rows later re-rolls this row.
+  if ('success' in (result as CancelRunResult)) rollupRunUsage(db, runId, logger);
 
   // Batch close-out (single-run parallel sprint): a canceled batch run must not
   // strand its sprint_batches row non-terminal. Fail-soft AFTER the write — the

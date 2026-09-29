@@ -224,6 +224,19 @@ describe('performHarnessAttestation — file-identity', () => {
   });
 });
 
+describe('performHarnessAttestation — serve-binding', () => {
+  it('is never verified here and probes NOTHING — the runner\'s serve binding is the proof (§A1.2)', async () => {
+    const probes = makeProbes();
+    const result = await run({ kind: 'serve-binding' }, probes);
+
+    expect(result).toMatchObject({ verified: false, kind: 'serve-binding' });
+    expect(probes.httpGetBody).not.toHaveBeenCalled();
+    expect(probes.cdpEvaluate).not.toHaveBeenCalled();
+    expect(probes.listNativeWindows).not.toHaveBeenCalled();
+    expect(probes.sleeps).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The retry loop (§5.4 flakiness guard)
 // ---------------------------------------------------------------------------

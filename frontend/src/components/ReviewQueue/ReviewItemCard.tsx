@@ -18,14 +18,20 @@
  * or simply the transcript), rather than offering a resolve button that settles
  * the gate without anyone having looked at the work.
  *
- * That routing is SURFACE-AWARE (`surface` prop). In the queue surfaces
- * (ReviewQueueView, the landing TypeGroupedQueue) the default pair applies. In
- * `surface="session"` — RunPendingInputStrip, which renders this same card INSIDE
- * the run — "Open in session" is a no-op, so those branches keep their real
- * actions; the strip is the terminal surface for any gate whose flow has no
- * artifact tab of its own (sprint's `human-review`, compound's
- * `approve-learnings`, ship's gates). Removing them there would leave those gates
- * answerable only by Dismiss, which humanGate.ts maps to a REJECT verdict.
+ * That routing is SURFACE-AWARE (`surface` prop). On the 'queue' surface the
+ * default pair applies. In `surface="session"` — RunPendingInputStrip, which
+ * renders this same card INSIDE the run — "Open in session" is a no-op, so those
+ * branches keep their real actions; the strip is the terminal surface for any
+ * gate whose flow has no artifact tab of its own (sprint's `human-review`,
+ * compound's `approve-learnings`, ship's gates). Removing them there would leave
+ * those gates answerable only by Dismiss, which humanGate.ts maps to a REJECT
+ * verdict.
+ *
+ * NOTE: as of the review-queue redesign the landing home renders its OWN rows
+ * (`landing/NeedsInputSection.tsx`) rather than this card, so RunPendingInputStrip
+ * is this card's only production host and 'queue' has none today. The surface is
+ * kept (and its default-pair semantics tested) because it is the safe default for
+ * any future host that is NOT inside the run.
  *
  * Two further carve-outs, both load-bearing:
  *   - A RUN-LESS item (`run_id === null` — a manual / triage-minted row) keeps its
@@ -67,6 +73,12 @@
  *                    task never appears for these. The ad-hoc quick-session
  *                    verdict summary is a sub-case that drops Address
  *                    entirely (its run has no address-review step at all).
+ *                    A run migration 081's handover flipped to orchestrated
+ *                    (TASK-299) is a THIRD case: Address stays ENABLED (there
+ *                    is no DAG left for a rewind, but the run's agent is live
+ *                    in chat) and delivers the same stock request into that
+ *                    chat instead — see `addressReviewFindings`'s
+ *                    `handed_over` reason / `viaChat` result below.
  *   - permission   — a real-time PreToolUse/approval gate (blocking). Reuses the
  *                    APPROVAL resolution path: Approve / Reject route to
  *                    cyboflow.approvals.approve / reject via the folded approvalId.
@@ -80,7 +92,18 @@
  *                    surfaces its own pair instead: "Launch a separate planner"
  *                    (runs.launchSeparatePlanner) / "Return to backlog"
  *                    (runs.returnIdeaToBacklog) — both resolve the guard
- *                    server-side, never the generic resolve/dismiss.
+ *                    server-side, never the generic resolve/dismiss. A
+ *                    `gate:'systemic-pause'` decision (plan v2: a
+ *                    programmatic step's agent hit a subscription/session
+ *                    limit) is checked the same way as approve-design — BEFORE
+ *                    the default-actions collapse, on both surfaces — and
+ *                    offers Retry now / Switch runtime & retry (an inline
+ *                    {@link SystemicPauseSwitchForm} in-session, "Switch &
+ *                    retry…" routing to the session from the queue) / Stop
+ *                    waiting, never a resolve(outcome:'reject'). A pause whose
+ *                    payload says `origin: 'triage'` (only the run's Claude-only
+ *                    supervisor hit the limit) offers NO switch — nothing a
+ *                    step-agent switch does can move it.
  *   - human_task   — a free-form action item (blocking per-item). Carries no
  *                    options, so the queue offers the default pair; in-session it
  *                    keeps Resolve / Dismiss / Promote to task.
@@ -93,10 +116,13 @@
  * (review-item triage) or the approvals router (permission gates).
  */
 import React from 'react';
+import type { inferRouterOutputs } from '@trpc/server';
 import { Button } from '../ui/Button';
 import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
+import type { AppRouter } from '../../../../shared/types/trpc';
+import { isSystemicPauseItem, systemicPauseOrigin } from '../../utils/systemicPause';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import {
   IDLE_REVIEW_SOURCE_PREFIX,
@@ -110,6 +136,8 @@ import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { SystemicPauseSwitchForm } from './SystemicPauseSwitchForm';
+import { isApproveDesignGateItem, gateDeclineOutcome } from '../../utils/gateActionPolicy';
 
 // ---------------------------------------------------------------------------
 // Accept-routing target chip — keyed on the discriminant so a new target breaks
@@ -164,10 +192,11 @@ const KIND_ACCENT: Record<ReviewItemKind, string> = {
 };
 
 /**
- * Where this card is mounted. 'queue' (the default — ReviewQueueView, the landing
- * TypeGroupedQueue) routes option-less escalations to the run via the default
- * "Open in session →" pair. 'session' (RunPendingInputStrip) is already inside the
- * run, so those branches render their real actions instead.
+ * Where this card is mounted. 'queue' (the default — any host OUTSIDE the run;
+ * none in production today, see the module doc) routes option-less escalations
+ * to the run via the default "Open in session →" pair. 'session'
+ * (RunPendingInputStrip) is already inside the run, so those branches render
+ * their real actions instead.
  */
 export type ReviewItemCardSurface = 'queue' | 'session';
 
@@ -347,40 +376,31 @@ function isApproveIdeasGateItem(item: ReviewItem): boolean {
   return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-ideas');
 }
 
-/**
- * Tier 2, item 12b: true for the two-way approve-design gate — Approve logs
- * every remaining adversarial-review entry as a non-blocking accepted-risk
- * finding and continues; Revise reruns the design steps with those findings
- * as feedback (a loopback, not a rejection). The generic "Approve & resume" /
- * "Reject" labels below read as a plain accept/deny, which is wrong for a
- * revision loop — this keys the button copy on the gate the same way
- * {@link isApproveIdeasGateItem} does.
- */
-function isApproveDesignGateItem(item: ReviewItem): boolean {
-  if (item.kind !== 'decision') return false;
-  if (item.source === 'gate:human-step:approve-design') return true;
-  const payload = item.payload;
-  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-design');
-}
+// Tier 2, item 12b / TASK-222: `isApproveDesignGateItem` and `gateDeclineOutcome`
+// moved to `utils/gateActionPolicy.ts` (imported above) so `ArtifactTabRenderer`'s
+// own gate controls can share the same decline-outcome mapping instead of
+// re-deriving it — see that module's header for the swift-bison incident this
+// guards against. Extend the discriminant there, never re-add a local copy here.
+
+// ---------------------------------------------------------------------------
+// Plan v2 — switch runtime/model on a systemic pause (subscription/session
+// limit) and retry. `gate:systemic-pause:<stepId>` decision items.
+// ---------------------------------------------------------------------------
 
 /**
- * TASK-222 — centralized gate -> verdict mapping. A gate that declares an
- * intra-phase `loopback` (today, the ONLY one among human gates: `approve-design`
- * — shared/types/workflows.ts) must never have its non-approve action recorded as
- * a plain terminal 'reject': that ENDS the run instead of looping back to
- * `expand-spec`/`ui-prototype` with the human's note + the adversarial review
- * threaded in (the 2026-09-17 swift-bison incident — `defaultEscalationActions`'s
- * discard button used to hardcode 'reject' for every decision kind, silently
- * downgrading this gate's Dismiss into a run-ending reject on the queue surface).
- *
- * ONE function, used by BOTH the explicit verdict pair below AND
- * `defaultEscalationActions`'s discard, so a future surface/collapse cannot
- * regress back to a bare 'reject' literal for this gate. Extend the underlying
- * discriminant (currently just {@link isApproveDesignGateItem}) — never add a new
- * per-surface conditional — when a future gate adds a loopback.
+ * The human-readable disposition for a RESOLVED/DISMISSED systemic-pause
+ * item, keyed on the resolution's stable prefix. Dismissed (by status OR a
+ * 'stop waiting' resolution) is checked first — it is the definitive "gave
+ * up" signal; 'retry: switched…' (the switch handler's own resolution, see
+ * plan v2 D3 step 6) names the switch-and-retry path specifically; anything
+ * else that reached a terminal status through a plain resolve() (a bare
+ * retry, or the auto-resume timer's 'auto-retry…') reads as a plain retry.
  */
-function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
-  return isApproveDesignGateItem(item) ? 'revise' : 'reject';
+function systemicPauseResolvedLabel(item: ReviewItem): string {
+  const resolution = item.resolution ?? '';
+  if (item.status === 'dismissed' || resolution.startsWith('stop waiting')) return 'Stopped waiting';
+  if (resolution.startsWith('retry: switched')) return 'Switched & retried';
+  return 'Retried';
 }
 
 // ---------------------------------------------------------------------------
@@ -388,15 +408,45 @@ function gateDeclineOutcome(item: ReviewItem): 'reject' | 'revise' {
 // findings / Dismiss), replacing the legacy Dismiss / Promote-to-task pair.
 // ---------------------------------------------------------------------------
 
-/** Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons. */
-const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<'completed' | 'no_step' | 'in_progress', string> = {
+type RouterOutputs = inferRouterOutputs<AppRouter>;
+
+// AppRouter-inferred rather than hand-mirrored (docs/CODE-PATTERNS.md IPC /
+// type-parity rules) — `'unavailable'` is added on top: a CLIENT-side reason
+// for a canAddressReviewFindings query failure, which the server never
+// returns (see the effect below), kept out of band from the server's own
+// ineligibility reasons so a real 'completed' can't be confused with a probe
+// that simply never got an answer.
+type AddressReviewServerEligibility = RouterOutputs['cyboflow']['runs']['canAddressReviewFindings'];
+type AddressReviewIneligibleReason = NonNullable<AddressReviewServerEligibility['reason']> | 'unavailable';
+/** The eligibility shape `runs.canAddressReviewFindings` returns, or the client-side 'unavailable' probe failure; null while loading. */
+type AddressReviewEligibility =
+  | AddressReviewServerEligibility
+  | { eligible: false; reason: 'unavailable' }
+  | null;
+
+/**
+ * Human copy for `runs.canAddressReviewFindings`'s ineligibility reasons, plus
+ * the client-side probe-failure reason. `handed_over` is never actually shown
+ * as a disabled tooltip (that reason renders the button ENABLED instead — see
+ * the render below) but the map stays exhaustive over the type regardless.
+ */
+const ADDRESS_REVIEW_DISABLED_TOOLTIP: Record<AddressReviewIneligibleReason, string> = {
   completed: 'Run already completed — log or dismiss',
   no_step: 'This flow has no address-review step',
   in_progress: 'Address review is already running for this run',
+  unavailable: 'Could not check eligibility — try again',
+  handed_over: 'This run was handed over to a live agent — Address sends the request into its chat',
+  orchestrated: 'This run is driven by a live agent, not a workflow step — chat with it directly instead',
 };
 
-/** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case). */
-const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
+/** Shown instead of the ordinary tooltip once a handed-over run's chat delivery has fired. */
+const ADDRESS_REVIEW_SENT_TOOLTIP = "Request sent to this run's chat — check there for progress";
+
+type AddressReviewFindingsResult = RouterOutputs['cyboflow']['runs']['addressReviewFindings'];
+type AddressReviewNoOpReason = Extract<AddressReviewFindingsResult, { noOp: true }>['reason'];
+
+/** Human copy for a `runs.addressReviewFindings` `noOp` result (the rare race case, plus TASK-299's chat-delivery refusals). */
+const ADDRESS_REVIEW_NOOP_MESSAGE: Record<AddressReviewNoOpReason, string> = {
   not_found: 'Run not found.',
   not_programmatic: 'Only programmatic runs support Address review findings.',
   not_rewindable: 'This run is not in a state that can be rewound right now.',
@@ -405,10 +455,19 @@ const ADDRESS_REVIEW_NOOP_MESSAGE: Record<string, string> = {
   target_not_prior: 'The address-review step is ahead of the run — nothing to rewind.',
   fanout_settled: 'Every sprint task in this run is already integrated.',
   race: 'The run changed state — try again.',
+  empty: 'Nothing to send.',
+  terminal: 'This run has ended and cannot receive messages.',
+  not_idle: 'This run is no longer resting for the agent to reply — try again once it settles.',
+  blocked: 'Another blocking item is holding this run — resolve it first.',
+  no_session: 'This run has no resumable chat session.',
+  execute_failed: 'The agent could not be re-driven — check the run logs.',
+  // TASK-299 attempt 3: the run's execution is held open past its last
+  // turn's own end (the TASK-300 shape) — nothing can be delivered OR safely
+  // queued right now. Names the actual next step rather than a bare no-op.
+  parked:
+    "This run's agent session is still open from its last turn and can't take a new message yet — " +
+    'open the run and use Cancel/Reopen to recover it, then try again.',
 };
-
-/** The eligibility shape `runs.canAddressReviewFindings` returns; null while loading. */
-type AddressReviewEligibility = { eligible: boolean; reason?: 'completed' | 'no_step' | 'in_progress' } | null;
 
 /**
  * The narrower half of {@link isApproveDesignGateItem}: ONLY the programmatic
@@ -498,6 +557,16 @@ export function ReviewItemCard({
   const [addressBusy, setAddressBusy] = React.useState(false);
   const [addressError, setAddressError] = React.useState<string | null>(null);
   const [addressEligibility, setAddressEligibility] = React.useState<AddressReviewEligibility>(null);
+  // TASK-299: set once a handed-over run's "Address review findings" click has
+  // delivered the stock request into that run's chat — a SEPARATE flag from
+  // addressEligibility's 'in_progress' (there is no address-review step
+  // running here, just a live agent that just received a message), so the
+  // button disables with its own "sent" tooltip instead of the rewind one.
+  const [addressSentViaChat, setAddressSentViaChat] = React.useState(false);
+  // Plan v2: whether the inline "Switch runtime & retry" form is open for a
+  // systemic-pause item (session surface only — the queue-side row lives in
+  // the landing's NeedsInputSection, whose "Switch & retry…" opens the session).
+  const [showSwitchForm, setShowSwitchForm] = React.useState(false);
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -605,13 +674,19 @@ export function ReviewItemCard({
     }
     let cancelled = false;
     setAddressEligibility(null);
+    setAddressSentViaChat(false);
     void trpc.cyboflow.runs.canAddressReviewFindings
       .query({ runId: item.run_id })
       .then((result) => {
         if (!cancelled) setAddressEligibility(result);
       })
       .catch(() => {
-        if (!cancelled) setAddressEligibility({ eligible: false, reason: 'completed' });
+        // A transport/DB error is NOT a statement about the run's state — using
+        // 'completed' here would show the false "Run already completed" tooltip
+        // on a probe failure. 'unavailable' is a client-only reason the server
+        // never returns, kept distinct so a real completed run is never confused
+        // with an eligibility check that simply never got an answer.
+        if (!cancelled) setAddressEligibility({ eligible: false, reason: 'unavailable' });
       });
     return () => {
       cancelled = true;
@@ -635,6 +710,12 @@ export function ReviewItemCard({
   // run (cyboflow_list_run_findings, called from the step itself). The
   // findings stay pending — address-review resolves each one it fixes/triages
   // — so this action never removes the card the way a resolve/dismiss would.
+  //
+  // TASK-299: for a HANDED-OVER run (`addressEligibility.reason ===
+  // 'handed_over'` — see the render below, which keeps the button ENABLED for
+  // that one ineligible reason) the server routes this SAME mutation to a
+  // chat delivery instead of a rewind; the two outcomes are told apart by
+  // `'viaChat' in result`, not by a second handler here.
   const handleAddressReviewFindings = (): void => {
     if (item.run_id === null) return;
     setAddressBusy(true);
@@ -643,6 +724,19 @@ export function ReviewItemCard({
       .mutate({ runId: item.run_id })
       .then((result) => {
         if ('delivered' in result) {
+          if ('viaChat' in result) {
+            // Delivered into the handed-over run's chat — there is no
+            // address-review step to mark 'in_progress', so a dedicated flag
+            // disables the button with its own "sent" tooltip instead.
+            setAddressSentViaChat(true);
+          } else {
+            // The run's address-review step is now the live current step — set
+            // eligibility to the same 'in_progress' the next query would report,
+            // right away, so the button re-renders disabled+tooltip instead of
+            // re-enabling on the now-stale `eligible:true` (a second click would
+            // otherwise reach the in_progress noOp error instead).
+            setAddressEligibility({ eligible: false, reason: 'in_progress' });
+          }
           trackEvent('review_item_resolved', {
             kind: item.kind,
             action: 'address_review_findings',
@@ -1072,6 +1166,85 @@ export function ReviewItemCard({
             </>
           );
         }
+        // Plan v2 (switch runtime/model on a systemic pause, then retry): the
+        // programmatic run host's `gate:systemic-pause:<stepId>` gate, opened
+        // when a step's agent hits a subscription/session limit. Checked
+        // BEFORE `usesDefaultActions` — like approve-design above — so the
+        // card never collapses this gate into the option-less "Open in
+        // session" + Dismiss pair. The switch form is session-only (the
+        // landing's NeedsInputSection row is the queue-side surface and
+        // routes its "Switch & retry…" here). Never sends outcome 'reject':
+        // Retry now / Switch & retry both resolve WITHOUT an outcome (a plain
+        // retry — the pause gate reads any resolve as 'retry'), and Stop
+        // waiting dismisses (giveup) instead.
+        if (isSystemicPauseItem(item)) {
+          if (item.status !== 'pending') {
+            return (
+              <span className="text-xs text-text-tertiary" data-testid="pause-resolved">
+                {systemicPauseResolvedLabel(item)}
+              </span>
+            );
+          }
+          const origin = systemicPauseOrigin(item);
+          // A triage-origin pause: only the run's Claude-only supervisor hit the
+          // limit. No step-agent switch moves it (the backend refuses one with
+          // `origin_triage`), so the card offers Retry now / Stop waiting and the
+          // note below — never a switch that would replay every lane for nothing.
+          const switchable = origin !== 'triage';
+          const retryNow = (): void => {
+            void resolve(item.project_id, item.id, { surface }).then((r) => {
+              if (r !== null) {
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'retry', blocking: item.blocking });
+                onResolved?.();
+              }
+            });
+          };
+          const stopWaiting = (): void => {
+            void dismiss(item.project_id, item.id).then((ok) => {
+              if (ok) {
+                trackEvent('review_item_resolved', { kind: item.kind, action: 'stop_waiting', blocking: item.blocking });
+                onResolved?.();
+              }
+            });
+          };
+          return (
+            <>
+              <Button variant="primary" size="sm" disabled={busy} onClick={retryNow} data-testid="pause-retry">
+                Retry now
+              </Button>
+              {switchable && surface === 'session' && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setShowSwitchForm((v) => !v)}
+                  data-testid="pause-switch-toggle"
+                >
+                  Switch runtime &amp; retry
+                </Button>
+              )}
+              <Button variant="secondary" size="sm" disabled={busy} onClick={stopWaiting} data-testid="pause-stop">
+                Stop waiting
+              </Button>
+              {origin === 'triage' && (
+                <p className="w-full text-xs text-text-tertiary" data-testid="pause-triage-note">
+                  The run&apos;s supervisor (always Claude) hit the limit; switching step agents won&apos;t move it.
+                </p>
+              )}
+              {switchable && surface === 'session' && showSwitchForm && (
+                <div className="w-full">
+                  <SystemicPauseSwitchForm
+                    item={item}
+                    onDone={() => {
+                      setShowSwitchForm(false);
+                      onResolved?.();
+                    }}
+                  />
+                </div>
+              )}
+            </>
+          );
+        }
         // A `gate:human-step:*` gate carries NO options (humanStepManager mints a
         // payload only for approve-ideas and for a bound-carrying approve-design,
         // and neither payload holds options), so the queue routes to
@@ -1127,6 +1300,13 @@ export function ReviewItemCard({
         );
       case 'finding':
       default:
+        // MAINTENANCE DEBT: this card has grown past ~740 lines of switch body
+        // (file total >1100) largely from TASK-277's eval-finding triage below
+        // (an eligibility effect + two handlers + two copy tables + this
+        // branch). Consider extracting an `EvalFindingActions` sibling
+        // (item/busy/onResolved props) so eval triage can be tested in
+        // isolation and this switch stays readable — not done here to avoid
+        // widening this change into a refactor.
         // TASK-277: an eval-sourced finding (source LIKE 'agent:eval%' — every
         // confirmed jury finding, the synthesized catastrophic-cap item, and
         // the ad-hoc summary) is a POST-HOC jury flag on a run parked at its
@@ -1151,14 +1331,33 @@ export function ReviewItemCard({
               </>
             );
           }
-          const ineligibleReason = addressEligibility && !addressEligibility.eligible ? addressEligibility.reason : undefined;
+          // TASK-299: 'handed_over' is the one ineligible reason that keeps the
+          // button CLICKABLE (this run has no DAG for a rewind, but does have a
+          // live agent in chat) — so eligibility for the click itself is
+          // "server said eligible, OR server said handed_over", not the bare
+          // `eligible` flag. `addressSentViaChat` disables it again once that
+          // chat delivery has actually fired, with its own "sent" tooltip
+          // outranking the ordinary ineligibility copy.
+          const ineligibleReason =
+            addressEligibility && !addressEligibility.eligible && addressEligibility.reason !== 'handed_over'
+              ? addressEligibility.reason
+              : undefined;
+          const addressReviewClickable =
+            addressEligibility !== null &&
+            (addressEligibility.eligible || addressEligibility.reason === 'handed_over');
           return (
             <>
               <Button
                 variant="primary"
                 size="sm"
-                disabled={busy || addressBusy || addressEligibility === null || !addressEligibility.eligible}
-                title={ineligibleReason ? ADDRESS_REVIEW_DISABLED_TOOLTIP[ineligibleReason] : undefined}
+                disabled={busy || addressBusy || addressSentViaChat || !addressReviewClickable}
+                title={
+                  addressSentViaChat
+                    ? ADDRESS_REVIEW_SENT_TOOLTIP
+                    : ineligibleReason
+                      ? ADDRESS_REVIEW_DISABLED_TOOLTIP[ineligibleReason]
+                      : undefined
+                }
                 onClick={handleAddressReviewFindings}
                 data-testid="address-review-findings"
               >

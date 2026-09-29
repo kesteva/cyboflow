@@ -17,6 +17,10 @@
  * injected vi.fn() fakes, no tRPC wiring.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { rollupRunUsage } from '../runUsageRollup';
+
+// The fold is covered by runUsageRollup.test.ts; here only WHEN cancel asks for it.
+vi.mock('../runUsageRollup', () => ({ rollupRunUsage: vi.fn() }));
 import type Database from 'better-sqlite3';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike } from '../types';
@@ -156,6 +160,19 @@ describe('cancelRunHandler (git-neutral run Cancel — Phase 4a)', () => {
     // Run-status-changed signal emitted AFTER the write.
     expect(spy.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'canceled');
     expect(spy.calls.indexOf('stopLiveRun')).toBeLessThan(spy.calls.indexOf('emitRunStatusChanged'));
+  });
+
+  it('materializes run_usage after a successful cancel, and not on a no-op', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const deps = makeDeps(db, spy, runQueues);
+
+    await cancelRunHandler(runId, deps);
+    expect(rollupRunUsage).toHaveBeenCalledOnce();
+    expect(rollupRunUsage).toHaveBeenCalledWith(deps.db, runId, undefined);
+
+    vi.mocked(rollupRunUsage).mockClear();
+    await expect(cancelRunHandler(runId, deps)).resolves.toMatchObject({ noOp: true });
+    expect(rollupRunUsage).not.toHaveBeenCalled();
   });
 
   it.each<WorkflowRunStatus>(['queued', 'starting', 'running', 'awaiting_review', 'stuck'])(

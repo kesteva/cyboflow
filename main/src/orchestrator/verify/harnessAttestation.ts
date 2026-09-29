@@ -359,6 +359,15 @@ function domMarkerExpression(selector: string): string {
 }
 
 /**
+ * Why this module never verifies `serve-binding` (runbook-optional-verification.md
+ * §A1.2): the channel HAS no probe — the runner's own serve-identity binding
+ * (`checkServeIdentityBinding`) is the whole proof, and the runner answers it
+ * without calling here. Unverified is the safe reading for a mis-wired caller.
+ */
+const SERVE_BINDING_NOT_PROBED_DETAIL =
+  "serve-binding: no channel probe exists — the runner's serve-identity binding is the proof, and it was not consulted here";
+
+/**
  * Ask ONE channel once. Returns the verdict; THROWS only when the probe itself
  * could not run (the caller folds that into the same `verified: false`).
  */
@@ -437,8 +446,13 @@ async function probeOnce(
     }
     case 'bundle-identity':
       return probeBundleIdentity(spec, args.mobile, deps);
+    case 'serve-binding':
+      // Unreachable via performHarnessAttestation (which short-circuits before
+      // probing), kept so this switch stays exhaustive over the union.
+      return { verified: false, detail: SERVE_BINDING_NOT_PROBED_DETAIL };
   }
 }
+
 
 /**
  * Probe the declared channel against the LIVE surface and return the harness's
@@ -466,6 +480,9 @@ export async function performHarnessAttestation(
       kind: 'file-identity',
       detail: 'file-identity: the runner owns the opened path, so identity holds by construction',
     };
+  }
+  if (spec.kind === 'serve-binding') {
+    return { verified: false, kind: 'serve-binding', detail: SERVE_BINDING_NOT_PROBED_DETAIL };
   }
 
   const sleep = args.deps.sleep ?? realSleep;

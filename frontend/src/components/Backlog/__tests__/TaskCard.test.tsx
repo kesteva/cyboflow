@@ -515,3 +515,95 @@ describe('TaskCard human executor (migration 137)', () => {
   });
 });
 
+// TASK-224: an idea seeded into a live (non-terminal) Planner/Ship run gets
+// the SAME breathing 'running' marker a task's card already carries — the
+// backend now emits an inFlow entry for such an idea (seed_idea_id /
+// seed_idea_ids), and hasRunningFlow/BoardCard are type-agnostic, so no card
+// logic is gated on task.type here except the idea-only "planning" hint.
+describe('TaskCard breathing marker for an idea seeded into a live run (TASK-224)', () => {
+  const runningFlow = {
+    agent: 'research',
+    runId: 'run-1',
+    stepId: 'research',
+    runStatus: 'running',
+    sessionId: null,
+    sessionName: null,
+    workflowName: 'planner',
+  };
+
+  it('pulses (border-interactive/60 ring-1 animate-pulse) for an idea with a RUNNING inFlow entry', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ ref: 'IDEA-201', inFlow: [runningFlow] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    const card = screen.getByTestId('board-card');
+    expect(card).toHaveAttribute('data-in-flow', 'true');
+    expect(card.className).toContain('animate-pulse');
+    expect(card.className).toContain('border-interactive/60');
+  });
+
+  it('renders the idea-only "planning" hint under the title while the run is live', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ ref: 'IDEA-201', inFlow: [runningFlow] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('idea-planning-hint')).toHaveTextContent('planning · planner / research');
+  });
+
+  it('falls back to the agent label when workflowName is unresolved (pre-migration/deleted row)', () => {
+    render(
+      <BoardCard
+        task={makeIdea({
+          ref: 'IDEA-204',
+          inFlow: [{ ...runningFlow, workflowName: null }],
+        })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('idea-planning-hint')).toHaveTextContent('planning · research / research');
+  });
+
+  it('does NOT pulse — but still surfaces the awaiting-review badge — while the planner is parked at a gate', () => {
+    render(
+      <BoardCard
+        task={makeIdea({
+          ref: 'IDEA-202',
+          inFlow: [{ ...runningFlow, runStatus: 'awaiting_review' }],
+          awaitingReview: true,
+        })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    const card = screen.getByTestId('board-card');
+    expect(card).toHaveAttribute('data-in-flow', 'false');
+    expect(card.className).not.toContain('animate-pulse');
+    expect(screen.getByText('Awaiting review')).toBeInTheDocument();
+  });
+
+  it('stops pulsing once the run reaches a terminal status (no inFlow entry left)', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ ref: 'IDEA-203', inFlow: [] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    const card = screen.getByTestId('board-card');
+    expect(card).toHaveAttribute('data-in-flow', 'false');
+    expect(screen.queryByTestId('idea-planning-hint')).not.toBeInTheDocument();
+  });
+});
+

@@ -14,7 +14,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { runGit, runGitAsync } from '../runGit';
+import { runGit, runGitAsync, runGitExit } from '../runGit';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -152,6 +152,38 @@ describe('error propagation', () => {
       (caughtError?.message ?? '').length > 0 ||
       (errAny?.stderr !== undefined);
     expect(hasGitContent).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runGitExit — the exit code is the answer
+// ---------------------------------------------------------------------------
+
+describe('runGitExit', () => {
+  it('resolves exit 0 with stdout on success', async () => {
+    const result = await runGitExit(process.cwd(), ['--version']);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^git version/);
+  });
+
+  it('resolves (does not reject) a non-zero exit, with its code and stderr', async () => {
+    const dir = makeTmpGitRepo();
+    tmpRepos.push(dir);
+    // check-ignore answers "not ignored" with exit 1 and no output.
+    expect(await runGitExit(dir, ['check-ignore', '-q', '--', 'not-ignored.txt'])).toEqual({
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+    });
+    const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'rungit-norepo-'));
+    tmpRepos.push(notRepo);
+    const fatal = await runGitExit(notRepo, ['status'], { env: { GIT_CEILING_DIRECTORIES: path.dirname(notRepo) } });
+    expect(fatal.exitCode).toBe(128);
+    expect(fatal.stderr).toContain('not a git repository');
+  });
+
+  it('rejects when git cannot run at all (no exit code to report)', async () => {
+    await expect(runGitExit(path.join(os.tmpdir(), 'rungit-missing-cwd-xyz', 'nope'), ['--version'])).rejects.toThrow();
   });
 });
 

@@ -1061,7 +1061,7 @@ export interface SessionSummary {
    */
   ask_dismissed_at: string | null;
   /**
-   * sha256 hex digest (see `main/src/orchestrator/sessionAskHash.ts`) of the
+   * sha256 hex digest (see `main/src/database/sessionAskHash.ts`) of the
    * `waiting_on` text that was dismissed — the read-time suppression key
    * `quickSessionListing.ts` compares a freshly-summarized `waiting_on`
    * against. Null when never dismissed, or when the dismissed ask had no

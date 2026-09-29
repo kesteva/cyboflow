@@ -39,6 +39,7 @@
  * a `cyboflow-verify-*` device with no marker under this data dir is logged and
  * LEFT ALONE.
  */
+import { createHash } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
@@ -63,12 +64,14 @@ export interface AppleCliExecResult {
  *    REJECTS.
  *
  * Implementations MUST pass `args` as an argv array (never a shell string) and
- * MUST honour `timeoutMs`.
+ * MUST honour `timeoutMs`. `env`, when given, is the child's COMPLETE
+ * environment (callers pass a full env, never a delta); absent, the child
+ * inherits the host's.
  */
 export type AppleCliExec = (
   command: string,
   args: readonly string[],
-  opts?: { timeoutMs?: number },
+  opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
 ) => Promise<AppleCliExecResult>;
 
 /** The filesystem surface this module drives; the default wraps `node:fs/promises`. */
@@ -99,6 +102,24 @@ export interface MobileSimulatorHandle {
   derivedDataDir: string;
   /** `<dataDir>/verify-mobile/<requestId>` — owns `owner.json` and DerivedData. */
   requestDir: string;
+  /**
+   * Stage 3 (runbook-optional-verification.md §B4.2): stamp the Xcode
+   * DeviceInteraction session key into this request's `owner.json` BEFORE
+   * `DeviceInteractionStartSession` runs, so a hard-killed cyboflow leaves the
+   * boot sweep enough to END that session (sessions outlive the bridge process,
+   * §B0). Rejects when the marker cannot be written — the caller then never
+   * starts the session, because an unrecorded session is one no sweep can end.
+   */
+  recordXcodeSessionKey(key: string): Promise<void>;
+  /**
+   * X-2 — keep `key` reachable by the boot sweep AFTER {@link dispose}, for a
+   * session whose StartSession outcome was unknown and that could not be proven
+   * ended. Writes a sibling marker dir (`<requestId>.xcode-<hash>/owner.json`)
+   * naming this process, the device and the key: {@link dispose} leaves it, a
+   * same-id re-dispatch cannot overwrite it, and the sweep ends the key once
+   * this process is dead. Rejects on a write failure. Optional so fakes compile.
+   */
+  retainXcodeSessionKey?(key: string): Promise<void>;
   /** Best-effort, idempotent, NEVER throws. Shutdown → delete → remove the request dir. */
   dispose(): Promise<void>;
 }
@@ -115,7 +136,24 @@ export interface AcquireSimulatorArgs {
   runtime?: string;
   /** Bound on `simctl bootstatus`. A boot that outlives it rolls the whole acquire back. */
   bootTimeoutMs: number;
+  /**
+   * Floor on the chosen runtime's MAJOR version (§B3): Xcode 27's
+   * DeviceInteraction refuses an iOS runtime older than 27.0, so the runner
+   * passes 27 when it intends the xcode drive rung. Applied to the newest-runtime
+   * default AND to a pinned runtime; unsatisfiable ⇒ a
+   * {@link MIN_RUNTIME_UNSATISFIED_PREFIX} error the runner can recognise and
+   * retry without the floor (degrade, never skip). Absent ⇒ no floor.
+   */
+  minRuntimeMajor?: number;
 }
+
+/**
+ * The message prefix {@link resolveSimTarget} throws when {@link
+ * AcquireSimulatorArgs.minRuntimeMajor} cannot be met. Exported so the runner
+ * recognises exactly this failure — and only this one — as "retry the acquire
+ * without the xcode floor" rather than a host that cannot boot a simulator.
+ */
+export const MIN_RUNTIME_UNSATISFIED_PREFIX = 'no available iOS runtime satisfies the minimum major version';
 
 /** What one sweep reclaimed and what it deliberately left alone. */
 export interface SweepResult {
@@ -149,6 +187,15 @@ export interface MobileSimulatorSessionDeps {
   processKill?: (pid: number, signal: 0) => void;
   /** Per-command bound for everything but `bootstatus`. */
   commandTimeoutMs?: number;
+  /**
+   * §B4.9 — end an orphaned Xcode DeviceInteraction session whose key a
+   * dead-owner marker carries, BEFORE its device is destroyed. Best-effort by
+   * contract: the implementation bounds itself and ignores "doesn't exist" /
+   * "isn't approved"; a rejection here is logged and the sweep goes on. Absent
+   * ⇒ a marker's key is simply dropped with its request dir (the claim that
+   * deleting the device ends the session is UNVERIFIED until the live smoke).
+   */
+  endXcodeSession?: (sessionKey: string) => Promise<void>;
 }
 
 /** The directory, under a data dir, that holds one marker dir per in-flight mobile request. */
@@ -162,6 +209,9 @@ const DERIVED_DATA_DIRNAME = 'DerivedData';
 
 /** The ownership marker's filename. */
 const OWNER_MARKER_FILENAME = 'owner.json';
+
+/** A retained session key's marker dir is `<requestId>` + this + a hash of the key (X-2). */
+const RETAINED_KEY_DIR_INFIX = '.xcode-';
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 
@@ -185,6 +235,14 @@ export interface SimulatorOwnerMarker {
   simUdid: string | null;
   requestId: string;
   createdAt: string;
+  /**
+   * §B4.2 — the Xcode DeviceInteraction session key, stamped before
+   * `StartSession` when the xcode drive rung is attempted; absent otherwise.
+   * The ONLY place the key touches disk: it lives under this instance's own
+   * data dir, next to the device it drives, for the one reader that needs it
+   * after a crash (the boot sweep's `EndSession`).
+   */
+  xcodeSessionKey?: string;
 }
 
 /** Minimal shape of one `xcrun simctl list -j` device-type entry. */
@@ -312,7 +370,7 @@ export function pickNewestIPhone(deviceTypes: readonly SimDeviceType[]): { id: s
  */
 export function resolveSimTarget(
   listJson: unknown,
-  pins: { runtime?: string; deviceType?: string } = {},
+  pins: { runtime?: string; deviceType?: string; minRuntimeMajor?: number } = {},
 ): ResolvedSimTarget {
   const root = asRecord(listJson);
   if (root === null) throw new Error('`xcrun simctl list -j` produced no readable object');
@@ -331,6 +389,17 @@ export function resolveSimTarget(
   if (iosRuntimes.length === 0) {
     throw new Error('no available iOS simulator runtime is installed');
   }
+  // §B3: the xcode drive rung's floor. Checked against the FULL available set
+  // first, so the error distinguishes "nothing new enough is installed" (the
+  // runner's retry-without-floor case) from an ordinary missing runtime.
+  const floor = pins.minRuntimeMajor;
+  const runtimeMajor = (entry: SimRuntime): number =>
+    Number.parseInt((asString(entry.version) ?? '0').split('.')[0] as string, 10) || 0;
+  if (floor !== undefined && !iosRuntimes.some((entry) => runtimeMajor(entry) >= floor)) {
+    throw new Error(`${MIN_RUNTIME_UNSATISFIED_PREFIX} ${floor} (installed: ${iosRuntimes
+      .map((entry) => asString(entry.version) ?? '?')
+      .join(', ')})`);
+  }
 
   let runtime: SimRuntime | undefined;
   if (pins.runtime !== undefined) {
@@ -340,10 +409,15 @@ export function resolveSimTarget(
     if (runtime === undefined) {
       throw new Error(`the pinned iOS runtime "${pins.runtime}" is not installed or not available`);
     }
+    if (floor !== undefined && runtimeMajor(runtime) < floor) {
+      throw new Error(
+        `${MIN_RUNTIME_UNSATISFIED_PREFIX} ${floor}: the pinned runtime "${pins.runtime}" is ${asString(runtime.version) ?? 'unversioned'}`,
+      );
+    }
   } else {
-    runtime = [...iosRuntimes].sort((a, b) =>
-      compareSimVersions(asString(b.version) ?? '0', asString(a.version) ?? '0'),
-    )[0];
+    runtime = [...iosRuntimes]
+      .filter((entry) => floor === undefined || runtimeMajor(entry) >= floor)
+      .sort((a, b) => compareSimVersions(asString(b.version) ?? '0', asString(a.version) ?? '0'))[0];
   }
   if (runtime === undefined) throw new Error('no available iOS simulator runtime is installed');
 
@@ -504,6 +578,7 @@ export function createMobileSimulatorSessionFactory(
       const target = resolveSimTarget(listJson, {
         ...(args.runtime !== undefined ? { runtime: args.runtime } : {}),
         ...(args.deviceType !== undefined ? { deviceType: args.deviceType } : {}),
+        ...(args.minRuntimeMajor !== undefined ? { minRuntimeMajor: args.minRuntimeMajor } : {}),
       });
 
       step = 'simctl create';
@@ -513,7 +588,8 @@ export function createMobileSimulatorSessionFactory(
       udid = created;
 
       step = 'owner marker update';
-      await writeMarker(requestDir, { ...marker, simUdid: udid });
+      const createdMarker: SimulatorOwnerMarker = { ...marker, simUdid: udid };
+      await writeMarker(requestDir, createdMarker);
 
       step = 'simctl boot';
       await xcrunOrThrow(['simctl', 'boot', udid]);
@@ -561,6 +637,16 @@ export function createMobileSimulatorSessionFactory(
         deviceTypeId: target.deviceTypeId,
         derivedDataDir,
         requestDir,
+        async recordXcodeSessionKey(key: string): Promise<void> {
+          // Throws on a write failure, deliberately: see the interface doc.
+          await writeMarker(requestDir, { ...createdMarker, xcodeSessionKey: key });
+        },
+        async retainXcodeSessionKey(key: string): Promise<void> {
+          const keyHash = createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 12);
+          const retainedDir = path.join(args.dataDir, VERIFY_MOBILE_DIRNAME, `${args.requestId}${RETAINED_KEY_DIR_INFIX}${keyHash}`);
+          await fs.mkdir(retainedDir, { recursive: true });
+          await writeMarker(retainedDir, { ...createdMarker, xcodeSessionKey: key });
+        },
         async dispose(): Promise<void> {
           if (disposed) return;
           disposed = true;
@@ -622,6 +708,9 @@ export function createMobileSimulatorSessionFactory(
             simUdid: asString(parsed.simUdid),
             requestId: asString(parsed.requestId) ?? entry.name,
             createdAt: asString(parsed.createdAt) ?? '',
+            ...(asString(parsed.xcodeSessionKey) !== null
+              ? { xcodeSessionKey: asString(parsed.xcodeSessionKey) as string }
+              : {}),
           };
         }
       } catch (err) {
@@ -648,6 +737,19 @@ export function createMobileSimulatorSessionFactory(
         continue;
       }
 
+      // §B4.9 — a dead owner that was driving through Xcode leaves a session
+      // behind (sessions outlive the bridge, §B0). End it BEFORE the device goes:
+      // best-effort, bounded by the hook itself, never a reason to skip the reclaim.
+      if (marker.xcodeSessionKey !== undefined && deps.endXcodeSession !== undefined) {
+        try {
+          await deps.endXcodeSession(marker.xcodeSessionKey);
+        } catch (err) {
+          logger?.info('[mobileSimulatorSession] could not end a stale Xcode session; reclaiming anyway', {
+            requestId: marker.requestId,
+            error: errorText(err),
+          });
+        }
+      }
       const udid = marker.simUdid ?? (await lookupUdidByName(marker.simName));
       if (udid !== null) {
         await destroyDevice(udid);

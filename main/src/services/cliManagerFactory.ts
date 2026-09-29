@@ -44,6 +44,7 @@ type CodexSdkSeams = Pick<
   | 'setQuestionRouterProvider'
   | 'getCodexModelCatalog'
   | 'detectChatGptAccount'
+  | 'abortInFlightTurn'
 >;
 
 /**
@@ -81,7 +82,8 @@ export function isCodexSdkManagerLike(manager: AbstractCliManager): manager is C
     typeof seams.setApprovalRouterProvider === 'function' &&
     typeof seams.setQuestionRouterProvider === 'function' &&
     typeof seams.getCodexModelCatalog === 'function' &&
-    typeof seams.detectChatGptAccount === 'function'
+    typeof seams.detectChatGptAccount === 'function' &&
+    typeof seams.abortInFlightTurn === 'function'
   );
 }
 
@@ -182,6 +184,10 @@ function codexSdkDemoSeams(): CodexSdkSeams {
     setQuestionRouterProvider: () => {},
     getCodexModelCatalog: demoSeamUnavailable('getCodexModelCatalog'),
     detectChatGptAccount: demoSeamUnavailable('detectChatGptAccount'),
+    // Demo mode has no live turn to interrupt — accept and no-op, mirroring
+    // the other injection seams above rather than `demoSeamUnavailable`
+    // (which is reserved for probes a caller AWAITS a real answer from).
+    abortInFlightTurn: async () => {},
   };
 }
 
@@ -834,11 +840,18 @@ export class CliManagerFactory {
       sessionManager: unknown,
       logger?: Logger,
       configManager?: ConfigManager,
+      additionalOptions?: unknown,
     ) => {
+      // Optional, unlike codex-sdk/omp-sdk: pi uses the db only to write a
+      // workflow run's role files (PiSdkManager.spawnCliProcess), so a call
+      // site without one still gets a working manager.
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const db = isSqliteDatabase(options?.db) ? options.db : undefined;
       return new PiSdkManager(
         sessionManager as SessionManager,
         logger,
         configManager,
+        db,
       );
     };
 

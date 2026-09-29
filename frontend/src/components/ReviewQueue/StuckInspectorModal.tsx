@@ -29,6 +29,7 @@ const STUCK_REASON_LABELS: Record<string, string> = {
   cross_run_deadlock: 'Cross-run deadlock — another run is also awaiting review',
   orphan_pty: 'Orphan CLI — the Claude process for this run is no longer running',
   stale_socket: 'Stale socket — the permission socket client has disconnected',
+  parked_no_gate: 'Parked with no gate — the run ended its turn with nothing to answer; message it to reopen or cancel it',
 };
 
 function stuckReasonLabel(reason: string | null | undefined): string {

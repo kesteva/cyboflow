@@ -135,13 +135,25 @@ export function assertAgentProviderAllowed(provider: AgentProvider, context: str
  * process boundary (losing its prototype) is still recognized.
  */
 export function agentProviderDisabledMessage(error: unknown): string | null {
-  if (error instanceof AgentProviderDisabledError) return error.message;
-  if (
-    error instanceof Error &&
-    error.name === 'AgentProviderDisabledError' &&
-    typeof error.message === 'string'
-  ) {
-    return error.message;
+  if (!isAgentProviderDisabled(error)) return null;
+  const { message } = error as Error;
+  return typeof message === 'string' ? message : null;
+}
+
+/**
+ * True when `error` is a provider-disabled refusal. Matches by instance and by
+ * name, so an error that crossed a module or process boundary (losing its
+ * prototype) is still recognized.
+ *
+ * Pass `provider` to scope the TYPED branch: a live refusal for a different
+ * provider is then not a match (the eval Codex adapters use this so another
+ * provider's refusal is never rewrapped as a Codex-juror outage). The bare
+ * `name` match stays unscoped, because a boundary-crossed error has lost its
+ * `provider` field along with its prototype.
+ */
+export function isAgentProviderDisabled(error: unknown, provider?: AgentProvider): boolean {
+  if (error instanceof AgentProviderDisabledError) {
+    return provider === undefined || error.provider === provider;
   }
-  return null;
+  return error instanceof Error && error.name === 'AgentProviderDisabledError';
 }

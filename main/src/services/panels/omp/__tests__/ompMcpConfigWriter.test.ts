@@ -181,6 +181,32 @@ describe('writeOmpMcpConfig', () => {
     expect(fs.existsSync(path.join(worktree, '.gitignore'))).toBe(false);
   });
 
+  it.each([
+    [
+      'already matches (an unchanged, no-write call)',
+      `${JSON.stringify({ mcpServers: { cyboflow: buildOmpCyboflowMcpServerEntry(NODE_PATH, BRIDGE_PATH) } }, null, 2)}\n`,
+    ],
+    ['is malformed (a refused write)', '{ not valid json'],
+  ])('excludes .omp/ even when a pre-existing mcp.json %s', (_label, existing) => {
+    // A worktree whose mcp.json predates the exclude — restored by hand, or left
+    // by an older build. The exclusion used to ride the rewrite, so a call that
+    // wrote nothing left `.omp/` (and every role file under it) untracked-visible.
+    execFileSync('git', ['init', '-q'], { cwd: worktree });
+    const configPath = ompMcpConfigPath(worktree);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, existing, 'utf-8');
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: worktree, encoding: 'utf8' })).toContain('.omp/');
+
+    const result = writeOmpMcpConfig({
+      worktreeRoot: worktree,
+      nodeExecutablePath: NODE_PATH,
+      bridgeScriptPath: BRIDGE_PATH,
+    });
+
+    expect(result.wrote).toBe(false);
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: worktree, encoding: 'utf8' })).toBe('');
+  });
+
   it('is fail-soft (still writes the config) when the worktree is not a git repo', () => {
     const result = writeOmpMcpConfig({
       worktreeRoot: worktree,

@@ -26,7 +26,7 @@ import {
 } from '../../../shared/types/agentRuntime';
 import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
+import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../shared/types/cliPanels';
 import type { AgentThreadImageAttachment } from '../../../shared/types/agentThread';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
@@ -162,8 +162,9 @@ export interface SprintLaneTaskIdsLike {
 /**
  * Options accepted by ClaudeCodeManager.spawnCliProcess (narrow shape).
  * The real ClaudeCodeManager satisfies this interface; tests use a vi.fn() stub.
+ * `laneEnv` (a fan-out lane's build-slot env) comes from {@link LaneSpawnEnv}.
  */
-export interface ClaudeSpawnerOptions {
+export interface ClaudeSpawnerOptions extends LaneSpawnEnv {
   /**
    * Set ONLY by a seam that showed the user their provider is switched off and
    * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
@@ -264,6 +265,16 @@ export interface ClaudeSpawnerOptions {
    * so no step turn may fire `cyboflow_request_verification` itself.
    */
   disallowedTools?: string[];
+  /**
+   * Run on the provider's STANDARD service tier instead of whatever tier the
+   * user's own CLI config selects. Set ONLY by the two workflow spawn seams
+   * (RunExecutor.execute, SpawnStepRunner) — quick chats and the global agent
+   * keep the user's choice. The Codex app-server otherwise inherits
+   * `service_tier` from `~/.codex/config.toml` onto every lane, and `priority`
+   * is billed as "1.5x speed, increased usage". Claude ignores this: its fast
+   * mode is already pinned off for every spawn (`fastModePerSessionOptIn`).
+   */
+  standardServiceTier?: boolean;
   /**
    * HERMETIC global-agent isolation — the spawner-side twin of
    * {@link ClaudeSpawnOptions.isolation} (claudeCodeManager.ts). Set ONLY by the
@@ -987,6 +998,7 @@ export class RunExecutor {
           // both it and the hidden flag are still live here.
           hidePromptFromTranscript:
             turnKind === 'launch' || (turnKind === 'nudge' && this.hiddenNudges.has(runId)),
+          standardServiceTier: true,
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });

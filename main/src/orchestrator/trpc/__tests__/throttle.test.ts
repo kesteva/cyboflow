@@ -11,7 +11,7 @@
  *      and returns to holding none after a burst settles.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { throttleAsyncIterator } from '../throttle';
+import { throttleAsyncIterator, batchAsyncIterator } from '../throttle';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -337,5 +337,137 @@ describe('throttleAsyncIterator', () => {
 
     await drainPromise;
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('batchAsyncIterator', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // -------------------------------------------------------------------------
+  // The property that distinguishes this from throttleAsyncIterator: nothing
+  // is dropped. Push 10 events synchronously (before any tick fires), then
+  // advance past one tick boundary — all 10 must arrive together, in order,
+  // as a single batch (not just the latest, and not one emission per event).
+  // -------------------------------------------------------------------------
+  it('emits every event seen within a tick window as one ordered batch — nothing dropped', async () => {
+    const hz = 60; // tick every ~16.67ms
+    const { push, done, iterable } = makeManualIterator<number>();
+    const batched = batchAsyncIterator(iterable, hz);
+
+    const results: number[][] = [];
+    const drainPromise = (async () => {
+      for await (const v of batched) {
+        results.push(v);
+      }
+    })();
+
+    for (let i = 1; i <= 10; i++) {
+      push(i);
+    }
+    done();
+
+    await drainMicrotasks(200);
+
+    // No tick has fired yet — nothing emitted.
+    expect(results).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(17);
+    await drainMicrotasks(50);
+    await drainPromise;
+
+    // Exactly one batch, carrying every value in arrival order.
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Rate cap: mirrors throttleAsyncIterator's own test — batches per second
+  // stay bounded to ~hz regardless of source throughput, even though no
+  // individual event is dropped (they land in fewer, larger batches instead).
+  // -------------------------------------------------------------------------
+  it('caps batch-emission rate to approximately hz per second while retaining every event', async () => {
+    const hz = 60;
+    const { push, done, iterable } = makeManualIterator<number>();
+    const batched = batchAsyncIterator(iterable, hz);
+
+    const batches: number[][] = [];
+    let drainFinished = false;
+    const drainPromise = (async () => {
+      for await (const v of batched) {
+        batches.push(v);
+      }
+      drainFinished = true;
+    })();
+
+    let eventCount = 0;
+    const sourceInterval = setInterval(() => {
+      push(++eventCount);
+    }, 1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    clearInterval(sourceInterval);
+    done();
+
+    await drainMicrotasks(50);
+    await vi.advanceTimersByTimeAsync(50);
+    await drainMicrotasks(50);
+
+    if (!drainFinished) {
+      await batched.return(undefined);
+    }
+    await drainPromise;
+
+    // Batch count stays hz-bounded (±10 jitter, same tolerance as the
+    // throttle test), but every pushed event is accounted for across batches.
+    expect(batches.length).toBeGreaterThanOrEqual(50);
+    expect(batches.length).toBeLessThanOrEqual(70);
+    const totalEvents = batches.reduce((sum, b) => sum + b.length, 0);
+    expect(totalEvents).toBe(eventCount);
+  });
+
+  // -------------------------------------------------------------------------
+  // Idle costs nothing — same property as throttleAsyncIterator, same reason
+  // (N live subscriptions must not each hold a perpetual setInterval).
+  // -------------------------------------------------------------------------
+  it('holds no timer while the source is idle', async () => {
+    const { push, done, iterable } = makeManualIterator<number>();
+    const batched = batchAsyncIterator(iterable, 60);
+
+    const results: number[][] = [];
+    const drainPromise = (async () => {
+      for await (const v of batched) {
+        results.push(v);
+      }
+    })();
+
+    await drainMicrotasks(50);
+    await vi.advanceTimersByTimeAsync(1000);
+    await drainMicrotasks(50);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(results).toHaveLength(0);
+
+    push(1);
+    push(2);
+    await drainMicrotasks(50);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The flush fires at one tick, then re-arms a trailing cooldown (same
+    // chain shape as throttleAsyncIterator) that expires empty — advance past
+    // BOTH before asserting the timer is gone, exactly like the throttle
+    // test's own "holds no timer while idle" case does.
+    await vi.advanceTimersByTimeAsync(100);
+    await drainMicrotasks(50);
+    expect(results).toEqual([[1, 2]]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    done();
+    await drainMicrotasks(50);
+    await drainPromise;
   });
 });

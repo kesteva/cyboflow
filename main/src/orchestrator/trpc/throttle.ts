@@ -244,3 +244,121 @@ export async function* throttleAsyncIterator<T>(
     void consumerPromise.catch(() => undefined);
   }
 }
+
+/**
+ * Same rate-cap/cooldown/cleanup architecture as {@link throttleAsyncIterator},
+ * but LOSSLESS: every source value seen within a tick window is retained and
+ * emitted together as an array, instead of coalescing to the latest. Use this
+ * instead of `throttleAsyncIterator` when a consumer accumulates DELTAS (e.g.
+ * concatenating `content_block_delta.text` fragments) rather than replacing
+ * its state wholesale on each signal — coalescing-to-latest silently drops
+ * the in-between deltas a delta-accumulator needs, corrupting the
+ * reconstructed text. Still caps the emission RATE to `hz` batches/second;
+ * only the coalescing behavior differs.
+ *
+ * @param source - Any async iterable (EventEmitter-backed iterator, etc.).
+ * @param hz     - Target batch-emission rate in batches per second (e.g. 60).
+ * @param signal - The subscription's AbortSignal (see throttleAsyncIterator's
+ *                 header for why this matters for teardown).
+ * @returns      An async generator yielding non-empty arrays of `T`.
+ */
+export async function* batchAsyncIterator<T>(
+  source: AsyncIterable<T>,
+  hz: number,
+  signal?: AbortSignal,
+): AsyncGenerator<T[]> {
+  const intervalMs = 1000 / hz;
+
+  let pending: T[] = [];
+  let dirty = false;
+  let done = false;
+  let sourceDone = false;
+
+  const queue: T[][] = [];
+
+  let waitResolve: (() => void) | null = null;
+
+  let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function wake(): void {
+    if (waitResolve) {
+      const r = waitResolve;
+      waitResolve = null;
+      r();
+    }
+  }
+
+  function flush(): void {
+    if (!dirty) return;
+    const toEmit = pending;
+    dirty = false;
+    pending = [];
+    queue.push(toEmit);
+    wake();
+  }
+
+  function armCooldown(): void {
+    if (cooldownTimer !== null || done) return;
+    cooldownTimer = setTimeout(() => {
+      cooldownTimer = null;
+      if (!dirty) return;
+      flush();
+      armCooldown();
+    }, intervalMs);
+  }
+
+  const iterator = source[Symbol.asyncIterator]();
+
+  const consumerPromise = (async () => {
+    try {
+      while (!done) {
+        const next = await iterator.next();
+        if (next.done === true || done) break;
+        pending.push(next.value);
+        dirty = true;
+        armCooldown();
+      }
+    } finally {
+      sourceDone = true;
+      wake();
+    }
+  })();
+
+  const onAbort = (): void => wake();
+  signal?.addEventListener('abort', onAbort);
+
+  try {
+    while (!done) {
+      while (queue.length > 0) {
+        yield queue.shift() as T[];
+      }
+
+      if (signal?.aborted === true) {
+        break;
+      }
+
+      if (sourceDone && queue.length === 0 && !dirty) {
+        break;
+      }
+
+      await new Promise<void>((resolve) => {
+        if (queue.length > 0 || (sourceDone && !dirty) || signal?.aborted === true) {
+          resolve();
+        } else {
+          waitResolve = resolve;
+        }
+      });
+    }
+  } finally {
+    done = true;
+    signal?.removeEventListener('abort', onAbort);
+    if (cooldownTimer !== null) {
+      clearTimeout(cooldownTimer);
+      cooldownTimer = null;
+    }
+    wake();
+
+    void Promise.resolve(iterator.return?.()).catch(() => undefined);
+    void consumerPromise.catch(() => undefined);
+  }
+}

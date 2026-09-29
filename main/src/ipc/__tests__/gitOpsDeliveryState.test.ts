@@ -135,7 +135,7 @@ describe('gitOps.getDeliveryState — completedNoCode wiring', () => {
 
     expect(res.success).toBe(true);
     if (!res.success) throw new Error('expected success');
-    expect(res.data).toEqual({ delivered: false, landed: false, ownCommits: 0, completedNoCode: true });
+    expect(res.data).toEqual({ delivered: false, landed: false, ownCommits: 0, completedNoCode: true, integratedLaneCount: 0 });
     expect(sessionCompletedNoCodeWork).toHaveBeenCalledWith(expect.anything(), SID);
   });
 
@@ -176,7 +176,7 @@ describe('gitOps.getDeliveryState — completedNoCode wiring', () => {
 
     expect(res.success).toBe(true);
     if (!res.success) throw new Error('expected success');
-    expect(res.data).toEqual({ delivered: true, landed: true, ownCommits: 0, completedNoCode: false });
+    expect(res.data).toEqual({ delivered: true, landed: true, ownCommits: 0, completedNoCode: false, integratedLaneCount: 0 });
   });
 
   it('fails soft with landed:false/ownCommits:0 (and therefore never fires completedNoCode) when there is no worktree/project to probe', async () => {
@@ -208,7 +208,7 @@ describe('gitOps.getDeliveryState — completedNoCode wiring', () => {
 
     expect(res.success).toBe(true);
     if (!res.success) throw new Error('expected success');
-    expect(res.data).toEqual({ delivered: false, landed: false, ownCommits: 0, completedNoCode: false });
+    expect(res.data).toEqual({ delivered: false, landed: false, ownCommits: 0, completedNoCode: false, integratedLaneCount: 0 });
   });
 
   it('fires completedNoCode when the probe SUCCEEDS with zero own commits and the helper agrees', async () => {

@@ -53,6 +53,8 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import type { CapabilityBreakerFindingFn, OnVerdict } from './verificationScheduler';
 import { VERIFY_NO_RUNBOOK_REASON, runbookDeclineForSkipReason } from './verificationScheduler';
 import { bootstrapRemedyText } from './bootstrapEligibility';
+import type { ExploreStaleProofFinding } from './runbookBootstrapPreflight';
+import type { RunbookLearningFinding } from './learnedRunbook';
 import type {
   CaptureOrigin,
   VerdictV1,
@@ -444,7 +446,11 @@ function buildFindingText(args: {
       if (untested.length > 0) parts.push(['Behaviors that could not be tested:', ...untested].join('\n'));
     }
     if (verdict?.feedback) parts.push(verdict.feedback);
-    if (!report && !verdict && errorMessage) parts.push(`Reason: ${errorMessage}`);
+    // The reason is what separates the low-confidence shapes from one another —
+    // an `unverifiable` diagnosis, a declined `wrong_environment` re-dispatch, a
+    // missing attestation floor — so it is rendered whenever the row has one,
+    // report or not.
+    if (errorMessage) parts.push(`Reason: ${errorMessage}`);
     return { title: 'Visual verification needs human review (low confidence)', body: parts.join('\n\n') };
   }
 
@@ -977,6 +983,96 @@ export function createCapabilityBreakerFinding(deps: {
       });
     } catch (err) {
       logger?.error('[verdictDelivery] capability-breaker finding failed (fail-soft)', {
+        projectId,
+        runId,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+}
+
+/**
+ * §A7 drift finding — the concrete sink behind
+ * `VerificationSchedulerDeps.staleProofFinding`. ONE non-blocking human finding
+ * per (run, modality): the preflight dedupes in memory, and `createIfNoPending`
+ * on the finding's stable `dedupeKey` keeps a restart from filing it twice.
+ * Fail-soft like {@link createCapabilityBreakerFinding}.
+ */
+export function createExploreStaleProofFinding(deps: {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+}): (finding: ExploreStaleProofFinding) => Promise<void> {
+  const { db, logger } = deps;
+  return async ({ projectId, runId, modality, title, body, dedupeKey }) => {
+    try {
+      const taskId = resolveRunTaskId(db, runId, logger);
+      await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title,
+        body,
+        blocking: false,
+        audience: 'human',
+        severity: 'warning',
+        source: dedupeKey,
+        entityType: taskId ? 'task' : null,
+        entityId: taskId ?? null,
+        runId,
+        payload: { kind: 'finding', category: 'visual-regression' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      logger?.error('[verdictDelivery] explore stale-proof finding failed (fail-soft)', {
+        projectId,
+        runId,
+        modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+}
+
+/**
+ * §A5 "learn from success" notices — the concrete sink behind
+ * `VerificationSchedulerDeps.runbookLearningFinding`: a recipe was LEARNED as
+ * an unproven draft, a learned recipe was PROMOTED to proven, or a recipe could
+ * not be learned over a committed entry and is offered as a SUGGESTED one
+ * (docs/proposals/runbook-optional-verification.md §A5 "Review surface").
+ *
+ * NON-BLOCKING by construction: learning never gates a lane, it only changes
+ * how later verifications stand the project up, and a human deciding whether
+ * to keep a machine-authored recipe needs to see the exact commands and the
+ * request they came from. `createIfNoPending` on the caller's stable
+ * `dedupeKey` keeps a replay or restart from filing one twice. Fail-soft like
+ * {@link createExploreStaleProofFinding}: the verdict it rode in on is already
+ * written.
+ */
+export function createRunbookLearningFinding(deps: {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+}): (finding: RunbookLearningFinding) => Promise<void> {
+  const { db, logger } = deps;
+  return async ({ projectId, runId, modality, title, body, dedupeKey, severity }) => {
+    try {
+      const taskId = resolveRunTaskId(db, runId, logger);
+      await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title,
+        body,
+        blocking: false,
+        audience: 'human',
+        severity,
+        source: dedupeKey,
+        entityType: taskId ? 'task' : null,
+        entityId: taskId ?? null,
+        runId,
+        payload: { kind: 'finding', category: 'visual-regression' } satisfies FindingPayload,
+      });
+    } catch (err) {
+      logger?.error('[verdictDelivery] runbook-learning finding failed (fail-soft)', {
         projectId,
         runId,
         modality,

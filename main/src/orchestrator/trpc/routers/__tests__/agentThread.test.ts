@@ -20,7 +20,7 @@ import type {
   AgentThreadStoreLike,
   AgentProposalExecutorLike,
 } from '../../context';
-import { agentThreadProposalEvents, type AgentProposalUpdateEvent } from '../agentThread';
+import { agentThreadProposalEvents, agentThreadEvents, type AgentProposalUpdateEvent } from '../agentThread';
 import type { DatabaseLike, PreparedStatement } from '../../../types';
 import type {
   AgentProposal,
@@ -109,10 +109,14 @@ class FakeStore implements AgentThreadStoreLike {
 function makeService(): AgentThreadServiceLike & {
   ensureGlobalThread: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
+  interruptTurn: ReturnType<typeof vi.fn>;
+  isTurnInFlight: ReturnType<typeof vi.fn>;
 } {
   return {
     ensureGlobalThread: vi.fn(() => THREAD),
     sendMessage: vi.fn(async () => undefined),
+    interruptTurn: vi.fn(async () => ({ interrupted: false })),
+    isTurnInFlight: vi.fn(() => false),
   };
 }
 
@@ -160,6 +164,38 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
     expect(result).toEqual({ ok: true });
     expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined, undefined);
+  });
+
+  it('interruptTurn forwards to the service and returns its result', async () => {
+    const service = makeService();
+    service.interruptTurn.mockResolvedValueOnce({ interrupted: true });
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
+    expect(result).toEqual({ interrupted: true });
+    expect(service.interruptTurn).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('interruptTurn is a no-op ({ interrupted: false }) when the thread is idle', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
+    expect(result).toEqual({ interrupted: false });
+  });
+
+  it('turnState reports the service\'s in-flight state', async () => {
+    const service = makeService();
+    service.isTurnInFlight.mockReturnValueOnce(true);
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
+    expect(result).toEqual({ inFlight: true });
+    expect(service.isTurnInFlight).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('turnState reports idle ({ inFlight: false }) when nothing is in flight', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
+    expect(result).toEqual({ inFlight: false });
   });
 
   it('sendMessage forwards an optional contextHint to the service', async () => {
@@ -464,6 +500,55 @@ describe('cyboflow.agentThread.onProposalUpdate', () => {
     setImmediate(() => agentThreadProposalEvents.emit('update', payload));
 
     expect(await resultPromise).toEqual(payload);
+  });
+});
+
+describe('cyboflow.agentThread.onThreadEvent', () => {
+  it('batches multiple same-tick envelopes into one emission — nothing dropped (regression: was throttleAsyncIterator, which coalesced to latest and silently dropped in-between deltas)', async () => {
+    const caller = appRouter.createCaller(createContext({}));
+    const subscription = await caller.cyboflow.agentThread.onThreadEvent({ threadId: 'thread-1' });
+
+    const batchPromise = (async () => {
+      for await (const batch of subscription as AsyncIterable<unknown[]>) {
+        return batch;
+      }
+      return undefined;
+    })();
+
+    // Three envelopes for this thread, emitted synchronously (same tick
+    // window) — a coalescing throttle would drop the first two.
+    setImmediate(() => {
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 1 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 2 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 3 } });
+    });
+
+    const batch = await batchPromise;
+    expect(batch).toEqual([
+      { type: 'stream_event', seq: 1 },
+      { type: 'stream_event', seq: 2 },
+      { type: 'stream_event', seq: 3 },
+    ]);
+  });
+
+  it('excludes events for a different thread', async () => {
+    const caller = appRouter.createCaller(createContext({}));
+    const subscription = await caller.cyboflow.agentThread.onThreadEvent({ threadId: 'thread-1' });
+
+    const batchPromise = (async () => {
+      for await (const batch of subscription as AsyncIterable<unknown[]>) {
+        return batch;
+      }
+      return undefined;
+    })();
+
+    setImmediate(() => {
+      agentThreadEvents.emit('message', { threadId: 'thread-OTHER', envelope: { type: 'stream_event', seq: 1 } });
+      agentThreadEvents.emit('message', { threadId: 'thread-1', envelope: { type: 'stream_event', seq: 2 } });
+    });
+
+    const batch = await batchPromise;
+    expect(batch).toEqual([{ type: 'stream_event', seq: 2 }]);
   });
 });
 

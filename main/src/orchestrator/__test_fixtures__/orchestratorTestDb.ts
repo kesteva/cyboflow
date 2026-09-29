@@ -89,6 +89,15 @@ export interface CreateTestDbOptions {
    * do not pass this option twice on the same DB.
    */
   includeWorkflowArchivedAt?: boolean;
+  /**
+   * If true, additionally layer migration 144's `agent_target_overrides_json`
+   * column onto workflow_runs (the operator-written, MUTABLE per-run agent-target
+   * override layer — switchRunAgentsHandler writes it, resolveRunEffectiveAgents
+   * and runs.runAgentTargets read it). Additive — never widens GATE_SCHEMA, so the
+   * parity test (no-options createTestDb()) is unaffected. Composes with every
+   * other flag; added idempotently.
+   */
+  includeRunAgentTargetOverrides?: boolean;
 }
 
 /**
@@ -236,6 +245,16 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN handed_over_at TEXT');
     handedOverAtAdded = true;
   };
+  // Migration 144 (run agent-target overrides): its own opt-in flag — neither
+  // read-model surface projects it, only the switch handler / the effective-agent
+  // reader / runs.runAgentTargets touch it. Idempotent add-once like the siblings.
+  // Plain nullable TEXT; additive — never widens GATE_SCHEMA.
+  let runAgentTargetOverridesAdded = false;
+  const addRunAgentTargetOverridesColumnOnce = (): void => {
+    if (runAgentTargetOverridesAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN agent_target_overrides_json TEXT');
+    runAgentTargetOverridesAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -333,6 +352,9 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // `workflows` table (not `workflow_runs`), so it is its own top-level
     // flag rather than folded into includeWorkflowRunTaskColumns / includeSubstrate.
     db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
+  }
+  if (options?.includeRunAgentTargetOverrides) {
+    addRunAgentTargetOverridesColumnOnce();
   }
   return db;
 }

@@ -28,8 +28,14 @@
  *    an iOS toolchain on a machine that cannot host one;
  *  - {@link MobileComposition.sweepAtBoot} is a no-op.
  *
- * Nothing in this file mentions mcpbridge: the Xcode MCP grant is Stage 3 design
- * (§11), not built, and the Stage 1 tier runs on Apple's own command-line tools.
+ * STAGE 3 (runbook-optional-verification.md §B2, §B4.9, §B8) adds the Xcode 27
+ * DeviceInteraction rung's host objects here too, for the same one-instance
+ * reason: the spawn-free {@link XcodeDeviceInteractionProbe} (60 s memo) feeds
+ * the runner's engine selection, the `'xcode-mcp'` health row and the §B8
+ * approval action's re-read, so all three see ONE answer. Nothing here spawns
+ * `mcpbridge` except the two places the design allows: the user-initiated
+ * approval action, and the boot sweep's best-effort EndSession for a dead
+ * owner's orphaned session. Off darwin none of it is constructed.
  */
 import { execFile } from 'node:child_process';
 import type { LoggerLike } from '../../orchestrator/types';
@@ -40,7 +46,13 @@ import {
   type MobileSimulatorSessionFactory,
 } from '../../orchestrator/verify/mobileSimulatorSession';
 import { XcodeToolchainBackend } from './xcodeToolchainBackend';
-import type { VerifyProbeRow } from '../../../../shared/types/visualVerification';
+import { XcodeDeviceInteractionProbe, XCODE_MCP_PROBE_ID } from './xcodeDeviceInteractionProbe';
+import { createXcodeApprovalAction, toXcodeProbeSummary, xcodeProbeRow } from './xcodeMcpHealth';
+import type { MobileXcodeDeps } from '../../orchestrator/verify/mobileDriveRung';
+import { endXcodeSessionBestEffort } from '../../orchestrator/verify/xcode/xcodeDriveSession';
+import { sweepStaleDriveSockets } from '../../orchestrator/verify/xcode/xcodeDriveSocketServer';
+import { DEFAULT_XCRUN_PATH } from '../../orchestrator/verify/xcode/xcodeMcpBridgeClient';
+import type { VerifyProbeRow, XcodeAccessApproval } from '../../../../shared/types/visualVerification';
 
 /** Per-command bound for the default host exec. Matches both consumers' own defaults. */
 const DEFAULT_EXEC_TIMEOUT_MS = 15_000;
@@ -58,6 +70,15 @@ export interface MobileCompositionDeps {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
   logger?: LoggerLike;
+  /**
+   * The binary that will spawn `mcpbridge` — the MAIN process's
+   * `process.execPath`, which Xcode keys its grant on. Defaults to it.
+   */
+  execPath?: string;
+  /** The resolved `xcrun` the bridge is spawned through. Defaults to `/usr/bin/xcrun`. */
+  xcrunPath?: string;
+  /** Whether this is a signed (packaged) build — the only kind offered `approve --always` (§B8). */
+  signedBuild?: boolean;
 }
 
 /** What the composition root injects into the scheduler, the runner and the tRPC context. */
@@ -85,6 +106,12 @@ export interface MobileComposition {
   probeRow: () => Promise<VerifyProbeRow>;
   /** The §8.2 boot sweep. Fire-and-forget: logs its result and NEVER throws. */
   sweepAtBoot: () => Promise<void>;
+  /** §B2/§B4 — the runner's xcode-rung collaborators, or `null` off darwin. */
+  xcode: MobileXcodeDeps | null;
+  /** §B2 — the `'xcode-mcp'` health row. Never throws; off darwin an honest `inconclusive`. */
+  xcodeProbeRow: () => Promise<VerifyProbeRow>;
+  /** §B8 — "Approve Xcode access", or `null` off darwin. Never throws. */
+  approveXcodeAccess: (() => Promise<XcodeAccessApproval>) | null;
 }
 
 /**
@@ -111,6 +138,7 @@ export function createHostAppleCliExec(defaultTimeoutMs = DEFAULT_EXEC_TIMEOUT_M
         {
           timeout: opts?.timeoutMs ?? defaultTimeoutMs,
           maxBuffer: MAX_EXEC_BUFFER_BYTES,
+          ...(opts?.env ? { env: opts.env } : {}),
           // No `shell` key at all — the default is false, and it stays that way.
           windowsHide: true,
         },
@@ -154,10 +182,25 @@ export function composeMobileVerification(deps: MobileCompositionDeps): MobileCo
         fix: null,
       }),
       sweepAtBoot: async () => {},
+      xcode: null,
+      xcodeProbeRow: async () => ({
+        id: XCODE_MCP_PROBE_ID,
+        state: 'inconclusive',
+        detail: 'Xcode DeviceInteraction requires macOS; this host is not macOS',
+        fix: null,
+      }),
+      approveXcodeAccess: null,
     };
   }
 
   const exec = deps.exec ?? createHostAppleCliExec();
+  const xcrunPath = deps.xcrunPath ?? DEFAULT_XCRUN_PATH;
+  const xcodeProbe = new XcodeDeviceInteractionProbe({
+    exec,
+    execPath: deps.execPath ?? process.execPath,
+    platform,
+    ...(logger !== undefined ? { logger } : {}),
+  });
   const toolchain = new XcodeToolchainBackend({
     exec,
     platform,
@@ -169,6 +212,9 @@ export function composeMobileVerification(deps: MobileCompositionDeps): MobileCo
     exec,
     platform,
     ...(logger !== undefined ? { logger } : {}),
+    // §B4.9: a dead owner that was driving through Xcode leaves a session
+    // behind; the sweep ends it (best-effort, bounded) before deleting the device.
+    endXcodeSession: (key) => endXcodeSessionBestEffort(key, { xcrunPath, ...(logger !== undefined ? { logger } : {}) }),
   });
 
   return {
@@ -193,7 +239,34 @@ export function composeMobileVerification(deps: MobileCompositionDeps): MobileCo
         fix: null,
       };
     },
+    xcode: {
+      probe: async () => toXcodeProbeSummary(await xcodeProbe.probe()),
+      xcrunPath,
+    },
+    xcodeProbeRow: async () => {
+      try {
+        return xcodeProbeRow(await xcodeProbe.probe());
+      } catch (err) {
+        // The probe's contract is never-throw; a violation reads as "could not tell".
+        return {
+          id: XCODE_MCP_PROBE_ID,
+          state: 'inconclusive',
+          detail: err instanceof Error ? err.message : String(err),
+          fix: null,
+        };
+      }
+    },
+    approveXcodeAccess: createXcodeApprovalAction({
+      dataDir: deps.dataDir,
+      probe: xcodeProbe,
+      signedBuild: deps.signedBuild ?? false,
+      xcrunPath,
+      ...(logger !== undefined ? { logger } : {}),
+    }),
     sweepAtBoot: async () => {
+      // §B4.9: leftover `xd-*` drive sockets a hard-killed instance left behind.
+      // Its own function never throws; a live listener's socket is kept.
+      await sweepStaleDriveSockets(deps.dataDir, logger);
       try {
         const result = await session.sweepStaleSimulators({ dataDir: deps.dataDir });
         // Logged at info even when it reclaimed nothing: the interesting line is

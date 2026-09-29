@@ -449,3 +449,51 @@ describe('runbookHash', () => {
     expect(runbookPortableHash(baseRunbook())).toBe(runbookPortableHash(baseRunbook()));
   });
 });
+
+describe('parseVerifyRunbookV1 — serve-binding attestation (runbook-optional-verification.md §A1.2)', () => {
+  const SERVE_BINDING = { kind: 'serve-binding' } as const;
+
+  it('accepts serve-binding on a web entry with a serve, and round-trips it', () => {
+    const rb = baseRunbook();
+    rb.modalities.web = { ...rb.modalities.web!, attestation: SERVE_BINDING };
+    const parsed = parseVerifyRunbookV1(rb);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.runbook.modalities.web?.attestation).toEqual(SERVE_BINDING);
+  });
+
+  it('accepts serve-binding on a cdp-app entry with a serve', () => {
+    const rb = baseRunbook();
+    rb.modalities['cdp-app'] = { ...rb.modalities['cdp-app']!, attestation: SERVE_BINDING };
+    expect(parseVerifyRunbookV1(rb).ok).toBe(true);
+  });
+
+  it('refuses serve-binding on a web entry with nothing to serve', () => {
+    expect(
+      parseVerifyRunbookV1({ version: 1, modalities: { web: { build: ['pnpm build'], attestation: SERVE_BINDING } } }),
+    ).toEqual({
+      ok: false,
+      error:
+        "modalities[\"web\"].serve: required with a 'serve-binding' attestation (the binding is to this serve's process — with nothing to serve it can never verify)",
+    });
+  });
+
+  it('refuses serve-binding on native-screen (no port is ever bound there)', () => {
+    expect(
+      parseVerifyRunbookV1({
+        version: 1,
+        modalities: { 'native-screen': { serve: { cmd: 'open -a MyApp' }, attestation: SERVE_BINDING } },
+      }),
+    ).toEqual({
+      ok: false,
+      error: "modalities[\"native-screen\"].attestation.kind: 'serve-binding' is only valid on the web and cdp-app modalities",
+    });
+  });
+
+  it('refuses serve-binding on mobile (it stays pinned to bundle-identity)', () => {
+    const rb = mobileRunbook();
+    rb.modalities.mobile = { ...rb.modalities.mobile!, attestation: SERVE_BINDING };
+    const parsed = parseVerifyRunbookV1(rb);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toMatch(/^modalities\["mobile"\]\.attestation\.kind: /);
+  });
+});

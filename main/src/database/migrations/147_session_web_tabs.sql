@@ -1,4 +1,4 @@
--- Migration 146: web-viewer tab rows + the web audit trail.
+-- Migration 147: web-viewer tab rows + the web audit trail.
 --
 -- session_web_tabs — one row per web-viewer tab, so a session's tabs survive a
 -- restart. `id` is the tab's OPAQUE id (`web:<uuid>`), not a URL: it is the
@@ -22,7 +22,7 @@
 -- schema.sql already declares). IF NOT EXISTS because the ledger tracks by
 -- filename — a renumbered file re-applies wholesale.
 --
--- Numbered 146, not 145: 145 is claimed by an unmerged worktree.
+-- Numbered 147: 146 went to usage accounting on main first.
 -- See docs/proposals/native-web-viewer.md §5.
 
 CREATE TABLE IF NOT EXISTS session_web_tabs (

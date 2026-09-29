@@ -10,7 +10,7 @@
 
 export { TypedEventNarrowing } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
-export { RawEventsSink, setStreamParserPerfBump } from './rawEventsSink';
+export { RawEventsSink, setStreamParserPerfBump, PROCESS_INSTANCE_ID_FIELD } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
 export { deriveEventType, derivePersistedEventType } from './derivers';
 export {

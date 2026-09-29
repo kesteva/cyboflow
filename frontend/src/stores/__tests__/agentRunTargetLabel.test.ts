@@ -61,7 +61,7 @@ describe('agentRunTargetLabel', () => {
 
   it('shows the pinned Claude model under a Claude runtime', () => {
     expect(agentRunTargetLabel({ runtime: 'claude-sdk', model: 'sonnet', providerModel: null })).toBe(
-      'Sonnet 5',
+      'Sonnet 5.5',
     );
   });
 

@@ -202,6 +202,7 @@ ${MOBILE_USAGE}
   attest cdp <expression> <expected>
   attest window <titlePattern> <app>
   attest bundle
+  attest binding
   stop`;
 
 // ---------------------------------------------------------------------------
@@ -227,7 +228,16 @@ export type AttestCommand =
    * subcommand only ECHOES that record, so there is nothing for the agent to
    * pass — and therefore nothing for it to pass wrong.
    */
-  | { kind: 'attest'; channel: 'bundle' };
+  | { kind: 'attest'; channel: 'bundle' }
+  /**
+   * `serve-binding` (runbook-optional-verification.md §A1.2), argument-free for
+   * the same reason as `bundle`: the channel has no probe the agent could run —
+   * the HARNESS binds the leased port's listener to the serve group the driver
+   * recorded after the session. The subcommand only reports whether a serve was
+   * started through the driver at all, so the agent never loops on a self-check
+   * it cannot pass or fail by itself.
+   */
+  | { kind: 'attest'; channel: 'binding' };
 
 export type DriverCommand =
   | { kind: 'serve'; command: string }
@@ -247,6 +257,7 @@ export const ATTEST_KIND_BY_CHANNEL: Record<AttestCommand['channel'], Attestatio
   cdp: 'cdp-token',
   window: 'window-identity',
   bundle: 'bundle-identity',
+  binding: 'serve-binding',
 };
 
 /**
@@ -430,12 +441,17 @@ function parseAttestArgv(rest: string[]): ParseArgvResult {
         return { ok: false, message: 'attest bundle takes no arguments' };
       }
       return { ok: true, command: { kind: 'attest', channel: 'bundle' } };
+    case 'binding':
+      if (args.length !== 0) {
+        return { ok: false, message: 'attest binding takes no arguments' };
+      }
+      return { ok: true, command: { kind: 'attest', channel: 'binding' } };
     default:
       return {
         ok: false,
         message: channel
-          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window|bundle)`
-          : 'attest requires a channel: http|dom|cdp|window|bundle',
+          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window|bundle|binding)`
+          : 'attest requires a channel: http|dom|cdp|window|bundle|binding',
       };
   }
 }
@@ -821,7 +837,7 @@ export async function runDriverCommand(
   if (env.VERIFY_MODALITY === 'mobile' && isDriveCommand(command)) {
     deps.stderr(MOBILE_CDP_REFUSAL);
     deps.stderr(
-      'mobile surface: "mobile-screenshot <name>" to observe, "mobile-tap"/"mobile-type"/"mobile-swipe"/"mobile-press"/"mobile-flow" to drive (when VERIFY_MOBILE_DRIVE=maestro), "mobile-openurl <url>" to navigate.',
+      'mobile surface: "mobile-screenshot <name>" / "mobile-capture <name>" to observe, "mobile-tap"/"mobile-type"/"mobile-swipe"/"mobile-press" to drive (when VERIFY_MOBILE_DRIVE is maestro or xcode; "mobile-flow" on maestro, "mobile-interact"/"mobile-activate" on xcode), "mobile-openurl <url>" to navigate.',
     );
     return 1;
   }
@@ -1318,7 +1334,38 @@ async function evaluateAttestation(
     }
     case 'bundle':
       return evaluateBundleAttestation(artifactsDir, deps);
+    case 'binding':
+      return evaluateServeBindingAttestation(artifactsDir, deps);
   }
+}
+
+/**
+ * `serve-binding` — HARNESS-VERIFIED, so there is nothing here to compare
+ * (runbook-optional-verification.md §A1.2). The harness, after the session,
+ * requires the leased port's listener to be in the process group `serve`
+ * recorded, running the task's VERBATIM composed `serve.cmd`. All this can
+ * usefully tell the agent is whether that precondition exists yet: a serve the
+ * driver started (`serve.pid` recorded) → ok, saying the rest is the harness's;
+ * none → not ok, pointing at the one road that can verify.
+ */
+async function evaluateServeBindingAttestation(artifactsDir: string, deps: DriverDeps): Promise<AttestOutcome> {
+  let pid: number | null = null;
+  try {
+    pid = await deps.readPidFile(servePidFilePath(artifactsDir));
+  } catch {
+    pid = null;
+  }
+  if (pid === null) {
+    return {
+      ok: false,
+      detail:
+        'serve-binding: no serve was started through "$VERIFY_DRIVER serve" in this request — the harness can only bind a serve the driver started; run the task\'s serve.cmd verbatim through it',
+    };
+  }
+  return {
+    ok: true,
+    detail: `serve-binding: harness-verified after your session (the leased port's listener must be the serve group ${pid} the driver recorded, running the task's verbatim serve.cmd) — nothing further to self-check; leave that serve running`,
+  };
 }
 
 /**
@@ -1584,10 +1631,37 @@ async function defaultResolveChromiumExecutable(): Promise<string | null> {
     const { chromium } = await import('playwright');
     const p = chromium.executablePath();
     if (typeof p !== 'string' || p.length === 0) return null;
-    return existsSync(p) ? p : null;
+    if (!existsSync(p)) return null;
+    return headlessShellSibling(p, existsSync) ?? p;
   } catch {
     return null;
   }
+}
+
+/**
+ * The `chrome-headless-shell` binary Playwright installs NEXT TO the full
+ * browser (`<cache>/chromium-<rev>/…` → `<cache>/chromium_headless_shell-<rev>/
+ * chrome-headless-shell-<platform>/chrome-headless-shell[.exe]`), or `null`.
+ *
+ * WHY THE DRIVER PREFERS IT (measured 2026-09-25, macOS 26, Chrome for Testing
+ * 151 / Playwright 1.62.1): the detached full "Google Chrome for Testing.app"
+ * never sends a single HTTP request — every `goto` to a local page hangs on
+ * `load` (the server logs nothing), and the next `connectOverCDP` times out
+ * behind it. `data:` URLs load, and the headless shell spawned with the SAME
+ * flags loads the same page in ~100ms. The shell is a plain executable, not an
+ * app bundle, so none of the app-level network gating applies. Playwright has
+ * no public API for this path, hence the sibling derivation; absent ⇒ the full
+ * browser, exactly as before.
+ */
+export function headlessShellSibling(fullPath: string, exists: (p: string) => boolean): string | null {
+  const m = /^(.*[\\/])chromium-(\d+)[\\/]/.exec(fullPath);
+  if (m === null) return null;
+  const root = `${m[1]}chromium_headless_shell-${m[2]}`;
+  for (const platform of ['mac-arm64', 'mac-x64', 'linux64', 'linux-arm64', 'win64']) {
+    const exe = join(root, `chrome-headless-shell-${platform}`, platform === 'win64' ? 'chrome-headless-shell.exe' : 'chrome-headless-shell');
+    if (exists(exe)) return exe;
+  }
+  return null;
 }
 
 /**

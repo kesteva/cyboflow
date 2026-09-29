@@ -55,6 +55,7 @@ import type {
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import { definitionMergesDecomposition } from './stepPrompt';
 import { composeDesignSurfaces } from './designSurfaces';
 import {
   isSolutionThoroughness,
@@ -85,6 +86,18 @@ import { hasReviewableDesignSurface } from '../runEntityOwnership';
 // artifact says, and only the gate-body copy knows the `reported_at` freshness
 // rule (migration 143). This module used to keep a byte-identical private copy.
 import { readAdversarialReviewMarkdown } from '../adversarialReviewGateBody';
+import { EnvironmentActions, environmentActionsDisabled } from './environmentActions';
+import { LaneBuildSlots, laneBuildSlotsDisabled, verifyLaneBuildSlotsIgnored } from './laneBuildSlots';
+import { runGitExit, runToolCapture } from '../../utils/runGit';
+import { ensureGitExcludeEntries } from '../../utils/gitExcludeWriter';
+import { mkdir } from 'fs/promises';
+
+/**
+ * Bound on each git call that verifies the lane build slots are ignored: the
+ * fan-out preflight awaits it before any lane dispatches, so a hung git must
+ * time out (⇒ no slots this run, with a notice) rather than stall the sprint.
+ */
+const LANE_BUILD_SLOTS_GIT_TIMEOUT_MS = 15_000;
 
 /**
  * The ESCALATION-REVIEW collaborator bag, declared STRUCTURALLY here rather than
@@ -250,6 +263,12 @@ export interface DefaultProgrammaticRunnerDeps {
       }
     | undefined;
   /**
+   * Per-step ROLE resolver for direct dispatch (programmatic/stepDispatch.ts):
+   * `(runId, agentKey)` → the role's effective system prompt. Threaded to the
+   * run's SpawnStepRunner as a run-bound thunk. Absent ⇒ every step delegates.
+   */
+  resolveStepRole?: (runId: string, agentKey: string) => { systemPrompt: string } | undefined;
+  /**
    * LANE-TRIAGE task reader (autonomous lane rescue). Resolves a fan-out item's
    * ref / title / CURRENT body so the host can enrich the controller's bare
    * lane-failure facts before consulting the monitor — the brain judges whether
@@ -314,6 +333,14 @@ export interface DefaultProgrammaticRunnerDeps {
    * resolves 'available' and behaves exactly as it did before the seam.
    */
   verifyRunbookStatus?: VerificationPostureDeps['runbookStatus'];
+  /**
+   * The LIVE visual-verify config (`configManager.getVisualVerifyConfig`) — the
+   * same read the agent engine's gate 3 makes for the runbook-optional kill
+   * switch, so the RUN-LEVEL posture and the per-request execution mode agree
+   * (runbook-optional-verification.md §A6). Absent ⇒ the posture consults only
+   * the env override, whose default is explore-on — the engine's own default.
+   */
+  verifyLiveConfig?: VerificationPostureDeps['liveConfig'];
   logger?: LoggerLike;
 }
 
@@ -841,6 +868,37 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const resolveStepAgent = this.deps.resolveStepAgent
       ? (agentKey: string) => this.deps.resolveStepAgent!(ctx.runId, agentKey)
       : undefined;
+    const resolveStepRole = this.deps.resolveStepRole
+      ? (agentKey: string) => this.deps.resolveStepRole!(ctx.runId, agentKey)
+      : undefined;
+
+    // Per-SLOT private build directories for fan-out lanes, inside the run's
+    // worktree (laneBuildSlots.ts). One instance per run so the git exclude, its
+    // git verification and each slot's mkdir happen once — and so its single
+    // "unavailable" notice is once per run (the host below subscribes to it and
+    // prepares the root eagerly in the fan-out preflight). Kill switch:
+    // CYBOFLOW_DISABLE_LANE_BUILD_SLOTS=1 (no instance, so no notice either).
+    const laneBuildSlots =
+      !laneBuildSlotsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
+        ? new LaneBuildSlots(
+            ctx.worktreePath,
+            {
+              ensureExcluded: (worktreePath, entries) =>
+                ensureGitExcludeEntries(worktreePath, entries, {
+                  label: 'LaneBuildSlots',
+                  ...(this.deps.logger ? { logger: this.deps.logger } : {}),
+                }) !== null,
+              verifyIgnored: (worktreePath, root) =>
+                verifyLaneBuildSlotsIgnored(worktreePath, root, (cwd, args) =>
+                  runGitExit(cwd, args, { timeout: LANE_BUILD_SLOTS_GIT_TIMEOUT_MS }),
+                ),
+              mkdirp: async (dirPath) => {
+                await mkdir(dirPath, { recursive: true });
+              },
+            },
+            this.deps.logger,
+          )
+        : undefined;
 
     const runner = new SpawnStepRunner(
       this.deps.spawner,
@@ -891,6 +949,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
+        ...(resolveStepRole ? { resolveStepRole } : {}),
+        ...(definitionMergesDecomposition(def) ? { mergedDecomposition: true } : {}),
+        ...(laneBuildSlots ? { laneScratch: (slot: number) => laneBuildSlots.resolve(slot) } : {}),
       },
       this.deps.logger,
     );
@@ -985,9 +1046,22 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // callback (where TS cannot keep the narrowing).
     const postureDb = this.deps.db;
     const verifyRunbookStatus = this.deps.verifyRunbookStatus;
+    const verifyLiveConfig = this.deps.verifyLiveConfig;
+
+    // The run worktree's closed set of host-run environment actions (lane triage's
+    // `fix_environment` + the fan-out dependency preflight). Kill switch:
+    // CYBOFLOW_DISABLE_ENV_ACTIONS=1.
+    const environmentActions =
+      !environmentActionsDisabled() && typeof ctx.worktreePath === 'string' && ctx.worktreePath.length > 0
+        ? new EnvironmentActions(ctx.worktreePath, (bin, args, cwd, timeoutMs) =>
+            runToolCapture(bin, cwd, args, { timeout: timeoutMs }),
+          )
+        : undefined;
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
+      ...(environmentActions ? { environmentActions } : {}),
+      ...(laneBuildSlots ? { laneBuildSlots } : {}),
       projectId: ctx.run.project_id,
       reporter: this.deps.reporter,
       gate: this.deps.gate,
@@ -1082,6 +1156,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
                 {
                   readRunStamp: (runId: string) => readVerificationRunStamp(postureDb, runId),
                   runbookStatus: verifyRunbookStatus,
+                  ...(verifyLiveConfig !== undefined ? { liveConfig: verifyLiveConfig } : {}),
                 },
                 ctx.runId,
               ),

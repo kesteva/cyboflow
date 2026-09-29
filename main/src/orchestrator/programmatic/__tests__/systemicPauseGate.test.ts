@@ -15,6 +15,7 @@ import {
   type SystemicPauseParker,
 } from '../systemicPauseGate';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
+import type { DecisionPayload } from '../../../../../shared/types/reviews';
 
 const channelFor = (projectId: number): string => `review-project-${projectId}`;
 // Fixed wall clock (~2023-11-14T22:13:20Z) so parseable-epoch errors are stable.
@@ -30,7 +31,14 @@ const flush = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
 
 interface FakeItems extends SystemicPauseItemOps {
   findPendingCalls: Array<{ runId: string; source: string }>;
-  createCalls: Array<{ runId: string; projectId: number; title: string; body: string; source: string }>;
+  createCalls: Array<{
+    runId: string;
+    projectId: number;
+    title: string;
+    body: string;
+    source: string;
+    payload?: DecisionPayload;
+  }>;
   resolveCalls: Array<{ projectId: number; reviewItemId: string; resolution: string }>;
   dismissCalls: Array<{ projectId: number; reviewItemId: string; resolution: string }>;
 }
@@ -295,5 +303,121 @@ describe('ReviewQueueSystemicPauseGate', () => {
     timer.timers[0].cb();
     expect(items.resolveCalls).toHaveLength(0);
     expect(parker.resumeCalls).toBe(1);
+  });
+});
+
+describe('ReviewQueueSystemicPauseGate — pause payload + body (switch runtime & retry)', () => {
+  it('mints the item with a systemic-pause DecisionPayload carrying what was blocked', async () => {
+    const items = makeItems();
+    const gate = new ReviewQueueSystemicPauseGate({
+      items,
+      parker: makeParker(),
+      events: new EventEmitter(),
+      channelFor,
+      now,
+    });
+
+    void gate.awaitClear({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'implement', name: 'Implement' }),
+      error: 'Claude AI usage limit reached',
+      info: {
+        blockedAgentKeys: ['implement'],
+        blockedProvider: 'claude',
+        blockedRuntime: 'claude-sdk',
+        origin: 'step',
+        fanOut: false,
+      },
+    });
+    await flush();
+
+    expect(items.createCalls).toHaveLength(1);
+    const call = items.createCalls[0];
+    expect(call.payload).toEqual({
+      kind: 'decision',
+      gate: 'systemic-pause',
+      stepId: 'implement',
+      agentKeys: ['implement'],
+      blockedProvider: 'claude',
+      blockedRuntime: 'claude-sdk',
+      origin: 'step',
+      fanOut: false,
+      errorClass: expect.any(String),
+    });
+    expect(call.body).toContain('Blocked: `implement` on claude (`claude-sdk`).');
+    expect(call.body).toContain('**Retry now**');
+    expect(call.body).toContain('**Switch runtime & retry**');
+    expect(call.body).toContain('**Stop waiting**');
+    expect(call.body).not.toContain('**Resolve**');
+  });
+
+  it('a triage-origin pause says the supervisor is not moved by a switch', async () => {
+    const items = makeItems();
+    const gate = new ReviewQueueSystemicPauseGate({
+      items,
+      parker: makeParker(),
+      events: new EventEmitter(),
+      channelFor,
+      now,
+    });
+
+    void gate.awaitClear({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'execute' }),
+      error: 'session limit',
+      info: { blockedAgentKeys: ['implement', 'code-review'], origin: 'triage', fanOut: true },
+    });
+    await flush();
+
+    const call = items.createCalls[0];
+    expect(call.payload).toMatchObject({ origin: 'triage', fanOut: true, agentKeys: ['implement', 'code-review'] });
+    expect(call.body).toContain("The run's supervisor (lane triage, always Claude) hit the limit");
+    expect(call.body).not.toContain('Blocked:');
+  });
+
+  it("no info (a legacy caller) ⇒ the payload carries only gate/stepId/errorClass and no Blocked line", async () => {
+    const items = makeItems();
+    const gate = new ReviewQueueSystemicPauseGate({
+      items,
+      parker: makeParker(),
+      events: new EventEmitter(),
+      channelFor,
+      now,
+    });
+
+    void gate.awaitClear({ runId: 'r', projectId: 1, step: step({ id: 'a' }), error: 'rate limit' });
+    await flush();
+
+    expect(items.createCalls[0].payload).toEqual({
+      kind: 'decision',
+      gate: 'systemic-pause',
+      stepId: 'a',
+      errorClass: expect.any(String),
+    });
+    expect(items.createCalls[0].body).not.toContain('Blocked:');
+  });
+
+  it('a re-attach keeps the existing item (no create, no rewrite)', async () => {
+    const items = makeItems({ existing: 'rvw_old' });
+    const gate = new ReviewQueueSystemicPauseGate({
+      items,
+      parker: makeParker(),
+      events: new EventEmitter(),
+      channelFor,
+      now,
+    });
+
+    void gate.awaitClear({
+      runId: 'r',
+      projectId: 1,
+      step: step({ id: 'a' }),
+      error: 'rate limit',
+      info: { blockedAgentKeys: ['a'], origin: 'step', fanOut: false },
+    });
+    await flush();
+
+    expect(items.createCalls).toHaveLength(0);
   });
 });

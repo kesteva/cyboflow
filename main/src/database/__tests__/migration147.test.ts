@@ -1,5 +1,5 @@
 /**
- * Migration 146_session_web_tabs.sql — web-viewer tab rows + the web audit trail.
+ * Migration 147_session_web_tabs.sql — web-viewer tab rows + the web audit trail.
  *
  * (a)-(c) run the file over a minimal `sessions` base; (d) proves it lands
  * through the real DatabaseService.initialize() chain.
@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseService } from '../database';
 
 const MIG_DIR = join(__dirname, '..', 'migrations');
-const SQL = readFileSync(join(MIG_DIR, '146_session_web_tabs.sql'), 'utf-8');
+const SQL = readFileSync(join(MIG_DIR, '147_session_web_tabs.sql'), 'utf-8');
 
 function baseDb(): Database.Database {
   const db = new Database(':memory:');
@@ -29,7 +29,7 @@ function insertTab(db: Database.Database, id: string, openedBy = 'user'): void {
   ).run(id, openedBy);
 }
 
-describe('migration 146 — session_web_tabs + session_web_events', () => {
+describe('migration 147 — session_web_tabs + session_web_events', () => {
   it('(a) creates both tables and their indexes', () => {
     const db = baseDb();
     db.exec(SQL);
@@ -71,7 +71,7 @@ describe('migration 146 — session_web_tabs + session_web_events', () => {
   });
 
   it('(d) a fresh DatabaseService.initialize() run applies the migration cleanly', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration146-'));
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration147-'));
     let svc: DatabaseService | undefined;
     try {
       svc = new DatabaseService(join(dir, 'test.db'));

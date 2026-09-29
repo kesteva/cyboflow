@@ -384,9 +384,10 @@ describe('omp-sdk workflow lane — per-step spawn plumbing', () => {
   it('renders the step prompt with the OMP runtime-adapter envelope', async () => {
     // The T1 step prompt tells the step to delegate to its `cyboflow-<agent>`
     // role and claims that role is installed in `.claude/agents/` — true on
-    // Claude only. The envelope corrects that and forbids resolving the
-    // prefix-stripped name against OMP's own roster (which is how a real run
-    // adopted a third-party `compounder`).
+    // Claude only. The envelope points at the OMP project agents cyboflow
+    // installs instead and forbids resolving the prefix-stripped name against
+    // OMP's own roster (which is how a real run adopted a third-party
+    // `compounder`).
     const { runner, clients, ompManager } = makeHarness({ runtime: 'omp-sdk' }, 'ok', {
       promptRenderContext: { provider: 'omp', runtime: 'omp-sdk', executionModel: 'programmatic' },
     });
@@ -395,7 +396,8 @@ describe('omp-sdk workflow lane — per-step spawn plumbing', () => {
 
     const prompt = clients[0].prompts[0];
     expect(prompt).toContain('# Runtime adapter: OMP');
-    expect(prompt).toContain('NEVER pass a `cyboflow-*` name');
+    expect(prompt).toContain('`.omp/agents/cyboflow-<role>.md`');
+    expect(prompt).toContain('NEVER pass the role name with the `cyboflow-` prefix stripped');
     // …and the composed step prompt is still there, after the envelope.
     expect(prompt).toContain('code-review');
     await ompManager.killAllProcesses();

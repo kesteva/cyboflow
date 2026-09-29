@@ -14,6 +14,7 @@ import type {
   NativeGrantProbe,
   VerificationModality,
   VerifyProbeRow,
+  XcodeAccessApproval,
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
@@ -46,7 +47,7 @@ import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
 import type { CustomViewsServiceLike } from '../customViews/customViewsService';
-import type { EffectiveAgentsResolver } from '../runStepModels';
+import type { EffectiveAgentsResolver, StepModelGates } from './contracts/effectiveAgents';
 
 /**
  * Narrow structural interface for `CustomWidgetServerManager`
@@ -233,6 +234,12 @@ export interface AgentThreadServiceLike {
     contextHint?: string,
     images?: readonly AgentThreadImageAttachment[],
   ): Promise<void>;
+  /** Abort whatever turn is currently in flight for this thread (the rail's
+   *  Stop control). No-op — `{ interrupted: false }` — when the thread is idle. */
+  interruptTurn(threadId: string): Promise<{ interrupted: boolean }>;
+  /** Whether a turn is currently in flight for this thread — lets a reloaded
+   *  renderer hydrate the Stop affordance for a turn that predates its mount. */
+  isTurnInFlight(threadId: string): boolean;
 }
 
 /**
@@ -339,6 +346,19 @@ export interface VerifyHostProbesLike {
    * so no state of this row has an action behind it.
    */
   mobileSimulator?: () => Promise<VerifyProbeRow>;
+  /**
+   * The `'xcode-mcp'` row (runbook-optional-verification.md §B2), already
+   * folded by `mobileComposition` for the same standalone-typecheck reason as
+   * {@link mobileSimulator}. The router keeps the fail-open discipline over it.
+   */
+  xcodeMcp?: () => Promise<VerifyProbeRow>;
+  /**
+   * §B8 "Approve Xcode access": opens cyboflow's scaffold project through the
+   * Xcode bridge from the main process (raising Xcode's prompt while the user is
+   * present), then returns the commands to SHOW. Never runs sudo. Absent off
+   * macOS.
+   */
+  approveXcodeAccess?: () => Promise<XcodeAccessApproval>;
 }
 
 /**
@@ -684,6 +704,14 @@ export interface ContextDeps {
    * PRECONDITION_FAILED.
    */
   resolveRunEffectiveAgents?: EffectiveAgentsResolver;
+
+  /**
+   * The spawn-seam gates (provider enabled, guarded model usable) the per-step
+   * model rail applies so it reports what actually spawns — see
+   * {@link StepModelGates}. `undefined` (the unit-test default) ⇒ every
+   * provider is treated as enabled and every model as usable.
+   */
+  stepModelGates?: StepModelGates;
 }
 
 /**
@@ -750,6 +778,7 @@ export function createContext(deps: ContextDeps = {}): {
   customViews?: CustomViewsServiceLike;
   customWidgetServer?: CustomWidgetServerLike;
   resolveRunEffectiveAgents?: EffectiveAgentsResolver;
+  stepModelGates?: StepModelGates;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -782,6 +811,7 @@ export function createContext(deps: ContextDeps = {}): {
     customViews,
     customWidgetServer,
     resolveRunEffectiveAgents,
+    stepModelGates,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -821,6 +851,7 @@ export function createContext(deps: ContextDeps = {}): {
     customViews,
     customWidgetServer,
     resolveRunEffectiveAgents,
+    stepModelGates,
   };
 }
 

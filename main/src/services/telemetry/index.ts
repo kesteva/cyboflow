@@ -10,6 +10,7 @@ import {
 } from './scrub';
 import { resolveTelemetryCredentials } from './credentials';
 import { recordLocalError } from './diagnostics';
+import { isSystemicErrorClass } from '../../orchestrator/programmatic/systemicError';
 import type { TelemetryEventMap, TelemetryEventName } from '../../../../shared/types/telemetry';
 
 export type { TelemetryEnvironment } from './environment';
@@ -155,6 +156,16 @@ export function captureSeamError(
   recordLocalError(seam, error, new Date().toISOString());
 
   if (!sentryActive) return;
+  // A SYSTEMIC errorClass is the user's environment, not our defect — a usage
+  // window exhausted, a rate limit, a dead login, a dropped network. The app
+  // already handles those (parks the run, offers the sign-in card), so a Sentry
+  // event only files someone's expired login as an app error and, because
+  // triage ranks by volume, lets it outrank real bugs. 80bde3193 fixed this at
+  // ONE seam (run-finalize-failed); the same classes kept arriving through
+  // sdk-session-terminal-result and monitor-query-failed (CYBOFLOW-APP-26/-27/
+  // -29: 17 of ~30 events on 0.4.2). Filtering here covers every seam, current
+  // and future. Still recorded locally above for the in-app bug reporter.
+  if (isSystemicErrorClass(tags?.errorClass)) return;
   try {
     const err = error instanceof Error ? error : new Error(String(error));
     Sentry.captureException(err, {

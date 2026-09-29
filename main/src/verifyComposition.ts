@@ -35,7 +35,12 @@ import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
-import { createVerdictDelivery, createCapabilityBreakerFinding } from './orchestrator/verify/verdictDelivery';
+import {
+  createVerdictDelivery,
+  createCapabilityBreakerFinding,
+  createExploreStaleProofFinding,
+  createRunbookLearningFinding,
+} from './orchestrator/verify/verdictDelivery';
 import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
 import { VerifyCapabilityStore } from './orchestrator/verify/capabilityStore';
 import { VerifyRunbookStore } from './orchestrator/verify/runbookStore';
@@ -51,6 +56,7 @@ import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore
 import {
   computeVerifyInputHash,
   computeVerifyHostFingerprint,
+  probeHasPackageJson,
 } from './services/visualVerify/verifyDriftProbes';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
@@ -167,6 +173,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
   const mobileVerification = composeMobileVerification({
     dataDir: getCyboflowDirectory(),
     logger: cyboflowLogger,
+    // §B8: only a packaged (Developer-ID signed) build is ever offered Xcode's
+    // durable `approve --always` — and then only as an explicit opt-in.
+    signedBuild: app.isPackaged,
   });
   const realVlmJudge: VlmJudge = new VlmJudgeImpl({
     confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
@@ -453,6 +462,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     },
     computeInputHash: verifyComputeInputHash,
     hostFingerprint: verifyHostFingerprint,
+    // A0 legacy-NULL compat: a record proven before the fallback input hash
+    // stored NULL for a package.json-less tree; this lets it keep matching.
+    hasPackageJson: probeHasPackageJson,
     logger: cyboflowLogger,
   });
 
@@ -541,6 +553,11 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
             session: mobileVerification.session,
             toolchain: mobileVerification.toolchain,
             dataDir: getCyboflowDirectory(),
+            // §B3: read LIVE per request, like the other live verify knobs.
+            driveEngine: () => configManager.getVisualVerifyConfig().mobileDriveEngine,
+            // §B2/§B4: the spawn-free probe + the resolved xcrun; the runner
+            // spawns the bridge itself, inside a request.
+            ...(mobileVerification.xcode !== null ? { xcode: mobileVerification.xcode } : {}),
             ...(visualVerifyConfig.mobileSimDeviceType !== ''
               ? { deviceType: visualVerifyConfig.mobileSimDeviceType }
               : {}),
@@ -570,6 +587,12 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // run the tier is exactly what a user deciding whether to declare `mobile`
     // needs told.
     mobileSimulator: mobileVerification.probeRow,
+    // §B2 — the 'xcode-mcp' row, from the SAME probe instance the runner's
+    // engine selection reads; §B8 — its "Approve Xcode access" action.
+    xcodeMcp: mobileVerification.xcodeProbeRow,
+    ...(mobileVerification.approveXcodeAccess !== null
+      ? { approveXcodeAccess: mobileVerification.approveXcodeAccess }
+      : {}),
     resolveNode: findNodeExecutable,
     resolveChromium: probeChromiumExecutable,
     probeDriverCli: makeDriverCliProbe(verifyDriverCliPath, (p) => fs.promises.access(p)),
@@ -863,6 +886,10 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // actually passed is the only transition into 'proven'.
     runbookStore: verifyRunbookStore,
     capabilityFinding: createCapabilityBreakerFinding({ db: cyboflowDb, logger: cyboflowLogger }),
+    // §A7 — the "runbook needs re-proving, lanes explore meanwhile" notice.
+    staleProofFinding: createExploreStaleProofFinding({ db: cyboflowDb, logger: cyboflowLogger }),
+    // §A5 — "recipe learned" / "learned recipe promoted" / "suggested entry".
+    runbookLearningFinding: createRunbookLearningFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // Phase 1 modality roster (§4): the live grant probe that decides whether a
     // `native-screen` request may deploy at all. Reuses the capture backend's
     // healthCheck verbatim, exactly as the proposal prescribes ("the retired

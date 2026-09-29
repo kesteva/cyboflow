@@ -166,6 +166,12 @@ export interface VerifyRunbookModalityEntry {
    * may predate the widening and must still round-trip, but a runbook is
    * authored by the setup flow after this contract existed, and the proof run
    * PROVES this channel comes up. "No attestation ⇒ no `passed`, period."
+   *
+   * `serve-binding` (runbook-optional-verification.md §A1.2) is valid on the
+   * `web` and `cdp-app` entries only, and only with a `serve`: the harness's
+   * binding of the leased port to that serve's process group is the whole proof,
+   * so an entry with nothing to serve could never verify. `mobile` stays pinned
+   * to `bundle-identity`, and `native-screen` never binds a port.
    */
   attestation: AttestationSpec;
   /** Free-text derivation notes for a human reading the committed file (why this form, what was tried). */
@@ -374,6 +380,21 @@ function parseModalityEntry(
     };
   }
   const attestation: AttestationSpec = value.attestation;
+
+  if (attestation.kind === 'serve-binding') {
+    if (modality !== 'web' && modality !== 'cdp-app') {
+      return {
+        ok: false,
+        error: `${path}.attestation.kind: 'serve-binding' is only valid on the web and cdp-app modalities`,
+      };
+    }
+    if (serve === undefined) {
+      return {
+        ok: false,
+        error: `${path}.serve: required with a 'serve-binding' attestation (the binding is to this serve's process — with nothing to serve it can never verify)`,
+      };
+    }
+  }
 
   if (modality === 'mobile') {
     if (attestation.kind !== 'bundle-identity') {

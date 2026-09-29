@@ -20,7 +20,7 @@
  */
 import type Database from 'better-sqlite3';
 import type { SessionSummary, SessionSummaryEntry } from './models';
-import { hashAskText } from '../orchestrator/sessionAskHash';
+import { hashAskText } from './sessionAskHash';
 
 /** `session_summaries.state` values the review-home board understands (migration 121). */
 const SESSION_SUMMARY_STATES = new Set(['working', 'complete', 'needs_input']);

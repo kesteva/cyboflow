@@ -27,6 +27,7 @@ import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
+import { ENVIRONMENT_ACTION_KINDS, type EnvironmentActionKind } from './environmentActions';
 import type {
   BlockingItemDecision,
   BlockingItemsEscalationRequest,
@@ -35,6 +36,8 @@ import type {
   GateEscalationRequest,
   EscalationReviewItemSummary,
   LaneFailureKind,
+  LanePriorRescue,
+  LaneTriageStage,
   ReviewLoopDecision,
   ReviewLoopPriorRound,
   ReviewLoopRequest,
@@ -54,7 +57,8 @@ import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
 import { SprintLaneStore } from '../sprintLaneStore';
-import { buildUserTextEvent, buildAssistantTextEvent } from './syntheticEvents';
+import { buildUserTextEvent, buildAssistantTextEvent, buildLoginRequiredEvent } from './syntheticEvents';
+import { isClaudeLoginRequiredError } from '../../../../shared/types/claudeAuth';
 import { isSystemicStepError } from './systemicError';
 
 // ---------------------------------------------------------------------------
@@ -333,9 +337,9 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
   properties: {
     verdict: {
       type: 'string',
-      enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction'],
+      enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction', 'accept', 'fix_environment'],
       description:
-        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
+        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); accept = the task\'s substance is done and what is left is waivable (cosmetic residue, or checks the environment could not run) — the lane proceeds as if the step had passed and each waived item is filed as a follow-up; for a commit-integrity failure, the uncommitted changes are not this lane\'s; fix_environment = the failure is the WORKTREE\'s (e.g. dependencies not installed): the host runs the named environmentAction, then re-drives the lane; give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
     },
     reason: {
       type: 'string',
@@ -357,6 +361,29 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
       description:
         'adjust_and_retry only (REQUIRED there): the FULL replacement task body, minimally edited — never silently drop a security- or correctness-relevant criterion.',
     },
+    followUps: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'accept (REQUIRED except for commit-integrity): one entry per thing you are WAIVING — a residual defect, or a criterion the environment could not verify ("verify on a real device: …"). Each becomes a follow-up item for the human. Never waive a correctness or security defect.',
+    },
+    environmentAction: {
+      type: 'string',
+      enum: [...ENVIRONMENT_ACTION_KINDS],
+      description:
+        'fix_environment only (REQUIRED there): which host-run action to perform. Must be one of the actions the prompt lists as available.',
+    },
+    releaseDependents: {
+      type: 'boolean',
+      description:
+        'give_up / append_correction only, and only when dependent lanes are listed: true = this lane fails, but what its dependents build on (the interface, module or data they consume) IS committed and works, so they should run instead of being blocked.',
+    },
+    progress: {
+      type: 'string',
+      enum: ['converging', 'repeating'],
+      description:
+        'REQUIRED for retry / adjust_and_retry when this lane was ALREADY rescued: "converging" = each traversal fixed the previous defects and surfaced DIFFERENT real ones (another rescue is worth it); "repeating" = it is failing on the same problem again. A second rescue without "converging" is refused.',
+    },
   },
 };
 
@@ -369,7 +396,7 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
  * must stay free of this file's heavier import graph) and re-exported here so the
  * brain, the host seam, and the controller can never drift apart on the union.
  */
-export type { LaneFailureKind };
+export type { LaneFailureKind, LanePriorRescue, LaneTriageStage };
 
 /**
  * Everything the monitor needs to triage ONE failing sprint fan-out lane. Assembled
@@ -396,6 +423,29 @@ export interface LaneTriageRequest {
   taskTitle: string;
   /** The task's CURRENT body — the acceptance criteria the lane's agents work from. */
   taskBody: string;
+  /** Failures earlier rescues of this lane answered, oldest first (absent on the first consult). */
+  priorRescues?: LanePriorRescue[];
+  /**
+   * 'early' — the lane is about to START its final automatic attempt (it has not
+   * failed for good); 'exhausted' / absent — the budget is spent. Changes the
+   * framing and what give_up means (see `buildLaneTriagePrompt`).
+   */
+  stage?: LaneTriageStage;
+  /** Not-yet-started lanes blocked on this one, by display ref (absent when none). */
+  dependents?: Array<{ taskRef: string; taskTitle: string }>;
+  /**
+   * The worktree environment as the host sees it, and the environment actions it
+   * can run (absent ⇒ no environment actions on this host; fix_environment is
+   * then refused).
+   */
+  environment?: { report: string; actions: EnvironmentActionKind[] };
+  /**
+   * True when no accept can let this lane through (its committed tree carries
+   * lane build output, or git could not verify that it does not — see
+   * `LaneTriageFailure.acceptUnavailable`): the parse downgrades an accept to
+   * give_up.
+   */
+  acceptUnavailable?: boolean;
 }
 
 /**
@@ -406,6 +456,8 @@ export interface LaneTriageRequest {
 export interface LaneGiveUpDecision {
   verdict: 'give_up';
   reason?: string;
+  /** Let the listed dependent lanes run although this one fails (see the schema). */
+  releaseDependents?: boolean;
   /**
    * Set ONLY when the triage exchange itself died on an environment-level
    * condition (a spent session limit, an expired login) — the verbatim error
@@ -456,6 +508,43 @@ export interface LaneAppendCorrectionDecision {
   reason: string;
   /** Optional corrective note recorded alongside the diagnosis. */
   guidance?: string;
+  /** Let the listed dependent lanes run although this one fails (see the schema). */
+  releaseDependents?: boolean;
+}
+
+/**
+ * Proceed past the failing step as if it had passed. The supervisor judged the
+ * task's substance done and the rest waivable — cosmetic residue, or checks the
+ * environment could not run (a missing toolchain, UI-only criteria on a backend
+ * task, a simulator that cannot grant a permission) — and names each waived item
+ * in `followUps`, which the host files for the human. For a commit-integrity
+ * failure it means the uncommitted paths belong to something else (a sibling
+ * lane, generated output). Re-drives nothing and costs no rescue budget.
+ */
+export interface LaneAcceptDecision {
+  verdict: 'accept';
+  /** Why the lane may proceed. REQUIRED — a blank one downgrades to give_up. */
+  reason: string;
+  /**
+   * What is being waived, one item each; the host files each as a follow-up
+   * finding. REQUIRED (non-empty) for every failure kind except commit-integrity,
+   * where the lane waives nothing of its own.
+   */
+  followUps?: string[];
+}
+
+/**
+ * The failure is the WORKTREE's, not the lane's work (observed 2026-09-28: no
+ * dependencies installed, so every typecheck died on `tsc: command not found`).
+ * The host runs `action` — a closed enum it maps to a fixed command, never a
+ * free-form shell — then re-drives the lane from `targetStepId` with `guidance`.
+ */
+export interface LaneFixEnvironmentDecision {
+  verdict: 'fix_environment';
+  action: EnvironmentActionKind;
+  targetStepId: string;
+  guidance: string;
+  reason: string;
 }
 
 /** The parsed, host-safe lane-triage verdict (every field a rescue needs is present). */
@@ -463,7 +552,9 @@ export type LaneTriageDecision =
   | LaneGiveUpDecision
   | LaneRetryDecision
   | LaneAdjustAndRetryDecision
-  | LaneAppendCorrectionDecision;
+  | LaneAppendCorrectionDecision
+  | LaneAcceptDecision
+  | LaneFixEnvironmentDecision;
 
 /** Build the fail-safe `give_up` decision carrying a machine-authored reason. */
 function laneGiveUp(reason: string): LaneGiveUpDecision {
@@ -504,6 +595,13 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *      nothing to record); otherwise it is VALID AS GIVEN and never downgraded
  *      further — it names no step and re-drives nothing, so none of the rescue
  *      constraints below apply to it
+ *   1c. `accept` on a request marked `acceptUnavailable`, with a blank
+ *      `reason`, or — on any failure kind other than `commit-integrity` — with
+ *      no non-blank `followUps` ⇒ give_up (a waiver that names nothing it waives
+ *      is not auditable); otherwise VALID AS GIVEN (it re-drives nothing, like
+ *      append_correction)
+ *   1d. `fix_environment` naming an action the request does not list as
+ *      available, or an unusable target ⇒ give_up; guidance defaults
  *   2. `give_up`                                        ⇒ give_up (reason kept when present)
  *   3. `retry`/`adjust_and_retry` with blank `guidance` ⇒ give_up (a rescue with
  *      nothing to do differently is just a wasted attempt)
@@ -512,6 +610,8 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  *   5. `adjust_and_retry` with a blank `taskBody`       ⇒ DOWNGRADE to `retry` — the
  *      guidance still carries the substance, and an empty body would wipe the task's
  *      acceptance criteria
+ *   5b. a re-drive of a lane that was ALREADY rescued without `progress:
+ *      'converging'` ⇒ append_correction (the diagnosis is kept; nothing re-runs)
  *   6. otherwise ⇒ the verdict as given (`reason` defaults to '' when non-string)
  */
 export function parseLaneTriageOutput(structured: unknown, req: LaneTriageRequest): LaneTriageDecision {
@@ -519,8 +619,11 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
     return laneGiveUp('unparseable lane triage verdict — letting the lane fail');
   }
   const o = structured as Record<string, unknown>;
+  // Only meaningful when there ARE dependents to release, and only on the two
+  // verdicts that let this lane fail.
+  const release = o.releaseDependents === true && (req.dependents?.length ?? 0) > 0 ? { releaseDependents: true } : {};
   if (o.verdict === 'give_up') {
-    return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}) };
+    return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}), ...release };
   }
   if (o.verdict === 'append_correction') {
     // The ONE verdict that names no step and re-drives nothing: the target-step
@@ -533,6 +636,41 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
       verdict: 'append_correction',
       reason: o.reason,
       ...(isNonEmptyString(o.guidance) ? { guidance: o.guidance } : {}),
+      ...release,
+    };
+  }
+  if (o.verdict === 'accept') {
+    if (req.acceptUnavailable === true) {
+      return laneGiveUp(
+        'lane triage accepted a lane whose committed tree carries (or could not be verified free of) lane build output (.cyboflow/build-slots/), which accept cannot waive — letting the lane fail',
+      );
+    }
+    if (!isNonEmptyString(o.reason)) {
+      return laneGiveUp('lane triage accepted the lane without saying why — letting the lane fail');
+    }
+    const followUps = Array.isArray(o.followUps) ? o.followUps.filter(isNonEmptyString).map((f) => f.trim()) : [];
+    if (followUps.length === 0 && req.failureKind !== 'commit-integrity') {
+      return laneGiveUp('lane triage accepted the lane without naming what it waived — letting the lane fail');
+    }
+    return { verdict: 'accept', reason: o.reason, ...(followUps.length > 0 ? { followUps } : {}) };
+  }
+  if (o.verdict === 'fix_environment') {
+    const action = o.environmentAction;
+    if (typeof action !== 'string' || !(req.environment?.actions ?? []).includes(action as EnvironmentActionKind)) {
+      return laneGiveUp('lane triage asked for an environment action this host cannot run — letting the lane fail');
+    }
+    const targetStepId = resolveLaneTargetStep(o.targetStepId, req);
+    if (targetStepId === null) {
+      return laneGiveUp('lane triage named an unusable target step — letting the lane fail');
+    }
+    return {
+      verdict: 'fix_environment',
+      action: action as EnvironmentActionKind,
+      targetStepId,
+      guidance: isNonEmptyString(o.guidance)
+        ? o.guidance
+        : 'The worktree environment was repaired (see the run chat). Re-run your checks; failures from the missing environment should be gone.',
+      reason: typeof o.reason === 'string' ? o.reason : '',
     };
   }
   if (o.verdict !== 'retry' && o.verdict !== 'adjust_and_retry') {
@@ -547,6 +685,18 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
   }
   const guidance = o.guidance;
   const reason = typeof o.reason === 'string' ? o.reason : '';
+  if ((req.priorRescues?.length ?? 0) > 0 && o.progress !== 'converging') {
+    // A lane that already had a rescue earns another only on attested
+    // convergence. Keep the diagnosis the supervisor made rather than dropping it.
+    return {
+      verdict: 'append_correction',
+      reason:
+        reason.trim().length > 0
+          ? `${reason} (Not re-driven: this lane was already rescued and the supervisor did not report it converging.)`
+          : 'This lane was already rescued and the supervisor did not report it converging, so it was not re-driven.',
+      guidance,
+    };
+  }
   if (o.verdict === 'retry' || !isNonEmptyString(o.taskBody)) {
     // adjust_and_retry with no replacement body downgrades to a plain rescue.
     return { verdict: 'retry', targetStepId, guidance, reason };
@@ -1213,7 +1363,81 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
   'task-verify': 'the task-verify gate kept returning FAIL until its loopback budget ran out',
   'code-review': 'code review kept reporting blocking defects until its loopback budget ran out',
   'merge-gate': 'the visual merge gate rejected this lane',
+  'commit-integrity':
+    'every inner step passed, but the lane made no git commit while the worktree holds uncommitted changes — or the committed tree at lane end carries lane build output under .cyboflow/build-slots/, or git could not verify that it does not (the error excerpt says which)',
 };
+
+/**
+ * The worktree environment and the host-run actions available to repair it. The
+ * supervisor's own tools are read-only, so this report is how it SEES the
+ * environment and `fix_environment` is how it acts on it.
+ */
+function environmentSection(req: LaneTriageRequest): string {
+  const env = req.environment;
+  if (env === undefined) return '';
+  const actions =
+    env.actions.length > 0
+      ? `Available environment actions: ${env.actions.map((a) => `\`${a}\``).join(', ')}.`
+      : 'No environment actions are available in this worktree.';
+  return `
+
+WORKTREE ENVIRONMENT (as the host sees it):
+${env.report}
+${actions}${
+    env.actions.length > 0
+      ? `
+- "fix_environment" — the failure comes from the WORKTREE, not the lane's work (a tool reported as \`command not found\`, a module that cannot be resolved because dependencies are missing). Set \`environmentAction\` to one of the available actions; the host runs it (at most once per run) and re-drives the lane from \`targetStepId\` with your \`guidance\`. This does not spend the run's rescue pool.`
+      : ''
+  }`;
+}
+
+/**
+ * The lanes blocked on this one. If it fails, they never start — unless the
+ * supervisor releases them because what they build on already landed.
+ */
+function dependentsSection(req: LaneTriageRequest): string {
+  const deps = req.dependents ?? [];
+  if (deps.length === 0 || req.stage === 'early') return '';
+  return `
+
+LANES WAITING ON THIS ONE: ${deps.map((d) => `**${d.taskRef}**${d.taskTitle ? ` (${oneLine(d.taskTitle)})` : ''}`).join(', ')}. If this lane fails they are BLOCKED and never start. If you let it fail ("give_up" / "append_correction") but what they need from it — the interface, module, procedure or data they consume — is already committed and working (check the worktree), set \`releaseDependents: true\` so they run anyway.`;
+}
+
+/**
+ * The lane's earlier rescues, rendered so the supervisor can judge convergence —
+ * the condition every rescue after the first requires (`progress: 'converging'`).
+ */
+function priorRescuesSection(req: LaneTriageRequest): string {
+  const prior = req.priorRescues ?? [];
+  if (prior.length === 0) return '';
+  const rounds = prior
+    .map(
+      (r, i) =>
+        `Rescue ${i + 1} answered a \`${r.failureKind}\` failure at \`${r.stepId}\`:\n${fencedMarkdown(r.errorExcerpt)}\nGuidance given: ${oneLine(r.guidance)}`,
+    )
+    .join('\n\n');
+  return `
+
+THIS LANE WAS ALREADY RESCUED ${prior.length} time${prior.length === 1 ? '' : 's'}. Compare the current failure with what the earlier rescue(s) answered:
+${rounds}
+
+Another "retry" / "adjust_and_retry" is allowed ONLY if you set \`progress: "converging"\` — the lane fixed what it was told and is now failing on DIFFERENT, real defects. If it is failing on the same problem again, set \`progress: "repeating"\` and prefer "append_correction" or "give_up"; a re-drive without "converging" is refused.`;
+}
+
+/**
+ * The extra verdict + evidence guidance a COMMIT-INTEGRITY consult needs. Every
+ * other failure kind is "the work is wrong"; this one is "is the work even
+ * this lane's?", and it is the only kind for which `accept` exists.
+ */
+function commitIntegrityTriageSection(req: LaneTriageRequest): string {
+  if (req.failureKind !== 'commit-integrity') return '';
+  return `
+
+THIS IS A COMMIT-INTEGRITY FAILURE, not a code defect. Every inner step of the lane passed; the question is only whether the lane left ITS OWN work uncommitted. Lanes of a sprint share ONE worktree, so uncommitted paths can belong to a sibling lane that is still working. Compare the uncommitted paths in the excerpt with what THIS task is about (its body, the lane's step outputs in the conversation, the files it names) and read the files if you need to. For this failure kind:
+- "accept" — the lane's own work is already committed, or the task needed no change (e.g. it was already implemented), and the uncommitted paths belong to other work. The host integrates the lane as it stands. \`reason\` is REQUIRED: say whose the paths are and why; \`followUps\` is not needed.
+Use "retry" (usually from the first inner step, with guidance naming the files to commit) when the uncommitted paths ARE this task's work.
+If the excerpt instead says the committed tree carries files under \`.cyboflow/build-slots/\` (lane build output) — or that git could not verify whether it does — ownership is not the question and "accept" is not available: use "retry" with guidance to check and untrack them as the excerpt says (the check re-runs when the re-run ends), or "give_up".`;
+}
 
 /**
  * Compose the LANE-TRIAGE prompt for one sprint fan-out lane that exhausted its
@@ -1248,7 +1472,11 @@ export function buildLaneTriagePrompt(
   const defaultTarget = req.innerStepIds[0] ?? '(none)';
   return `${monitorCharter(ctx)}
 
-One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.
+${
+    req.stage === 'early'
+      ? `One TASK LANE of this run's fan-out has failed ${req.attempt} time(s) and is about to start its FINAL automatic attempt. You are consulted NOW, before that attempt, so you can change its course while it still has one: the default is that it loops back exactly as before, with the failure below as its feedback.`
+      : `One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.`
+  }
 
 Failing lane: **${req.taskRef}** — ${req.taskTitle}
 Failure kind: \`${req.failureKind}\` — ${LANE_FAILURE_KIND_LABELS[req.failureKind]}
@@ -1256,7 +1484,7 @@ Failing step: \`${req.stepId}\` (attempt ${req.attempt})
 This lane's inner step chain, in order: ${chain}
 
 Error / verdict excerpt:
-${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}
+${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}${commitIntegrityTriageSection(req)}${priorRescuesSection(req)}${dependentsSection(req)}${environmentSection(req)}
 
 Current task body — the acceptance criteria this lane's agents are working from:
 ---
@@ -1272,16 +1500,22 @@ ${digestConversation(history.conversation)}
 Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the code, the tests, and repo reality actually match what this task asks for. Then decide ONE verdict and return it as structured output:
 - "retry"            — a concrete, DIFFERENT approach is likely to succeed. \`guidance\` is REQUIRED and must say what to do DIFFERENTLY; "try again" is not guidance and the host will reject it (downgrading your verdict to give_up).
 - "adjust_and_retry" — the task body CONFLICTS with repo reality and you have the file:line evidence (cite it in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
+- "accept"           — the task's SUBSTANCE is done and verified, and what is left is WAIVABLE: cosmetic or polish residue, or checks this environment could not run (a toolchain that is missing from the worktree, UI-only criteria such as fidelity/reachability applied to a backend task, a simulator that cannot grant a permission the behavior needs). The lane proceeds as if the failing step had passed. \`followUps\` is REQUIRED: one entry per waived item, each filed for the human (e.g. "verify on a real device: the shield subtitle appears"). NEVER waive a correctness, data-loss or security defect — those need "retry".
 - "append_correction" — you worked out something worth KEEPING (a real cause, a cross-lane interaction, a wrong assumption in the task) but re-driving this lane would not fix it. Put the diagnosis in \`reason\`; add the corrective note in \`guidance\` if you have one. This costs NO rescue budget and the lane still settles failed — it exists so a diagnosis you actually made does not die with this consult.
-- "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.
+${
+    req.stage === 'early'
+      ? `- "give_up"          — AT THIS STAGE it means "no steering": the lane loops back for its final attempt exactly as it would have without you. Use it when the plain loopback feedback is already enough.
+If the lane's rounds keep surfacing NEW defects in the same area (whack-a-mole), that is the signal to "retry" with a STRUCTURAL approach — name the design change that closes the whole class, not the next instance.`
+      : `- "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.`
+  }
 
-RESOLVE IT YOURSELF WHERE YOU CAN. Between those four, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "append_correction" when neither will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
+RESOLVE IT YOURSELF WHERE YOU CAN. Between these verdicts, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "accept" when the work is done and only waivable residue is failing it, "append_correction" when none of those will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
 
-AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane is rescued at most once), so spend it only where it will genuinely change the outcome.
+AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane gets one rescue, and more only while it is converging; the whole run has a fixed pool), so spend it only where it will genuinely change the outcome.
 
 \`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry" (and is IGNORED for "append_correction", which re-drives nothing). It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
 
-Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
+Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody?, followUps?, progress?, releaseDependents?, environmentAction? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
 }
 
 /** Render the prior-round ledger: one line per round, `AR-n` ids with their titles. */
@@ -2492,6 +2726,21 @@ export interface DefaultMonitorSessionDeps {
 const ANSWER_FAILED =
   'Sorry — I could not answer that right now (the monitor encountered an error). Please try again.';
 
+/**
+ * Rendered instead of {@link ANSWER_FAILED} when the query died on a missing or
+ * expired Claude login. "Please try again" is wrong advice there — every retry
+ * fails the same way until the user signs in — so the reply names the cause and
+ * `converseOnce` injects it as a login-failure row, which puts the sign-in card
+ * under it.
+ */
+const LOGIN_REQUIRED_REPLY =
+  "I can't reach Claude — your Claude Code login has expired or is missing. Sign in again below, then resend your question.";
+
+/** The fail-soft reply for a thrown monitor query: login-specific when it can be. */
+function answerFailedReply(message: string): string {
+  return isClaudeLoginRequiredError(message) ? LOGIN_REQUIRED_REPLY : ANSWER_FAILED;
+}
+
 /** Rendered when the monitor returns a successful-but-empty answer (so a turn always renders). */
 const NO_ANSWER = 'I could not produce an answer for that.';
 
@@ -2504,6 +2753,9 @@ const LANE_TRIAGE_FAILED = 'lane triage failed; letting the lane fail';
  * rather than only once the monitor has made up its mind.
  */
 function laneFailureAnnouncement(req: LaneTriageRequest): string {
+  if (req.stage === 'early') {
+    return `⚠ **${req.taskRef}** (${req.taskTitle}) failed at \`${req.stepId}\` again (${req.failureKind}, attempt ${req.attempt}) and is about to start its final attempt. Checking whether to steer it…`;
+  }
   return `⚠ **${req.taskRef}** (${req.taskTitle}) failed at \`${req.stepId}\` — ${req.failureKind}, attempt ${req.attempt}. Triaging the lane…`;
 }
 
@@ -2512,10 +2764,16 @@ function laneFailureAnnouncement(req: LaneTriageRequest): string {
  * completed act: the host executes it (and may still downgrade an adjust to a plain
  * rescue if the task edit is refused), so this turn must never claim success itself.
  */
+function releasedNote(req: LaneTriageRequest): string {
+  return `\n\nReleasing the lanes waiting on it: ${(req.dependents ?? []).map((d) => d.taskRef).join(', ')}.`;
+}
+
 function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecision): string {
   switch (decision.verdict) {
     case 'give_up':
-      return `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}`;
+      return req.stage === 'early'
+        ? `↻ **${req.taskRef}**: no steering — the lane loops back for its final attempt as usual.${decision.reason ? ` ${decision.reason}` : ''}`
+        : `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}${decision.releaseDependents ? releasedNote(req) : ''}`;
     case 'retry':
       return `▶ **${req.taskRef}**: rescue — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
     case 'adjust_and_retry':
@@ -2523,7 +2781,13 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
     case 'append_correction':
       // Advisory: no re-drive, no budget spent. Say so plainly, or the reader
       // assumes the lane got another attempt.
-      return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
+      return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}${decision.releaseDependents ? releasedNote(req) : ''}`;
+    case 'fix_environment':
+      return `🔧 **${req.taskRef}**: environment fix — run \`${decision.action}\`, then re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}`;
+    case 'accept':
+      return req.failureKind === 'commit-integrity'
+        ? `✔ **${req.taskRef}**: accept — the uncommitted changes are not this lane's, so integrate it as it stands. ${decision.reason}`
+        : `✔ **${req.taskRef}**: accept — the task's substance is done; continuing past \`${req.stepId}\` and filing ${decision.followUps?.length ?? 0} follow-up(s). ${decision.reason}`;
   }
 }
 
@@ -2999,11 +3263,12 @@ export class DefaultMonitorSession implements MonitorSession {
       });
       return reply;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn('[Monitor] answer failed (fail-soft)', {
         runId: this.ctx.runId,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
-      return ANSWER_FAILED;
+      return answerFailedReply(message);
     }
   }
 
@@ -3041,7 +3306,9 @@ export class DefaultMonitorSession implements MonitorSession {
     // render as nothing — the user would see their question with no answer. Always
     // render something (review: empty-monitor-reply-dropped).
     const rendered = reply.trim().length > 0 ? reply : NO_ANSWER;
-    this.tryInject(buildAssistantTextEvent(rendered));
+    this.tryInject(
+      rendered === LOGIN_REQUIRED_REPLY ? buildLoginRequiredEvent(rendered) : buildAssistantTextEvent(rendered),
+    );
     await this.handleControlAndAction(control, action);
     return rendered;
   }
@@ -3137,11 +3404,12 @@ export class DefaultMonitorSession implements MonitorSession {
       });
       return parseConverseOutput(structured);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn('[Monitor] action-capable answer failed (fail-soft)', {
         runId: this.ctx.runId,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
-      return { reply: ANSWER_FAILED };
+      return { reply: answerFailedReply(message) };
     }
   }
 

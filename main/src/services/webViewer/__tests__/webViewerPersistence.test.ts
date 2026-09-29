@@ -17,7 +17,7 @@ import { PersistingWebViewer } from '../webViewerPersistence';
 import { WEB_VIEWER_HUMAN_TOUCH, WEB_VIEWER_TAB_CLOSED, WEB_VIEWER_TAB_STATE } from '../webViewerManager';
 
 const SQL = readFileSync(
-  join(__dirname, '..', '..', '..', 'database', 'migrations', '146_session_web_tabs.sql'),
+  join(__dirname, '..', '..', '..', 'database', 'migrations', '147_session_web_tabs.sql'),
   'utf-8',
 );
 

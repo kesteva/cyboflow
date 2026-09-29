@@ -293,10 +293,12 @@ function parseUserInput(value: unknown): AppServerUserInput | null {
         && value.text_elements.every(isJsonValue)
         ? { type: 'text', text: value.text, text_elements: value.text_elements }
         : null;
-    case 'image':
-      return typeof value.url === 'string'
-        ? { type: 'image', url: value.url, ...(typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {}) }
-        : null;
+    case 'image': {
+      const detail = typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {};
+      if (typeof value.url === 'string') return { type: 'image', url: value.url, ...detail };
+      if (typeof value.fileId === 'string') return { type: 'image', fileId: value.fileId, ...detail };
+      return null;
+    }
     case 'localImage':
       return typeof value.path === 'string'
         ? { type: 'localImage', path: value.path, ...(typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {}) }
@@ -479,7 +481,7 @@ function parseTurnEnvelope(params: unknown): { threadId: string; turnId: string 
   return { threadId: params.threadId as string, turnId: params.turn.id as string };
 }
 
-function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
+export function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
   if (
     !isRecord(value)
     || !isFiniteNumber(value.totalTokens)
@@ -504,7 +506,7 @@ function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
   };
 }
 
-function parseThreadTokenUsageUpdated(
+export function parseThreadTokenUsageUpdated(
   params: unknown,
 ): ThreadTokenUsageUpdatedNotification | null {
   if (

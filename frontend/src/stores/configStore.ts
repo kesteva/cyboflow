@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { API } from '../utils/api';
-import type { AppConfig } from '../types/config';
+import type { AppConfig, UpdateAppConfigRequest } from '../types/config';
 import type {
   RunTypeDefaults,
   RunTypeDefaultsOp,
@@ -33,7 +33,7 @@ interface ConfigStore {
    * success/fail signal for retry UX (e.g. the onboarding Telemetry step) can
    * check the return value instead of racing the shared `error` field.
    */
-  updateConfig: (updates: Partial<AppConfig>) => Promise<boolean>;
+  updateConfig: (updates: Partial<UpdateAppConfigRequest>) => Promise<boolean>;
   applyRunTypeDefault: (
     key: string,
     op: RunTypeDefaultsOp,
@@ -62,7 +62,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
     }
   },
 
-  updateConfig: async (updates: Partial<AppConfig>) => {
+  updateConfig: async (updates: Partial<UpdateAppConfigRequest>) => {
     try {
       const response = await API.config.update(updates);
       if (response.success) {

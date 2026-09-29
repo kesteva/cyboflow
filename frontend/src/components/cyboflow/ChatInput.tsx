@@ -98,12 +98,42 @@ function queueInputReasonMessage(reason: string): string {
       return 'This run has ended and cannot receive messages.';
     case 'not_running':
       return 'This run is no longer executing — try again once it resumes.';
+    case 'stuck':
+      return 'This run is stuck — it ended its turn with nothing to answer, so a queued message would never be delivered. Reopen or cancel it from the review queue, then try again.';
+    case 'parked':
+      return 'This run has no active turn and nothing pending to answer right now, so this message would never be delivered. It will show as stuck shortly — reopen or cancel it from the review queue, then try again.';
     case 'not_found':
       return 'Run not found.';
     case 'empty':
       return 'Nothing to send.';
     default:
       return `Message not queued: ${reason}`;
+  }
+}
+
+/**
+ * Human-readable message for an interruptAndSend no-op reason (falls back to the
+ * raw reason). Used by the "Interrupt & send" trio action while an SDK flow run is
+ * mid-turn — see the `handleInterruptSend` dispatch below.
+ */
+function interruptAndSendReasonMessage(reason: string): string {
+  switch (reason) {
+    case 'blocked':
+      return 'Resolve the blocking review item(s) for this run first.';
+    case 'no_session':
+      return 'This run has no resumable session to continue.';
+    case 'not_idle':
+      return 'The agent is still finishing up — try again in a moment.';
+    case 'terminal':
+      return 'This run has ended and cannot be messaged.';
+    case 'execute_failed':
+      return 'The agent could not be re-driven — check the run logs.';
+    case 'interactive_unsupported':
+      return 'Interactive (CLI) runs cannot be interrupted — message the live session instead.';
+    case 'programmatic_unsupported':
+      return 'This run is a Sprint fan-out — use Queue instead of Interrupt & send.';
+    default:
+      return `Interrupt & send ignored: ${reason}`;
   }
 }
 
@@ -243,6 +273,15 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   const isSdkRun = activeRun?.substrate === 'sdk';
   const isProgrammatic = activeRun?.execution_model === 'programmatic';
   const runStatus = activeRun?.status;
+  // interruptAndSendHandler's liveness probe (`listLiveSpawnKeys`) only reads
+  // ClaudeCodeManager's steering-hook registry — Codex/OMP/Pi SDK managers
+  // never populate it, so the server always falls through to `nudgeRunHandler`
+  // and refuses with `not_idle` for those runtimes, silently eating the typed
+  // message. A `starting` run has no live turn to abort yet, same result.
+  // Until the handler can probe non-Claude liveness safely (see its header),
+  // withhold Interrupt & send outside this exact shape so the button is never
+  // offered somewhere it can only fail.
+  const isInterruptCapableRun = activeRun?.agent_runtime === 'claude-sdk' && runStatus === 'running';
   const [monitorActive, setMonitorActive] = useState(false);
 
   useEffect(() => {
@@ -494,6 +533,68 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     }
   };
 
+  /**
+   * "Interrupt & send" (TASK-301): abort the run's live SDK turn and drive the
+   * typed message as a fresh turn NOW, instead of queueing it for the next rest
+   * boundary. Only reachable while `isSdkRunning` — UnifiedComposer gates the
+   * button on `running && hasDraft && onInterruptSend`, so this is never invoked
+   * outside that state. Mirrors `handleSend`'s attachment-composition step (same
+   * on-disk-path convention) but always drives `runs.interruptAndSend`.
+   */
+  const handleInterruptSend = async (atts: ComposerAttachments): Promise<void> => {
+    if (runId == null) {
+      console.warn('[ChatInput] interruptAndSend but runId is null at send time');
+      return;
+    }
+    if (text.trim().length === 0 && !hasAttachments(atts)) return;
+
+    let body = text;
+    if (hasAttachments(atts)) {
+      try {
+        body = await composeWithAttachments(text, atts, runId);
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Could not save the attachment');
+        throw err;
+      }
+    }
+
+    // The resumed turn re-renders the user's text in the transcript (plus a muted
+    // "Interrupted" marker when a live turn was actually aborted), so the
+    // 'sending' row reconciles away exactly like a nudge delivery.
+    setText('');
+    setSendError(null);
+    const id = addPending(runId, body, 'sending');
+    void trpc.cyboflow.runs.interruptAndSend
+      .mutate({ runId, text: body })
+      .then((result) => {
+        if (!('delivered' in result)) {
+          setPendingStatus(runId, id, 'failed');
+          setSendError(interruptAndSendReasonMessage(result.reason));
+        }
+      })
+      .catch((err: unknown) => {
+        setPendingStatus(runId, id, 'failed');
+        setSendError(err instanceof Error ? err.message : 'Interrupt & send failed');
+      });
+  };
+
+  /**
+   * The trio's plain "Stop" (abort without sending — the draft is preserved).
+   * There is no query()-level "stop just this turn" primitive for a flow run
+   * (unlike a quick session's live stream): the existing git-neutral `runs.pause`
+   * (RunActionBar's dedicated Pause control) is the real stop-the-active-work
+   * seam for an SDK flow run, so the composer's Stop reuses it rather than
+   * inventing a second one. Resumable via RunActionBar's Resume afterwards.
+   * `runs.pause` never throws for its benign noOp reasons (not_pausable / race /
+   * …); only a genuine transport failure surfaces here.
+   */
+  const handleStop = (): void => {
+    if (runId == null) return;
+    void trpc.cyboflow.runs.pause.mutate({ runId }).catch((err: unknown) => {
+      setSendError(err instanceof Error ? err.message : 'Stop failed');
+    });
+  };
+
   if (mode === 'none') return null;
 
   const placeholder =
@@ -519,10 +620,14 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     ? 'Run paused — Resume to continue the conversation'
     : 'Input enabled when the agent asks a question or the run is awaiting your review';
 
+  // `running` is the composer's live-turn signal (TASK-301): true for an SDK flow
+  // run mid-turn (the SAME predicate that already gates Queue-vs-Send below),
+  // which is what unlocks the full `[Queue] [Interrupt & send] [Stop]` trio. Quick
+  // mode's own `running` state is owned by QuickSessionComposer, not this host.
   const visibility = resolveChatVisibility({
     transport: substrate,
     mode: runId != null ? 'flow' : 'quick',
-    running: false,
+    running: isSdkRunning,
     ptyOpen,
   });
 
@@ -577,7 +682,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   return (
     <UnifiedComposer
       visibility={visibility}
-      running={false}
+      running={isSdkRunning}
       value={text}
       onChange={setText}
       textareaRef={textareaRef}
@@ -588,6 +693,32 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       // message is buffered for its next turn, so the action is QUEUE (not Send).
       primaryLabel={isSdkRunning ? 'Queue' : 'Send'}
       onSubmit={(atts) => handleSend(atts)}
+      // TASK-301: while the run is mid-turn, offer "Interrupt & send" alongside
+      // Queue — abort the live turn and drive this message NOW instead of waiting
+      // for the next rest boundary. UnifiedComposer only surfaces the button (and
+      // the ⌘⇧↵ binding) while `running` is true AND there is a draft. Withheld
+      // for a PROGRAMMATIC (Sprint fan-out) run: each DAG step is a fresh SDK
+      // session, so a step-scoped abort cannot signal the WorkflowController's
+      // walk (runs.interruptAndSend refuses it server-side with
+      // 'programmatic_unsupported' — see interruptAndSendHandler.ts's header
+      // note). Also withheld outside `isInterruptCapableRun` (non-Claude
+      // runtime, or `starting`) — see that flag's own comment — since the
+      // server can only ever refuse there today. Both cases fall back to
+      // Queue-only.
+      onInterruptSend={
+        isSdkRunning && !isProgrammatic && isInterruptCapableRun
+          ? (atts) => handleInterruptSend(atts)
+          : undefined
+      }
+      // ChatInput's own withheld-onInterruptSend case (a PROGRAMMATIC Sprint
+      // fan-out run) is a genuine queue: `onSubmit` really does buffer the
+      // message via `runs.queueInput` for the run's next turn, unlike
+      // QuickSessionComposer's withheld cases (an open question gate / a live
+      // PTY relay), where `onSubmit` takes immediate effect. Opt in explicitly
+      // so UnifiedComposer's running+draft fallback offers Queue here — see
+      // UnifiedComposer.tsx's `queueWhileRunning` doc.
+      queueWhileRunning
+      onStop={isSdkRunning ? handleStop : undefined}
       // Images / large pasted text ride every SDK send path (monitor, nudge,
       // reopen, queue, question gate, quick) as on-disk paths. The interactive
       // PTY relay is excluded: it types the body into a live xterm, where a

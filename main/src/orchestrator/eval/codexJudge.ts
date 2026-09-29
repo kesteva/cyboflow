@@ -8,6 +8,8 @@ import {
   type JudgeGradeInput,
 } from './evalJury';
 import type { JudgeSample } from './scoring';
+import { isAgentProviderDisabled } from '../../../../shared/agents/agentProviderGuard';
+import { hasResolvedModel } from './judgeSlots';
 
 export type CodexJurorUnavailableCode = 'runtime-missing' | 'logged-out' | 'provider-disabled';
 
@@ -20,15 +22,6 @@ export class CodexJurorUnavailableError extends Error {
   ) {
     super(message);
   }
-}
-
-interface QueryWithResolvedModel {
-  getResolvedModel(): string | null;
-}
-
-function hasResolvedModel(query: EvalStructuredQueryFn): query is EvalStructuredQueryFn & QueryWithResolvedModel {
-  return 'getResolvedModel' in query
-    && typeof (query as { getResolvedModel?: unknown }).getResolvedModel === 'function';
 }
 
 export interface CodexJudgeDeps {
@@ -62,6 +55,16 @@ export class CodexJudge implements JudgeClient {
         ...(input.signal ? { signal: input.signal } : {}),
       });
       return parseJudgeSample(raw);
+    } catch (err) {
+      if (err instanceof CodexJurorUnavailableError) {
+        throw err; // pass through by identity — do not rewrap an already-typed refusal
+      }
+      if (isAgentProviderDisabled(err, 'codex')) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.deps.logger?.warn('[codexJudge] Codex provider disabled', { error: message });
+        throw new CodexJurorUnavailableError(message, 'provider-disabled');
+      }
+      throw err;
     } finally {
       if (hasResolvedModel(this.deps.structuredQuery)) {
         this.resolvedModel = this.deps.structuredQuery.getResolvedModel() ?? this.resolvedModel;

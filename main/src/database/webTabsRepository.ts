@@ -1,5 +1,5 @@
 /**
- * webTabsRepository — `session_web_tabs` + `session_web_events` (migration 146).
+ * webTabsRepository — `session_web_tabs` + `session_web_events` (migration 147).
  *
  * Its own module rather than `DatabaseService` methods: `database.ts` sits near
  * the file-size ratchet, and neither table is one of the entity chokepoint

@@ -1,36 +1,56 @@
 /**
- * CodeQualitySection — Insights mockup section 03.
+ * CodeQualitySection — Insights mockup section 03 (TASK-291 tally-first redesign).
  *
  * "03 CODE QUALITY — flagged in-flow · caught at verify · found after merge."
- * Buckets the store's {@link QualityFinding}s into three columns using the SHARED
- * {@link classifyQualityFinding} helper (imported, never reimplemented — so the
- * backend tests and this rendering cannot drift on the bucketing rule):
  *
- *   in_workflow   → "IN-WORKFLOW"
- *   verification  → "FOUND DURING VERIFICATION"
- *   post_merge    → "POST-MERGE"
+ * Was: every {@link QualityFinding} rendered as a row across three bucket
+ * columns — an unbounded scroll on any project with more than a couple dozen
+ * open findings, with the column count badge as the only aggregate number.
  *
- * Each column header carries a count badge. An item row shows a severity dot
- * (error → status-error, warning → status-warning, info/null → text-muted), the
- * finding title, a meta line ('<location path> · <sourceStep> · <workflowName>'
- * with the missing parts elided), and a right-aligned status chip. POST-MERGE rows
- * append a lag annotation to that meta line — '<N>d after merge' ('<N>h' under 24h)
- * computed from runEndedAt → createdAt when the run merged and both stamps are
- * present (mirroring the mockup's '2d after merge'); a category-tagged post-merge
- * finding with no run linkage shows the category text instead (no fabricated lag).
- * The chip text
- * keys on status AND — for resolved items — the resolution prefix, parsed through
- * the shared {@link parseResolutionKind}: pending → OPEN, dismissed → DISMISSED,
- * and resolved → FIXED ('fixed:') / TRIAGED ('triaged:') / PROMOTED ('promoted:')
- * / else RESOLVED. Empty columns render a quiet placeholder so the three-column
- * rhythm holds.
+ * Now: the DEFAULT render is tallies, not rows — no per-finding DOM node is
+ * mounted until a human clicks one. All aggregation is the pure, unit-tested
+ * {@link computeCodeQualityTally} helper (`shared/insights/codeQualityTally.ts`
+ * — kept dependency-free and outside `frontend/src/` so a backend test can
+ * reuse the exact same counting logic this component renders):
  *
- * Label maps (column titles, status chips) are keyed on the shared discriminants
- * so a new bucket / status breaks the map at compile time (per CODE-PATTERNS
- * "Label maps for shared-type discriminants").
+ *   - bucket × status counts (open/fixed/triaged/promoted/resolved/dismissed
+ *     per column) — clicking a cell drills down.
+ *   - category / severity / source tallies — clicking a bar drills down.
+ *   - top recurring finding titles (normalized: the "Shared build break (N
+ *     lanes): " prefix and embedded run ids stripped so the SAME underlying
+ *     issue counts once) — clicking a title drills down.
+ *   - a weekly opened/resolved trend sparkline over the last 30 days.
+ *
+ * Clicking any tally cell opens a FILTERED, PAGED (page size ≤ 50) list —
+ * the original row rendering (severity dot / meta line / status chip),
+ * unchanged, scoped by {@link filterQualityFindings}. From there, "Seed
+ * compounding with these" hands the WHOLE filtered set (not just the current
+ * page) to the CompoundingTray's selection via the store's
+ * {@link InsightsState.seedCompoundingFromFindingIds} — approving any
+ * still-untriaged row into READY and selecting every eligible row, so a human
+ * never has to one-by-one pick a filtered batch. Ids with no matching
+ * `triageFindings` row (already resolved/dismissed, or from a
+ * non-delivered-session run) are silently skipped — they are not
+ * triage-eligible.
+ *
+ * Row-level triage actions (Approve / Dismiss / promote) are OUT of scope
+ * here: the pre-existing flat list this section replaces never wired any —
+ * it has always been a read-only historical view (unlike FindingsSection's
+ * UntriagedRow, which owns the actual triage menu). This redesign keeps that
+ * read-only row exactly as it was.
+ *
+ * Bucket classification uses the SHARED {@link classifyQualityFinding} helper
+ * (imported, never reimplemented) and the tally's per-bucket status axis uses
+ * the SHARED {@link classifyTallyStatus} (mirrors this file's own chipLabel()
+ * exactly), so a tally count can never drift from what a drilled-down row
+ * would show for the same finding.
+ *
+ * Label maps (column titles, status chips, tally axis labels) are keyed on
+ * the shared discriminants so a new bucket / status breaks the map at
+ * compile time (per CODE-PATTERNS "Label maps for shared-type discriminants").
  */
-import { useMemo } from 'react';
-import { useInsightsStore } from '../../stores/insightsStore';
+import { useMemo, useState } from 'react';
+import { useInsightsStore, QUALITY_FINDINGS_LIMIT } from '../../stores/insightsStore';
 import {
   classifyQualityFinding,
   POST_MERGE_FINDING_CATEGORY,
@@ -38,6 +58,21 @@ import {
   type QualityFinding,
 } from '../../../../shared/types/insights';
 import { parseResolutionKind } from '../../../../shared/types/reviews';
+import {
+  computeCodeQualityTally,
+  filterQualityFindings,
+  paginate,
+  CATEGORY_UNSET,
+  SEVERITY_UNSET,
+  SOURCE_UNKNOWN,
+  QUALITY_DRILLDOWN_PAGE_SIZE,
+  type QualityTallyStatus,
+  type QualitySeverityKey,
+  type QualityFindingFilter,
+  type TallyEntry,
+} from '../../../../shared/insights/codeQualityTally';
+import { BarRow } from './charts/BarRow';
+import { Sparkline } from './charts/Sparkline';
 
 // ---------------------------------------------------------------------------
 // Discriminant-keyed label maps — exhaustive over the shared unions.
@@ -50,6 +85,38 @@ const BUCKET_LABEL: Record<QualityBucket, string> = {
   verification: 'Found during verification',
   post_merge: 'Post-merge',
 };
+
+const TALLY_STATUS_ORDER: readonly QualityTallyStatus[] = [
+  'open',
+  'fixed',
+  'triaged',
+  'promoted',
+  'resolved',
+  'dismissed',
+];
+
+/** Mirrors chipLabel()'s return strings exactly — never let the two drift. */
+const TALLY_STATUS_LABEL: Record<QualityTallyStatus, string> = {
+  open: 'Open',
+  fixed: 'Fixed',
+  triaged: 'Triaged',
+  promoted: 'Promoted',
+  resolved: 'Resolved',
+  dismissed: 'Dismissed',
+};
+
+const SEVERITY_LABEL: Record<QualitySeverityKey, string> = {
+  error: 'Error',
+  warning: 'Warning',
+  info: 'Info',
+  unset: 'No severity',
+};
+
+const CATEGORY_UNSET_LABEL = 'Uncategorized';
+const SOURCE_UNKNOWN_LABEL = 'Unknown source';
+
+/** Fixed render order for the severity tally panel, keyed on the shared severity axis. */
+const SEVERITY_KEYS: readonly QualitySeverityKey[] = ['error', 'warning', 'info', SEVERITY_UNSET];
 
 type FindingStatus = QualityFinding['status'];
 
@@ -164,7 +231,7 @@ function postMergeMeta(f: QualityFinding, bucket: QualityBucket): string | null 
   return null;
 }
 
-/** One finding row inside a column. */
+/** One finding row — UNCHANGED from the pre-redesign flat list, now rendered only inside a drill-down. */
 function FindingRow({
   finding,
   bucket,
@@ -202,13 +269,49 @@ function FindingRow({
   );
 }
 
-/** One bucket column — header with count badge over its finding rows. */
-function QualityColumn({
+// ---------------------------------------------------------------------------
+// Tally overview — the DEFAULT render. No per-finding row is mounted here.
+// ---------------------------------------------------------------------------
+
+/** One clickable tally row: a label, a count, and a click target that opens the drill-down. */
+function TallyRow({
+  label,
+  count,
+  onClick,
+  testId,
+}: {
+  label: string;
+  count: number;
+  onClick: () => void;
+  testId: string;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={count === 0}
+      data-testid={testId}
+      className="flex w-full items-center justify-between gap-2 rounded-button px-1.5 py-1 text-left text-xs transition-colors hover:bg-bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+    >
+      <span className="truncate text-text-secondary">{label}</span>
+      <span className="flex-shrink-0 rounded-full border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-bold tabular-nums text-text-primary">
+        {count}
+      </span>
+    </button>
+  );
+}
+
+/** One bucket column of the tally grid — header badge (matches today's) + its status breakdown. */
+function BucketTallyColumn({
   bucket,
-  findings,
+  total,
+  byStatus,
+  onDrill,
 }: {
   bucket: QualityBucket;
-  findings: QualityFinding[];
+  total: number;
+  byStatus: Record<QualityTallyStatus, number>;
+  onDrill: (filter: QualityFindingFilter) => void;
 }): React.JSX.Element {
   return (
     <div
@@ -221,37 +324,216 @@ function QualityColumn({
           className="rounded-full border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-bold tabular-nums text-text-secondary"
           data-testid="quality-column-count"
         >
-          {findings.length}
+          {total}
         </span>
       </div>
       <div className="mt-1">
-        {findings.length === 0 ? (
+        {total === 0 ? (
           <p className="py-6 text-center text-[11px] text-text-muted" data-testid="quality-column-empty">
             Nothing here.
           </p>
         ) : (
-          findings.map((f) => <FindingRow key={f.id} finding={f} bucket={bucket} />)
+          TALLY_STATUS_ORDER.filter((status) => byStatus[status] > 0).map((status) => (
+            <TallyRow
+              key={status}
+              label={TALLY_STATUS_LABEL[status]}
+              count={byStatus[status]}
+              testId={`quality-tally-${bucket}-${status}`}
+              onClick={() => onDrill({ bucket, status })}
+            />
+          ))
         )}
       </div>
     </div>
   );
 }
 
+/** A generic "key → count" tally panel (category / severity / source), rendered as clickable bars. */
+function TallyBarPanel({
+  title,
+  entries,
+  labelFor,
+  testId,
+  onDrill,
+}: {
+  title: string;
+  entries: TallyEntry[];
+  /** Human-readable label for a raw tally key (e.g. the CATEGORY_UNSET sentinel -> "Uncategorized"). */
+  labelFor: (key: string) => string;
+  testId: string;
+  onDrill: (key: string) => void;
+}): React.JSX.Element {
+  const max = entries.reduce((m, e) => Math.max(m, e.count), 0);
+  return (
+    <div data-testid={testId}>
+      <div className="eyebrow mb-2 text-text-tertiary">{title}</div>
+      {entries.length === 0 ? (
+        <p className="text-[11px] text-text-muted">No data yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {entries.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              onClick={() => onDrill(entry.key)}
+              data-testid={`${testId}-${entry.key}`}
+              className="block w-full rounded-button text-left transition-colors hover:bg-bg-hover"
+            >
+              <BarRow label={labelFor(entry.key)} value={entry.count} max={max} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Drill-down — the filtered, paged list a tally click opens.
+// ---------------------------------------------------------------------------
+
+/** Human-readable description of an active drill-down filter (for the panel header). */
+function describeFilter(filter: QualityFindingFilter): string {
+  const parts: string[] = [];
+  if (filter.bucket !== undefined) parts.push(BUCKET_LABEL[filter.bucket]);
+  if (filter.status !== undefined) parts.push(TALLY_STATUS_LABEL[filter.status]);
+  if (filter.category !== undefined) {
+    parts.push(filter.category === CATEGORY_UNSET ? CATEGORY_UNSET_LABEL : filter.category);
+  }
+  if (filter.severity !== undefined) parts.push(SEVERITY_LABEL[filter.severity]);
+  if (filter.source !== undefined) {
+    parts.push(filter.source === SOURCE_UNKNOWN ? SOURCE_UNKNOWN_LABEL : filter.source);
+  }
+  if (filter.normalizedTitle !== undefined) parts.push(`"${filter.normalizedTitle}"`);
+  return parts.length > 0 ? parts.join(' · ') : 'All findings';
+}
+
+function DrillDownPanel({
+  filter,
+  findings,
+  page,
+  onPageChange,
+  onBack,
+}: {
+  filter: QualityFindingFilter;
+  findings: QualityFinding[];
+  page: number;
+  onPageChange: (page: number) => void;
+  onBack: () => void;
+}): React.JSX.Element {
+  const pageResult = useMemo(
+    () => paginate(findings, page, QUALITY_DRILLDOWN_PAGE_SIZE),
+    [findings, page],
+  );
+
+  const handleSeedCompounding = (): void => {
+    void useInsightsStore
+      .getState()
+      .seedCompoundingFromFindingIds(findings.map((f) => f.id));
+  };
+
+  return (
+    <div data-testid="quality-drilldown" className="mt-3 rounded-card border border-border-primary bg-surface-primary p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-primary pb-2">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onBack}
+            data-testid="quality-drilldown-back"
+            className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
+          >
+            ← Back to tallies
+          </button>
+          <span className="text-xs font-semibold text-text-primary">{describeFilter(filter)}</span>
+          <span
+            className="rounded-full border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-bold tabular-nums text-text-secondary"
+            data-testid="quality-drilldown-count"
+          >
+            {pageResult.total}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={handleSeedCompounding}
+          disabled={pageResult.total === 0}
+          data-testid="quality-drilldown-seed"
+          className="rounded-button border border-interactive/40 bg-interactive-surface px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-interactive transition-colors hover:bg-interactive/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Seed compounding with these
+        </button>
+      </div>
+
+      <div className="mt-1">
+        {pageResult.total === 0 ? (
+          <p className="py-6 text-center text-[11px] text-text-muted" data-testid="quality-drilldown-empty">
+            Nothing matches this filter.
+          </p>
+        ) : (
+          pageResult.items.map((f) => (
+            <FindingRow key={f.id} finding={f} bucket={classifyQualityFinding(f)} />
+          ))
+        )}
+      </div>
+
+      {pageResult.pageCount > 1 && (
+        <div className="mt-2 flex items-center justify-center gap-3 border-t border-border-tertiary pt-2 text-[11px]">
+          <button
+            type="button"
+            onClick={() => onPageChange(pageResult.page - 1)}
+            disabled={pageResult.page === 0}
+            data-testid="quality-drilldown-prev"
+            className="text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            ← Prev
+          </button>
+          <span className="text-text-tertiary" data-testid="quality-drilldown-page">
+            Page {pageResult.page + 1} of {pageResult.pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => onPageChange(pageResult.page + 1)}
+            disabled={pageResult.page >= pageResult.pageCount - 1}
+            data-testid="quality-drilldown-next"
+            className="text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Next →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Section root
+// ---------------------------------------------------------------------------
+
+const EMPTY_FINDINGS: QualityFinding[] = [];
+
 export function CodeQualitySection(): React.JSX.Element {
   const qualityFindings = useInsightsStore((s) => s.qualityFindings);
 
-  // Bucket via the SHARED helper so backend + UI cannot drift on the rule.
-  const byBucket = useMemo(() => {
-    const buckets: Record<QualityBucket, QualityFinding[]> = {
-      in_workflow: [],
-      verification: [],
-      post_merge: [],
-    };
-    for (const f of qualityFindings) {
-      buckets[classifyQualityFinding(f)].push(f);
-    }
-    return buckets;
-  }, [qualityFindings]);
+  const [filter, setFilter] = useState<QualityFindingFilter | null>(null);
+  const [page, setPage] = useState(0);
+
+  const tally = useMemo(() => computeCodeQualityTally(qualityFindings), [qualityFindings]);
+
+  // Only computed when a drill-down is open — the default (tally) render never
+  // maps the full findings array into DOM rows, however large the project.
+  const filteredFindings = useMemo(
+    () => (filter === null ? EMPTY_FINDINGS : filterQualityFindings(qualityFindings, filter)),
+    [qualityFindings, filter],
+  );
+
+  const openDrilldown = (next: QualityFindingFilter): void => {
+    setFilter(next);
+    setPage(0);
+  };
+
+  // A row count exactly at the fetch cap means the query most likely truncated
+  // silently (the store's QUALITY_FINDINGS_LIMIT) — every tally below is then
+  // computed over a sample, not the whole inbox, with no other signal of that.
+  const isTruncated = qualityFindings.length >= QUALITY_FINDINGS_LIMIT;
 
   return (
     <div data-testid="code-quality-section">
@@ -262,11 +544,111 @@ export function CodeQualitySection(): React.JSX.Element {
         </span>
       </header>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-        {BUCKET_ORDER.map((bucket) => (
-          <QualityColumn key={bucket} bucket={bucket} findings={byBucket[bucket]} />
-        ))}
-      </div>
+      {isTruncated && (
+        <p
+          className="mt-2 text-[11px] text-status-warning"
+          data-testid="quality-truncated-notice"
+          title={`Only the most recent ${QUALITY_FINDINGS_LIMIT} findings are fetched — tallies below are a sample, not the whole project.`}
+        >
+          Showing the {QUALITY_FINDINGS_LIMIT} most recent findings — totals below may be
+          incomplete for larger projects.
+        </p>
+      )}
+
+      {filter !== null ? (
+        <DrillDownPanel
+          filter={filter}
+          findings={filteredFindings}
+          page={page}
+          onPageChange={setPage}
+          onBack={() => setFilter(null)}
+        />
+      ) : (
+        <div data-testid="quality-tally-overview">
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+            {BUCKET_ORDER.map((bucket) => (
+              <BucketTallyColumn
+                key={bucket}
+                bucket={bucket}
+                total={tally.byBucket[bucket]}
+                byStatus={tally.byBucketStatus[bucket]}
+                onDrill={openDrilldown}
+              />
+            ))}
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-3">
+            <TallyBarPanel
+              title="By category"
+              entries={tally.byCategory}
+              labelFor={(key) => (key === CATEGORY_UNSET ? CATEGORY_UNSET_LABEL : key)}
+              testId="quality-categories"
+              onDrill={(category) => openDrilldown({ category })}
+            />
+            <TallyBarPanel
+              title="By severity"
+              entries={SEVERITY_KEYS.map((key) => ({ key, count: tally.bySeverity[key] }))}
+              labelFor={(key) => SEVERITY_LABEL[key as QualitySeverityKey]}
+              testId="quality-severities"
+              onDrill={(severity) => openDrilldown({ severity: severity as QualitySeverityKey })}
+            />
+            <TallyBarPanel
+              title="By source"
+              entries={tally.bySource}
+              labelFor={(key) => (key === SOURCE_UNKNOWN ? SOURCE_UNKNOWN_LABEL : key)}
+              testId="quality-sources"
+              onDrill={(source) => openDrilldown({ source })}
+            />
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <div data-testid="quality-recurring-titles">
+              <div className="eyebrow mb-2 text-text-tertiary">Recurring titles</div>
+              {tally.recurringTitles.length === 0 ? (
+                <p className="text-[11px] text-text-muted">No repeat findings yet.</p>
+              ) : (
+                <div className="space-y-1">
+                  {tally.recurringTitles.map((entry, index) => (
+                    <TallyRow
+                      key={entry.normalizedTitle}
+                      label={entry.normalizedTitle}
+                      count={entry.count}
+                      testId={`quality-recurring-title-${index}`}
+                      onClick={() => openDrilldown({ normalizedTitle: entry.normalizedTitle })}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div data-testid="quality-trend">
+              <div className="eyebrow mb-2 text-text-tertiary">Opened vs resolved · last 30 days</div>
+              <div className="flex items-center gap-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Opened</div>
+                  <Sparkline
+                    points={tally.weeklyTrend.map((p) => p.opened)}
+                    strokeClass="stroke-interactive"
+                  />
+                </div>
+                <div>
+                  <div
+                    className="text-[10px] uppercase tracking-wider text-text-tertiary"
+                    data-testid="quality-trend-resolved-label"
+                    title="Counted by the week a finding was OPENED, not the week it was actually resolved, and includes dismissals — QualityFinding carries no resolution timestamp today."
+                  >
+                    Resolved*
+                  </div>
+                  <Sparkline
+                    points={tally.weeklyTrend.map((p) => p.resolved)}
+                    strokeClass="stroke-status-success"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

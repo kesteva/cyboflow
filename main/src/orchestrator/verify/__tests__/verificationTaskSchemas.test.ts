@@ -33,6 +33,7 @@ const ATTESTATION_SPECS: AttestationSpec[] = [
   { kind: 'window-identity', titlePattern: 'MyApp — dev', app: 'MyApp' },
   { kind: 'bundle-identity', bundleId: 'com.example.demo' },
   { kind: 'file-identity' },
+  { kind: 'serve-binding' },
 ];
 
 describe('parseVerificationTaskV1', () => {
@@ -370,9 +371,9 @@ describe('isAttestationSpec', () => {
     expect(isAttestationSpec({ kind: 'magic-word' })).toBe(false);
   });
 
-  it('lists exactly the six kinds, and ATTESTATION_KINDS matches the fixtures', () => {
+  it('lists exactly the seven kinds, and ATTESTATION_KINDS matches the fixtures', () => {
     expect([...ATTESTATION_KINDS].sort()).toEqual(ATTESTATION_SPECS.map((a) => a.kind).sort());
-    expect(new Set(ATTESTATION_KINDS).size).toBe(6);
+    expect(new Set(ATTESTATION_KINDS).size).toBe(7);
   });
 
   it('accepts bundle-identity with a bundleId and nothing else required', () => {

@@ -127,4 +127,22 @@ describe('selectRunRawStreamEvents', () => {
     expect(selectRunRawStreamEvents(db, 'run-x')).toHaveLength(1);
     expect(selectRunRawStreamEvents(db, 'run-y')).toHaveLength(1);
   });
+
+  it('strips the persistence-only process-identity stamp from the replayed payload', () => {
+    const rows: MockRawRow[] = [
+      {
+        id: 1,
+        runId: 'run-p',
+        createdAt: '2026-01-01T00:00:01Z',
+        payloadJson: JSON.stringify({
+          type: 'assistant',
+          message: { id: 'm1', model: 'claude-opus-4', role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+          cyboflow_process_instance_id: 'proc-1',
+        }),
+      },
+    ];
+    const [envelope] = selectRunRawStreamEvents(makeMockDb(rows), 'run-p');
+    expect(envelope.payload).not.toHaveProperty('cyboflow_process_instance_id');
+    expect(envelope.type).toBe('assistant');
+  });
 });

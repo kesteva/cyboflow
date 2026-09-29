@@ -20,6 +20,7 @@ import {
   listExperimentSeedTasks,
   seedTaskCloneIdsForArm,
   deleteExperimentSeedTasks,
+  stampArmGateReachedAt,
 } from '../experimentStore';
 import type { ExperimentRow } from '../../../../shared/types/experiments';
 
@@ -51,7 +52,7 @@ function buildDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, gate_reached_at TEXT);
     CREATE TABLE experiment_seed_tasks (
       experiment_id TEXT NOT NULL,
       arm TEXT NOT NULL CHECK (arm IN ('A','B')),
@@ -436,5 +437,83 @@ describe('experiment_seed_tasks helpers (migration 051)', () => {
     expect(listExperimentSeedTasks(db, 'exp_x')).toEqual([]);
     expect(seedTaskCloneIdsForArm(db, 'exp_x', 'A')).toEqual([]);
     expect(() => deleteExperimentSeedTasks(db, 'exp_x')).not.toThrow();
+  });
+});
+
+describe('stampArmGateReachedAt (migration 145)', () => {
+  it('stamps gate_reached_at on a run resting at its FINAL awaiting_review gate', () => {
+    const raw = buildDb();
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    stampArmGateReachedAt(db, 'runA', 'awaiting_review');
+    const row = raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
+      gate_reached_at: string | null;
+    };
+    expect(row.gate_reached_at).not.toBeNull();
+  });
+
+  it('writes it exactly once — a second call (re-fired terminal event) is a no-op', () => {
+    const raw = buildDb();
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    stampArmGateReachedAt(db, 'runA', 'awaiting_review');
+    // CURRENT_TIMESTAMP has 1-second resolution, so two calls in the same test
+    // tick would coincidentally match even without the IS NULL guard. Force a
+    // distinct sentinel value in between so an overwrite is actually detectable.
+    const sentinel = '2020-01-01 00:00:00';
+    raw.prepare('UPDATE workflow_runs SET gate_reached_at = ? WHERE id = ?').run(sentinel, 'runA');
+    stampArmGateReachedAt(db, 'runA', 'awaiting_review');
+    const second = (raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
+      gate_reached_at: string | null;
+    }).gate_reached_at;
+    expect(second).toBe(sentinel);
+  });
+
+  it('does NOT stamp an arm at awaiting_review behind an open MID-RUN human gate', () => {
+    const raw = buildDb();
+    raw.exec(
+      `CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, status TEXT, blocking INTEGER, source TEXT);`,
+    );
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    raw
+      .prepare(
+        `INSERT INTO review_items (id, run_id, kind, status, blocking, source) VALUES ('g1', 'runA', 'decision', 'pending', 1, 'gate:human-step:approve-plan')`,
+      )
+      .run();
+    stampArmGateReachedAt(db, 'runA', 'awaiting_review');
+    const row = raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
+      gate_reached_at: string | null;
+    };
+    expect(row.gate_reached_at).toBeNull();
+  });
+
+  it.each(['completed', 'failed', 'canceled'])('does NOT stamp on a %s event (only awaiting_review measures gate wait)', (status) => {
+    const raw = buildDb();
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', status);
+    stampArmGateReachedAt(db, 'runA', status);
+    const row = raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get('runA') as {
+      gate_reached_at: string | null;
+    };
+    expect(row.gate_reached_at).toBeNull();
+  });
+
+  it('is fail-soft on a pre-145 DB with no gate_reached_at column', () => {
+    const raw = new Database(':memory:');
+    raw.exec(`CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL);`);
+    raw.prepare('INSERT INTO workflow_runs (id, status) VALUES (?, ?)').run('runA', 'awaiting_review');
+    const db = dbAdapter(raw);
+    expect(() => stampArmGateReachedAt(db, 'runA', 'awaiting_review')).not.toThrow();
+  });
+
+  it('propagates write failures other than a missing column so the caller can log them', () => {
+    const raw = new Database(':memory:');
+    raw.exec(`CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, gate_reached_at TEXT);`);
+    raw.prepare('INSERT INTO workflow_runs (id, status) VALUES (?, ?)').run('runA', 'awaiting_review');
+    raw.exec(`CREATE TRIGGER block_stamp BEFORE UPDATE OF gate_reached_at ON workflow_runs
+      BEGIN SELECT RAISE(ABORT, 'stamp blocked'); END;`);
+    const db = dbAdapter(raw);
+    expect(() => stampArmGateReachedAt(db, 'runA', 'awaiting_review')).toThrow(/stamp blocked/);
   });
 });

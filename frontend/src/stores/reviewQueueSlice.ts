@@ -16,7 +16,7 @@
  *
  * ## Integration with PendingApprovalCard
  *
- * `ReviewQueueView` passes each card's `runStatus` by looking up `runId` in
+ * The queue host passes each card's `runStatus` by looking up `runId` in
  * this slice's `runStatusMap`.  Cards re-render within one event-loop tick of
  * the event arriving because Zustand notifies all subscribers synchronously.
  *
@@ -210,7 +210,7 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
  * Selector hook that returns the current WorkflowRunStatus for the given runId,
  * or undefined when the runId is absent from the map.
  *
- * Used by ReviewQueueView to pass runStatus to each PendingApprovalCard.
+ * Used by the queue host to pass runStatus to each PendingApprovalCard.
  * Exported for direct use in components and for unit testing via renderHook.
  *
  * @param runId - The workflow_runs.id to look up. When undefined, returns undefined.
@@ -224,7 +224,7 @@ export function useRunStatus(runId: string | undefined): WorkflowRunStatus | und
  * given runId, or `undefined` fields when the runId is absent from the maps.
  *
  * Used by PendingApprovalCard to forward reason + detectedAt to StuckBadge
- * without requiring ReviewQueueView to pass these as props.
+ * without requiring the queue host to pass these as props.
  *
  * The `shallow` equality function prevents unnecessary re-renders caused by
  * a fresh object being returned on every selector call.
