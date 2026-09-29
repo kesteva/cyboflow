@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FlaskConical, X } from 'lucide-react';
 import { trpc } from '../../trpc/client';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 interface ExperimentCancelDialogProps {
   isOpen: boolean;
@@ -30,6 +31,7 @@ export function ExperimentCancelDialog({
   experimentName,
   onSuccess,
 }: ExperimentCancelDialogProps) {
+  useOcclusion(isOpen, 'experiment-cancel-dialog');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

@@ -282,3 +282,29 @@ describe('GitFileWatcher — stop-during-in-flight', () => {
     expect(impl).toHaveBeenCalledTimes(1); // no dirty rerun spawned after stop
   });
 });
+
+describe('GitFileWatcher — ignored paths', () => {
+  type ChangeInternals = { handleFileChange: (sessionId: string, filename: string, eventType: string) => void };
+
+  it("drops writes inside a fan-out lane's build slot, but not other .cyboflow/ files", () => {
+    const watcher = new GitFileWatcher();
+    const session = seedSession(watcher, 's1');
+    session.pendingRefresh = false;
+    const handle = (filename: string) =>
+      (watcher as unknown as ChangeInternals).handleFileChange('s1', filename, 'change');
+
+    try {
+      // Concurrent xcodebuild/SwiftPM output in a slot (laneBuildSlots.ts) is
+      // git-excluded churn: no refresh.
+      handle('.cyboflow/build-slots/slot-0/DerivedData/Build/Intermediates.noindex/XCBuildData/build.db');
+      handle('.cyboflow/build-slots/slot-3/clang-module-cache/Swift-7JL1KBZ3A6V3.swiftmodule');
+      expect(session.pendingRefresh).toBe(false);
+
+      // A committed .cyboflow/ file still counts.
+      handle('.cyboflow/verify-runbook.json');
+      expect(session.pendingRefresh).toBe(true);
+    } finally {
+      watcher.stopAll(); // clears the debounce timer the last change scheduled
+    }
+  });
+});

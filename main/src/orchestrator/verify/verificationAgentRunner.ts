@@ -1285,6 +1285,16 @@ export type AttestationFloorOutcome =
  * binding-only verdict when it does not verify (see
  * {@link evaluateAttestationFloorForMode}).
  */
+/**
+ * The driver's page selector, from the task's `cdp-token` attestation. Empty for
+ * every other channel — they name nothing a page evaluates to.
+ */
+export function driverPageSelectorEnv(task: VerificationTaskV1): Record<string, string> {
+  const spec = task.attestation;
+  if (spec?.kind !== 'cdp-token') return {};
+  return { VERIFY_DRIVER_PAGE_EXPRESSION: spec.expression, VERIFY_DRIVER_PAGE_EXPECTED: spec.expected };
+}
+
 export function effectiveAttestationSpec(
   task: VerificationTaskV1,
   implicit?: { executionMode: VerificationExecutionMode; mobileLeased: boolean; harnessMarker?: boolean },
@@ -2475,7 +2485,7 @@ const buildHarnessAttestationDeps = (
       }
       return res.body;
     },
-    cdpEvaluate: (port, expression, timeoutMs) => evaluateOverCdp(port, expression, timeoutMs),
+    cdpEvaluate: (port, expression, timeoutMs, select) => evaluateOverCdp(port, expression, timeoutMs, select ?? null),
     listNativeWindows: async (app: string) =>
       extractWindowTitles(
         await driver.runPeekaboo(peekabooBin, peekabooListWindowsArgs(app), PEEKABOO_TIMEOUT_MS),
@@ -3788,6 +3798,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // driver must ATTACH and never launch its own chromium (a blank chromium
         // there would screenshot the wrong surface). driverCore honors this flag.
         ...(req.task.serve?.attach === 'cdp' ? { VERIFY_DRIVER_ATTACH_ONLY: '1' } : {}),
+        // Positive page selection for the driver (see driverCore PageSelector):
+        // the app's own cdp-token attestation names what ITS page evaluates to,
+        // so an embedded web page on the same endpoint is never driven instead.
+        ...driverPageSelectorEnv(req.task),
         // Empty on every non-mobile modality, so none of the VERIFY_SIM_* /
         // VERIFY_APP_* / VERIFY_MOBILE_* names exist there at all.
         ...mobileEnv,

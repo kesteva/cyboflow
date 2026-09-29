@@ -459,8 +459,11 @@ export function stampArmGateReachedAt(db: DatabaseLike, runId: string, status: s
       `UPDATE workflow_runs SET gate_reached_at = CURRENT_TIMESTAMP
         WHERE id = ? AND gate_reached_at IS NULL`,
     ).run(runId);
-  } catch {
+  } catch (err) {
     // Pre-145 DB (no gate_reached_at column) or a minimal test schema — no-op.
+    // Any other write failure propagates to the caller's logged fail-soft catch.
+    if (err instanceof Error && /no such column: gate_reached_at/.test(err.message)) return;
+    throw err;
   }
 }
 

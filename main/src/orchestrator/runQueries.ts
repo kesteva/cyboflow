@@ -81,3 +81,61 @@ export function resolveSessionRunHandler(
   const named = row.flowName && row.flowName !== QUICK_WORKFLOW_SENTINEL_NAME;
   return { runId: row.runId, flowName: named ? row.flowName : null };
 }
+
+/**
+ * Event-type values that mark a turn as having ENDED (TASK-300).
+ * Mirrors the pairing `insightsQueries.ts` / `runContextUsageListing.ts` already
+ * use for "is this raw_events row a turn-result" — a native Claude SDK result
+ * message is stored as event_type='result'; the provider-neutral agent stream
+ * (Codex/OMP) stores the same moment as 'agent_result'. See
+ * `shared/streamParser/derivers.ts`'s `derivePersistedEventType`.
+ */
+const TURN_RESULT_EVENT_TYPES = ['result', 'agent_result'] as const;
+
+/**
+ * True when the LATEST raw_events row for a run is a turn-result event —
+ * i.e. the run's last SDK turn has already ended, whatever a real-time
+ * "is a process still attached" signal (RunExecutor.hasActiveExecution /
+ * ClaudeManagerLike.hasActiveRunForId) reports.
+ *
+ * That real-time signal answers "has execute()'s await returned", not "did
+ * the model actually keep talking" — a detached child the agent spawned
+ * (e.g. a left-running dev server that inherited stdio) can keep it true
+ * forever after the turn itself finished, because the query() iterator's
+ * stdout pipe never drains. Reading the last persisted event instead is
+ * immune to that: a completed turn's last row is always its `result` event,
+ * appended synchronously by RawEventsSink before anything downstream (a dev
+ * server, a lingering tool) gets a chance to hang around.
+ *
+ * A run with ZERO raw_events rows (nothing has happened yet) reads as NOT
+ * completed — there is no turn to have ended.
+ *
+ * Always false for a PROGRAMMATIC run (and for an unknown run id). The signal
+ * is only sound when the run is ONE conversation, i.e. orchestrated (including
+ * a handed-over run, which is orchestrated from the handover on). A
+ * programmatic walk spawns one invocation per step, and fan-out lanes run
+ * concurrently under the same run_id: a `result` row there only proves THAT
+ * step or lane ended. The walk may be starting its next step, or a sibling
+ * lane may be deep in a quiet tool call. raw_events carries no per-spawn key
+ * to tell these apart, so for programmatic runs callers fall back to the
+ * process-liveness signal alone. The cost is that a programmatic walk wedged
+ * by a hung spawn is not caught here.
+ *
+ * Used by `runs.ts`'s `queueInput` 'parked' check and `StuckDetector`'s
+ * `parked_no_gate` rung so both agree on one turn-ended signal instead of
+ * each layering its own staleness heuristic on top of the same ambiguity.
+ */
+export function isLatestRunTurnCompleted(db: DatabaseLike, runId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT wr.execution_model AS executionModel,
+              (SELECT re.event_type FROM raw_events re
+                WHERE re.run_id = wr.id
+                ORDER BY re.id DESC LIMIT 1) AS eventType
+         FROM workflow_runs wr
+        WHERE wr.id = ?`,
+    )
+    .get(runId) as { executionModel: string | null; eventType: string | null } | undefined;
+  if (!row || row.executionModel === 'programmatic' || !row.eventType) return false;
+  return (TURN_RESULT_EVENT_TYPES as readonly string[]).includes(row.eventType);
+}

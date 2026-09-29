@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useIPCEvents } from './hooks/useIPCEvents';
+import { useReservedChord } from './hooks/useReservedChord';
 import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
@@ -55,6 +56,7 @@ import {
   useAggregatedReviewItems,
   useLandingStore,
 } from './stores/landingStore';
+import { useOcclusion } from './hooks/useOcclusion';
 
 /**
  * What stands in for the shell row while the first-run tour owns the window:
@@ -118,6 +120,7 @@ function App() {
     (s) => s.items.filter((it) => it.kind === 'finding' && it.status === 'pending').length,
   );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
+  useOcclusion(isTokenTestOpen, 'token-test-modal');
   const { currentError, clearError } = useErrorStore();
   const { fetchConfig } = useConfigStore();
   // Global assistant on/off (Settings → Assistant). Reactive off the shared
@@ -280,21 +283,17 @@ function App() {
   // identity across renders since the underlying setters are themselves stable.
   const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
 
-  // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'T') {
-        // Only allow in development mode
-        if (process.env.NODE_ENV === 'development') {
-          e.preventDefault();
-          setIsTokenTestOpen(prev => !prev);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  // Token test page (Cmd/Ctrl + Shift + T) — development only. Goes through the
+  // shared reserved-chord registry rather than its own window listener, so it
+  // still fires while a native web-viewer view holds focus (which swallows every
+  // renderer keydown). `enabled` gates it to development, which also keeps the
+  // chord out of main's reserved table in a packaged build — so a page there is
+  // free to use Cmd-Shift-T itself. See shared/types/reservedChords.ts.
+  useReservedChord(
+    'tokenTest',
+    useCallback(() => setIsTokenTestOpen((prev) => !prev), []),
+    { enabled: process.env.NODE_ENV === 'development' },
+  );
 
   return (
     <ContextMenuProvider>

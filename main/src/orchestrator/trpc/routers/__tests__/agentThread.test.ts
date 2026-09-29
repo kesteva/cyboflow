@@ -109,10 +109,14 @@ class FakeStore implements AgentThreadStoreLike {
 function makeService(): AgentThreadServiceLike & {
   ensureGlobalThread: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
+  interruptTurn: ReturnType<typeof vi.fn>;
+  isTurnInFlight: ReturnType<typeof vi.fn>;
 } {
   return {
     ensureGlobalThread: vi.fn(() => THREAD),
     sendMessage: vi.fn(async () => undefined),
+    interruptTurn: vi.fn(async () => ({ interrupted: false })),
+    isTurnInFlight: vi.fn(() => false),
   };
 }
 
@@ -160,6 +164,38 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
     expect(result).toEqual({ ok: true });
     expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined, undefined);
+  });
+
+  it('interruptTurn forwards to the service and returns its result', async () => {
+    const service = makeService();
+    service.interruptTurn.mockResolvedValueOnce({ interrupted: true });
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
+    expect(result).toEqual({ interrupted: true });
+    expect(service.interruptTurn).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('interruptTurn is a no-op ({ interrupted: false }) when the thread is idle', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.interruptTurn({ threadId: 'thread-1' });
+    expect(result).toEqual({ interrupted: false });
+  });
+
+  it('turnState reports the service\'s in-flight state', async () => {
+    const service = makeService();
+    service.isTurnInFlight.mockReturnValueOnce(true);
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
+    expect(result).toEqual({ inFlight: true });
+    expect(service.isTurnInFlight).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('turnState reports idle ({ inFlight: false }) when nothing is in flight', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.turnState({ threadId: 'thread-1' });
+    expect(result).toEqual({ inFlight: false });
   });
 
   it('sendMessage forwards an optional contextHint to the service', async () => {

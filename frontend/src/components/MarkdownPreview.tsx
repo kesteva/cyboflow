@@ -1,7 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useContext, useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MermaidRenderer } from './MermaidRenderer';
+import { WebLinkContext } from '../contexts/WebLinkContext';
+import { viewableHref } from '../utils/openWebLink';
 
 interface CodeComponentProps extends React.HTMLAttributes<HTMLElement> {
   node?: unknown;
@@ -35,6 +37,37 @@ function chartKey(source: string): string {
     hash = ((hash << 5) + hash + source.charCodeAt(i)) | 0;
   }
   return `mermaid-${source.length}-${hash}`;
+}
+
+/**
+ * Markdown link. Inside a chat (a `WebLinkContext` provider) a plain left-click
+ * on an absolute http(s) link opens it as a web-viewer tab; everything else —
+ * no provider, a modifier-click, a middle-click, a relative or non-web href —
+ * keeps the original `target=_blank` path, which main escapes to the OS browser.
+ * Reads context rather than closing over a session so the components map can
+ * stay module-scope.
+ */
+function MarkdownLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const openWebLink = useContext(WebLinkContext);
+  const onClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (openWebLink === null || e.defaultPrevented) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const url = viewableHref(href);
+    if (url === null) return;
+    e.preventDefault();
+    openWebLink(url);
+  };
+  return (
+    <a
+      href={href}
+      className="text-interactive-on-dark"
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={onClick}
+    >
+      {children}
+    </a>
+  );
 }
 
 const MARKDOWN_COMPONENTS: Components = {
@@ -98,11 +131,7 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </td>
   ),
-  a: ({ href, children }) => (
-    <a href={href} className="text-interactive-on-dark" target="_blank" rel="noopener noreferrer">
-      {children}
-    </a>
-  ),
+  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
   hr: () => <hr className="my-6 border-border-primary" />,
 };
 

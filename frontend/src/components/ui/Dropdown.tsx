@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, ReactNode, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../utils/cn';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 export interface DropdownItem {
   id: string;
@@ -83,6 +84,8 @@ export function Dropdown({
   style,
 }: DropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
+  // A native web view paints above all DOM; hide it while the menu is open.
+  useOcclusion(isOpen, 'dropdown');
   const [actualPosition, setActualPosition] = useState<'bottom-left' | 'bottom-right' | 'top-left' | 'top-right'>('bottom-right');
   // Fixed viewport coordinates for the PORTALED menu (computed from the trigger
   // rect). null until measured — the menu only renders once coords are known.

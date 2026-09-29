@@ -77,6 +77,17 @@ can help", a read-only preview of the session types whose only exit is "Finish s
 finale then has no project to stamp or navigate to, so it lands on LandingHome's empty state;
 step 14 is never reached on that branch.
 
+**Web tabs and occlusion.** The run and quick-session center panes (`RunCenterPane`,
+`QuickSessionCenterPane`) can hold `'web'` tabs alongside file/artifact tabs. A web tab's body is
+an empty anchor `<div>`; the page itself is a main-process `WebContentsView` composited ABOVE
+the renderer at the anchor's bounds (`useWebViewBounds`, `useWebViewerBridge`). Consequence for
+every surface in this shell: **DOM stacking cannot cover a web tab.** Anything that can overlap
+the center pane — a modal, dropdown, context menu, popover, toast, resize drag — must take an
+occlusion lease (`useOcclusion(open, reason)`, `frontend/src/utils/occlusion.ts`); while any
+lease is held the native view is hidden. `frontend/src/__tests__/occlusionRegistry.test.ts`
+fails on a new fixed/absolute high-z or portalled element that takes no lease (explicit,
+justified exemptions only). The web viewer adds no App-level mount condition.
+
 ## Assumption order
 
 1. The agent rail (Sidebar) is leftmost; the title bar (38px) spans above the row.

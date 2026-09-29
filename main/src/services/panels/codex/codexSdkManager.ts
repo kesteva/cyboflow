@@ -318,6 +318,22 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(canonicalize(value)) ?? 'null';
 }
 
+/**
+ * The app-server env: the run env plus a fan-out lane's build-slot env
+ * (`options.laneEnv`, programmatic/laneBuildSlots.ts), merged LAST so it wins.
+ * The app-server hands its env to every command the agent runs, which is how the
+ * slot reaches a Codex lane's shell. ONE builder for both the cold spawn and the
+ * warm fingerprint so the two can never disagree. No laneEnv ⇒ the run env as-is.
+ */
+function appServerEnvironment(
+  runId: string,
+  runtimeConfig: CodexMcpRuntimeConfig,
+  options: ClaudeSpawnerOptions,
+): NodeJS.ProcessEnv {
+  const env = buildCodexAppServerEnvironment(runId, runtimeConfig);
+  return options.laneEnv ? { ...env, ...options.laneEnv } : env;
+}
+
 function defaultCodexAppServerClientFactory(
   options: CodexAppServerClientOptions,
 ): CodexAppServerClientLike {
@@ -798,7 +814,7 @@ export class CodexSdkManager extends AbstractCliManager {
     agentRoles: CodexAgentRoles,
   ): string {
     return sha1(stableSerialize({
-      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
+      env: appServerEnvironment(runId, runtimeConfig, options),
       thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig, agentRoles),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
@@ -881,7 +897,7 @@ export class CodexSdkManager extends AbstractCliManager {
       command: executable.executablePath,
       cwd: options.worktreePath,
       env: prependCodexPathToEnvironment(
-        buildCodexAppServerEnvironment(runId, runtimeConfig),
+        appServerEnvironment(runId, runtimeConfig, options),
         executable.pathDir,
       ),
       onServerRequest: (request) => {
@@ -1477,6 +1493,29 @@ export class CodexSdkManager extends AbstractCliManager {
       if (run.sessionId === sessionId) return true;
     }
     return false;
+  }
+
+  /**
+   * Interrupt seam for "Stop"/"Interrupt & send": abort the in-flight turn
+   * for this identity (panelId, runId, or spawnKey — same lookup
+   * {@link killProcess} uses) WITHOUT closing a warm-parked entry that has no
+   * turn running. No-op when idle, mirroring
+   * ClaudeCodeManager.abortInFlightTurn's contract: a warm entry parked
+   * between turns is left alone (there is nothing to interrupt), only a live
+   * `activeRuns` entry is cancelled.
+   */
+  async abortInFlightTurn(identity: string): Promise<void> {
+    const keys = new Set<string>([
+      ...(this.spawnKeysByPanelId.get(identity) ?? []),
+      ...(this.spawnKeysByRunId.get(identity) ?? []),
+    ]);
+    if (keys.size === 0) keys.add(identity);
+    await Promise.all(
+      [...keys].map(async (spawnKey) => {
+        const active = this.activeRuns.get(spawnKey);
+        if (active) await active.cancel();
+      }),
+    );
   }
 
   override async killProcess(identity: string): Promise<void> {

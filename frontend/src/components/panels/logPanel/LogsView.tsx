@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { Search, X, Download, Trash2, ChevronUp, ChevronDown, Filter, Copy, Check } from 'lucide-react';
 import { cn } from '../../../utils/cn';
 import AnsiToHtml from 'ansi-to-html';
+import { useOcclusion } from '../../../hooks/useOcclusion';
 
 interface LogEntry {
   timestamp: string;
@@ -20,6 +21,7 @@ export const LogsView: React.FC<LogsViewProps> = ({ sessionId, isVisible }) => {
   const [filterTerm, setFilterTerm] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [searchVisible, setSearchVisible] = useState(false);
+  useOcclusion(searchVisible, 'logs-search-bar');
   const [currentSearchIndex, setCurrentSearchIndex] = useState(0);
   const [searchMatches, setSearchMatches] = useState<number[]>([]);
   const [autoScroll, setAutoScroll] = useState(true);

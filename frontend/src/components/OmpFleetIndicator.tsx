@@ -24,6 +24,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../utils/cn';
 import { useOmpFleetStore } from '../stores/ompFleetStore';
 import type { OmpFleetUiStatus } from '../stores/ompFleetStore';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 const DOT_COLOR: Record<OmpFleetUiStatus, string> = {
   available: 'bg-status-success',
@@ -57,6 +58,7 @@ export function OmpFleetIndicator() {
     })),
   );
   const [open, setOpen] = useState(false);
+  useOcclusion(open, 'omp-fleet-popover');
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Aria mode can flip off while the popover is open (the store re-probes every

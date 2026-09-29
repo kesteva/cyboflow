@@ -50,8 +50,11 @@ import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
+import { WebViewTab } from './WebViewTab';
+import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
+import { openBlankWebTab } from '../../utils/openWebLink';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
@@ -137,6 +140,10 @@ export function QuickSessionCenterPane({
   // resting quick session is visually unchanged from before.
   const showStrip = pane.tabs.length > 1;
 
+  // Native web viewer: relay chords swallowed by a focused view, turn page
+  // popups into tabs, and follow main's teardown. See useWebViewerBridge.
+  useWebViewerBridge(sessionKey);
+
   const renderActiveTab = (): ReactElement => {
     if (activeTab && activeTab.kind === 'file' && activeTab.filePath) {
       // The diff/content source is the pane's session key; an optional
@@ -151,6 +158,9 @@ export function QuickSessionCenterPane({
           scope={activeTab.scope}
         />
       );
+    }
+    if (activeTab && activeTab.kind === 'web') {
+      return <WebViewTab tab={activeTab} sessionKey={sessionKey} active />;
     }
     if (activeTab && activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (
@@ -239,6 +249,7 @@ export function QuickSessionCenterPane({
           activeTabId={pane.activeTabId}
           onTabClick={(id) => focusTab(sessionKey, id)}
           onTabClose={(id) => closeTab(sessionKey, id)}
+          onNewWebTab={() => openBlankWebTab(sessionKey)}
         />
       )}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>

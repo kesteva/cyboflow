@@ -58,6 +58,9 @@ const STOP_HOOK_FILENAME = 'stopShellHook.js';
 /** Name of the compiled AskUserQuestion "parked on a question" notify-hook script. */
 const QUESTION_HOOK_FILENAME = 'questionShellHook.js';
 
+/** The session CLI's `$BROWSER` — opens URLs as web-viewer tabs (openUrlShellHook.ts). */
+const OPEN_URL_HOOK_FILENAME = 'openUrlShellHook.js';
+
 /**
  * Relative path from process.resourcesPath to the unpacked hook script. Mirrors
  * the `build.asarUnpack` glob in package.json
@@ -111,6 +114,11 @@ export function resolveStopHookScriptPath(dirOverride?: string): string {
 /** Resolve the absolute path to the compiled AskUserQuestion notify-hook script. */
 export function resolveQuestionHookScriptPath(dirOverride?: string): string {
   return resolveShellHookScriptPathForFilename(QUESTION_HOOK_FILENAME, dirOverride);
+}
+
+/** Resolve the absolute path to the compiled `$BROWSER` open-url script. */
+export function resolveOpenUrlScriptPath(dirOverride?: string): string {
+  return resolveShellHookScriptPathForFilename(OPEN_URL_HOOK_FILENAME, dirOverride);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +260,22 @@ export function hookCommand(
 ): string {
   if (platform !== 'win32') return hookScriptPath;
   return `"${nodePath ?? hookNodePath()}" "${hookScriptPath}"`;
+}
+
+/**
+ * The `BROWSER` env for an interactive `claude`: the CLI opens a URL by exec'ing
+ * `$BROWSER <url>` (no shell), so pointing it at the open-url script lands the
+ * URL in the web viewer, and the script falls back to the OS opener itself.
+ * Empty on win32, where a bare `.js` path is not executable.
+ */
+export function resolveBrowserEnv(
+  opts: { platform?: NodeJS.Platform; hookDirOverride?: string } = {},
+  logger?: LoggerLike,
+): Record<string, string> {
+  if ((opts.platform ?? process.platform) === 'win32') return {};
+  const scriptPath = resolveOpenUrlScriptPath(opts.hookDirOverride);
+  ensureHookExecutable(scriptPath, logger);
+  return { BROWSER: scriptPath };
 }
 
 /**

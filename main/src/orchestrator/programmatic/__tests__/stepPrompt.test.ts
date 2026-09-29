@@ -638,6 +638,96 @@ describe('composeStepPrompt', () => {
   });
 
   // -------------------------------------------------------------------------
+  // laneScratchDir — a fan-out lane's private build directory (its concurrency
+  // slot's, laneBuildSlots.ts). Absent ⇒ byte-identical output.
+  // -------------------------------------------------------------------------
+
+  const SCRATCH = '/wt/.cyboflow/build-slots/slot-0';
+
+  it('renders the lane build directory section with the dir, the env var and the toolchain flags', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      item: { id: 't1', over: 'tasks' },
+      laneScratchDir: SCRATCH,
+    });
+    expect(out).toContain('## Lane build directory');
+    expect(out).toContain(`This lane has a private build directory: \`${SCRATCH}\` (also \`$CYBOFLOW_LANE_SCRATCH_DIR\`)`);
+    expect(out).toContain('never commit it, never delete it');
+    expect(out).toContain(
+      '`-derivedDataPath "$CYBOFLOW_LANE_SCRATCH_DIR/DerivedData" -clonedSourcePackagesDirPath "$CYBOFLOW_LANE_SCRATCH_DIR/SourcePackages"`',
+    );
+    expect(out).toContain('`--scratch-path "$CYBOFLOW_LANE_SCRATCH_DIR/swiftpm"`');
+    expect(out).toContain('`CLANG_MODULE_CACHE_PATH`');
+  });
+
+  it('tells a sandboxed agent to pass --disable-sandbox to SwiftPM (its manifest sandbox cannot nest)', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      laneScratchDir: SCRATCH,
+    });
+    expect(out).toContain('Inside a sandbox (a Codex agent\'s shell usually is one) also pass `--disable-sandbox`');
+    expect(out).toContain('`sandbox_apply: Operation not permitted`');
+  });
+
+  it('scopes the directory to the Apple toolchains, not every build tool', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      laneScratchDir: SCRATCH,
+    });
+    expect(out).toContain("Send these Apple toolchains' build output there:");
+    expect(out).not.toContain('Wherever a toolchain lets you choose where build output goes');
+    expect(out).toContain('Send nothing else there');
+    expect(out).toContain('If one reports a file under `.cyboflow/build-slots/`, that is build output, not your code');
+  });
+
+  it('keeps the lane directory out of verification tasks and committed files (task-verify uses $VERIFY_DERIVED_DATA)', () => {
+    // task-verify is an inner lane step, so it sees this section too; its
+    // mobile recipe requires `-derivedDataPath "$VERIFY_DERIVED_DATA"`.
+    const out = composeStepPrompt({
+      step: step({ id: 'task-verify', agent: 'task-verify' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      item: { id: 't1', over: 'tasks' },
+      laneScratchDir: SCRATCH,
+    });
+    expect(out).toContain('Use this directory only in commands you run yourself in this lane');
+    expect(out).toContain(
+      'never write its path or `$CYBOFLOW_LANE_SCRATCH_DIR` into a `## Visual verification task` (its build line uses `$VERIFY_DERIVED_DATA`), a runbook, or any committed file',
+    );
+  });
+
+  it('tells a delegating turn to pass the section on, and a direct turn not to', () => {
+    const base = {
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      laneScratchDir: SCRATCH,
+    } as const;
+    expect(composeStepPrompt(base)).toContain('When you delegate, pass this section to the subagent');
+    expect(composeStepPrompt({ ...base, stepDispatch: 'direct' })).not.toContain('When you delegate');
+    expect(composeStepPrompt({ ...base, stepDispatch: 'direct' })).toContain('## Lane build directory');
+  });
+
+  it('omits the section — byte-identically — when laneScratchDir is absent or blank', () => {
+    const base = {
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      item: { id: 't1', over: 'tasks' },
+    } as const;
+    const without = composeStepPrompt(base);
+    expect(without).not.toContain('## Lane build directory');
+    expect(without).not.toContain('CYBOFLOW_LANE_SCRATCH_DIR');
+    expect(composeStepPrompt({ ...base, laneScratchDir: '  ' })).toBe(without);
+  });
+
+  // -------------------------------------------------------------------------
   // retryGuidance — the supervisor's ONE-SHOT triage-retry correction. Its own
   // heading (not folded into `## Operator guidance`), rendered AFTER it, and
   // absent ⇒ byte-identical output.

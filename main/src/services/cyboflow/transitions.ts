@@ -13,6 +13,36 @@ import {
   unclassifiedErrorTags,
 } from '../../orchestrator/programmatic/systemicError';
 
+// ---------------------------------------------------------------------------
+// Terminal-run listeners
+// ---------------------------------------------------------------------------
+
+type RunTerminalListener = (runId: string, outcome: 'completed' | 'failed' | 'canceled') => void;
+const runTerminalListeners = new Set<RunTerminalListener>();
+
+/**
+ * Subscribe to guarded terminal transitions (completed / failed / canceled). For
+ * cleanup that must follow a run's end — e.g. the web viewer revoking the
+ * consent grants a run holds. Listeners run synchronously after the UPDATE and
+ * can never break the transition. Returns an unsubscribe.
+ */
+export function onRunTerminal(listener: RunTerminalListener): () => void {
+  runTerminalListeners.add(listener);
+  return () => {
+    runTerminalListeners.delete(listener);
+  };
+}
+
+function notifyRunTerminal(runId: string, outcome: 'completed' | 'failed' | 'canceled'): void {
+  for (const listener of runTerminalListeners) {
+    try {
+      listener(runId, outcome);
+    } catch {
+      // A listener must never break a state transition.
+    }
+  }
+}
+
 /**
  * Emit an anonymized `workflow_run_completed` usage event after a terminal
  * transition. Best-effort: a single query derives the run's flow + duration; any
@@ -24,6 +54,7 @@ function emitRunCompletedUsage(
   runId: string,
   outcome: 'completed' | 'failed' | 'canceled',
 ): void {
+  notifyRunTerminal(runId, outcome);
   try {
     const row = db
       .prepare(

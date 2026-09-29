@@ -124,6 +124,34 @@ export function runGitCapture(cwd: string, args: string[], options: RunGitOption
   return runToolCapture(resolveGitCommand(), cwd, args, options);
 }
 
+/** A git child that ran to completion: its exit code plus both output streams. */
+export interface GitExitOutput extends CommandOutput {
+  exitCode: number;
+}
+
+/**
+ * {@link runGitCapture} for commands whose EXIT CODE is the answer (`check-ignore -q`
+ * exits 1 for "not ignored"): resolves for ANY exit code instead of rejecting on a
+ * non-zero one. Still rejects when git did not run to completion — a spawn failure
+ * (the error's `code` is then a string such as 'ENOENT'), a timeout, an abort, or a
+ * signal — because there is no exit code to report.
+ */
+export async function runGitExit(cwd: string, args: string[], options: RunGitOptions = {}): Promise<GitExitOutput> {
+  try {
+    return { exitCode: 0, ...(await runGitCapture(cwd, args, options)) };
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && typeof err.code === 'number') {
+      const out = err as Error & { code: number; stdout?: unknown; stderr?: unknown };
+      return {
+        exitCode: out.code,
+        stdout: typeof out.stdout === 'string' ? out.stdout : '',
+        stderr: typeof out.stderr === 'string' ? out.stderr : '',
+      };
+    }
+    throw err;
+  }
+}
+
 /**
  * Generic execFile runner used by the runGitAsync/runGitCapture twins (with the
  * git command resolved by gitExeFinder) and for the non-git CLIs that sit

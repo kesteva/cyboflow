@@ -1324,6 +1324,16 @@ describe('ReviewItemCard', () => {
     );
   });
 
+  it("the Address button renders disabled with the accurate 'orchestrated' tooltip for a live run orchestrated from birth, never the false completed copy", async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'orchestrated' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      'This run is driven by a live agent, not a workflow step — chat with it directly instead',
+    );
+  });
+
   it('a canAddressReviewFindings transport failure renders disabled with an "unavailable" tooltip, never the false "Run already completed" (rvw_898ebd7f)', async () => {
     mockCanAddressReviewFindings.mockRejectedValueOnce(new Error('boom'));
     render(<ReviewItemCard item={makeEvalFinding()} />);
@@ -1345,6 +1355,83 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
       'title',
       'Address review is already running for this run',
+    );
+  });
+
+  // -- TASK-299: handed-over run ---------------------------------------------
+
+  it("the Address button renders ENABLED (not disabled) for a handed-over run, unlike every other ineligible reason", async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    expect(screen.getByTestId('address-review-findings')).not.toHaveAttribute('title');
+  });
+
+  it('clicking Address on a handed-over run delivers via chat (viaChat result) and disables with a "sent" tooltip, never a rewind-style tooltip', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ delivered: true, viaChat: true });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalledWith({ runId: 'run-1' }));
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      "Request sent to this run's chat — check there for progress",
+    );
+    // Same as the rewind path: this action never resolves/dismisses the finding.
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('a refused chat delivery (e.g. blocked) on a handed-over run surfaces the noOp message and leaves the button clickable again', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ noOp: true, reason: 'blocked' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalled());
+    // Refused, not delivered — addressSentViaChat never flips, so the button
+    // stays clickable (still 'handed_over' eligibility) for a retry.
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    expect(screen.getByText('Another blocking item is holding this run — resolve it first.')).toBeInTheDocument();
+  });
+
+  it("a 'parked' chat delivery refusal (TASK-299 attempt 3) names the actual next step, not a silent no-op", async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ noOp: true, reason: 'parked' });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+    expect(
+      screen.getByText(
+        "This run's agent session is still open from its last turn and can't take a new message yet — " +
+          'open the run and use Cancel/Reopen to recover it, then try again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('clicking Address on a handed-over run whose turn IS live buffers via queueInput (queued result) and still disables with the "sent" tooltip', async () => {
+    mockCanAddressReviewFindings.mockResolvedValueOnce({ eligible: false, reason: 'handed_over' });
+    mockAddressReviewFindings.mockResolvedValueOnce({ delivered: true, viaChat: true, queued: true });
+    render(<ReviewItemCard item={makeEvalFinding()} />);
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId('address-review-findings'));
+
+    await waitFor(() => expect(mockAddressReviewFindings).toHaveBeenCalledWith({ runId: 'run-1' }));
+    await waitFor(() => expect(screen.getByTestId('address-review-findings')).toBeDisabled());
+    expect(screen.getByTestId('address-review-findings')).toHaveAttribute(
+      'title',
+      "Request sent to this run's chat — check there for progress",
     );
   });
 

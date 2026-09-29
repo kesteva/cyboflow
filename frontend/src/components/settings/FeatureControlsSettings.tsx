@@ -1,4 +1,4 @@
-import { AlarmClock, FileText, FolderOpen, ScanEye, Terminal, ToggleRight } from 'lucide-react';
+import { AlarmClock, FileText, FolderOpen, Globe, ScanEye, Terminal, ToggleRight } from 'lucide-react';
 import { Checkbox } from '../ui/Input';
 import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
@@ -26,6 +26,14 @@ export interface FeatureControlsSettingsProps {
   autoBootstrapRunbook: boolean;
   onAutoBootstrapRunbookChange: (value: boolean) => void;
   onVisualVerifyEnabledChange: (enabled: boolean) => void;
+  webViewerEnabled: boolean;
+  onWebViewerEnabledChange: (enabled: boolean) => void;
+  webViewerAgentObserve: boolean;
+  onWebViewerAgentObserveChange: (enabled: boolean) => void;
+  webViewerAgentDrive: boolean;
+  onWebViewerAgentDriveChange: (enabled: boolean) => void;
+  webViewerPersistLogin: boolean;
+  onWebViewerPersistLoginChange: (enabled: boolean) => void;
   idleReviewEnabled: boolean;
   onIdleReviewEnabledChange: (enabled: boolean) => void;
   /** number | '' so clearing the field shows empty (never value={NaN}). */
@@ -46,6 +54,14 @@ export function FeatureControlsSettings({
   autoBootstrapRunbook,
   onAutoBootstrapRunbookChange,
   onVisualVerifyEnabledChange,
+  webViewerEnabled,
+  onWebViewerEnabledChange,
+  webViewerAgentObserve,
+  onWebViewerAgentObserveChange,
+  webViewerAgentDrive,
+  onWebViewerAgentDriveChange,
+  webViewerPersistLogin,
+  onWebViewerPersistLoginChange,
   idleReviewEnabled,
   onIdleReviewEnabledChange,
   idleReviewThresholdMinutes,
@@ -203,6 +219,57 @@ export function FeatureControlsSettings({
             above): without it, every project except one that already has a proven runbook stays
             permanently unverifiable. Turn it off if you don't want a run committing to your branch
             on its own.
+          </p>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Web Viewer"
+          description="Open links from chat as tabs inside Cyboflow, and what agents may do with them"
+          icon={<Globe className="w-4 h-4" />}
+        >
+          <Checkbox
+            label="Enable the web viewer"
+            checked={webViewerEnabled}
+            onChange={(e) => onWebViewerEnabledChange(e.target.checked)}
+          />
+          <p className="text-xs text-text-tertiary mt-1 mb-3">
+            Links in chat and transcripts open as a tab in the center pane instead of your OS
+            browser (Cmd-click still goes to the browser). On by default. Turning this off is the
+            master kill switch — it disables everything below too, and no page is loaded.
+          </p>
+          <Checkbox
+            label="Let agents read web tabs"
+            checked={webViewerAgentObserve}
+            disabled={!webViewerEnabled}
+            onChange={(e) => onWebViewerAgentObserveChange(e.target.checked)}
+          />
+          <p className="text-xs text-text-tertiary mt-1 mb-3">
+            Agents can pull console output, network activity, errors, page text and screenshots —
+            the point being to debug a page you are both looking at. Off by default. Tabs an agent
+            opened itself are read freely; reading a tab <em>you</em> opened, or one you have typed
+            into, asks you first.
+          </p>
+          <Checkbox
+            label="Let agents drive web tabs"
+            checked={webViewerAgentDrive}
+            disabled={!webViewerEnabled}
+            onChange={(e) => onWebViewerAgentDriveChange(e.target.checked)}
+          />
+          <p className="text-xs text-text-tertiary mt-1 mb-3">
+            Agents can navigate, click, type and evaluate JavaScript in a tab. Off by default, and
+            every tab asks you once before the first drive — re-asking if the page navigates
+            somewhere else.
+          </p>
+          <Checkbox
+            label="Stay signed in between launches"
+            checked={webViewerPersistLogin}
+            disabled={!webViewerEnabled}
+            onChange={(e) => onWebViewerPersistLoginChange(e.target.checked)}
+          />
+          <p className="text-xs text-text-tertiary mt-1">
+            Keeps cookies for tabs you opened, so you do not sign in to the same site every
+            launch. Agent-opened tabs always use a throwaway cookie jar that is wiped on quit and
+            never shares your logins, whatever this is set to.
           </p>
         </SettingsSection>
 

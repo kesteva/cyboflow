@@ -95,7 +95,8 @@ import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
-import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
+import { TaskChangeRouter, taskChangeEvents } from './orchestrator/taskChangeRouter';
+import { attachHumanTaskReviewItemCloser } from './orchestrator/humanTaskReviewItemCloser';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
@@ -159,7 +160,7 @@ import { createFileOps } from './ipc/fileOps';
 import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setInterruptAndSendDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -321,6 +322,8 @@ import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
+import { composeWebViewer } from './webViewerComposition';
+import { stripInheritedLaneEnv, checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -373,6 +376,7 @@ for (const key of [
 ]) {
   delete process.env[key];
 }
+stripInheritedLaneEnv(process.env); // Same reason for a hosting lane's build-slot env (laneBuildSlots.ts).
 
 // Set by the boot-time schema-version gate when the user picked "Check for
 // Updates" on a database that a newer build advanced. Consumed once by the
@@ -952,6 +956,15 @@ let sessionGitOps: SessionGitOpsLike | undefined;
 let sessionOps: SessionOpsLike | undefined;
 
 /**
+ * The native web viewer's manager + event channels (webViewerComposition.ts).
+ * Same lazy-holder reason as the two above: composed inside initializeServices
+ * (it needs configManager + sessionManager), read per request by the context
+ * factory. Undefined ⇒ the webViewer router reports PRECONDITION_FAILED and its
+ * subscriptions complete immediately.
+ */
+let webViewerComposition: ReturnType<typeof composeWebViewer> | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -984,6 +997,9 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         db,
         configOps,
         gitPrerequisiteOps,
+        webViewer: webViewerComposition?.webViewer,
+        webViewerEvents: webViewerComposition?.webViewerEvents,
+        webViewerConsent: webViewerComposition?.webViewerConsent,
         claudeAuthOps: claudeAuthOps ?? undefined,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
@@ -2021,6 +2037,10 @@ async function initializeServices(): Promise<boolean> {
   // finding on it.
   const reviewItemRouter = ReviewItemRouter.initialize(cyboflowDb);
 
+  // A human task's standing review item (humanPrerequisites) closes itself when
+  // the task reaches Done / Won't do, is archived, or is deleted — by any writer.
+  attachHumanTaskReviewItemCloser(taskChangeEvents, cyboflowDb, reviewItemRouter, cyboflowLogger);
+
   // Issue-tracker sync loop (migration 093). Started HERE, immediately after the
   // chokepoint it subscribes to: start() does boot crash-recovery (demoting any
   // `in_flight` outbox row to `ambiguous`) BEFORE arming its listener or poll
@@ -2295,6 +2315,18 @@ async function initializeServices(): Promise<boolean> {
     runbookBootstrapStamps,
   });
 
+  // Native web viewer — the WebContentsView manager, its context menu and its
+  // teardown hooks (docs/proposals/native-web-viewer.md). Composed in
+  // webViewerComposition.ts (a sibling, like verifyComposition above: it imports
+  // electron and concrete services, so it may not live under orchestrator/**).
+  webViewerComposition = composeWebViewer({
+    configManager,
+    sessionManager,
+    databaseService,
+    getMainWindow: () => mainWindow,
+    devMode: !app.isPackaged,
+  });
+
   // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically
   // usable; the spawn seam falls back to Opus and the pickers grey a model out
   // when it's marked unavailable. refresh() is a best-effort Models-API probe that
@@ -2429,6 +2461,8 @@ async function initializeServices(): Promise<boolean> {
       // cyboflow_create_sprint_batch backstop must honor the CURRENT setting, not
       // one frozen at launch.
       getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+      // Web-viewer observe tools; consent lives behind the seam (webViewerComposition.ts).
+      webViewerAgent: webViewerComposition?.webViewerAgent,
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
@@ -3064,6 +3098,7 @@ async function initializeServices(): Promise<boolean> {
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
+              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
             };
           };
         },
@@ -5755,6 +5790,22 @@ app.whenReady().then(async () => {
       runExecutor,
     });
     console.log('[Main] runs.queueInput deps wired');
+
+    // Interrupt & send (TASK-301): the SAME nudgeDeps bag (db / runQueues /
+    // runExecutor / logger) plus the facade's abort + live-spawn-key seams — the
+    // SAME ones laneRewindDepsBag (above) and rewindRunDepsBag use. Deliberately
+    // does NOT reuse `awaitTurnStart` — the live-spawn branch buffers the text via
+    // `runExecutor.queueInput` and requests the abort, then returns immediately;
+    // delivery is left entirely to the aborted turn's own drain
+    // (`drainQueuedInputAtRest`, reached once `teardownRun` observes the aborted
+    // spawn's 'drained' lifecycle transition), not to this mutation awaiting
+    // anything itself (see interruptAndSendHandler.ts's header note).
+    setInterruptAndSendDeps({
+      ...nudgeDeps,
+      abortRunSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
+      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
+    });
+    console.log('[Main] runs.interruptAndSend deps wired');
 
     // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
     // path into a running interactive REPL). Both methods route through the

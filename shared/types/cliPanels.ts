@@ -18,6 +18,25 @@ export interface CliSpawnOutcome {
 }
 
 /**
+ * The per-LANE spawn env of a programmatic fan-out lane step: its concurrency
+ * slot's private build directory (`CYBOFLOW_LANE_SCRATCH_DIR`) and the
+ * module-cache overrides pointed into it (main/src/orchestrator/programmatic/
+ * laneBuildSlots.ts). Every manager a lane step can reach merges `laneEnv` LAST
+ * into the agent's spawn env, so it wins over anything inherited. Absent (every
+ * non-lane spawn, and a lane whose slot could not be prepared) ⇒ the env is
+ * byte-identical.
+ *
+ * Shared home, like {@link CliSpawnOutcome}: the spawner options
+ * (ClaudeSpawnerOptions) and each manager's own options type EXTEND this, so
+ * there is one typed declaration. A manager options type missing it would still
+ * accept the key through AbstractCliManager's `CliSpawnOptions` index signature
+ * and read it as `unknown` — which is why it is extended, not re-declared.
+ */
+export interface LaneSpawnEnv {
+  laneEnv?: Readonly<Record<string, string>>;
+}
+
+/**
  * Base interface for all CLI panel types
  */
 export interface CliPanel extends ToolPanel {

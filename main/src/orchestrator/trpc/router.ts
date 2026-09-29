@@ -41,6 +41,7 @@ import { experimentsRouter } from './routers/experiments';
 import { verificationRequestsRouter } from './routers/verificationRequests';
 import { ompRouter } from './routers/omp';
 import { ompCommandRouter } from './routers/ompCommand';
+import { webViewerRouter } from './routers/webViewer';
 import { workspaceFilesRouter } from './routers/workspaceFiles';
 
 export const appRouter = router({
@@ -77,6 +78,7 @@ export const appRouter = router({
     tracker: trackerRouter,
     variants: variantsRouter,
     verificationRequests: verificationRequestsRouter,
+    webViewer: webViewerRouter,
     workflows: workflowsRouter,
     omp: ompRouter,
     ompCommand: ompCommandRouter,

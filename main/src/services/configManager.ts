@@ -2,6 +2,8 @@ import { EventEmitter } from 'events';
 import { app } from 'electron';
 import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config';
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
+import type { ResolvedWebViewerConfig } from '../../../shared/types/webViewer';
+import { WEB_VIEWER_DEFAULTS } from '../../../shared/types/webViewer';
 import {
   DEFAULT_RUN_TYPE_MODEL_FLOORS,
   type RunTypeDefaults,
@@ -907,6 +909,31 @@ export class ConfigManager extends EventEmitter {
         typeof threshold === 'number' && threshold > 0
           ? threshold
           : IDLE_SESSION_REVIEW_DEFAULTS.thresholdMinutes,
+    };
+  }
+
+  /**
+   * The fully-resolved web-viewer block — every field present, with
+   * WEB_VIEWER_DEFAULTS applied for any omitted member. Same floor-on-read
+   * contract as getVisualVerifyConfig / getIdleSessionReviewConfig: the stored
+   * shape stays partial (config.json is never rewritten with defaults).
+   *
+   * `enabled: false` is the MASTER kill switch: it forces every agent
+   * capability off in the resolved block, so no caller has to remember to
+   * check two flags. This is the authoritative enforcement point — the
+   * renderer merely hides UI.
+   */
+  getWebViewerConfig(): ResolvedWebViewerConfig {
+    const wv = this.config.webViewer;
+    const enabled = wv?.enabled ?? WEB_VIEWER_DEFAULTS.enabled;
+    if (!enabled) {
+      return { enabled: false, agentObserve: false, agentDrive: false, persistLogin: false };
+    }
+    return {
+      enabled: true,
+      agentObserve: wv?.agentObserve ?? WEB_VIEWER_DEFAULTS.agentObserve,
+      agentDrive: wv?.agentDrive ?? WEB_VIEWER_DEFAULTS.agentDrive,
+      persistLogin: wv?.persistLogin ?? WEB_VIEWER_DEFAULTS.persistLogin,
     };
   }
 

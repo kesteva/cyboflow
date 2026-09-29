@@ -287,6 +287,16 @@ export interface ControllerStepContext {
    * (byte-identical prompts).
    */
   laneGuidance?: string;
+  /**
+   * The CONCURRENCY SLOT this fan-out lane's walk occupies (0-based): the
+   * lowest index no other live lane held when it was dispatched, kept for every
+   * re-drive inside the walk and released when the walk settles, so the next
+   * lane dispatched into it reuses the same slot. The step runner resolves it to
+   * the slot's private build directory (laneBuildSlots.ts) — a prompt section
+   * plus spawn env. Pure bookkeeping here: the controller never sees a path.
+   * Absent on every non-fan-out step (byte-identical prompts and spawn env).
+   */
+  laneSlot?: number;
 }
 
 /**
@@ -365,6 +375,7 @@ export interface SupervisorEvent {
  * `headAdvanced` — the worktree's HEAD sha moved since the lane was dispatched.
  * `dirty` — `git status --porcelain` is non-empty, i.e. tracked edits and/or
  * untracked files are still sitting in the worktree uncommitted.
+ * `buildSlots` — whether lane build output made it INTO the committed tree.
  */
 export interface CommitIntegrityReading {
   headAdvanced: boolean;
@@ -383,7 +394,30 @@ export interface CommitIntegrityReading {
    * could not tell, and every dirty path counts as possibly this lane's.
    */
   newDirtyPaths?: string[];
+  /**
+   * Whether the COMMITTED TREE at the lane-end HEAD carries lane build output
+   * under `.cyboflow/build-slots/` (laneBuildSlots.ts) — see
+   * {@link BuildSlotCheck} and `checkCommittedBuildSlots`. Read from the end
+   * HEAD alone, on every lane end, so it needs no lane-start state and survives
+   * an app restart. Absent ⇒ the probe does not run this check (treated as
+   * clean). 'leak' or 'unknown' ⇒ the controller refuses to integrate even
+   * though HEAD advanced: build output must never be merged, whoever committed
+   * it.
+   */
+  buildSlots?: BuildSlotCheck;
 }
+
+/**
+ * The build-slot half of a commit-integrity reading, deliberately TRI-STATE:
+ * - `clean` — the lane-end HEAD's tree has nothing under `.cyboflow/build-slots/`
+ *   (or git could not tell, but the directory does not exist on disk, so no lane
+ *   ever built there and nothing could have leaked);
+ * - `leak` — it does; `paths` lists them (a placeholder when git could not list
+ *   them — never empty);
+ * - `unknown` — git could not answer (twice) AND the directory exists on disk,
+ *   so something may have leaked. FAIL-CLOSED: refused like a leak.
+ */
+export type BuildSlotCheck = { kind: 'clean' } | { kind: 'leak'; paths: string[] } | { kind: 'unknown' };
 
 /** The lane-end half of a commit-integrity probe (see `beginCommitProbe`). */
 export type CommitIntegrityProbe = () => Promise<CommitIntegrityReading>;
@@ -534,6 +568,15 @@ export interface LaneTriageFailure {
    * prerequisite. Present ⇒ a give_up may RELEASE them (`releaseDependents`).
    */
   dependents?: string[];
+  /**
+   * True when an 'accept' verdict cannot let this lane through — the lane-end
+   * committed tree carries lane build output, or git could not verify that it
+   * does not (`CommitIntegrityReading.buildSlots`), which no ownership judgment
+   * can waive. The monitor's parse then downgrades an accept to give_up, so the
+   * chat and the review queue never record an accept the controller would
+   * refuse anyway.
+   */
+  acceptUnavailable?: boolean;
   /** The run's cancel signal, so a slow triage query dies with the run. */
   signal?: AbortSignal;
 }

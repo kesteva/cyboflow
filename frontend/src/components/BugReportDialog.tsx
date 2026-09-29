@@ -8,6 +8,7 @@ import {
   type BugReportRunLink,
   type BugReportSubmitResponse,
 } from '../../../shared/types/bugReport';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface BugReportDialogProps {
   isOpen: boolean;
@@ -70,6 +71,7 @@ function describeDelivery(response: BugReportSubmitResponse): {
 }
 
 export function BugReportDialog({ isOpen, onClose }: BugReportDialogProps) {
+  useOcclusion(isOpen, 'bug-report-dialog');
   const [whatHappened, setWhatHappened] = useState('');
   const [steps, setSteps] = useState('');
   const [expected, setExpected] = useState('');

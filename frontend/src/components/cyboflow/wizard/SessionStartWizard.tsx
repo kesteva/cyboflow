@@ -182,6 +182,7 @@ import {
   type PermissionMode,
 } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
+import { useOcclusion } from '../../../hooks/useOcclusion';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1754,6 +1755,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     key: selection === null || selection.kind === 'design' ? null : runTypeKey,
     label: saveDefaultLabel,
   });
+  useOcclusion(toast !== null || saveToast !== null, 'wizard-toast');
 
   const handleSaveDefault = useCallback(() => {
     // A pending tuning-level pick persists as the workflow's STAMPED level via

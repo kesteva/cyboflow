@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -24,6 +25,9 @@ export function ConfirmDialog({
   confirmButtonClass = 'bg-status-error hover:bg-status-error text-white',
   icon
 }: ConfirmDialogProps) {
+  // Hand-rolled scrim (not ui/Modal), so it takes its own occlusion lease.
+  useOcclusion(isOpen, 'confirm-dialog');
+
   // Handle keyboard events
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

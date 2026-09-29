@@ -102,6 +102,7 @@ import {
 } from './handlers/workflowConfigHandlers';
 import { GlobalAgentToolHandlers } from './handlers/globalAgentToolHandlers';
 import { VerifyToolHandlers } from './handlers/verifyToolHandlers';
+import { handleWebViewerTool, type WebViewerToolContext } from './handlers/webViewerToolHandlers';
 import { InteractiveHookHandlers } from './handlers/interactiveHookHandlers';
 import { TaskToolHandlers } from './handlers/taskToolHandlers';
 import { ReviewItemToolHandlers } from './handlers/reviewItemToolHandlers';
@@ -160,6 +161,9 @@ export class McpQueryHandler {
    * handed over as closures.
    */
   private readonly verifyTools: VerifyToolHandlers;
+
+  /** The web-viewer observe tools (handlers/webViewerToolHandlers.ts). */
+  private readonly webViewerCtx: WebViewerToolContext;
 
   /**
    * The INTERACTIVE-substrate hook family — the async-deferred shell
@@ -244,6 +248,11 @@ export class McpQueryHandler {
       resolveProjectPath: (projectId) => this.resolveProjectPath(projectId),
       readExecutionModel: (runId) => this.readExecutionModel(runId),
     });
+    this.webViewerCtx = {
+      db: this.db,
+      deps: this.deps,
+      writeResponse: (client, response) => this.writeResponse(client, response),
+    };
     this.interactiveHooks = new InteractiveHookHandlers({
       db: this.db,
       logger: this.logger,
@@ -420,6 +429,13 @@ export class McpQueryHandler {
           // FIRE-AND-CONTINUE: awaits only the snapshot + enqueue (never the jury),
           // then replies with the queued/requeued/in_flight status or a reason code.
           await this.verifyTools.handleRunEval(msg, client);
+          break;
+        case 'mcp-web-tabs':
+        case 'mcp-read-web-tab':
+        case 'mcp-open-web-tab':
+        case 'mcp-drive-web-tab': // AWAITED: read/drive can block on a consent prompt on the tab.
+        case 'web-open-url':
+          await handleWebViewerTool(this.webViewerCtx, msg, client);
           break;
         case 'mcp-list-workflows':
           handleListWorkflows(this.workflowConfigCtx, msg, client);

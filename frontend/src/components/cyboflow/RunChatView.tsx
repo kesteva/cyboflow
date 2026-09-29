@@ -30,6 +30,7 @@ import {
 import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
+import { WebLinkProvider } from '../../contexts/WebLinkContext';
 import { formatContextUsage } from './unified/runContextUsage';
 import { LiveTail } from '../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
@@ -158,9 +159,47 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const pendingSends = usePendingSendStore((s) => (runId != null ? s.byHost[runId] : undefined));
   const reconcilePending = usePendingSendStore((s) => s.reconcile);
   const requestReopenPending = usePendingSendStore((s) => s.requestReopen);
+  const setPendingStatus = usePendingSendStore((s) => s.setStatus);
   useEffect(() => {
     if (runId != null) reconcilePending(runId, messages);
   }, [messages, runId, reconcilePending]);
+
+  // TASK-300 (visual-verify fix): a 'queued' entry accepted by runs.queueInput
+  // is buffered server-side on RunExecutor and delivered at the NEXT turn
+  // boundary — but RunExecutor.teardownRun() unconditionally clears that
+  // buffer when the run's turn ends in failure or cancellation (the drain
+  // seam that would otherwise deliver it is never reached), with no signal
+  // back to the client that the message was dropped. Left alone, the pending
+  // row sits marked 'queued' forever, silently lying about a message that no
+  // longer exists anywhere. Once the run reaches a terminal status, any
+  // still-'queued' entries for it can no longer be delivered — flip them to
+  // 'failed' so PendingSendRow surfaces the loss and offers click-to-reopen
+  // (the text itself survives in the entry, so nothing is actually lost).
+  //
+  // TASK-300 attempt 4: a terminal status is not the only way a queued entry
+  // becomes undeliverable. A message accepted as `{ queued: true }` before
+  // the run's turn ended (a legitimate accept at the time) can still be
+  // stranded if the StuckDetector's `parked_no_gate` rung later classifies
+  // the SAME run as parked — status flips to 'stuck', never a terminal
+  // status, and the server buffer it was queued into will never drain either.
+  // Key off `stuck_reason` (not just terminal status) so that shape also
+  // flips its queued rows to 'failed' instead of lying about them forever.
+  const runStatus = run?.status;
+  const runStuckReason = run?.stuck_reason ?? null;
+  useEffect(() => {
+    if (runId == null || pendingSends == null) return;
+    const isTerminal = runStatus === 'completed' || runStatus === 'failed' || runStatus === 'canceled';
+    const isParked = runStatus === 'stuck' && runStuckReason === 'parked_no_gate';
+    if (!isTerminal && !isParked) return;
+    const message = isParked
+      ? 'This run is parked awaiting you — reopen or cancel it from the review queue, then try again.'
+      : 'Run ended before this message could be delivered.';
+    for (const entry of pendingSends) {
+      if (entry.status === 'queued') {
+        setPendingStatus(runId, entry.id, 'failed', message);
+      }
+    }
+  }, [runId, runStatus, runStuckReason, pendingSends, setPendingStatus]);
 
   // -------------------------------------------------------------------------
   // Run artifacts → question-card "open in pane" affordances (#8 / #9).
@@ -297,55 +336,58 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Full conversation view — the shared chat surface.
   // -------------------------------------------------------------------------
   return (
-    <UnifiedChatView
-      name={isInteractive ? 'Terminal' : agentName}
-      transport={isInteractive ? 'interactive' : 'sdk'}
-      mode="flow"
-      running={running}
-      runStatus={run?.status ?? null}
-      messages={messages}
-      loadError={loadError}
-      isWaitingForResponse={running}
-      liveTail={liveTail}
-      transcriptEndSlot={unanchoredQuestionSlot}
-      folderLabel={folderLabel}
-      folderTitle={worktreePath}
-      branchName={branchName}
-      contextUsage={contextUsage}
-      railId={runId}
-      renderToolCallExtra={renderToolCallExtra}
-      pendingSends={isInteractive ? undefined : pendingSends}
-      onReopenPending={(entry) => {
-        // A server-buffered 'queued' entry must also be dropped from the run's
-        // queue so the reopened text is not ALSO delivered at the rest boundary
-        // (behavior 3 — no double delivery). Matched by text on the server.
-        if (entry.status === 'queued') {
-          void trpc.cyboflow.runs.dequeueInput.mutate({ runId, text: entry.text });
-        }
-        requestReopenPending(runId, entry.id);
-      }}
-      interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
-      bottomSlot={
-        <>
-          <PendingApprovalsForRun runId={runId} />
+    // Chat links open as web tabs in THIS run's center pane — same key it uses.
+    <WebLinkProvider sessionKey={run?.session_id ?? runId}>
+      <UnifiedChatView
+        name={isInteractive ? 'Terminal' : agentName}
+        transport={isInteractive ? 'interactive' : 'sdk'}
+        mode="flow"
+        running={running}
+        runStatus={run?.status ?? null}
+        messages={messages}
+        loadError={loadError}
+        isWaitingForResponse={running}
+        liveTail={liveTail}
+        transcriptEndSlot={unanchoredQuestionSlot}
+        folderLabel={folderLabel}
+        folderTitle={worktreePath}
+        branchName={branchName}
+        contextUsage={contextUsage}
+        railId={runId}
+        renderToolCallExtra={renderToolCallExtra}
+        pendingSends={isInteractive ? undefined : pendingSends}
+        onReopenPending={(entry) => {
+          // A server-buffered 'queued' entry must also be dropped from the run's
+          // queue so the reopened text is not ALSO delivered at the rest boundary
+          // (behavior 3 — no double delivery). Matched by text on the server.
+          if (entry.status === 'queued') {
+            void trpc.cyboflow.runs.dequeueInput.mutate({ runId, text: entry.text });
+          }
+          requestReopenPending(runId, entry.id);
+        }}
+        interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
+        bottomSlot={
+          <>
+            <PendingApprovalsForRun runId={runId} />
 
-          {/* Permission-change confirmation — copy supplied by ChatInput's pill
-              (SDK runs apply the change on the next message). */}
-          {permissionToast !== null && (
-            <div className="pointer-events-none relative">
-              <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
-                <SessionActionToast
-                  message={permissionToast}
-                  isVisible={permissionToast !== null}
-                  onDismiss={() => setPermissionToast(null)}
-                />
+            {/* Permission-change confirmation — copy supplied by ChatInput's pill
+                (SDK runs apply the change on the next message). */}
+            {permissionToast !== null && (
+              <div className="pointer-events-none relative">
+                <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
+                  <SessionActionToast
+                    message={permissionToast}
+                    isVisible={permissionToast !== null}
+                    onDismiss={() => setPermissionToast(null)}
+                  />
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          <ChatInput runId={runId} onPermissionApplied={setPermissionToast} />
-        </>
-      }
-    />
+            <ChatInput runId={runId} onPermissionApplied={setPermissionToast} />
+          </>
+        }
+      />
+    </WebLinkProvider>
   );
 }

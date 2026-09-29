@@ -25,6 +25,7 @@ export function stuckReasonText(reason: StuckReason): string {
     case 'cross_run_deadlock': return 'cross-run deadlock';
     case 'orphan_pty': return 'Claude process exited';
     case 'stale_socket': return 'permission socket disconnected';
+    case 'parked_no_gate': return 'parked with no gate — waiting on you';
   }
 }
 

@@ -506,4 +506,14 @@ describe('stampArmGateReachedAt (migration 145)', () => {
     const db = dbAdapter(raw);
     expect(() => stampArmGateReachedAt(db, 'runA', 'awaiting_review')).not.toThrow();
   });
+
+  it('propagates write failures other than a missing column so the caller can log them', () => {
+    const raw = new Database(':memory:');
+    raw.exec(`CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, gate_reached_at TEXT);`);
+    raw.prepare('INSERT INTO workflow_runs (id, status) VALUES (?, ?)').run('runA', 'awaiting_review');
+    raw.exec(`CREATE TRIGGER block_stamp BEFORE UPDATE OF gate_reached_at ON workflow_runs
+      BEGIN SELECT RAISE(ABORT, 'stamp blocked'); END;`);
+    const db = dbAdapter(raw);
+    expect(() => stampArmGateReachedAt(db, 'runA', 'awaiting_review')).toThrow(/stamp blocked/);
+  });
 });

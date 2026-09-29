@@ -19,6 +19,7 @@ import {
   mapReportToResult,
   resolveRequestModality,
   effectiveAttestationSpec,
+  driverPageSelectorEnv,
   evaluateAttestationFloor,
   coerceDriveUnsupportedBehaviors,
   checkRunbookPin,
@@ -1129,6 +1130,21 @@ describe('resolveRequestModality', () => {
 // ---------------------------------------------------------------------------
 // §7.1 attestation floor — pure helpers
 // ---------------------------------------------------------------------------
+
+describe('driverPageSelectorEnv', () => {
+  it('exports a cdp-token attestation as the driver page selector', () => {
+    expect(
+      driverPageSelectorEnv(
+        makeTask({ attestation: { kind: 'cdp-token', expression: 'window.__T__', expected: 'v1' } }),
+      ),
+    ).toEqual({ VERIFY_DRIVER_PAGE_EXPRESSION: 'window.__T__', VERIFY_DRIVER_PAGE_EXPECTED: 'v1' });
+  });
+
+  it('exports nothing for any other channel', () => {
+    expect(driverPageSelectorEnv(makeTask({ attestation: { kind: 'http-endpoint', urlPath: '/__v' } }))).toEqual({});
+    expect(driverPageSelectorEnv(makeTask())).toEqual({});
+  });
+});
 
 describe('effectiveAttestationSpec', () => {
   it('returns the task\'s own declared spec', () => {

@@ -7,6 +7,10 @@
  *   - listMessages     : query    → UnifiedMessage[] (projection over agent_thread_events)
  *   - sendMessage      : mutation → { ok: true }   (one agent turn; optional
  *                        prompt-only `contextHint`, never persisted to the transcript)
+ *   - interruptTurn    : mutation → { interrupted: boolean } (the rail's Stop
+ *                        control; false when the thread is idle)
+ *   - turnState        : query    → { inFlight: boolean } (bootstrap hydration
+ *                        for the Stop affordance across a renderer reload)
  *   - listProposals    : query    → AgentProposal[]
  *   - confirmProposal  : mutation → ConfirmProposalResult (the user's Confirm click)
  *   - dismissProposal  : mutation → { ok: true; dismissed }
@@ -212,6 +216,25 @@ export const agentThreadRouter = router({
     .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
       await requireService(ctx).sendMessage(input.threadId, input.text, input.contextHint, input.images);
       return { ok: true };
+    }),
+
+  /** The rail's Stop control: abort whatever turn is in flight for this
+   *  thread. `{ interrupted: false }` when idle — never an error. */
+  interruptTurn: protectedProcedure
+    .input(z.object({ threadId: z.string() }))
+    .mutation(async ({ ctx, input }): Promise<{ interrupted: boolean }> => {
+      return requireService(ctx).interruptTurn(input.threadId);
+    }),
+
+  /** Whether a turn is currently in flight for this thread — the renderer
+   *  calls this once at bootstrap (right after `getThread`) so a reload
+   *  mid-turn still shows Stop instead of Send, rather than only ever
+   *  learning about an in-flight turn from the `sendMessage` call that
+   *  started it in the same renderer session. */
+  turnState: protectedProcedure
+    .input(z.object({ threadId: z.string() }))
+    .query(({ ctx, input }): { inFlight: boolean } => {
+      return { inFlight: requireService(ctx).isTurnInFlight(input.threadId) };
     }),
 
   /** List a thread's proposals oldest-first (all statuses). */

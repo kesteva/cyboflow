@@ -43,10 +43,16 @@ export function AgentThreadView({
   const thread = useAgentThreadStore((s) => s.thread);
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
+  const interrupt = useAgentThreadStore((s) => s.interrupt);
   const proposals = useAgentThreadStore((s) => s.proposals);
   const composerDraft = useAgentThreadStore((s) => s.composerDraft);
   const setComposerDraft = useAgentThreadStore((s) => s.setComposerDraft);
   const liveEvents = useAgentThreadStore((s) => s.liveEvents);
+  // TASK-301: Queue + Interrupt & send.
+  const queuedTurn = useAgentThreadStore((s) => s.queuedTurn);
+  const queueTurn = useAgentThreadStore((s) => s.queueTurn);
+  const cancelQueuedTurn = useAgentThreadStore((s) => s.cancelQueuedTurn);
+  const interruptAndSend = useAgentThreadStore((s) => s.interruptAndSend);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
 
@@ -112,6 +118,18 @@ export function AgentThreadView({
     void sendMessage(text, images !== undefined && images.length > 0 ? { images } : undefined);
   };
 
+  // TASK-301: Queue buffers the draft as the next turn (delivered the instant
+  // the in-flight one lands); Interrupt & send aborts the live turn and drives
+  // this one immediately. Both preserve claude_session_id / Codex thread id
+  // continuity — neither touches the stored resume id, exactly like a plain
+  // `sendMessage` call.
+  const handleQueue = (text: string, images?: AgentThreadImageAttachment[]): void => {
+    queueTurn(text, images);
+  };
+  const handleInterruptSend = (text: string, images?: AgentThreadImageAttachment[]): void => {
+    void interruptAndSend(text, images);
+  };
+
   return (
     <UnifiedChatView
       name="cyboflow assistant"
@@ -133,10 +151,18 @@ export function AgentThreadView({
           data-guided-target={variant === 'rail' ? GUIDED_TARGETS.assistantComposer : undefined}
         >
           <ProposalCardList proposals={proposals} />
-          {variant === 'rail' && <AgentSuggestionChips onSend={handleSend} disabled={sending} />}
+          {variant === 'rail' && (
+            <AgentSuggestionChips onSend={handleSend} disabled={sending || queuedTurn !== null} />
+          )}
           <AgentComposer
             onSend={handleSend}
-            disabled={sending || thread === null}
+            disabled={thread === null}
+            sending={sending}
+            onStop={() => void interrupt()}
+            onQueue={handleQueue}
+            onInterruptSend={handleInterruptSend}
+            queued={queuedTurn !== null}
+            onCancelQueued={cancelQueuedTurn}
             placeholder={composerPlaceholder}
             prefill={composerDraft}
             onPrefillConsumed={() => setComposerDraft(null)}

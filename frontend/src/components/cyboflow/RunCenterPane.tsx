@@ -22,9 +22,12 @@ import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { ApprovedDesignTab } from './ApprovedDesignTab';
+import { WebViewTab } from './WebViewTab';
+import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
+import { openBlankWebTab } from '../../utils/openWebLink';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
@@ -226,6 +229,10 @@ export function RunCenterPane({
     );
   };
 
+  // Native web viewer: relay chords swallowed by a focused view, turn page
+  // popups into tabs, and follow main's teardown. See useWebViewerBridge.
+  useWebViewerBridge(sessionKey);
+
   const renderActiveTab = (): ReactElement => {
     if (!activeTab || activeTab.kind === 'flow') return renderFlow();
     if (activeTab.kind === 'file' && activeTab.filePath) {
@@ -239,6 +246,9 @@ export function RunCenterPane({
           scope={activeTab.scope}
         />
       );
+    }
+    if (activeTab.kind === 'web') {
+      return <WebViewTab tab={activeTab} sessionKey={sessionKey} active />;
     }
     if (activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (
@@ -315,6 +325,7 @@ export function RunCenterPane({
             activeTabId={session.activeTabId}
             onTabClick={(id) => focusTab(sessionKey, id)}
             onTabClose={(id) => closeTab(sessionKey, id)}
+            onNewWebTab={() => openBlankWebTab(sessionKey)}
           />
         </div>
         {/* A/B variant pill (migration 048) — reads the denormalized

@@ -48,6 +48,7 @@ vi.mock('../../stores/agentThreadStore', () => ({
       thread: null,
       sending: false,
       sendMessage: vi.fn(),
+      interrupt: vi.fn(),
       proposals: [],
     }),
 }));

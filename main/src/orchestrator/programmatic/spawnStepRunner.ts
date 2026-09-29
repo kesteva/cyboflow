@@ -32,6 +32,7 @@ import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
 import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
 import { isSystemicStepError } from './systemicError';
+import type { LaneScratch } from './laneBuildSlots';
 import type { WorkflowStep, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { definitionHasControllerVisualVerify } from '../laneChainResolution';
 import { providerForRuntime, type WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
@@ -270,6 +271,16 @@ export interface SpawnStepRunnerOptions {
    * `epics` prompt is byte-identical.
    */
   mergedDecomposition?: boolean;
+  /**
+   * Resolves a fan-out lane's CONCURRENCY SLOT (`ctx.laneSlot`) to that slot's
+   * private build directory — created and git-excluded — or undefined when it
+   * could not be prepared (laneBuildSlots.ts). Invoked once per lane step; the
+   * directory feeds the `## Lane build directory` prompt section and the spawn's
+   * `laneEnv`. A rejection is treated as undefined. Absent (kill switch, no
+   * worktree) or a step with no `laneSlot` ⇒ no section and no `laneEnv`
+   * (byte-identical prompt and spawn options).
+   */
+  laneScratch?: (slot: number) => Promise<LaneScratch | undefined>;
   resolveStepAgent?: (agentKey: string) =>
     | {
         runtime?: WorkflowAgentRuntime;
@@ -384,6 +395,21 @@ export class SpawnStepRunner implements StepRunner {
     // mid-run at a lane's visual-verify, so a value read at construction would be
     // empty on exactly the run that needs the denylist.
     const bootstrapProtectedPaths = this.opts.bootstrapProtectedPaths?.();
+    // This lane's build directory: the slot is per-LANE, so it rides the ctx; the
+    // run-bound resolver maps it to a directory. Fail-soft: any failure spawns
+    // the step without one.
+    let laneScratch: LaneScratch | undefined;
+    if (ctx.laneSlot !== undefined && this.opts.laneScratch) {
+      try {
+        laneScratch = await this.opts.laneScratch(ctx.laneSlot);
+      } catch (err) {
+        this.logger?.warn(`[SpawnStepRunner] lane build slot ${ctx.laneSlot} unavailable for step '${step.id}'`, {
+          runId: this.opts.runId,
+          stepId: step.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     // Re-resolve this step's agent RUNTIME per step (Codex-per-step mixing) —
     // never captured at construction, mirroring the resolvers above — so a
     // workflow-scoped agent config edited mid-run is honored on this step's next
@@ -463,6 +489,7 @@ export class SpawnStepRunner implements StepRunner {
       // reads is keyed by bare step id and shared across lanes. Absent on every
       // non-rescued lane ⇒ byte-identical prompt.
       ...(ctx.laneGuidance ? { laneGuidance: ctx.laneGuidance } : {}),
+      ...(laneScratch ? { laneScratchDir: laneScratch.dir } : {}),
       ...(bootstrapProtectedPaths && bootstrapProtectedPaths.length > 0
         ? { bootstrapProtectedPaths }
         : {}),
@@ -563,6 +590,8 @@ export class SpawnStepRunner implements StepRunner {
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults
         // spawnKey to panelId when absent.
         ...(ctx.spawnKey ? { spawnKey: ctx.spawnKey } : {}),
+        // The lane's slot build-directory env, merged last by every manager.
+        ...(laneScratch ? { laneEnv: laneScratch.env } : {}),
       });
       // The SDK treats an aborted turn as a clean drain, so a resolved spawn after
       // a cancel is NOT a real success — consult the signal to tell them apart.

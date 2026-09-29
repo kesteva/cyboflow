@@ -65,6 +65,8 @@ const NON_TOOL_ENVELOPES: ReadonlySet<string> = new Set([
   'shell-approval-request',
   'interactive-turn-end',
   'interactive-question-open',
+  // The session CLI's $BROWSER (openUrlShellHook.ts) — a shell script, not an MCP tool.
+  'web-open-url',
 ]);
 
 /**

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { X, ExternalLink, Download } from 'lucide-react';
 import { NimbalystIcon } from './icons/NimbalystIcon';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface NimbalystInstallDialogProps {
   isOpen: boolean;
@@ -8,6 +9,7 @@ interface NimbalystInstallDialogProps {
 }
 
 export function NimbalystInstallDialog({ isOpen, onClose }: NimbalystInstallDialogProps) {
+  useOcclusion(isOpen, 'nimbalyst-install-dialog');
   // Handle keyboard events
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

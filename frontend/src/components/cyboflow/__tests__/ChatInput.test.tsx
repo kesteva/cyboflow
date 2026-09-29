@@ -47,6 +47,11 @@ vi.mock('../../../trpc/client', () => ({
         // "Always allow messaging a running flow" — Send QUEUES while an SDK run
         // executes; the backend delivers the text at the next turn boundary.
         queueInput: { mutate: vi.fn(async () => ({ queued: true })) },
+        // TASK-301: abort the live turn and drive the message NOW.
+        interruptAndSend: { mutate: vi.fn(async () => ({ delivered: true, interrupted: true })) },
+        // TASK-301: the composer's plain "Stop" (trio) reuses the existing
+        // git-neutral Pause mutation.
+        pause: { mutate: vi.fn(async () => ({ success: true })) },
         // ISSUE #2 — runtime agent-permission change for an active SDK run.
         setPermissionMode: { mutate: vi.fn(async () => ({ updated: true })) },
       },
@@ -164,6 +169,10 @@ beforeEach(() => {
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
   vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ queued: true });
+  vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate).mockResolvedValue({ delivered: true, interrupted: true });
+  vi.mocked(trpc.cyboflow.runs.pause.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.pause.mutate).mockResolvedValue({ success: true });
 
   // On-demand monitor: default inactive so the existing SDK tests keep their
   // workflow-idle/paused (disabled) behavior; the monitor-composer describe
@@ -909,9 +918,11 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     });
 
     // Sending now routes to the orchestrated queue, never the (gone) monitor.
-    // In queue mode the send button reads "Queue" — target the stable testid.
+    // TASK-301: the composer now reports `running` for a live SDK flow run, so
+    // once a draft exists the trio renders — target the stable Queue testid
+    // (not the idle-only 'unified-composer-send').
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'orchestrated now?' } });
-    fireEvent.click(screen.getByTestId('unified-composer-send'));
+    fireEvent.click(screen.getByTestId('unified-composer-queue'));
     await waitFor(() => {
       expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalled();
     });
@@ -1020,6 +1031,10 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     expect(textarea).not.toBeDisabled();
     expect(textarea.placeholder).toBe('Queue a message for the agent — sent on its next turn…');
+    // TASK-301: the composer now reports `running` for a live SDK flow run, so the
+    // Queue button (part of the trio) appears once a draft exists — see the
+    // dedicated "interrupt & send trio" describe block for the empty-draft case.
+    fireEvent.change(textarea, { target: { value: 'draft' } });
     // The primary action communicates queue semantics (not "Send").
     expect(screen.getByRole('button', { name: 'Queue' })).toBeInTheDocument();
     // The disabled idle hint must NOT be shown.
@@ -1053,7 +1068,9 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
   it('also enables the queue composer for a STARTING SDK run', () => {
     activate({ status: 'starting' });
     render(<ChatInput runId={RUN_ID} />);
-    expect(screen.getByRole('textbox')).not.toBeDisabled();
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).not.toBeDisabled();
+    fireEvent.change(textarea, { target: { value: 'draft' } });
     expect(screen.getByRole('button', { name: 'Queue' })).toBeInTheDocument();
   });
 
@@ -1074,6 +1091,45 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
     const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
     expect(failed.some((e) => e.status === 'failed' && e.text === 'too late?')).toBe(true);
+  });
+
+  it('TASK-300: surfaces an honest "stuck" reason instead of silently buffering', async () => {
+    // The tRPC boundary now refuses queueInput with reason 'stuck' once the
+    // StuckDetector's parked_no_gate rung has classified a run with no live
+    // turn and no gate — this pins the composer's side of that contract.
+    vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ noOp: true, reason: 'stuck' });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'still there?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/stuck/i);
+    });
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'still there?')).toBe(true);
+  });
+
+  it('TASK-300 attempt 2: surfaces an honest "parked" reason immediately, without waiting on the stuck detector', async () => {
+    // The tRPC boundary now catches the SAME shape 'stuck' answers the instant
+    // the message is submitted — reason 'parked' — rather than only after the
+    // StuckDetector's 45-minute staleness grace period has separately flipped
+    // the run to status='stuck'.
+    vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ noOp: true, reason: 'parked' });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'still there?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/no active turn/i);
+    });
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'still there?')).toBe(true);
   });
 
   it('an ACTIVE monitor still wins (queries the monitor, not the queue path)', async () => {
@@ -1098,6 +1154,225 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
       expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).toHaveBeenCalled();
     });
     expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — interrupt & send trio (TASK-301)', () => {
+  const RUN_ID = 'run-sdk-interrupt-001';
+  const PROJECT_ID = 23;
+
+  function makeRunningSdkRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-run',
+      project_id: PROJECT_ID,
+      status: 'running',
+      substrate: 'sdk',
+      // Interrupt & send is only offered on a claude-sdk run that is actually
+      // `running` (see ChatInput.tsx's `isInterruptCapableRun`) — the handler's
+      // liveness probe only reads ClaudeCodeManager's steering-hook registry,
+      // so Codex/OMP/Pi and a `starting` run would only ever be refused
+      // server-side. Default to the capable shape; the withholding tests below
+      // override `agent_runtime` / `status` to prove the Queue-only fallback.
+      agent_runtime: 'claude-sdk',
+      worktree_path: '/Users/me/worktrees/run-x',
+      branch_name: 'planner/run-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      permission_mode_snapshot: 'default',
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  const activate = (overrides: Partial<ActiveRunRow> = {}) => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeRunningSdkRow(overrides)] } });
+    });
+  };
+
+  it('renders only the plain Queue button (no trio) while the composer is empty', () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    // No draft yet → UnifiedComposer's running+no-draft branch: the plain Stop-only
+    // affordance (reused as the composer's Stop control), not the trio.
+    expect(screen.queryByTestId('unified-composer-queue')).toBeNull();
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.getByTestId('unified-composer-stop')).toBeInTheDocument();
+  });
+
+  it('renders the full [Queue] [Interrupt & send] [Stop] trio once a draft exists for a running SDK flow run', () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'stop and tell it this instead' } });
+
+    expect(screen.getByTestId('unified-composer-queue')).toBeInTheDocument();
+    expect(screen.getByTestId('unified-composer-interrupt-send')).toBeInTheDocument();
+    expect(screen.getByTestId('unified-composer-stop')).toBeInTheDocument();
+  });
+
+  it('clicking "Interrupt & send" calls runs.interruptAndSend (not queueInput/nudge) and clears the draft', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'abort and send this now' } });
+    fireEvent.click(screen.getByTestId('unified-composer-interrupt-send'));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'abort and send this now',
+      });
+    });
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).not.toHaveBeenCalled();
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('⌘⇧↵ triggers Interrupt & send', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'keyboard interrupt' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, shiftKey: true });
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'keyboard interrupt',
+      });
+    });
+  });
+
+  it('surfaces the noOp reason (pending row → failed) when interruptAndSend is refused', async () => {
+    vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate).mockResolvedValue({
+      noOp: true,
+      reason: 'blocked',
+    });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'try anyway' } });
+    fireEvent.click(screen.getByTestId('unified-composer-interrupt-send'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Resolve the blocking review item(s) for this run first.',
+      );
+    });
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'try anyway')).toBe(true);
+  });
+
+  it('the plain Stop button calls runs.pause, not interruptAndSend', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'keep this draft' } });
+    fireEvent.click(screen.getByTestId('unified-composer-stop'));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.pause.mutate)).toHaveBeenCalledWith({ runId: RUN_ID });
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate)).not.toHaveBeenCalled();
+    // Stop preserves the draft (it does not send).
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('keep this draft');
+  });
+
+  it('does NOT offer Interrupt & send for an interactive (PTY) run — relay path only', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeRunningSdkRow({ substrate: 'interactive' })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'relay only' } });
+
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+  });
+
+  it('does NOT offer Interrupt & send for a PROGRAMMATIC (Sprint fan-out) run — falls back to Queue-only (blocker 2a)', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeRunningSdkRow({ execution_model: 'programmatic' })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'stop the fan-out' } });
+
+    // No trio — only the plain Queue affordance survives (mirrors the backend's
+    // 'programmatic_unsupported' refusal in interruptAndSendHandler.ts).
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.getByTestId('unified-composer-queue')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('unified-composer-queue'));
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'stop the fan-out',
+      });
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('does NOT offer Interrupt & send for a non-claude-sdk run (e.g. Codex) — falls back to Queue-only', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeRunningSdkRow({ agent_runtime: 'codex-sdk' })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'interrupt a codex run' } });
+
+    // interruptAndSendHandler's liveness probe only reads ClaudeCodeManager's
+    // steering-hook registry, so a Codex-SDK run would always be refused
+    // server-side as 'not_idle' — withhold the button rather than show one
+    // that can only fail.
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.getByTestId('unified-composer-queue')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('unified-composer-queue'));
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'interrupt a codex run',
+      });
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.interruptAndSend.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('does NOT offer Interrupt & send for a `starting` claude-sdk run — falls back to Queue-only', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeRunningSdkRow({ status: 'starting' })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'interrupt a starting run' } });
+
+    // No live turn exists yet to abort — the handler would have nothing to
+    // queue-then-abort, so the button is withheld rather than offered and
+    // refused.
+    expect(screen.queryByTestId('unified-composer-interrupt-send')).toBeNull();
+    expect(screen.getByTestId('unified-composer-queue')).toBeInTheDocument();
   });
 });
 

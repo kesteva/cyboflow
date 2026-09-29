@@ -121,6 +121,14 @@ export interface AgentSpawnManagerLike {
   spawnCliProcess(options: AgentSpawnOptions): Promise<CliSpawnOutcome | void>;
   on(event: 'output', listener: (payload: unknown) => void): unknown;
   off(event: 'output', listener: (payload: unknown) => void): unknown;
+  /**
+   * Abort the in-flight turn keyed by this spawn identity (panelId, for the
+   * global-agent's synthetic panelId===sessionId===runId identity). A no-op
+   * when nothing is in flight for that key — mirrors
+   * ClaudeCodeManager.abortInFlightTurn's own idle no-op contract, which
+   * already satisfies this method structurally.
+   */
+  abortInFlightTurn(spawnKey: string): Promise<void>;
 }
 
 /** The 'output' event payload ClaudeCodeManager emits (claudeCodeManager.ts). */
@@ -279,6 +287,13 @@ interface AgentThreadBridge {
   listener: (payload: unknown) => void;
 }
 
+/** One turn currently in flight for a thread — which runtime/manager hosts it. */
+interface InFlightTurn {
+  runtime: AssistantRuntime;
+  spawnKey: string;
+  startedAt: number;
+}
+
 export class AgentThreadService {
   /** ONE durable writer for all threads; owns the runId → threadId mapping. */
   private readonly sink: AgentThreadEventsSink;
@@ -291,6 +306,24 @@ export class AgentThreadService {
    * runtime it belongs to, which is how a captured id learns its provider.
    */
   private readonly eventBridges = new Map<string, AgentThreadBridge[]>();
+  /**
+   * threadId → the turn's identity while `spawn()` is awaiting it. Set at
+   * spawn entry, cleared in `spawn()`'s finally — so it always reflects
+   * whether a turn is CURRENTLY in flight, and which manager owns it (a
+   * runtime switched mid-turn must abort the manager that actually holds the
+   * turn, not a re-read of the live setting).
+   */
+  private readonly inFlight = new Map<string, InFlightTurn>();
+  /**
+   * threadId set by `interruptTurn` just before calling the manager's
+   * `abortInFlightTurn`, consumed by `sendMessage` once its `spawn()` call
+   * settles (either resolves or rejects — both providers currently resolve an
+   * aborted turn cleanly, but this checks both paths defensively). Its
+   * presence is what turns an aborted turn into an `assistant_interrupted`
+   * transcript marker instead of a normal completion / error, and is what
+   * suppresses the stale-resume retry on an abort.
+   */
+  private readonly pendingInterrupts = new Set<string>();
 
   constructor(private readonly deps: AgentThreadServiceDeps) {
     this.sink = new AgentThreadEventsSink(deps.store, deps.logger);
@@ -398,6 +431,21 @@ export class AgentThreadService {
     // (compact-daily) — so re-read the thread afterwards; the stored id always
     // reflects the live conversation.
     await this.applyDailyRetention(thread, model, runtime);
+    // `applyDailyRetention`'s own compact spawn shares this thread's spawn
+    // identity, so a Stop clicked WHILE it is compacting aborts that spawn —
+    // and `applyDailyRetention` is fail-soft by design (a failed compact must
+    // never block the day's real turn), so it swallows that abort internally
+    // and returns normally. Left unchecked, `sendMessage` would then go on to
+    // spawn the actual requested turn anyway: Stop would silently cancel only
+    // the invisible compaction and let the turn the user meant to interrupt
+    // run regardless. `interruptTurn` sets `pendingInterrupts` BEFORE calling
+    // abort and nothing clears it during compaction, so its presence here
+    // means the interrupt landed before the real turn ever started — treat
+    // the whole `sendMessage` call as interrupted and stop here.
+    if (this.pendingInterrupts.delete(threadId)) {
+      this.recordInterrupted(threadId);
+      return;
+    }
     thread = this.deps.store.getThread(threadId) ?? thread;
 
     const resumeSessionId = thread.claudeSessionId ?? undefined;
@@ -409,7 +457,17 @@ export class AgentThreadService {
 
     try {
       await this.spawn(threadId, prompt, model, resumeSessionId, runtime, attachments);
+      if (this.pendingInterrupts.delete(threadId)) {
+        this.recordInterrupted(threadId);
+      }
     } catch (err) {
+      // An interrupt takes priority over every other outcome: it must never be
+      // read as a stale resume (a genuinely stale id would resurface on the
+      // very next turn anyway) nor as a spawn failure.
+      if (this.pendingInterrupts.delete(threadId)) {
+        this.recordInterrupted(threadId);
+        return;
+      }
       if (resumeSessionId !== undefined && isResumeError(err)) {
         this.deps.logger?.warn(
           `[agentThreadService] stale resume for thread ${threadId}; retrying fresh: ${errMessage(err)}`,
@@ -417,7 +475,14 @@ export class AgentThreadService {
         this.deps.store.updateClaudeSessionId(threadId, null);
         try {
           await this.spawn(threadId, prompt, model, undefined, runtime, attachments);
+          if (this.pendingInterrupts.delete(threadId)) {
+            this.recordInterrupted(threadId);
+          }
         } catch (retryErr) {
+          if (this.pendingInterrupts.delete(threadId)) {
+            this.recordInterrupted(threadId);
+            return;
+          }
           this.recordSpawnFailure(threadId, retryErr);
           throw retryErr;
         }
@@ -425,6 +490,62 @@ export class AgentThreadService {
       }
       this.recordSpawnFailure(threadId, err);
       throw err;
+    }
+  }
+
+  /**
+   * Interrupt seam for the rail's Stop control: abort whatever turn is
+   * currently in flight for this thread, on whichever runtime/manager
+   * actually hosts it (resolved once at spawn entry, never re-read from
+   * live settings — a runtime switched mid-turn must not abort the wrong
+   * manager). No-op when the thread is idle (`{ interrupted: false }`), so a
+   * stray click / late Esc after the turn already settled is harmless.
+   *
+   * Marking `pendingInterrupts` BEFORE calling the manager is what lets
+   * `sendMessage` — whose awaited `spawn()` call resolves cleanly on both
+   * providers' current abort implementations, and may reject on a future
+   * one — recognize the settling turn as an intentional interrupt rather
+   * than a normal completion or a real failure.
+   */
+  async interruptTurn(threadId: string): Promise<{ interrupted: boolean }> {
+    const info = this.inFlight.get(threadId);
+    if (info === undefined) return { interrupted: false };
+    this.pendingInterrupts.add(threadId);
+    try {
+      await this.managerFor(info.runtime).abortInFlightTurn(info.spawnKey);
+    } catch (err) {
+      // The abort call itself failed — the turn is NOT known to be stopping.
+      // Clear the pending flag so whatever the turn actually does next (a
+      // normal completion, or a genuine spawn failure) is recorded as that
+      // real outcome instead of being misread as an intentional "Stopped".
+      this.pendingInterrupts.delete(threadId);
+      this.deps.logger?.warn(
+        `[agentThreadService] abortInFlightTurn failed for thread ${threadId}: ${errMessage(err)}`,
+      );
+      return { interrupted: false };
+    }
+    return { interrupted: true };
+  }
+
+  /**
+   * Whether a turn is currently in flight for this thread. Lets a reloaded
+   * renderer hydrate the composer's Stop affordance for a turn that started
+   * before it mounted, rather than only ever learning about it from the
+   * `sendMessage` call that started it in the same renderer session.
+   */
+  isTurnInFlight(threadId: string): boolean {
+    return this.inFlight.has(threadId);
+  }
+
+  /** Persist + publish the muted "Stopped" transcript marker for an interrupted turn. */
+  private recordInterrupted(threadId: string): void {
+    try {
+      const event = this.sink.recordAssistantInterrupted(threadId);
+      this.deps.publish(threadId, this.toEnvelope(event));
+    } catch (err) {
+      this.deps.logger?.warn(
+        `[agentThreadService] interrupted-event record failed for thread ${threadId}: ${errMessage(err)}`,
+      );
     }
   }
 
@@ -584,7 +705,12 @@ export class AgentThreadService {
       ...(model !== undefined ? { model } : {}),
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };
-    await this.managerFor(runtime).spawnCliProcess(options);
+    this.inFlight.set(threadId, { runtime, spawnKey: identity, startedAt: this.nowMs() });
+    try {
+      await this.managerFor(runtime).spawnCliProcess(options);
+    } finally {
+      this.inFlight.delete(threadId);
+    }
   }
 
   private managerFor(runtime: AssistantRuntime): AgentSpawnManagerLike {

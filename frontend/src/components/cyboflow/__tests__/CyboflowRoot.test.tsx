@@ -50,6 +50,29 @@ vi.mock('../ArtifactTabRenderer', () => ({
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
+      // Native web viewer (docs/proposals/native-web-viewer.md) — the
+      // useWebViewerBridge hook mounts unconditionally inside BOTH center panes
+      // (it relays chords a focused native view swallows), so any test rendering
+      // a pane needs these stubbed. Inert by default: never emits, so no test
+      // sees a chord, a popup or a teardown it did not ask for.
+      webViewer: {
+        onTabOpened: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        pendingConsents: { query: vi.fn().mockResolvedValue([]) },
+        onConsent: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        restore: { mutate: vi.fn().mockResolvedValue([]) },
+        onReservedChord: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onPopupRequested: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onTabClosed: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onTabState: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        get: { query: vi.fn().mockResolvedValue(null) },
+        open: { mutate: vi.fn().mockResolvedValue({ ok: false, error: 'viewer_disabled' }) },
+        setBounds: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+        setVisible: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+        back: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+        forward: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+        reload: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+        close: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+      },
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
         // Live merge/PR gate — settled by default so accept actions proceed.

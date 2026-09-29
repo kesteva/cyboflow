@@ -290,6 +290,52 @@ describe('gitOps.markComplete — TASK-296 sprint close-out', () => {
     });
   });
 
+  it('landed, but one integrated lane\'s task move throws (fail-soft) -> tasksMovedToDone reports only the move that actually succeeded', async () => {
+    await withTempDir('gitops-markcomplete-landed-partial-fail-', async (repo) => {
+      initRepo(repo);
+      const manager = new WorktreeManager();
+      const { worktreePath } = await manager.createWorktree(repo, 'feature');
+      commitFile(worktreePath, 'feature.txt', 'feature work\n', 'feat: sprint work');
+      git('merge --ff-only feature', repo);
+
+      const router = TaskChangeRouter.getInstance();
+      const tInt1 = await makeTaskWithEntry(db, router, 'Integrated A');
+      const tInt2 = await makeTaskWithEntry(db, router, 'Integrated B');
+
+      seedSprintRun(db, { runId: 'r1', batchId: 'bat-1', sessionId: SESSION_ID, outcome: null });
+      seedLane(db, 'bat-1', tInt1, 'integrated');
+      seedLane(db, 'bat-1', tInt2, 'integrated');
+
+      // Simulate finalizeSprintLanesOnSessionMerge's fail-soft catch: tInt2's
+      // move throws, tInt1's goes through untouched. A naive "counted before
+      // the close-out ran" implementation would report 2 here even though
+      // only one task actually reached Done.
+      const originalApplyChange = router.applyChange.bind(router);
+      vi.spyOn(router, 'applyChange').mockImplementation(async (projectId, change) => {
+        if ('taskId' in change && change.taskId === tInt2 && change.kind === 'execution-stage') {
+          throw new Error('simulated task move failure');
+        }
+        return originalApplyChange(projectId, change);
+      });
+
+      const services = makeServices({ sessionId: SESSION_ID, worktreePath, repoPath: repo, db });
+      const ops = createGitOps(services);
+
+      const result = await ops.markComplete({ sessionId: SESSION_ID });
+
+      expect(result.success).toBe(true);
+      if (!result.success) throw new Error('expected success');
+      // The run stamp and batch terminal are independent of the per-task
+      // move failure — both still happen (fail-soft).
+      expect(result.data.stamped).toBe(1);
+      expect((result.data as { tasksMovedToDone?: number }).tasksMovedToDone).toBe(1);
+
+      expect(readTaskStage(db, tInt1)).toBe(stageId(9)); // Done — succeeded
+      expect(readTaskStage(db, tInt2)).toBe(stageId(6)); // still at entry stage — move threw
+      expect(readBatchStatus(db, 'bat-1')).toBe('completed');
+    });
+  });
+
   it('branch NOT on main -> tasks untouched, outcome=completed, laneTasksLeftOpen reports the integrated lanes', async () => {
     await withTempDir('gitops-markcomplete-unlanded-', async (repo) => {
       initRepo(repo);

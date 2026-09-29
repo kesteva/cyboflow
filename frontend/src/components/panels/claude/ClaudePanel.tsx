@@ -30,6 +30,7 @@ import { reduceLiveTail, hasVisibleTailContent } from '../../../utils/liveTailRe
 import { AGENT_PROVIDER_LABELS } from '../../../../../shared/types/agentRuntime';
 import { providerForRuntime } from '../../cyboflow/agentRuntimeUi';
 import { ClaudeSignInCard } from '../../session/ClaudeSignInCard';
+import { WebLinkProvider } from '../../../contexts/WebLinkContext';
 import { findClaudeLoginRequired } from '../../../utils/findClaudeLoginRequired';
 import { isClaudeLoginRequiredError } from '../../../../../shared/types/claudeAuth';
 
@@ -650,35 +651,38 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   );
 
   return (
-    <div className="relative flex-1 flex flex-col h-full bg-background">
-      <UnifiedChatView
-        name={agentName}
-        transport={isInteractive ? 'interactive' : 'sdk'}
-        mode="quick"
-        running={sessionWorking}
-        messages={messages}
-        loadError={loadError}
-        isWaitingForResponse={isWaitingForResponse}
-        liveTail={liveTail}
-        transcriptEndSlot={claudeSignInSlot}
-        folderLabel={folderLabel}
-        folderTitle={worktreePath}
-        branchName={branchName}
-        contextUsage={contextUsage}
-        railId={panel.id}
-        renderToolCallExtra={renderToolCallExtra}
-        interactiveBody={interactiveBody}
-        bottomSlot={bottomSlot}
-        pendingSends={isInteractive ? undefined : pendingSends}
-        onReopenPending={(entry) => {
-          // A server-buffered 'queued' entry must also be dequeued so the reopened
-          // message is not ALSO delivered at the turn's rest boundary (behavior 3:
-          // reopen removes it from the queue — no double delivery).
-          if (entry.status === 'queued') void API.panels.dequeueInput(panel.id, entry.id);
-          requestReopenPending(panel.id, entry.id);
-        }}
-      />
-    </div>
+    // Chat links open as web tabs in this quick session's center pane.
+    <WebLinkProvider sessionKey={panel.sessionId ?? null}>
+      <div className="relative flex-1 flex flex-col h-full bg-background">
+        <UnifiedChatView
+          name={agentName}
+          transport={isInteractive ? 'interactive' : 'sdk'}
+          mode="quick"
+          running={sessionWorking}
+          messages={messages}
+          loadError={loadError}
+          isWaitingForResponse={isWaitingForResponse}
+          liveTail={liveTail}
+          transcriptEndSlot={claudeSignInSlot}
+          folderLabel={folderLabel}
+          folderTitle={worktreePath}
+          branchName={branchName}
+          contextUsage={contextUsage}
+          railId={panel.id}
+          renderToolCallExtra={renderToolCallExtra}
+          interactiveBody={interactiveBody}
+          bottomSlot={bottomSlot}
+          pendingSends={isInteractive ? undefined : pendingSends}
+          onReopenPending={(entry) => {
+            // A server-buffered 'queued' entry must also be dequeued so the reopened
+            // message is not ALSO delivered at the turn's rest boundary (behavior 3:
+            // reopen removes it from the queue — no double delivery).
+            if (entry.status === 'queued') void API.panels.dequeueInput(panel.id, entry.id);
+            requestReopenPending(panel.id, entry.id);
+          }}
+        />
+      </div>
+    </WebLinkProvider>
   );
 });
 

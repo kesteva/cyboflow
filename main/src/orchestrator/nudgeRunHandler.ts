@@ -43,6 +43,29 @@ import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachi
 export interface NudgeRunExecutorLike {
   setPendingNudge(runId: string, text: string): void;
   execute(runId: string): Promise<void>;
+  /**
+   * Optional real-time "is a turn actually in flight" signal (RunExecutor's
+   * concrete method — structurally satisfied for free by every real caller;
+   * test fakes may omit it). Consulted ONLY when the run's status is
+   * `'running'` (never `'awaiting_review'`, whose guard is unaffected) to
+   * recognize a PARKED running run — one that never drained to
+   * `awaiting_review` because the step it is resting on (e.g. a handed-over
+   * run's final human gate) has no drain seam of its own, even though its
+   * SDK turn has genuinely ended (TASK-299). Omitted or returning `true` keeps
+   * today's behavior: `'running'` is refused `not_idle`.
+   */
+  hasActiveExecution?(runId: string): boolean;
+  /**
+   * Optional buffer-append for a message that must be DELIVERED LATER rather
+   * than driven now — the SAME mechanism `runs.queueInput` uses. This handler
+   * never calls it itself; it exists so a caller sharing this dependency bag
+   * (`runs.ts`'s `deliverAddressReviewFindingsViaChat`, TASK-299) can buffer a
+   * message for a run it has determined has a genuinely live turn, without
+   * wiring a second dependency bag for the same singleton RunExecutor. Present
+   * for free on the real RunExecutor (it satisfies `QueueInputRunExecutorLike`
+   * too); omitted on test fakes that never exercise that path.
+   */
+  queueInput?(runId: string, text: string): void;
 }
 
 /**
@@ -117,6 +140,47 @@ interface NudgeRunRow {
 const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
 
 // ---------------------------------------------------------------------------
+// Parked-running delivery reservation
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs with a parked-running delivery currently in flight, per `deps`
+ * identity (WeakMap so a test's own `deps` object gets an isolated set that
+ * disappears with it, while the real boot-time singleton reserves for real
+ * across the process's lifetime).
+ *
+ * The `isParkedRunning` admission (below) has no status change to CAS on —
+ * unlike the `awaiting_review -> running` flip, `row.status` stays
+ * `'running'` before, during, and after delivery — so without this, two
+ * concurrent calls (e.g. two "Address review findings" clicks) both pass the
+ * guard and race `setPendingNudge()`/`execute()` outside it: the second
+ * caller's `setPendingNudge` can silently overwrite the first's text before
+ * either the first's or the second's spawn actually reads it. Reserving here,
+ * INSIDE the guard task (itself serialized by the per-run queue), admits
+ * exactly one caller at a time; the reservation is released once that
+ * caller's delivery settles (`drained`, `execute_failed`, or the `turn-start`
+ * race resolving), whichever comes first.
+ */
+const parkedDeliveryInFlight = new WeakMap<NudgeRunDeps, Set<string>>();
+
+function reserveParkedDelivery(deps: NudgeRunDeps, runId: string): boolean {
+  let set = parkedDeliveryInFlight.get(deps);
+  if (!set) {
+    set = new Set<string>();
+    parkedDeliveryInFlight.set(deps, set);
+  }
+  if (set.has(runId)) {
+    return false;
+  }
+  set.add(runId);
+  return true;
+}
+
+function releaseParkedDelivery(deps: NudgeRunDeps, runId: string): void {
+  parkedDeliveryInFlight.get(deps)?.delete(runId);
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -128,11 +192,19 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
  *   1. trim(text) empty            → { noOp: 'empty' }
  *   2. run row missing             → { noOp: 'not_found' }
  *   3. status terminal             → { noOp: 'terminal' }
- *   4. status !== awaiting_review  → { noOp: 'not_idle' }
+ *   4. status !== awaiting_review AND not a PARKED `running` run (status ===
+ *      'running' with `hasActiveExecution(runId) === false` — TASK-299) →
+ *      { noOp: 'not_idle' }
  *   5. pending blocking review     → { noOp: 'blocked' }
  *   6. claude_session_id null      → { noOp: 'no_session' }
- *   7. guarded UPDATE → running; 0 rows changed → { noOp: 'race' }
- *      (awaiting_review → running is legal — stateMachine ALLOWED_TRANSITIONS.)
+ *   7. a run already `running` (the parked case) reserves the delivery
+ *      (`reserveParkedDelivery`) and skips straight to delivery; a SECOND
+ *      concurrent call for the same parked run finds the reservation already
+ *      held → { noOp: 'not_idle' } rather than racing the first call's
+ *      `setPendingNudge`/`execute` (TASK-299 concurrent-click finding).
+ *      Otherwise the guarded UPDATE flips awaiting_review → running, and 0
+ *      rows changed → { noOp: 'race' } (that edge is legal per
+ *      stateMachine ALLOWED_TRANSITIONS).
  *
  * Then OUTSIDE the queue guard: setPendingNudge(runId, text) + execute(runId).
  * With the default `deliveredAt: 'drain'` the handler awaits the full drain
@@ -174,7 +246,14 @@ export async function nudgeRunHandler(
     if (TERMINAL_STATUSES.has(row.status)) {
       return { ok: false as const, reason: 'terminal' as const };
     }
-    if (row.status !== 'awaiting_review') {
+    // A run PARKED in `running` (never drained to awaiting_review — e.g. a
+    // handed-over run resting at its final human gate, which has no drain
+    // seam of its own) is treated the same as an idle run IFF the executor
+    // confirms no turn is actually in flight for it. Anything else (a genuine
+    // mid-turn run, or `hasActiveExecution` unwired) keeps today's refusal.
+    const isParkedRunning =
+      row.status === 'running' && runExecutor.hasActiveExecution?.(runId) === false;
+    if (row.status !== 'awaiting_review' && !isParkedRunning) {
       return { ok: false as const, reason: 'not_idle' as const };
     }
     // `ignoreBlockingReviewItemId` excludes the gate(s) the caller is answering
@@ -190,9 +269,17 @@ export async function nudgeRunHandler(
       return { ok: false as const, reason: 'no_session' as const };
     }
 
-    // Guarded flip: only succeeds while still parked in awaiting_review, so a
-    // concurrent transition (merge / dismiss / approval cycle) that already
-    // moved the run loses cleanly here (changes === 0 → race).
+    // A run already parked in `running` needs no flip — reserve the delivery
+    // (see `reserveParkedDelivery` above) and go straight to it. A second
+    // concurrent call for the same run — e.g. a double "Address review
+    // findings" click — finds the reservation already held and is refused
+    // here rather than racing setPendingNudge()/execute() outside the queue.
+    if (row.status === 'running') {
+      if (!reserveParkedDelivery(deps, runId)) {
+        return { ok: false as const, reason: 'not_idle' as const };
+      }
+      return { ok: true as const, reserved: true as const };
+    }
     const flip = db.transaction(() => {
       // The raw UPDATE stays inlined because transitions.ts is db-coupled SERVICES
       // code this module may not import at runtime — but VALIDATION no longer needs
@@ -212,12 +299,12 @@ export async function nudgeRunHandler(
       return { ok: false as const, reason: 'race' as const };
     }
 
-    return { ok: true as const };
+    return { ok: true as const, reserved: false as const };
   });
 
   // p-queue returns the task's value; our task always returns a value.
   const guard = guardResult as
-    | { ok: true }
+    | { ok: true; reserved: boolean }
     | { ok: false; reason: Exclude<NudgeNoOpReason, 'empty' | 'execute_failed'> };
 
   if (!guard.ok) {
@@ -226,46 +313,56 @@ export async function nudgeRunHandler(
 
   // Phase 2: stash the nudge + re-drive OUTSIDE the queue guard (execute() and
   // its lifecycle transitions re-enter the same run queue — see header note).
-  runExecutor.setPendingNudge(runId, trimmed);
+  // Wrapped so the parked-delivery reservation (if this call took one) is
+  // ALWAYS released once delivery settles, on every exit path below —
+  // otherwise a run whose only delivery attempt failed would stay reserved
+  // forever and refuse every later click with a false 'not_idle'.
+  try {
+    runExecutor.setPendingNudge(runId, trimmed);
 
-  // Turn-start delivery mode: register the waiter BEFORE execute() so the
-  // 'spawned' emit cannot be missed, then race turn-start against execute()'s
-  // own settlement. Falls through to the drain path when the caller did not
-  // opt in or no waiter factory is wired (tests/legacy boot).
-  const waiter = opts.deliveredAt === 'turn-start' ? deps.awaitTurnStart?.(runId) : undefined;
+    // Turn-start delivery mode: register the waiter BEFORE execute() so the
+    // 'spawned' emit cannot be missed, then race turn-start against execute()'s
+    // own settlement. Falls through to the drain path when the caller did not
+    // opt in or no waiter factory is wired (tests/legacy boot).
+    const waiter = opts.deliveredAt === 'turn-start' ? deps.awaitTurnStart?.(runId) : undefined;
 
-  if (!waiter) {
-    try {
-      await runExecutor.execute(runId);
-    } catch (err) {
-      logger?.error('[nudgeRun] execute() rejected after running flip', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (!waiter) {
+      try {
+        await runExecutor.execute(runId);
+      } catch (err) {
+        logger?.error('[nudgeRun] execute() rejected after running flip', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { noOp: true, reason: 'execute_failed' };
+      }
+      return { delivered: true };
+    }
+
+    // execSettled never rejects: both arms map to a value, so the detached
+    // execute() can never become an unhandled rejection after the race resolves
+    // via turn-start. A post-start rejection is only logged — the executor's own
+    // 'failed' transition owns the run state, and the nudge text is already
+    // committed to the conversation.
+    const execSettled = runExecutor.execute(runId).then(
+      () => 'drained' as const,
+      (err: unknown) => {
+        logger?.error('[nudgeRun] execute() rejected after running flip', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return 'execute_failed' as const;
+      },
+    );
+    const outcome = await Promise.race([waiter.started.then(() => 'started' as const), execSettled]);
+    waiter.cancel();
+    if (outcome === 'execute_failed') {
       return { noOp: true, reason: 'execute_failed' };
     }
     return { delivered: true };
+  } finally {
+    if (guard.reserved) {
+      releaseParkedDelivery(deps, runId);
+    }
   }
-
-  // execSettled never rejects: both arms map to a value, so the detached
-  // execute() can never become an unhandled rejection after the race resolves
-  // via turn-start. A post-start rejection is only logged — the executor's own
-  // 'failed' transition owns the run state, and the nudge text is already
-  // committed to the conversation.
-  const execSettled = runExecutor.execute(runId).then(
-    () => 'drained' as const,
-    (err: unknown) => {
-      logger?.error('[nudgeRun] execute() rejected after running flip', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return 'execute_failed' as const;
-    },
-  );
-  const outcome = await Promise.race([waiter.started.then(() => 'started' as const), execSettled]);
-  waiter.cancel();
-  if (outcome === 'execute_failed') {
-    return { noOp: true, reason: 'execute_failed' };
-  }
-  return { delivered: true };
 }

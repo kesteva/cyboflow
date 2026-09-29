@@ -25,6 +25,7 @@ import type { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import type { CustomViewsServiceLike } from '../customViews/customViewsService';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
+import type { WebViewerAgentLike } from '../trpc/contracts/webViewerOps';
 
 export type McpQueryMessage =
   | { type: 'mcp-list-pending-approvals'; requestId: string; runId: string }
@@ -441,6 +442,68 @@ export type McpQueryMessage =
       type: 'mcp-run-eval';
       requestId: string;
       runId: string;
+    }
+  // -------------------------------------------------------------------------
+  // Web viewer observe tools (docs/proposals/native-web-viewer.md §6). Served
+  // through the injected `webViewerAgent` seam; the caller's session is resolved
+  // from the run row, never taken from the agent.
+  // -------------------------------------------------------------------------
+  | {
+      /** List this session's web tabs — origin only for a tab not yet granted. */
+      type: 'mcp-web-tabs';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      /**
+       * Telemetry delta since per-kind cursors, plus optional page text / DOM.
+       * BLOCKS on a consent prompt when the tab is not the caller's own.
+       */
+      type: 'mcp-read-web-tab';
+      requestId: string;
+      runId: string;
+      tabId: string;
+      since?: { console?: number; network?: number; navigation?: number };
+      include?: Array<'text' | 'dom'>;
+      frame?: 'top' | 'all';
+      reason?: string;
+    }
+  | {
+      /** Background-open a tab in the session's agent partition, owned by this run. */
+      type: 'mcp-open-web-tab';
+      requestId: string;
+      runId: string;
+      url: string;
+      reason?: string;
+      waitForLoad?: boolean;
+    }
+  | {
+      /**
+       * One drive verb on a tab. BLOCKS on a `drive` consent prompt unless the
+       * tab is the caller's own and untouched. Needs the agentDrive flag.
+       */
+      type: 'mcp-drive-web-tab';
+      requestId: string;
+      runId: string;
+      tabId: string;
+      action: 'navigate' | 'back' | 'forward' | 'reload' | 'click' | 'type' | 'eval';
+      url?: string;
+      selector?: string;
+      text?: string;
+      expression?: string;
+      frame?: string;
+      reason?: string;
+    }
+  | {
+      /**
+       * NOT an MCP tool: the session CLI's `$BROWSER` (openUrlShellHook.ts)
+       * asking to show a URL. Opens a USER tab in the run's session; an error
+       * reply sends the script to the OS browser instead.
+       */
+      type: 'web-open-url';
+      requestId: string;
+      runId: string;
+      url: string;
     }
   // -------------------------------------------------------------------------
   // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
@@ -1039,6 +1102,13 @@ export interface McpQueryHandlerDeps {
    * without it keeps passing unchanged.
    */
   getSprintMaxTasks?(): SprintMaxTasksOverrides;
+
+  /**
+   * The web viewer's agent surface (cyboflow_web_tabs / _read_web_tab /
+   * _open_web_tab / _drive_web_tab), wired from webViewerComposition.ts. A structural seam: the
+   * service imports electron. Absent ⇒ every web tool replies 'viewer_unavailable'.
+   */
+  webViewerAgent?: WebViewerAgentLike;
 }
 
 /**

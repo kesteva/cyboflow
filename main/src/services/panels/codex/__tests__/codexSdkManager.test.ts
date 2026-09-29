@@ -802,6 +802,83 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
+  it('abortInFlightTurn interrupts an active turn by run id (the global-assistant Stop control)', async () => {
+    const db = createDb();
+    try {
+      let markTurnStarted!: () => void;
+      const turnStarted = new Promise<void>((resolve) => {
+        markTurnStarted = resolve;
+      });
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(markTurnStarted, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        if (method === 'turn/interrupt') return {};
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const spawn = manager.spawnCliProcess({
+        panelId: 'panel:agent-thread-1',
+        sessionId: 'panel:agent-thread-1',
+        runId: 'agent:thread-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'wait',
+      });
+      await turnStarted;
+      await manager.abortInFlightTurn('agent:thread-1');
+      await spawn;
+
+      const client = getClient();
+      expect(client.requests).toContainEqual({
+        method: 'turn/interrupt',
+        params: { threadId: 'codex-thread-1', turnId: 'turn-1' },
+      });
+      expect(client.stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn is a no-op when nothing is in flight for that identity', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method) => {
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      // Idle — never spawned. Must not throw, and must not touch any client.
+      await expect(manager.abortInFlightTurn('nobody-home')).resolves.toBeUndefined();
+      expect(getClient).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('abortInFlightTurn leaves a warm-parked entry (no turn in flight) untouched — a later resume still reuses it', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients[0].stop).not.toHaveBeenCalled(); // parked, not closed
+
+      await manager.abortInFlightTurn('run-1');
+      expect(clients[0].stop).not.toHaveBeenCalled(); // still parked — nothing was in flight
+
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(1); // reused the SAME parked client, no cold respawn
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('rejects API-key auth before creating a thread', async () => {
     const db = createDb();
     try {
@@ -1133,6 +1210,23 @@ describe('CodexSdkManager warm app-server reuse', () => {
     }
   });
 
+  it('cold-respawns when the lane env changes (laneEnv is part of the warm fingerprint)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      await manager.spawnCliProcess(baseTurn({
+        prompt: 'second',
+        resumeSessionId: 'codex-thread-1',
+        laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: '/tmp/worktree/.cyboflow/build-slots/slot-0' },
+      }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
   it('stops (not just evicts) a parked app-server whose client errors with no active turn', async () => {
     const db = createDb();
     try {
@@ -1208,6 +1302,67 @@ function agentTurn(
     ...overrides,
   } as Parameters<CodexSdkManager['spawnCliProcess']>[0];
 }
+
+describe('CodexSdkManager lane build-slot env', () => {
+  // The app-server hands its env to every command the agent runs, so a fan-out
+  // lane's build slot (programmatic/laneBuildSlots.ts) reaches the agent's shell
+  // only through the app-server env — merged LAST so it wins.
+  const LANE_KEYS = ['CYBOFLOW_LANE_SCRATCH_DIR', 'CLANG_MODULE_CACHE_PATH', 'SWIFTPM_MODULECACHE_OVERRIDE'] as const;
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    // This suite may itself run inside a cyboflow lane whose env carries these.
+    for (const key of LANE_KEYS) {
+      saved.set(key, process.env[key]);
+      delete process.env[key];
+    }
+  });
+  afterEach(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('merges laneEnv into the app-server env, overriding an inherited value', async () => {
+    process.env.CLANG_MODULE_CACHE_PATH = '/inherited/module-cache';
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      const slot = '/tmp/worktree/.cyboflow/build-slots/slot-1';
+      await manager.spawnCliProcess(baseTurn({
+        spawnKey: 'run-1:TASK-1',
+        laneEnv: {
+          CYBOFLOW_LANE_SCRATCH_DIR: slot,
+          CLANG_MODULE_CACHE_PATH: `${slot}/clang-module-cache`,
+          SWIFTPM_MODULECACHE_OVERRIDE: `${slot}/clang-module-cache`,
+        },
+      }));
+
+      const env = clients[0].options.env ?? {};
+      expect(env.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      expect(env.CLANG_MODULE_CACHE_PATH).toBe(`${slot}/clang-module-cache`);
+      expect(env.SWIFTPM_MODULECACHE_OVERRIDE).toBe(`${slot}/clang-module-cache`);
+      // The run env is intact alongside it.
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-1');
+      expect(env.PATH).toContain('/app/codex/codex-path');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds no lane keys to a spawn without laneEnv', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ spawnKey: 'run-1:TASK-1' }));
+
+      const env = clients[0].options.env ?? {};
+      for (const key of LANE_KEYS) expect(env[key]).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+});
 
 describe('CodexSdkManager hermetic global-agent spawn', () => {
   it('routes the turn into the injected sink and writes NEITHER run-keyed table', async () => {

@@ -234,10 +234,25 @@ const systemTaskNotificationSchema = z.object({
   session_id: z.string().optional(),
 });
 
+/**
+ * system/assistant_interrupted: SYNTHETIC-ONLY — never emitted by the real
+ * CLI/app-server wire. Accepted here solely so a persisted
+ * {@link SystemAssistantInterruptedEvent} (minted by
+ * `AgentThreadEventsSink.recordAssistantInterrupted`) round-trips through
+ * `TypedEventNarrowing.narrow` on read instead of falling through to
+ * `{kind:'__unknown__'}` and being silently dropped by MessageProjection.
+ */
+const systemAssistantInterruptedSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('assistant_interrupted'),
+  session_id: z.string().optional(),
+});
+
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemInitSchema,
   systemCompactBoundarySchema,
+  systemAssistantInterruptedSchema,
   systemHookStartedSchema,
   systemHookResponseSchema,
   systemStatusSchema,

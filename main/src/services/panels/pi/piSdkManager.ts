@@ -269,6 +269,7 @@ export class PiSdkManager extends AbstractCliManager {
     worktreePath: string,
     prompt: string,
     runId?: string,
+    laneEnv?: Readonly<Record<string, string>>,
   ): Promise<void> {
     const state = this.turns.get(panelId);
     if (!state) throw new Error(`[PI] no turn state for panel ${panelId}`);
@@ -310,6 +311,9 @@ export class PiSdkManager extends AbstractCliManager {
             ...process.env,
             PATH: getShellPath(),
             [PI_GATE_ENV_KEYS.mode]: state.gateMode,
+            // A fan-out lane's build-slot env (programmatic/laneBuildSlots.ts),
+            // LAST so it wins. Only the workflow entry point passes one.
+            ...laneEnv,
           },
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
@@ -488,7 +492,7 @@ export class PiSdkManager extends AbstractCliManager {
     // options.worktreePath, not state.cwd: state.cwd has already absorbed the
     // process.cwd() fallback, which must never receive role files.
     this.installRoleOverlayIfWorkflowSpawn(options.runId, options.worktreePath);
-    await this.runTurn(panelId, sessionId, state.cwd, options.prompt ?? '', options.runId);
+    await this.runTurn(panelId, sessionId, state.cwd, options.prompt ?? '', options.runId, options.laneEnv);
     return { resultText: this.lastResultText.get(panelId) ?? null };
   }
 

@@ -847,4 +847,87 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
     expected: { weight: 'weight: integer >= 0 (optional)' },
     toEnvelope: (args) => ({ workflowId: args.workflow_id, inRotation: args.in_rotation, weight: args.weight }),
   }),
+
+  // --------------------------------------------------------------------------
+  // Web viewer (docs/proposals/native-web-viewer.md §6). Off unless the user
+  // turned on agent observation (and, for drive, agent control) in Settings —
+  // every tool then replies `viewer_disabled: …`.
+  // --------------------------------------------------------------------------
+
+  defineTool({
+    name: 'cyboflow_web_tabs',
+    description:
+      'List the web tabs open in YOUR session\'s center pane (the in-app browser). Each row: tabId (opaque — pass it to cyboflow_read_web_tab), state (live | hidden | evicted | crashed | auth_required | certificate_error — an evicted tab is unloaded, not blank; a read reloads it), openedBy (user | agent), ownedByCaller, access, and origin. `url` and `title` are null unless access is \'free\' (a tab YOU opened that no human has interacted with) or \'granted\': a full URL can carry login codes and tokens, so a tab you have no grant for reports its origin only. Does not prompt the human. Errors: viewer_disabled (agent access is off in Settings — relay that; do not retry), viewer_unavailable, run_not_active.',
+    input: z.object({}),
+    envelope: 'mcp-web-tabs',
+    toEnvelope: () => ({}),
+  }),
+
+  defineTool({
+    name: 'cyboflow_read_web_tab',
+    description:
+      'Read what a web tab in your session did and shows: console messages, network requests (query VALUES and credentials redacted) and navigations since your last cursor, plus optionally the page text or DOM. Pass back each returned `cursor` as `since` to get only new entries; `gap` > 0 means entries you never saw were already dropped. CONSENT: reading a tab you did not open — or one a human has typed into — shows the human an Allow/Deny prompt ON THE TAB and BLOCKS until they answer (up to 5 minutes; then consent_timeout). Give a one-line `reason`; it is shown in the prompt. A grant is bound to the page\'s origin: if the tab navigates to a different site the grant is gone and the read fails origin_changed. frame=\'all\' also reads iframes (e.g. an artifact iframe on another origin), and each distinct iframe origin needs its own Allow — a denied iframe comes back with an `error` and no content, and on a granted tab console/network entries from origins you are not granted for are left out and counted in `withheld`. Errors: tab_not_found, tab_closed, tab_crashed, auth_required, certificate_error, tab_evicted, consent_denied, consent_timeout, origin_changed, navigating (retry shortly), viewer_disabled.',
+    input: z.object({
+      tab_id: z.string().min(1).describe('The tab id from cyboflow_web_tabs or cyboflow_open_web_tab (required).'),
+      since_console: z.number().int().min(0).describe('Optional console cursor from your previous read; omit for everything buffered.').optional(),
+      since_network: z.number().int().min(0).describe('Optional network cursor from your previous read.').optional(),
+      since_navigation: z.number().int().min(0).describe('Optional navigation cursor from your previous read.').optional(),
+      include: z.array(z.enum(['text', 'dom'])).describe('Optional page content to include: \'text\' (visible text) and/or \'dom\' (serialized HTML). Each is capped per frame; `truncated` says when it was cut.').optional(),
+      frame: z.enum(['top', 'all']).describe('Optional: \'top\' (default) reads the page itself; \'all\' also reads every iframe.').optional(),
+      reason: z.string().max(280).describe('Optional one-line reason shown to the human if a consent prompt is needed.').optional(),
+    }),
+    envelope: 'mcp-read-web-tab',
+    // A consent prompt legitimately blocks for minutes. Bounded by the consent
+    // layer's own timeout, never by the transport's 30-second default.
+    timeoutMs: null,
+    toEnvelope: (args) => {
+      const since =
+        args.since_console !== undefined || args.since_network !== undefined || args.since_navigation !== undefined
+          ? compact({ console: args.since_console, network: args.since_network, navigation: args.since_navigation })
+          : undefined;
+      return { tabId: args.tab_id, since, include: args.include, frame: args.frame, reason: args.reason };
+    },
+  }),
+
+  defineTool({
+    name: 'cyboflow_open_web_tab',
+    description:
+      'Open a URL (http/https only) in a new BACKGROUND web tab in your session — it appears in the center-pane tab strip without taking focus. The tab runs in a separate cookie jar from the human\'s browsing, is owned by YOUR run, and while no human interacts with it you can read it freely with cyboflow_read_web_tab (no prompt). Use it to watch a dev server, a preview deploy, or a page you are debugging. Returns the new tab. wait_for_load=true waits (up to 15s) for the first load to finish. Errors: tab_limit_reached (close tabs or ask the human), rate_limited (too many opens in a minute), invalid_arguments (not an http(s) URL), viewer_disabled.',
+    input: z.object({
+      url: z.string().min(1).describe('The http(s) URL to open (required).'),
+      reason: z.string().max(280).describe('Optional one-line reason, recorded in the tab\'s activity log.').optional(),
+      wait_for_load: z.boolean().describe('Optional; wait for the first load to finish before replying. Defaults to false.').optional(),
+    }),
+    envelope: 'mcp-open-web-tab',
+    toEnvelope: (args) => ({ url: args.url, reason: args.reason, waitForLoad: args.wait_for_load }),
+  }),
+
+  defineTool({
+    name: 'cyboflow_drive_web_tab',
+    description:
+      'Act on a web tab in your session: navigate (url), back, forward, reload, click (a CSS selector), type (selector + text — REPLACES the field\'s value, firing input/change events), or eval (a JavaScript expression, `await` allowed, run in the page; returns its JSON-serializable value, capped). Off unless the human turned on agent control in Settings (viewer_disabled). CONSENT: on a tab you did not open, or one a human has interacted with, this shows an Allow/Deny prompt ON THE TAB and BLOCKS until answered (up to 5 minutes). The grant is bound to the page\'s origin: navigating away to another site ends it, and a verb aimed at a document whose origin changed since you were granted fails origin_changed — read the tab again and let the human re-approve. click/type/eval act on the top frame unless you pass `frame` (a frameToken from cyboflow_read_web_tab with frame=\'all\'); an iframe on another origin needs its own Allow. Every verb is recorded in the tab\'s activity log. Errors: tab_not_found, tab_closed, tab_crashed (only reload works), auth_required, certificate_error, frame_not_found, frame_principal_changed, navigating (retry shortly), origin_changed, consent_denied, consent_timeout, element_not_found, element_not_editable, drive_timeout, script_error: <message>, invalid_arguments, viewer_disabled.',
+    input: z.object({
+      tab_id: z.string().min(1).describe('The tab id (required).'),
+      action: z.enum(['navigate', 'back', 'forward', 'reload', 'click', 'type', 'eval']).describe('The verb (required).'),
+      url: z.string().min(1).describe('navigate: the http(s) URL.').optional(),
+      selector: z.string().min(1).describe('click / type: a CSS selector, resolved in the target frame.').optional(),
+      text: z.string().describe('type: the value to set.').optional(),
+      expression: z.string().min(1).describe('eval: a JavaScript expression; wrap statements in an IIFE.').optional(),
+      frame: z.string().min(1).describe('Optional frameToken for click / type / eval; default the top frame.').optional(),
+      reason: z.string().max(280).describe('Optional one-line reason shown to the human if a consent prompt is needed.').optional(),
+    }),
+    envelope: 'mcp-drive-web-tab',
+    // Blocks on a consent prompt; bounded by the consent layer's own timeout.
+    timeoutMs: null,
+    toEnvelope: (args) => ({
+      tabId: args.tab_id,
+      action: args.action,
+      url: args.url,
+      selector: args.selector,
+      text: args.text,
+      expression: args.expression,
+      frame: args.frame,
+      reason: args.reason,
+    }),
+  }),
 ];

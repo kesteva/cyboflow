@@ -6,6 +6,7 @@ import ProjectSettings from './ProjectSettings';
 import { Button, IconButton } from './ui/Button';
 import { Card } from './ui/Card';
 import { CreateProjectDialog } from './CreateProjectDialog';
+import { useOcclusion } from '../hooks/useOcclusion';
 
 interface ProjectSelectorProps {
   onProjectChange?: (project: Project) => void;
@@ -15,6 +16,7 @@ export default function ProjectSelector({ onProjectChange }: ProjectSelectorProp
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [isOpen, setIsOpen] = useState(false);
+  useOcclusion(isOpen, 'project-selector');
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsProject, setSettingsProject] = useState<Project | null>(null);

@@ -1,5 +1,6 @@
 import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import type { LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
@@ -26,7 +27,7 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../../../shared/streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
-import { InteractiveSettingsWriter, resolveInlineGatingHooks } from './interactiveSettingsWriter';
+import { InteractiveSettingsWriter, resolveBrowserEnv, resolveInlineGatingHooks } from './interactiveSettingsWriter';
 import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
@@ -146,8 +147,12 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
  *                      system prompt has its OWN field: `sessionBriefing`.
  * ------------------------------------------------------------------------- */
 
-/** CLI spawn options accepted by the interactive substrate. */
-interface InteractiveClaudeSpawnOptions {
+/**
+ * CLI spawn options accepted by the interactive substrate. `laneEnv`
+ * ({@link LaneSpawnEnv}) reaches it only through a per-agent `claude-interactive`
+ * runtime pin on a programmatic lane step; initializeCliEnvironment merges it LAST.
+ */
+interface InteractiveClaudeSpawnOptions extends LaneSpawnEnv {
   /**
    * Set ONLY by a seam that showed the user their provider is switched off and
    * got an explicit "do it anyway" — see AbstractCliManager.assertProviderEnabled.
@@ -980,6 +985,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       // and the artifacts:load-images / auto-mint-scan resolvers
       // (CYBOFLOW_DIR/artifacts/runs/<runId>) all agree on one subtree.
       env.CYBOFLOW_RUN_ARTIFACTS_DIR = getCyboflowSubdirectory('artifacts', 'runs', runId);
+      // URLs the CLI opens (a published Artifact, a login page) go to this
+      // session's web viewer instead of the OS browser — openUrlShellHook.ts
+      // reaches the app on the same socket + token, and falls back to the OS
+      // opener when the viewer is off or the app does not answer.
+      Object.assign(env, resolveBrowserEnv({}, this.toLoggerLike(this.logger)));
     }
 
     // FORCE conversation-transcript persistence for the embedded REPL.
@@ -1016,6 +1026,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // under that theme. Defaults to the app's default paper (light) when unset.
     const theme = this.configManager?.getConfig()?.theme;
     env.COLORFGBG = theme === 'dark' ? '15;0' : '0;15';
+
+    // A fan-out lane's build-slot env (programmatic/laneBuildSlots.ts), LAST so
+    // it wins here and — since cliEnv overrides systemEnv — over the inherited env.
+    if (options.laneEnv) Object.assign(env, options.laneEnv);
 
     return env;
   }

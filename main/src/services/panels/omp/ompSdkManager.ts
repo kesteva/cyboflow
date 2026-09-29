@@ -714,7 +714,7 @@ export class OmpSdkManager extends AbstractCliManager {
     ];
     assertOmpSdkSpawnFlags(baseArgs);
 
-    const env = this.buildSpawnEnvironment(runId, sentinelPath, gateConfig, runtimeConfig, overlayPath);
+    const env = this.buildSpawnEnvironment(runId, sentinelPath, gateConfig, runtimeConfig, overlayPath, options.laneEnv);
     const fingerprint = sha1(
       stableSerialize({
         executablePath: executable.executablePath,
@@ -789,6 +789,7 @@ export class OmpSdkManager extends AbstractCliManager {
     gateConfig: OmpGateConfig,
     runtimeConfig: OmpMcpRuntimeConfig,
     overlayPath: string | null,
+    laneEnv: Readonly<Record<string, string>> | undefined,
   ): NodeJS.ProcessEnv {
     const inherited = process.env;
     const pathKey = Object.keys(inherited).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
@@ -821,6 +822,9 @@ export class OmpSdkManager extends AbstractCliManager {
       // inherits this, which is what makes an OMP lane self-govern its vitest
       // fork pool.
       ...managedTestConcurrencyEnv(),
+      // A fan-out lane's build-slot env (programmatic/laneBuildSlots.ts), LAST
+      // so it wins. Absent on every non-lane spawn.
+      ...laneEnv,
     };
   }
 

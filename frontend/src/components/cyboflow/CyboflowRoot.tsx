@@ -67,6 +67,7 @@ import { useRunSummaryDismissStore, useRunSummaryDismissed } from '../../stores/
 import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
 import { QuickSessionDockTabs } from './QuickSessionDockTabs';
+import { useOcclusion } from '../../hooks/useOcclusion';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -192,6 +193,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // keeps the ordering use-before-define-clean even though the callback only
   // ever runs post-render, when the const binding is already initialized.
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  useOcclusion(toastMessage !== null, 'session-action-toast');
 
   const handleEditorSaved = useCallback((_workflowId: string, savedAsNewScopeNote?: string) => {
     setIsEditorOpen(false);

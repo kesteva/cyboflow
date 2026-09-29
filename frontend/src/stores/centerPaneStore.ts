@@ -24,11 +24,13 @@ import {
   type FileTabStatus,
   type RightRailTab,
   type TabItem,
+  type WebTabOpener,
   FLOW_TAB_ID,
   makeFlowTab,
   fileTabId,
   artifactTabId,
   approvedDesignTabId,
+  makeWebTabId,
 } from '../../../shared/types/centerPane';
 
 /** A freshly-seeded session: the pinned Flow tab, dock open, Workflow steps rail. */
@@ -98,6 +100,39 @@ export interface OpenArtifactTabArgs {
   focus?: boolean;
 }
 
+/** Params to open (or focus) a web tab. */
+export interface OpenWebTabArgs {
+  /** Absolute http(s) URL. The caller resolves + scheme-checks before opening. */
+  url: string;
+  /** Strip label; defaults to the URL's hostname. */
+  label?: string;
+  /** Who opened it. Defaults to `'user'` — the chat-link path. */
+  openedBy?: WebTabOpener;
+  /** The opening run, for an agent open. See `TabItem.openedByRunId`. */
+  openedByRunId?: string;
+  /**
+   * Whether to make the tab active. Defaults to true. An AGENT open passes
+   * `false`: an agent may open a tab in the background but must never steal
+   * focus.
+   */
+  focus?: boolean;
+  /**
+   * Pre-minted id, used ONLY by the session restore path so a restored tab
+   * keeps the id its grants, telemetry cursor and DB row correlate on. Omit for
+   * a fresh open and one is minted.
+   */
+  id?: string;
+  /** Restored `currentUrl` (restore path only). */
+  currentUrl?: string;
+  /** Restored human-interaction tripwire (restore path only). */
+  humanTouched?: boolean;
+  /**
+   * Suppress the new-tab pulse on an unfocused open. A restore rebuilds tabs the
+   * user already had; pulsing all of them would read as "something happened".
+   */
+  quiet?: boolean;
+}
+
 /** Params to open (or focus) an approved-design tab. */
 export interface OpenApprovedDesignTabArgs {
   ideaId: string;
@@ -119,6 +154,15 @@ interface CenterPaneStore {
   openArtifactTab: (key: string, args: OpenArtifactTabArgs) => void;
   /** Open (or focus) an approved-design tab (one per idea per session). */
   openApprovedDesignTab: (key: string, args: OpenApprovedDesignTabArgs) => void;
+  /**
+   * Open a web tab and RETURN its id. Unlike its siblings this returns, because
+   * the id is the correlation key the caller immediately hands to
+   * `webViewer.open({ tabId, url })` — minting it here keeps the action
+   * synchronous like the others while main and the renderer agree on one id.
+   */
+  openWebTab: (key: string, args: OpenWebTabArgs) => string;
+  /** Rewrite a web tab's live URL / title / tripwire from a main-process event. */
+  updateWebTab: (key: string, tabId: string, patch: WebTabPatch) => void;
   /** Toggle the terminal dock expanded/collapsed. */
   toggleTerminal: (key: string) => void;
   /** Set the terminal dock expanded state explicitly. */
@@ -127,6 +171,26 @@ interface CenterPaneStore {
   setRightTab: (key: string, tab: RightRailTab) => void;
   /** Drop a session's tab state (e.g. on session close). */
   clearSession: (key: string) => void;
+}
+
+/** The mutable slice of a web tab that main-process events rewrite. */
+export interface WebTabPatch {
+  currentUrl?: string;
+  label?: string;
+  humanTouched?: boolean;
+}
+
+/**
+ * Label for a web tab: the URL's hostname, so the strip stays narrow and
+ * predictable before the page reports a title. A non-parsing URL falls back to
+ * the raw string rather than throwing inside a store action.
+ */
+export function webTabLabel(url: string): string {
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
 }
 
 /** Basename of a path (file tab label default). Separator-agnostic: paths
@@ -313,6 +377,74 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           ideaRef: args.ideaRef,
         };
         return { ...cur, tabs: [...cur.tabs, tab], activeTabId: id };
+      }),
+
+    openWebTab: (key, args) => {
+      // Minted OUTSIDE mutate() so the id can be returned synchronously — the
+      // caller needs it for webViewer.open({ tabId, url }). A restore passes the
+      // persisted id instead: re-minting would orphan the tab's grants,
+      // telemetry cursor and session_web_tabs row.
+      const id = args.id ?? makeWebTabId();
+      const focus = args.focus !== false;
+      mutate(key, (cur) => {
+        // Web tabs do NOT dedupe by URL: two tabs on the same URL are a
+        // legitimate thing to want (compare two states of a page), and the id is
+        // opaque precisely because the URL is not identity. A repeat call with an
+        // explicit id (restore) does reuse the row.
+        const existing = cur.tabs.find((t) => t.id === id);
+        if (existing) {
+          return {
+            ...cur,
+            activeTabId: focus ? id : cur.activeTabId,
+            tabs: cur.tabs.map((t) =>
+              t.id === id ? { ...t, label: args.label ?? t.label } : t,
+            ),
+          };
+        }
+        const tab: TabItem = {
+          id,
+          kind: 'web',
+          label: args.label ?? webTabLabel(args.url),
+          initialUrl: args.url,
+          currentUrl: args.currentUrl ?? args.url,
+          openedBy: args.openedBy ?? 'user',
+          ...(args.openedByRunId !== undefined ? { openedByRunId: args.openedByRunId } : {}),
+          ...(args.humanTouched === true ? { humanTouched: true } : {}),
+          // An agent-opened tab arrives as a pulsing inactive tab, the same
+          // affordance a mid-run artifact uses — it is new and unfocused.
+          ...(focus || args.quiet === true ? {} : { isNew: true }),
+        };
+        return {
+          ...cur,
+          tabs: [...cur.tabs, tab],
+          activeTabId: focus ? id : cur.activeTabId,
+        };
+      });
+      return id;
+    },
+
+    updateWebTab: (key, tabId, patch) =>
+      mutate(key, (cur) => {
+        const idx = cur.tabs.findIndex((t) => t.id === tabId && t.kind === 'web');
+        if (idx === -1) return cur;
+        return {
+          ...cur,
+          tabs: cur.tabs.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  ...(patch.currentUrl !== undefined ? { currentUrl: patch.currentUrl } : {}),
+                  ...(patch.label !== undefined && patch.label !== ''
+                    ? { label: patch.label }
+                    : {}),
+                  // The tripwire only ever LATCHES — a patch can set it, never
+                  // clear it. Clearing it would re-open free agent reads of a tab
+                  // the user has typed into.
+                  ...(patch.humanTouched === true ? { humanTouched: true } : {}),
+                }
+              : t,
+          ),
+        };
       }),
 
     toggleTerminal: (key) => mutate(key, (cur) => ({ ...cur, terminalOpen: !cur.terminalOpen })),

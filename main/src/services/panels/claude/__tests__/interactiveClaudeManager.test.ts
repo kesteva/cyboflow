@@ -801,6 +801,25 @@ describe('InteractiveClaudeManager', () => {
       const env = await mgr.callInitializeCliEnvironment(opts);
       expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
     });
+
+    // A programmatic lane step pinned to `claude-interactive` reaches this
+    // manager; its build-slot env (laneBuildSlots.ts) is merged LAST.
+    it('merges a lane build-slot env (laneEnv) last, and adds nothing without one', async () => {
+      mgr.setOrchSocketPath('/tmp/orch.sock');
+      const slot = '/tmp/wt/.cyboflow/build-slots/slot-0';
+      const lane = await mgr.callInitializeCliEnvironment({
+        ...opts,
+        runId: 'run-lane',
+        laneEnv: { CYBOFLOW_LANE_SCRATCH_DIR: slot, COLORFGBG: 'lane-wins' },
+      });
+      expect(lane.CYBOFLOW_LANE_SCRATCH_DIR).toBe(slot);
+      expect(lane.COLORFGBG).toBe('lane-wins');
+      expect(lane.CYBOFLOW_RUN_ID).toBe('run-lane');
+
+      const plain = await mgr.callInitializeCliEnvironment({ ...opts, runId: 'run-lane' });
+      expect(plain.CYBOFLOW_LANE_SCRATCH_DIR).toBeUndefined();
+      expect(plain.COLORFGBG).toBe('0;15');
+    });
   });
 
   // -------------------------------------------------------------------------
