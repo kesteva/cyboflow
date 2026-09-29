@@ -7,6 +7,7 @@
  * reports, which URL a re-load goes to — not Chromium.
  * docs/proposals/native-web-viewer.md §3.4.
  */
+import { EventEmitter } from 'events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fakes = vi.hoisted(() => {
@@ -84,7 +85,7 @@ function makeWindow() {
     children,
     isDestroyed: () => false,
     once: vi.fn(),
-    webContents: { getZoomFactor: () => 1, focus: vi.fn() },
+    webContents: Object.assign(new EventEmitter(), { getZoomFactor: () => 1, focus: vi.fn() }),
     contentView: {
       addChildView: (v: unknown) => children.add(v),
       removeChildView: (v: unknown) => children.delete(v),
@@ -144,6 +145,16 @@ describe('suspension', () => {
     created[0].webContents.focused = true;
     await manager.setVisible('t1', false);
     expect(win.webContents.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides every visible view when the app renderer reloads, but not on an in-page navigation', async () => {
+    await open('t1');
+    await manager.setVisible('t1', true);
+    win.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
+    expect(win.children.has(created[0])).toBe(true);
+    win.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    await vi.waitFor(() => expect(win.children.has(created[0])).toBe(false));
+    expect((await manager.get('t1'))?.state).toBe('hidden');
   });
 });
 

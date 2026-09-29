@@ -536,6 +536,16 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
         if (this.attachedWindow === window) this.attachedWindow = null;
         this.disposeAll();
       });
+      // A renderer reload (View → Reload) unmounts every tab body without its
+      // unmount-hide ever reaching main, so a visible view would stay painted
+      // over whatever the fresh renderer shows. Hide them all; the remounted
+      // tab re-shows its own.
+      window.webContents.on('did-start-navigation', (details) => {
+        if (!details.isMainFrame || details.isSameDocument) return;
+        for (const record of this.tabs.values()) {
+          if (record.visible) void this.setVisible(record.tabId, false);
+        }
+      });
     }
     return window;
   }
