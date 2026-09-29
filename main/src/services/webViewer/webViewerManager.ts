@@ -252,11 +252,14 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
     return { ok: true, snapshot };
   }
 
-  async navigate(tabId: string, url: string): Promise<WebViewerAck> {
+  async navigate(tabId: string, url: string, opts: { byUser?: boolean } = {}): Promise<WebViewerAck> {
     const record = this.tabs.get(tabId);
     if (!record) return { ok: false, error: 'tab_not_found' };
     const resolved = resolveViewableUrl(url);
     if (resolved === null) return { ok: false, error: 'invalid_arguments: url must be http(s)' };
+    // A typed URL can carry a secret (a magic link, a token in the query), so it
+    // counts as the human interacting with the tab.
+    if (opts.byUser === true) this.markHumanTouched(record);
     const wc = this.ensureLoaded(record);
     if (!wc) return { ok: false, error: record.state === 'crashed' ? 'tab_crashed' : 'no_window' };
     record.loading = true;

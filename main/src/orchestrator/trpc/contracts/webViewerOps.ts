@@ -55,7 +55,12 @@ export type WebViewerAck = { ok: true } | { ok: false; error: string };
  */
 export interface WebViewerCoreLike {
   open(args: WebViewerOpenArgs): Promise<WebViewerOpenResult>;
-  navigate(tabId: string, url: string): Promise<WebViewerAck>;
+  /**
+   * `byUser`: the human typed the URL into the tab's address bar. That latches
+   * the human-touch tripwire like a keystroke in the page would — agent drives
+   * navigate without it.
+   */
+  navigate(tabId: string, url: string, opts?: { byUser?: boolean }): Promise<WebViewerAck>;
   back(tabId: string): Promise<WebViewerAck>;
   forward(tabId: string): Promise<WebViewerAck>;
   reload(tabId: string): Promise<WebViewerAck>;

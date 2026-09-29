@@ -192,8 +192,8 @@ export class PersistingWebViewer implements WebViewerLike {
   // Pass-through
   // -------------------------------------------------------------------------
 
-  navigate(tabId: string, url: string): Promise<WebViewerAck> {
-    return this.manager.navigate(tabId, url);
+  navigate(tabId: string, url: string, opts?: { byUser?: boolean }): Promise<WebViewerAck> {
+    return this.manager.navigate(tabId, url, opts);
   }
   back(tabId: string): Promise<WebViewerAck> {
     return this.manager.back(tabId);

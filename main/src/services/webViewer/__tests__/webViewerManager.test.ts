@@ -290,6 +290,14 @@ describe('consent inputs', () => {
     ]);
   });
 
+  it('a URL the human typed latches the tripwire; an agent navigate does not', async () => {
+    await open('a1', { openedBy: 'agent' });
+    await manager.navigate('a1', 'https://example.com/by-agent');
+    expect(manager.consentView('a1')?.humanTouched).toBe(false);
+    await manager.navigate('a1', 'https://example.com/typed', { byUser: true });
+    expect(manager.consentView('a1')?.humanTouched).toBe(true);
+  });
+
   it('latches the WHOLE agent jar once a human touches any of its tabs', async () => {
     await open('a1', { openedBy: 'agent' });
     await open('a2', { openedBy: 'agent' });

@@ -81,7 +81,8 @@ export const webViewerRouter = router({
   navigate: protectedProcedure
     .input(tabIdInput.extend({ url: z.string().min(1) }))
     .mutation(async ({ ctx, input }): Promise<WebViewerAck> => {
-      return requireViewer(ctx.webViewer).navigate(input.tabId, input.url);
+      // Only the renderer calls this, and only for a URL the human typed.
+      return requireViewer(ctx.webViewer).navigate(input.tabId, input.url, { byUser: true });
     }),
 
   back: protectedProcedure
