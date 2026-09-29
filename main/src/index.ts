@@ -132,7 +132,7 @@ import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blocki
 import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
-import { parsePorcelainPaths, checkCommittedBuildSlots } from './orchestrator/programmatic/commitIntegrity';
+import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -316,13 +316,13 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync, runGitExit } from './utils/runGit';
+import { runGitAsync } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
-import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlots';
+import { stripInheritedLaneEnv, checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -375,10 +375,7 @@ for (const key of [
 ]) {
   delete process.env[key];
 }
-// Same reason for a hosting LANE's build-slot env (CYBOFLOW_LANE_SCRATCH_DIR and
-// the module-cache overrides that point into it): inherited, it would send this
-// instance's non-lane spawns into the outer run's slot directory.
-stripInheritedLaneEnv(process.env);
+stripInheritedLaneEnv(process.env); // Same reason for a hosting lane's build-slot env (laneBuildSlots.ts).
 
 // Set by the boot-time schema-version gate when the user picked "Check for
 // Updates" on a database that a newer build advanced. Consumed once by the
@@ -3067,9 +3064,6 @@ async function initializeServices(): Promise<boolean> {
                 // Keep the plain comparison.
               }
             }
-            // Lane build output (.cyboflow/build-slots/) in the END HEAD's committed tree — tri-state, fail-closed only while slots exist.
-            const buildSlots = await checkCommittedBuildSlots(
-              (args) => runGitExit(worktreePath, args), (rel) => fs.existsSync(path.join(worktreePath, rel)));
             return {
               headAdvanced,
               dirty: dirtyPaths.length > 0,
@@ -3077,7 +3071,7 @@ async function initializeServices(): Promise<boolean> {
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
-              buildSlots,
+              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
             };
           };
         },
