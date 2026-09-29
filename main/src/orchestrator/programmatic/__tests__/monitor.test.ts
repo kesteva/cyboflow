@@ -2091,7 +2091,8 @@ describe('buildLaneTriagePrompt', () => {
     expect(ci).toContain('made no git commit while the worktree holds uncommitted changes');
     expect(ci).toContain('THIS IS A COMMIT-INTEGRITY FAILURE');
     // The second commit-integrity shape (lane build output committed) has no accept.
-    expect(ci).toContain('carry files under `.cyboflow/build-slots/`');
+    expect(ci).toContain('carries files under `.cyboflow/build-slots/`');
+    expect(ci).toContain('git could not verify whether it does');
     expect(ci).toContain('"accept" is not available');
     const other = buildLaneTriagePrompt(sprintCtx, history, laneReq());
     expect(other).not.toContain('COMMIT-INTEGRITY FAILURE');

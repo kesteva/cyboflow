@@ -50,6 +50,7 @@ import { parseVisualTaskSection } from '../verify/visualTaskSection';
 import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
   BuildBreakGroup,
+  BuildSlotCheck,
   CommitIntegrityProbe,
   CommitIntegrityReading,
   ControllerEscalation,
@@ -74,7 +75,7 @@ import type {
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
-import { commitIntegrityExcerpt, committedBuildSlotsExcerpt } from './commitIntegrity';
+import { commitIntegrityExcerpt, committedBuildSlotsExcerpt, unverifiedBuildSlotsExcerpt } from './commitIntegrity';
 
 /**
  * Parse a task-verify agent's captured result text for its terminal verdict —
@@ -1668,14 +1669,6 @@ export class WorkflowController {
     const activeLanes = new Set<string>();
     const overlappedLanes = new Set<string>();
     /**
-     * itemId → the lane-start HEAD of its FIRST dispatch (the commit probe's
-     * `startHead`). A systemic park's 'retry' re-dispatches a lane with a fresh
-     * probe, whose start HEAD already holds whatever the earlier dispatch
-     * committed; the build-slot half of the lane-end check must still see that,
-     * so every later dispatch diffs from here (`CommitProbeOptions`).
-     */
-    const laneFirstStartHeads = new Map<string, string>();
-    /**
      * itemId → the CONCURRENCY SLOT its live walk occupies: the lowest index no
      * other live lane holds, taken at dispatch and released when the walk settles,
      * so a lane dispatched into a freed slot inherits that slot's warm build
@@ -1986,13 +1979,7 @@ export class WorkflowController {
       // pre-backstop path (step verdicts alone).
       let commitProbe: CommitIntegrityProbe | undefined;
       try {
-        const buildSlotBaseHead = laneFirstStartHeads.get(itemId);
-        commitProbe = await (buildSlotBaseHead !== undefined
-          ? driver.beginCommitProbe?.(runId, { buildSlotBaseHead })
-          : driver.beginCommitProbe?.(runId));
-        if (buildSlotBaseHead === undefined && commitProbe?.startHead !== undefined) {
-          laneFirstStartHeads.set(itemId, commitProbe.startHead);
-        }
+        commitProbe = await driver.beginCommitProbe?.(runId);
       } catch (err) {
         this.host.log?.(
           'warn',
@@ -2202,12 +2189,14 @@ export class WorkflowController {
       };
 
       /**
-       * The lane's commits (its FIRST dispatch's start HEAD → lane-end HEAD, see
-       * `laneFirstStartHeads`) carry files under `.cyboflow/build-slots/` — lane
-       * build output that must never be merged. The monitor is consulted
-       * (failure kind 'commit-integrity', with its own excerpt) and only a RESCUE
-       * keeps the lane alive: the re-driven lane is re-checked at its end, so a
-       * re-run that untracks them and commits integrates. Every other verdict
+       * The committed tree at the lane-end HEAD carries files under
+       * `.cyboflow/build-slots/` — lane build output that must never be merged —
+       * or git could not verify that it does not while the directory exists on
+       * disk (`CommitIntegrityReading.buildSlots`, fail-closed). The monitor is
+       * consulted (failure kind 'commit-integrity', with the excerpt for that
+       * case) and only a RESCUE keeps the lane alive: the re-driven lane is
+       * re-checked at its end, so a re-run that untracks them and commits (or
+       * whose check git can answer again) integrates. Every other verdict
        * fails the lane — there is deliberately no ownership fallback (a sibling's
        * commit still cannot be merged under this lane), and 'accept', which
        * elsewhere integrates, cannot waive it: the consult says so
@@ -2217,13 +2206,15 @@ export class WorkflowController {
        * as the dirty-tree arm does.
        */
       const refuseCommittedBuildSlots = async (
-        paths: readonly string[],
+        buildSlots: Exclude<BuildSlotCheck, { kind: 'clean' }>,
       ): Promise<{ kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }> => {
         const lastStepId = inner[inner.length - 1].id;
         const verdict = await triageLane(
           lastStepId,
           'commit-integrity',
-          committedBuildSlotsExcerpt(paths, overlappedLanes.has(itemId)),
+          buildSlots.kind === 'leak'
+            ? committedBuildSlotsExcerpt(buildSlots.paths, overlappedLanes.has(itemId))
+            : unverifiedBuildSlotsExcerpt(),
           false,
           'exhausted',
           true,
@@ -2238,13 +2229,15 @@ export class WorkflowController {
         if (verdict.kind === 'accept') {
           this.host.log?.(
             'warn',
-            `fan-out item '${itemId}': the monitor ACCEPTED the lane (${verdict.reason}), but accept cannot integrate a lane whose commits carry lane build output; failing it`,
+            `fan-out item '${itemId}': the monitor ACCEPTED the lane (${verdict.reason}), but accept cannot integrate a lane whose committed tree carries (or may carry) lane build output; failing it`,
           );
         }
         driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
         this.host.log?.(
           'error',
-          `fan-out item '${itemId}': its commits added lane build output under .cyboflow/build-slots/ (${paths.length} path(s), e.g. ${paths[0]}) — refusing to mark integrated`,
+          buildSlots.kind === 'leak'
+            ? `fan-out item '${itemId}': the lane-end committed tree carries lane build output under .cyboflow/build-slots/ (${buildSlots.paths.length} path(s), e.g. ${buildSlots.paths[0]}) — refusing to mark integrated`
+            : `fan-out item '${itemId}': git could not verify whether lane build output under .cyboflow/build-slots/ is committed (the directory exists on disk) — refusing to mark integrated`,
         );
         return { kind: 'settled', outcome: { kind: 'failed', persisted: true } };
       };
@@ -2272,11 +2265,12 @@ export class WorkflowController {
        *      for dirt it may not own ⇒ integrate with a warning (the probe may
        *      only withhold a false 'integrated', never invent a failure).
        *
-       * One reading overrides all of that: commits that carry LANE BUILD OUTPUT
-       * (`committedBuildSlotPaths`, laneBuildSlots.ts). An advanced HEAD proves
-       * nothing there — the commits themselves are wrong — and ownership cannot
-       * clear it: whoever committed the files, integrating would merge them. See
-       * `refuseCommittedBuildSlots`.
+       * One reading overrides all of that: a lane-end committed tree that carries
+       * LANE BUILD OUTPUT, or that git could not verify clean while the slots
+       * directory exists (`buildSlots` 'leak' / 'unknown', laneBuildSlots.ts). An
+       * advanced HEAD proves nothing there — the commits themselves are wrong —
+       * and ownership cannot clear it: whoever committed the files, integrating
+       * would merge them. See `refuseCommittedBuildSlots`.
        */
       const checkCommitIntegrity = async (): Promise<
         { kind: 'integrate' } | { kind: 'redrive'; targetIndex: number } | { kind: 'settled'; outcome: LaneWalkOutcome }
@@ -2292,9 +2286,9 @@ export class WorkflowController {
           );
           return { kind: 'integrate' };
         }
-        const buildSlotPaths = reading.committedBuildSlotPaths;
-        if (buildSlotPaths !== undefined && buildSlotPaths.length > 0) {
-          return await refuseCommittedBuildSlots(buildSlotPaths);
+        const buildSlots = reading.buildSlots;
+        if (buildSlots !== undefined && buildSlots.kind !== 'clean') {
+          return await refuseCommittedBuildSlots(buildSlots);
         }
         if (reading.headAdvanced || !reading.dirty) return { kind: 'integrate' };
         if (reading.newDirtyPaths !== undefined && reading.newDirtyPaths.length === 0) {

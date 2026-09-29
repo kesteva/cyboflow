@@ -7,10 +7,11 @@ import { runGitExit, type RunGitOptions } from '../../../utils/runGit';
 import type { GitExit } from '../laneBuildSlots';
 import {
   COMMITTED_BUILD_SLOTS_UNLISTED,
+  checkCommittedBuildSlots,
   commitIntegrityExcerpt,
   committedBuildSlotsExcerpt,
   parsePorcelainPaths,
-  readCommittedBuildSlotPaths,
+  unverifiedBuildSlotsExcerpt,
 } from '../commitIntegrity';
 
 describe('parsePorcelainPaths', () => {
@@ -55,28 +56,41 @@ describe('commitIntegrityExcerpt', () => {
 });
 
 describe('committedBuildSlotsExcerpt', () => {
-  it('lists the paths, names the fix, and rules out accept', () => {
+  it('lists the paths, names the fix, rules out accept, and says the files may predate the lane', () => {
     const text = committedBuildSlotsExcerpt(['.cyboflow/build-slots/slot-0/a.o'], false);
+    expect(text).toContain('committed tree at the lane-end HEAD');
     expect(text).toContain('- .cyboflow/build-slots/slot-0/a.o');
     expect(text).toContain('git rm -r --cached -- .cyboflow/build-slots');
     expect(text).toContain('"accept" IS NOT AN OPTION');
-    expect(text).toContain('No other lane was running');
-    expect(text).not.toContain('OWNERSHIP:');
+    expect(text).toContain('no other lane was running');
+    expect(text).toContain('already in HEAD when it started');
+    expect(text).not.toContain('commits made while it ran');
   });
 
-  it("notes that an overlapped lane's range includes siblings' commits, and caps the list", () => {
+  it('names a sibling lane as a possible committer for an overlapped lane, and caps the list', () => {
     const paths = Array.from({ length: 25 }, (_, i) => `.cyboflow/build-slots/slot-1/f${i}.o`);
     const text = committedBuildSlotsExcerpt(paths, true);
-    expect(text).toContain('OWNERSHIP:');
-    expect(text).toContain('also contains their commits');
+    expect(text).toContain('a sibling lane');
+    expect(text).toContain('SAME worktree');
     expect(text).toContain('- .cyboflow/build-slots/slot-1/f19.o');
     expect(text).not.toContain('- .cyboflow/build-slots/slot-1/f20.o');
     expect(text).toContain('… and 5 more');
   });
 });
 
-// ── real git: which build-slot paths a lane's commit range carries ──
-describe('readCommittedBuildSlotPaths — real git', () => {
+describe('unverifiedBuildSlotsExcerpt', () => {
+  it('says git could not verify, gives the check and the fix, and rules out accept', () => {
+    const text = unverifiedBuildSlotsExcerpt();
+    expect(text).toContain('git could not verify');
+    expect(text).toContain('git ls-tree -r --name-only HEAD -- .cyboflow/build-slots');
+    expect(text).toContain('git rm -r --cached -- .cyboflow/build-slots');
+    expect(text).toContain('"accept" IS NOT AN OPTION');
+    expect(text).toContain('check runs again');
+  });
+});
+
+// ── real git: does the lane-end HEAD's committed tree carry build-slot paths ──
+describe('checkCommittedBuildSlots — real git', () => {
   function git(args: string[], cwd: string): string {
     return execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], {
       cwd,
@@ -101,56 +115,55 @@ describe('readCommittedBuildSlotPaths — real git', () => {
     fs.appendFileSync(path.resolve(repo, git(['rev-parse', '--git-path', 'info/exclude'], repo)), '/.cyboflow/build-slots/\n');
     return commitFile(repo, 'README.md', 'hello\n');
   }
-  /** The probe's own runner: `runGitExit` in the worktree (index.ts beginCommitProbe). */
+  /** The probe's own runners (index.ts beginCommitProbe): `runGitExit` and an on-disk check in the worktree. */
   const inRepo = (repo: string, options: RunGitOptions = {}) => (args: string[]) => runGitExit(repo, args, options);
+  const onDisk = (repo: string) => (rel: string) => fs.existsSync(path.join(repo, rel));
+  const check = (repo: string, options: RunGitOptions = {}) => checkCommittedBuildSlots(inRepo(repo, options), onDisk(repo));
 
   it(
-    'reports a force-added build-slot file, clears once a later commit removes it, and ignores unrelated commits',
+    'reports a force-committed build-slot file, clears once a later commit removes it, and ignores unrelated files',
     async () => {
       await withTempDir('commit-integrity-slots-', async (repo) => {
-        const start = initRepo(repo);
+        initRepo(repo);
+        // Slots in use on disk (git-excluded, uncommitted): nothing committed ⇒ clean.
+        fs.mkdirSync(path.join(repo, '.cyboflow', 'build-slots', 'slot-0'), { recursive: true });
+        fs.writeFileSync(path.join(repo, '.cyboflow', 'build-slots', 'slot-0', 'scratch.o'), 'o');
+        commitFile(repo, 'src/a.ts', 'export {};\n');
+        expect(await check(repo)).toEqual({ kind: 'clean' });
 
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), start, start)).toEqual([]);
-        const unrelated = commitFile(repo, 'src/a.ts', 'export {};\n');
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), start, unrelated)).toEqual([]);
-
-        const leaked = commitFile(repo, '.cyboflow/build-slots/slot-0/DerivedData/build.db', 'x', true);
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), start, leaked)).toEqual([
-          '.cyboflow/build-slots/slot-0/DerivedData/build.db',
-        ]);
+        commitFile(repo, '.cyboflow/build-slots/slot-0/DerivedData/build.db', 'x', true);
+        expect(await check(repo)).toEqual({
+          kind: 'leak',
+          paths: ['.cyboflow/build-slots/slot-0/DerivedData/build.db'],
+        });
         // A project's OTHER .cyboflow/ files are not build output, nor is a look-alike sibling dir.
         commitFile(repo, '.cyboflow/verify-runbook.json', '{}\n');
-        const runbook = commitFile(repo, '.cyboflow/build-slots-archive/notes.txt', 'n\n');
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), leaked, runbook)).toEqual([]);
+        commitFile(repo, '.cyboflow/build-slots-archive/notes.txt', 'n\n');
+        expect(await check(repo)).toEqual({
+          kind: 'leak',
+          paths: ['.cyboflow/build-slots/slot-0/DerivedData/build.db'],
+        });
 
         git(['rm', '-q', '-r', '--cached', '--', '.cyboflow/build-slots'], repo);
-        const fixed = commitAll(repo, 'untrack build output');
-        // Tree comparison: the range as a whole no longer carries them.
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), start, fixed)).toEqual([]);
-        // A lane whose range only REMOVES an earlier offender is not blamed for it.
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), runbook, fixed)).toEqual([]);
+        commitAll(repo, 'untrack build output');
+        expect(await check(repo)).toEqual({ kind: 'clean' });
       });
     },
     60_000,
   );
 
   it(
-    'reports a file RENAMED into the slots root as the add it is, even with diff.renames on',
+    'still reports output committed BEFORE the lane started (already in its start HEAD — e.g. an earlier run, pre-restart)',
     async () => {
-      await withTempDir('commit-integrity-slots-rename-', async (repo) => {
-        const start = initRepo(repo);
-        git(['config', 'diff.renames', 'true'], repo);
-        const before = commitFile(repo, 'build/app.o', 'object code\n');
-        fs.mkdirSync(path.join(repo, '.cyboflow', 'build-slots', 'slot-1'), { recursive: true });
-        git(['mv', '-f', '--', 'build/app.o', '.cyboflow/build-slots/slot-1/app.o'], repo);
-        const moved = commitAll(repo, 'move build output');
-
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), before, moved)).toEqual([
-          '.cyboflow/build-slots/slot-1/app.o',
-        ]);
-        expect(await readCommittedBuildSlotPaths(inRepo(repo), start, moved)).toEqual([
-          '.cyboflow/build-slots/slot-1/app.o',
-        ]);
+      await withTempDir('commit-integrity-slots-before-', async (repo) => {
+        initRepo(repo);
+        commitFile(repo, '.cyboflow/build-slots/slot-1/app.o', 'object code\n', true);
+        // The lane starts HERE and commits only unrelated work: no start..end range
+        // would contain the leak, but the end HEAD's tree still does.
+        const laneStart = git(['rev-parse', 'HEAD'], repo);
+        const laneEnd = commitFile(repo, 'src/feature.ts', 'export const x = 1;\n');
+        expect(laneEnd).not.toBe(laneStart);
+        expect(await check(repo)).toEqual({ kind: 'leak', paths: ['.cyboflow/build-slots/slot-1/app.o'] });
       });
     },
     60_000,
@@ -160,42 +173,122 @@ describe('readCommittedBuildSlotPaths — real git', () => {
     'still reports a leak too big to LIST (the name listing overflows the output buffer)',
     async () => {
       await withTempDir('commit-integrity-slots-big-', async (repo) => {
-        const start = initRepo(repo);
-        const leaked = commitFile(repo, '.cyboflow/build-slots/slot-0/DerivedData/Index.noindex/big.idx', 'x', true);
+        initRepo(repo);
+        commitFile(repo, '.cyboflow/build-slots/slot-0/DerivedData/Index.noindex/big.idx', 'x', true);
 
-        // A buffer too small for even one path stands in for 80k DerivedData paths
+        // A buffer that fits the one top entry the presence check prints but not
+        // the full recursive listing stands in for 80k DerivedData paths
         // overflowing the real 10 MB one: git said the files are there, so the
         // lane is still refused — with a placeholder instead of the list.
-        const tiny = inRepo(repo, { maxBuffer: 16 });
-        await expect(runGitExit(repo, ['diff', '--name-only', start, leaked], { maxBuffer: 16 })).rejects.toMatchObject({
-          code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
-        });
-        expect(await readCommittedBuildSlotPaths(tiny, start, leaked)).toEqual([COMMITTED_BUILD_SLOTS_UNLISTED]);
+        const small = { maxBuffer: '.cyboflow/build-slots\n'.length + 4 };
+        await expect(
+          runGitExit(repo, ['ls-tree', '-r', '--name-only', 'HEAD', '--', '.cyboflow/build-slots'], small),
+        ).rejects.toMatchObject({ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+        expect(await check(repo, small)).toEqual({ kind: 'leak', paths: [COMMITTED_BUILD_SLOTS_UNLISTED] });
       });
     },
     60_000,
   );
+  it(
+    'fails closed (unknown) when real git cannot read the tree and the slots directory exists — clean when it does not',
+    async () => {
+      // Not a repository at all: every git read fails (exit 128), twice.
+      await withTempDir('commit-integrity-slots-nogit-', async (dir) => {
+        fs.writeFileSync(path.join(dir, '.git'), 'gitdir: /nonexistent/cyboflow-test-gitdir\n');
+        expect(await check(dir)).toEqual({ kind: 'clean' });
+        fs.mkdirSync(path.join(dir, '.cyboflow', 'build-slots', 'slot-0'), { recursive: true });
+        expect(await check(dir)).toEqual({ kind: 'unknown' });
+      });
+    },
+    60_000,
+  );
+});
 
-  it('resolves undefined (never throws) when git cannot answer whether anything is there', async () => {
-    const failing = async (): Promise<GitExit> => {
-      throw new Error('spawn git ENOENT');
+describe('checkCommittedBuildSlots — git failures (tri-state)', () => {
+  const clean: GitExit = { exitCode: 0, stdout: '', stderr: '' };
+  const failed: GitExit = { exitCode: 128, stdout: '', stderr: 'fatal: unable to read tree' };
+  /** A git runner that answers each call from `script` in order (the last entry repeats), counting calls. */
+  function scripted(script: Array<GitExit | Error>): { git: (args: string[]) => Promise<GitExit>; calls: string[][] } {
+    const calls: string[][] = [];
+    return {
+      calls,
+      git: async (args) => {
+        calls.push(args);
+        const next = script[Math.min(calls.length - 1, script.length - 1)];
+        if (next instanceof Error) throw next;
+        return next;
+      },
     };
-    expect(await readCommittedBuildSlotPaths(failing, 'aaa', 'bbb')).toBeUndefined();
-    const badObject = async (): Promise<GitExit> => ({ exitCode: 128, stdout: '', stderr: 'fatal: bad object aaa' });
-    expect(await readCommittedBuildSlotPaths(badObject, 'aaa', 'bbb')).toBeUndefined();
+  }
+
+  it('reports unknown when git fails twice and the slots directory exists on disk', async () => {
+    const { git, calls } = scripted([failed]);
+    const asked: string[] = [];
+    const result = await checkCommittedBuildSlots(git, (rel) => {
+      asked.push(rel);
+      return true;
+    });
+    expect(result).toEqual({ kind: 'unknown' });
+    expect(calls).toHaveLength(2);
+    expect(asked).toEqual(['.cyboflow/build-slots']);
+  });
+
+  it('treats a THROWING git (spawn failure) like a failed exit', async () => {
+    const { git, calls } = scripted([new Error('spawn git ENOENT')]);
+    expect(await checkCommittedBuildSlots(git, () => true)).toEqual({ kind: 'unknown' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('reports clean when git fails twice but no slots directory exists (nothing could have leaked)', async () => {
+    const { git, calls } = scripted([failed]);
+    expect(await checkCommittedBuildSlots(git, () => false)).toEqual({ kind: 'clean' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('fails closed when the on-disk check itself throws', async () => {
+    const { git } = scripted([failed]);
+    const result = await checkCommittedBuildSlots(git, () => {
+      throw new Error('EACCES');
+    });
+    expect(result).toEqual({ kind: 'unknown' });
+  });
+
+  it('uses the RETRY\'s answer when git fails once and then succeeds', async () => {
+    const present: GitExit = { exitCode: 0, stdout: '.cyboflow/build-slots\n', stderr: '' };
+    const listing: GitExit = { exitCode: 0, stdout: '.cyboflow/build-slots/slot-0/a.o\n', stderr: '' };
+    const leak = scripted([failed, present, listing]);
+    expect(await checkCommittedBuildSlots(leak.git, () => true)).toEqual({
+      kind: 'leak',
+      paths: ['.cyboflow/build-slots/slot-0/a.o'],
+    });
+    const cleanAfterRetry = scripted([failed, clean]);
+    expect(await checkCommittedBuildSlots(cleanAfterRetry.git, () => true)).toEqual({ kind: 'clean' });
+    expect(cleanAfterRetry.calls).toHaveLength(2);
+  });
+
+  it('never consults the disk or retries when the first read answers', async () => {
+    const { git, calls } = scripted([clean]);
+    let asked = false;
+    const result = await checkCommittedBuildSlots(git, () => {
+      asked = true;
+      return true;
+    });
+    expect(result).toEqual({ kind: 'clean' });
+    expect(calls).toHaveLength(1);
+    expect(asked).toBe(false);
   });
 
   it('reports the placeholder when the presence check says yes but the listing fails or comes back empty', async () => {
-    const presentThen = (listing: () => Promise<GitExit>) => async (args: string[]): Promise<GitExit> =>
-      args.includes('--quiet') ? { exitCode: 1, stdout: '', stderr: '' } : listing();
+    const present: GitExit = { exitCode: 0, stdout: '.cyboflow/build-slots\n', stderr: '' };
     const overflow = Object.assign(new Error('stdout maxBuffer length exceeded'), {
       code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
     });
-    expect(
-      await readCommittedBuildSlotPaths(presentThen(async () => Promise.reject(overflow)), 'aaa', 'bbb'),
-    ).toEqual([COMMITTED_BUILD_SLOTS_UNLISTED]);
-    expect(
-      await readCommittedBuildSlotPaths(presentThen(async () => ({ exitCode: 128, stdout: '', stderr: 'boom' })), 'aaa', 'bbb'),
-    ).toEqual([COMMITTED_BUILD_SLOTS_UNLISTED]);
+    for (const listing of [overflow, failed, clean]) {
+      const { git } = scripted([present, listing]);
+      expect(await checkCommittedBuildSlots(git, () => true)).toEqual({
+        kind: 'leak',
+        paths: [COMMITTED_BUILD_SLOTS_UNLISTED],
+      });
+    }
   });
 });

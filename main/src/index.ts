@@ -131,7 +131,7 @@ import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blocki
 import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
 import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
-import { parsePorcelainPaths, readCommittedBuildSlotPaths } from './orchestrator/programmatic/commitIntegrity';
+import { parsePorcelainPaths, checkCommittedBuildSlots } from './orchestrator/programmatic/commitIntegrity';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -2997,7 +2997,7 @@ async function initializeServices(): Promise<boolean> {
         // left the tree dirty. Every failure path (no worktree row, git error)
         // degrades to "no probe" / a rethrow the controller swallows, so the
         // backstop can only withhold a false integrate, never invent a failure.
-        beginCommitProbe: async (rid, opts) => {
+        beginCommitProbe: async (rid) => {
           const row = rawDb
             .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
             .get(rid) as { worktree_path?: unknown } | undefined;
@@ -3024,7 +3024,7 @@ async function initializeServices(): Promise<boolean> {
           } catch {
             startDirty = undefined;
           }
-          return Object.assign(async () => {
+          return async () => {
             const endHead = await readHead();
             const dirtyPaths = await readDirtyPaths();
             // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
@@ -3061,9 +3061,9 @@ async function initializeServices(): Promise<boolean> {
                 // Keep the plain comparison.
               }
             }
-            // Lane build output (.cyboflow/build-slots/) committed since the lane FIRST started — fail-soft (absent on error).
-            const committedBuildSlotPaths = await readCommittedBuildSlotPaths(
-              (args) => runGitExit(worktreePath, args), opts?.buildSlotBaseHead ?? startHead, endHead);
+            // Lane build output (.cyboflow/build-slots/) in the END HEAD's committed tree — tri-state, fail-closed only while slots exist.
+            const buildSlots = await checkCommittedBuildSlots(
+              (args) => runGitExit(worktreePath, args), (rel) => fs.existsSync(path.join(worktreePath, rel)));
             return {
               headAdvanced,
               dirty: dirtyPaths.length > 0,
@@ -3071,9 +3071,9 @@ async function initializeServices(): Promise<boolean> {
               ...(startDirty !== undefined
                 ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
                 : {}),
-              ...(committedBuildSlotPaths !== undefined ? { committedBuildSlotPaths } : {}),
+              buildSlots,
             };
-          }, { startHead });
+          };
         },
         // Targeted failed→running un-settle for the controller's MONITOR LANE
         // RESCUE at the visual merge gate: that gate durably writes the lane
