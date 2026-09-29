@@ -94,6 +94,7 @@ import { BlockedRunsSection } from './BlockedRunsSection';
 import { NeedsInputSection } from './NeedsInputSection';
 import { NotificationsSection } from './NotificationsSection';
 import { HumanTasksSection } from './HumanTasksSection';
+import { dependentsByHumanRef, isHumanTaskReviewItem, selectPendingHumanTasks } from './humanTasks';
 import { ReadyForReviewSection, type ReadyRow } from './ReadyForReviewSection';
 import { WorkingSection, type WorkingRow } from './WorkingSection';
 import { BacklogSection } from './BacklogSection';
@@ -311,11 +312,26 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     () => reviewItems.filter((it) => it.kind === 'notification'),
     [reviewItems],
   );
-  const humanTaskItems = React.useMemo(
+  // Human tasks come from the BACKLOG (see ./humanTasks.ts); a task's own
+  // `human-task:<id>` review item folds into its row, so only loose action items
+  // stay review-item rows.
+  const pendingHumanTasks = React.useMemo(
+    () => selectPendingHumanTasks(backlogTasks, backlogBoards),
+    [backlogTasks, backlogBoards],
+  );
+  const humanTaskDependents = React.useMemo(() => dependentsByHumanRef(backlogTasks), [backlogTasks]);
+  const humanActionItems = React.useMemo(
     () =>
       reviewItems.filter(
-        (it) => it.kind === 'human_task' && !(it.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX) ?? false),
+        (it) =>
+          it.kind === 'human_task' &&
+          !(it.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX) ?? false) &&
+          !isHumanTaskReviewItem(it),
       ),
+    [reviewItems],
+  );
+  const foldedHumanTaskItemCount = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'human_task' && isHumanTaskReviewItem(it)).length,
     [reviewItems],
   );
 
@@ -375,7 +391,9 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
 
   const waitingCount =
     approvalsCount +
-    reviewItems.length +
+    reviewItems.length -
+    foldedHumanTaskItemCount +
+    pendingHumanTasks.length +
     readyToReviewCount +
     attentionQuickCount +
     blockedRunRows.length;
@@ -797,14 +815,19 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         onOpenRun={(run) => openRunSession(run.id, run.project_id)}
       />
     ) : null,
-    'queue.human-tasks': showSessionSections ? (
+    // Not gated on showSessionSections: human tasks are backlog work, pending
+    // whether or not any session exists (the section renders nothing when empty).
+    'queue.human-tasks': (
       <HumanTasksSection
-        items={humanTaskItems}
+        tasks={pendingHumanTasks}
+        dependentsByHumanRef={humanTaskDependents}
+        boards={backlogBoards}
+        actionItems={humanActionItems}
         projectNameById={projectNameById}
         nowMs={nowMs}
         onResolved={afterLifecycleAction}
       />
-    ) : null,
+    ),
     // The wrapper div carries the scroll ref and its offset — it is part of the
     // section, not of the surface, so it travels with it into a custom view.
     'queue.ready-for-review': showSessionSections ? (
