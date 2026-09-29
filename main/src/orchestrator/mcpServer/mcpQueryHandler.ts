@@ -605,14 +605,14 @@ export class McpQueryHandler {
           await this.verifyTools.handleRegisterVerifyRunbook(msg, client);
           break;
         case 'mcp-run-eval':
-          // FIRE-AND-CONTINUE: awaits only the snapshot + enqueue (never the jury),
-          // then replies with the queued/requeued/in_flight status or a reason code.
+          // FIRE-AND-CONTINUE: awaits snapshot + enqueue only (never the jury); replies with the status.
           await this.verifyTools.handleRunEval(msg, client);
           break;
         case 'mcp-web-tabs':
         case 'mcp-read-web-tab':
         case 'mcp-open-web-tab':
         case 'mcp-drive-web-tab': // AWAITED: read/drive can block on a consent prompt on the tab.
+        case 'web-open-url':
           await handleWebViewerTool(this.webViewerCtx, msg, client);
           break;
         case 'mcp-list-workflows':
@@ -706,8 +706,7 @@ export class McpQueryHandler {
           this.handleShellApprovalRequest(msg, client);
           break;
         case 'interactive-turn-end':
-          // Fire-and-ack: unlike shell-approval-request, there is no verdict to
-          // defer — writeResponse happens synchronously either way.
+          // Fire-and-ack: no verdict to defer — writeResponse happens synchronously either way.
           this.handleInteractiveTurnEnd(msg, client);
           break;
         case 'interactive-question-open':

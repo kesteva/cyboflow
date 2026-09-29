@@ -26,7 +26,7 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../../../shared/streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
-import { InteractiveSettingsWriter, resolveInlineGatingHooks } from './interactiveSettingsWriter';
+import { InteractiveSettingsWriter, resolveBrowserEnv, resolveInlineGatingHooks } from './interactiveSettingsWriter';
 import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
@@ -980,6 +980,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       // and the artifacts:load-images / auto-mint-scan resolvers
       // (CYBOFLOW_DIR/artifacts/runs/<runId>) all agree on one subtree.
       env.CYBOFLOW_RUN_ARTIFACTS_DIR = getCyboflowSubdirectory('artifacts', 'runs', runId);
+      // URLs the CLI opens (a published Artifact, a login page) go to this
+      // session's web viewer instead of the OS browser — openUrlShellHook.ts
+      // reaches the app on the same socket + token, and falls back to the OS
+      // opener when the viewer is off or the app does not answer.
+      Object.assign(env, resolveBrowserEnv({}, this.toLoggerLike(this.logger)));
     }
 
     // FORCE conversation-transcript persistence for the embedded REPL.

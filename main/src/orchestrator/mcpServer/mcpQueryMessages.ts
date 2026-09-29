@@ -492,6 +492,17 @@ export type McpQueryMessage =
       frame?: string;
       reason?: string;
     }
+  | {
+      /**
+       * NOT an MCP tool: the session CLI's `$BROWSER` (openUrlShellHook.ts)
+       * asking to show a URL. Opens a USER tab in the run's session; an error
+       * reply sends the script to the OS browser instead.
+       */
+      type: 'web-open-url';
+      requestId: string;
+      runId: string;
+      url: string;
+    }
   // -------------------------------------------------------------------------
   // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
   //

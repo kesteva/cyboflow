@@ -232,6 +232,19 @@ export class WebViewerAgentOps implements WebViewerAgentLike {
     return { ok: true, tab: await this.describe(caller, view, this.access(caller.runId, view, flags)) };
   }
 
+  /**
+   * A URL the session's `claude` CLI asked the OS to open — `$BROWSER` points at
+   * openUrlShellHook, which lands here. It opens as a USER tab: it is exactly
+   * what `open` would have put in front of the human, in their browser jar (an
+   * artifact needs their claude.ai login), so an agent that later reads it
+   * needs consent like any other human tab. Gated by the viewer switch alone,
+   * not the agent flags — it grants the agent nothing that `open` did not.
+   */
+  async openForUser(caller: AgentCaller, args: { url: string }): Promise<AgentResult<{ tabId: string }>> {
+    const tabId = (this.deps.mintTabId ?? makeWebTabId)();
+    const opened = await this.deps.viewer.open({ sessionId: caller.sessionKey, tabId, url: args.url, openedBy: 'user' });
+    return opened.ok ? { ok: true, tabId } : opened;
+  }
 
   /**
    * One drive verb. Same order as a read — scope, load, consent, recheck — with

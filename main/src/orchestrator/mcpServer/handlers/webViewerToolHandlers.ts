@@ -1,6 +1,7 @@
 /**
  * webViewerToolHandlers — the cyboflow_web_tabs / _read_web_tab / _open_web_tab /
- * _drive_web_tab MCP handler family (docs/proposals/native-web-viewer.md §6).
+ * _drive_web_tab MCP handler family (docs/proposals/native-web-viewer.md §6),
+ * plus `web-open-url`, the session CLI's `$BROWSER` hand-off (openUrlShellHook).
  *
  * Thin by design. Every consent decision lives behind the `webViewerAgent` seam
  * (services/webViewer/webViewerAgentOps.ts), which this orchestrator-layer module
@@ -23,7 +24,7 @@ export interface WebViewerToolContext {
 
 type WebToolMessage = Extract<
   McpQueryMessage,
-  { type: 'mcp-web-tabs' | 'mcp-read-web-tab' | 'mcp-open-web-tab' | 'mcp-drive-web-tab' }
+  { type: 'mcp-web-tabs' | 'mcp-read-web-tab' | 'mcp-open-web-tab' | 'mcp-drive-web-tab' | 'web-open-url' }
 >;
 
 /**
@@ -96,5 +97,7 @@ export async function handleWebViewerTool(
           reason: msg.reason,
         }),
       );
+    case 'web-open-url':
+      return reply(await agent.openForUser(caller, { url: msg.url }));
   }
 }

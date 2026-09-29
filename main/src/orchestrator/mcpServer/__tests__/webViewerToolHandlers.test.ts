@@ -52,6 +52,10 @@ function makeAgent(): WebViewerAgentLike & { calls: unknown[] } {
       calls.push(['drive', caller, args]);
       return { ok: false as const, error: 'origin_changed' };
     }),
+    openForUser: vi.fn(async (caller, args) => {
+      calls.push(['open-for-user', caller, args]);
+      return { ok: true as const, tabId: 'web:u1' };
+    }),
   };
 }
 
@@ -152,5 +156,19 @@ describe('handleWebViewerTool', () => {
       { tabId: 'web:1', since: undefined, include: ['text'], frame: 'all', reason: undefined },
     ]);
     expect(writes[0]).toEqual({ type: 'mcp-query-response', requestId: 'r4', ok: false, error: 'consent_denied' });
+  });
+
+  it('hands a $BROWSER open to the seam under the run’s session, never the agent-open path', async () => {
+    const agent = makeAgent();
+    const { ctx, writes } = makeCtx(agent);
+    await handleWebViewerTool(
+      ctx,
+      { type: 'web-open-url', requestId: 'u1', runId: 'run-a', url: 'https://claude.ai/code/artifact/x' },
+      client,
+    );
+    expect(agent.calls).toEqual([
+      ['open-for-user', { runId: 'run-a', sessionKey: 'sess-1' }, { url: 'https://claude.ai/code/artifact/x' }],
+    ]);
+    expect(writes[0]).toEqual({ type: 'mcp-query-response', requestId: 'u1', ok: true, data: { tabId: 'web:u1' } });
   });
 });

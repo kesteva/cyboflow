@@ -73,22 +73,27 @@ export function useWebViewerBridge(sessionKey: string | null): void {
       },
     );
 
-    // An agent opened a tab in the background: it joins the strip unfocused,
-    // pulsing — it never steals focus from what the human is doing.
-    const agentTabs = trpc.cyboflow.webViewer.onTabOpened.subscribe(
+    // A tab main opened. An AGENT's joins the strip unfocused, pulsing — it
+    // never steals focus from what the human is doing. A USER tab main opened
+    // is the session CLI's `$BROWSER` (openUrlShellHook): the human's own
+    // `claude` asked to show it, so it takes focus the way `open` would have.
+    // A tab the renderer opened itself is already in the strip and is left be.
+    const openedTabs = trpc.cyboflow.webViewer.onTabOpened.subscribe(
       { sessionId: sessionKey },
       {
         onData: (ev) => {
           const snap = ev.snapshot;
           const url = snap.currentUrl;
           if (url === null) return;
-          useCenterPaneStore.getState().openWebTab(sessionKey, {
+          const store = useCenterPaneStore.getState();
+          const known = (store.bySession[sessionKey]?.tabs ?? []).some((t) => t.id === snap.tabId);
+          store.openWebTab(sessionKey, {
             id: snap.tabId,
             url,
-            openedBy: 'agent',
+            openedBy: snap.openedBy,
             ...(snap.openedByRunId !== null ? { openedByRunId: snap.openedByRunId } : {}),
             ...(snap.title ? { label: snap.title } : {}),
-            focus: false,
+            focus: snap.openedBy === 'user' && !known,
           });
         },
         onError: (err: unknown) => console.warn('[useWebViewerBridge] onTabOpened error:', err),
@@ -152,7 +157,7 @@ export function useWebViewerBridge(sessionKey: string | null): void {
     return () => {
       cancelled = true;
       consents.unsubscribe();
-      agentTabs.unsubscribe();
+      openedTabs.unsubscribe();
       states.unsubscribe();
       chords.unsubscribe();
       popups.unsubscribe();

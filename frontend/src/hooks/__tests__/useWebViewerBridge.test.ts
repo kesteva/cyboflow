@@ -196,4 +196,22 @@ describe('useWebViewerBridge agent tabs', () => {
     expect(webTabs()[0]).toMatchObject({ label: 'Dev server', currentUrl: 'http://localhost:5173/app' });
     expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).not.toBe('web:agent-2');
   });
+
+  it('focuses a USER tab main opened ($BROWSER), but never re-focuses one the renderer already has', async () => {
+    renderHook(() => useWebViewerBridge(KEY));
+    await waitFor(() => expect(openedHandler).not.toBeNull());
+    const snapshot = {
+      tabId: 'web:cli-1', sessionId: KEY, state: 'hidden', currentUrl: 'https://claude.ai/code/artifact/x',
+      title: null, openedBy: 'user', openedByRunId: null, humanTouched: false,
+      canGoBack: false, canGoForward: false, loading: true, blockedReason: null,
+    };
+    act(() => openedHandler!({ sessionId: KEY, snapshot }));
+    expect(webTabs()[0]).toMatchObject({ id: 'web:cli-1', openedBy: 'user' });
+    expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).toBe('web:cli-1');
+
+    // A popup the renderer opened unfocused: main's echo must not pull focus to it.
+    const popupId = useCenterPaneStore.getState().openWebTab(KEY, { url: 'https://example.com/', focus: false });
+    act(() => openedHandler!({ sessionId: KEY, snapshot: { ...snapshot, tabId: popupId, currentUrl: 'https://example.com/' } }));
+    expect(useCenterPaneStore.getState().bySession[KEY].activeTabId).toBe('web:cli-1');
+  });
 });

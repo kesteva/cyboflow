@@ -355,6 +355,18 @@ describe('openTab', () => {
   });
 });
 
+describe('openForUser ($BROWSER)', () => {
+  it('opens a HUMAN tab with no run owner, even with every agent flag off', async () => {
+    flags.agentObserve = false;
+    const r = await ops.openForUser(ME, { url: 'https://claude.ai/code/artifact/x' });
+    expect(r).toEqual({ ok: true, tabId: 'web:new' });
+    // No openedByRunId: a later agent read of it is consent-gated like any human tab.
+    expect(opened).toEqual([
+      { sessionId: 'sess-1', tabId: 'web:new', url: 'https://claude.ai/code/artifact/x', openedBy: 'user' },
+    ]);
+  });
+});
+
 describe('driveTab', () => {
   /** A frame that records the scripts it is asked to run and answers `reply`. */
   function scriptedFrame(token: string, principal: string, isTop: boolean, reply: unknown, seen: string[]): WebFrameTarget {

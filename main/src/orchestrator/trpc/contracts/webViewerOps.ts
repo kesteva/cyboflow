@@ -239,4 +239,6 @@ export interface WebViewerAgentLike {
     args: { url: string; reason?: string; waitForLoad?: boolean },
   ): Promise<AgentResult<{ tab: AgentWebTab }>>;
   driveTab(caller: AgentCaller, args: AgentDriveArgs): Promise<AgentResult<AgentDriveResult>>;
+  /** A URL the session's CLI handed to `$BROWSER` — opened as the HUMAN's tab. */
+  openForUser(caller: AgentCaller, args: { url: string }): Promise<AgentResult<{ tabId: string }>>;
 }
