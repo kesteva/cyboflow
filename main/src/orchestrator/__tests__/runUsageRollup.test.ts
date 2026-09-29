@@ -37,9 +37,10 @@ import { RAW_EVENTS_DDL } from '../__test_fixtures__/rawEvents';
 // unseeded — absent runs simply leave the rollup timestamps null.
 const WORKFLOW_RUNS_DDL = `
   CREATE TABLE IF NOT EXISTS workflow_runs (
-    id         TEXT PRIMARY KEY,
-    started_at DATETIME,
-    ended_at   DATETIME
+    id              TEXT PRIMARY KEY,
+    started_at      DATETIME,
+    ended_at        DATETIME,
+    gate_reached_at DATETIME
   )
 `;
 

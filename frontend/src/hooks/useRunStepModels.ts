@@ -63,9 +63,21 @@ function fetchStepModels(runId: string, version: number): Promise<StepModelRow[]
   return p;
 }
 
-/** Index rows by `(phaseId, stepId)` for the step cards. */
+/**
+ * Index rows by `(phaseId, stepId[, fanOutStepId])` for the step cards. The
+ * 3-arg form is used when a row carries `fanOutStepId` (a `fanOut.inner` step
+ * row) — a 2-arg key alone would silently collide such a row with an outer
+ * step sharing the same `(phaseId, stepId)` pair (see `stepModelKey` in
+ * `shared/types/agents.ts`). Passing `undefined` for an outer row's
+ * (absent) `fanOutStepId` is a no-op per the extended signature.
+ */
 export function indexStepModels(rows: readonly StepModelRow[]): StepModelMap {
-  return new Map(rows.map((r) => [stepModelKey(r.phaseId, r.stepId), { label: r.label, family: r.family }]));
+  return new Map(
+    rows.map((r) => [
+      stepModelKey(r.phaseId, r.stepId, r.fanOutStepId),
+      { label: r.label, family: r.family },
+    ]),
+  );
 }
 
 export function useRunStepModels(runId: string): StepModelRow[] | null {

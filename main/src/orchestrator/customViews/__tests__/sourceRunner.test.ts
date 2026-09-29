@@ -43,7 +43,8 @@ beforeEach(() => {
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, project_id INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'queued', outcome TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, started_at DATETIME, ended_at DATETIME
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, started_at DATETIME, ended_at DATETIME,
+      gate_reached_at DATETIME
     );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, event_type TEXT NOT NULL,

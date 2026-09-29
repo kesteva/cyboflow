@@ -1168,7 +1168,11 @@ function VerdictCard({
 // ---------------------------------------------------------------------------
 
 function ArmColumn({ arm }: { arm: ExperimentArmView }): React.JSX.Element {
-  const runtime = arm.usage ? formatRuntime(arm.usage.startedAt, arm.usage.endedAt) : null;
+  const gateReachedAt = arm.usage?.gateReachedAt ?? null;
+  const runtime = arm.usage
+    ? formatRuntime(arm.usage.startedAt, gateReachedAt ?? arm.usage.endedAt)
+    : null;
+  const runtimeIsToGate = gateReachedAt !== null;
   return (
     <div className="flex flex-col gap-3 rounded-card border border-border-primary bg-surface-primary p-4" data-testid={`experiment-arm-${arm.arm.toLowerCase()}`}>
       <div className="flex items-center justify-between gap-2">
@@ -1188,7 +1192,17 @@ function ArmColumn({ arm }: { arm: ExperimentArmView }): React.JSX.Element {
         {arm.usage !== null ? (
           <>
             {compactTokens(arm.usage.totalTokens)} tokens · {formatCost(arm.usage.costUsd)}
-            {runtime !== null && <> · {runtime}</>}
+            {runtime !== null && (
+              <>
+                {' '}
+                ·{' '}
+                {runtimeIsToGate ? (
+                  <span title="time to final human gate — excludes review wait">{runtime} to review</span>
+                ) : (
+                  runtime
+                )}
+              </>
+            )}
           </>
         ) : (
           'No usage recorded yet.'

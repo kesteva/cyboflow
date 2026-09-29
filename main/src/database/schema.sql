@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
   ended_at DATETIME,
+  gate_reached_at DATETIME,
   FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);

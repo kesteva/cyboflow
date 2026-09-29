@@ -65,6 +65,7 @@ const ROLLUP: RunUsageRollup = {
   coverage: 'complete',
   startedAt: null,
   endedAt: null,
+  gateReachedAt: null,
 };
 
 /** A complete eval fixture; override per-test. */
@@ -976,7 +977,7 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
     expect(section).toHaveTextContent(
       'Not a per-step cost split — the cost above is reported per run and cannot be attributed to individual steps.',
     );
-    expect(section).toHaveTextContent('Human review gates are excluded.');
+    expect(section).toHaveTextContent('Human review gates and per-task sprint-lane steps are excluded.');
   });
 
   it('clears the previous run\'s groups when runId changes (panel is mounted without a key)', async () => {
@@ -1004,5 +1005,46 @@ describe('WorkflowSummaryPanel — Models used configuration section (TASK-275)'
     await waitFor(() =>
       expect(screen.queryByTestId('run-summary-step-models')).not.toBeInTheDocument(),
     );
+  });
+
+  it('excludes fanOutStepId-carrying rows (sprint-lane steps) from the chip-sum groups (TASK-298)', async () => {
+    // Negative control: WITHOUT the fanOutStepId filter, this fixture would
+    // produce THREE distinct groups (Opus 5 / Sonnet 5 / gpt-5.6-sol) and a
+    // chip-sum of 4 — the pre-change behavior this test guards against.
+    getStepModelsQuery.mockResolvedValue([
+      { stepId: 'plan', stepName: 'Plan', phaseId: 'p1', label: 'Opus 5', family: 'opus' },
+      // Two fan-out inner rows sharing the OUTER 'plan' step's label but
+      // carrying fanOutStepId — must not fold into the outer 'Opus 5' group,
+      // must not create their own 'Sonnet 5' / 'gpt-5.6-sol' groups, and must
+      // not inflate the chip count.
+      {
+        stepId: 'implement',
+        stepName: 'Implement',
+        phaseId: 'execute',
+        label: 'Sonnet 5',
+        family: 'sonnet',
+        fanOutStepId: 'fan-step',
+      },
+      {
+        stepId: 'code-review',
+        stepName: 'Code review',
+        phaseId: 'execute',
+        label: 'gpt-5.6-sol',
+        family: 'other',
+        fanOutStepId: 'fan-step',
+      },
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText('Models used — configuration')).toBeInTheDocument();
+    const labels = screen
+      .getAllByTestId('run-summary-step-model-group-label')
+      .map((el) => el.textContent);
+    // Only the outer 'plan' step's group — the two fan-out rows contribute
+    // neither their own groups nor extra chips to 'Opus 5'.
+    expect(labels).toEqual(['Opus 5 — 1 step']);
+    const chips = screen.getAllByTestId('run-summary-step-model-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips.map((c) => c.textContent)).toEqual(['Plan']);
   });
 });

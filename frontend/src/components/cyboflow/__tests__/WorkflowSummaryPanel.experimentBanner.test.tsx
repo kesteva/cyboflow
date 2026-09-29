@@ -66,6 +66,7 @@ const ROLLUP: RunUsageRollup = {
   coverage: 'complete',
   startedAt: null,
   endedAt: null,
+  gateReachedAt: null,
 };
 
 beforeEach(() => {

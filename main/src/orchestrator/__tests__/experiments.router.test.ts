@@ -69,6 +69,8 @@ function buildDb(): Database.Database {
   // Migration 022's soft batch link + sprint_batch_tasks (lanes), so decide's
   // clone->original lane remap (remapWinnerSeedLane) has real rows to rewrite.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT;');
+  // Migration 145: gate_reached_at, selected by insightsQueries.fetchRunTimestamps.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN gate_reached_at DATETIME;');
   db.exec(`CREATE TABLE sprint_batch_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, task_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued', current_step_id TEXT, run_id TEXT, error_message TEXT,

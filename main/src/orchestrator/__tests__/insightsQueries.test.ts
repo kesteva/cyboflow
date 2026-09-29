@@ -105,7 +105,10 @@ function createInsightsDb(): Database.Database {
       agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
-      ended_at DATETIME
+      ended_at DATETIME,
+      -- migration 145: stamped when an experiment arm first lands on its FINAL
+      -- human-review gate — see selectRunUsageRollups' runtime-timestamps block.
+      gate_reached_at DATETIME
     );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +229,8 @@ interface SeedRunOpts {
   createdAt?: string;
   startedAt?: string | null;
   endedAt?: string | null;
+  /** workflow_runs.gate_reached_at (migration 145); null/omitted = never reached. */
+  gateReachedAt?: string | null;
   /** Frozen spec_hash (the revision bucket key); null = pre-mig-025 historic run. */
   specHash?: string | null;
   /** Owning quick session (migration 019); null = standalone flow run. */
@@ -247,8 +252,8 @@ interface SeedRunOpts {
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, model, agent_provider, agent_runtime, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, model, agent_provider, agent_runtime, created_at, started_at, ended_at, gate_reached_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
@@ -266,6 +271,7 @@ function seedRun(db: Database.Database, opts: SeedRunOpts): void {
     opts.createdAt ?? null,
     opts.startedAt ?? null,
     opts.endedAt ?? null,
+    opts.gateReachedAt ?? null,
   );
 }
 
@@ -2955,6 +2961,30 @@ describe('selectRunUsageRollups runtime timestamps', () => {
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['ghost']);
     expect(rollup.startedAt).toBeNull();
     expect(rollup.endedAt).toBeNull();
+  });
+
+  it('folds gate_reached_at from workflow_runs into the rollup (ISO-normalized)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      startedAt: '2026-07-01 10:00:00',
+      endedAt: null,
+      gateReachedAt: '2026-07-01 10:03:00',
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.gateReachedAt).toBe('2026-07-01T10:03:00.000Z');
+    // A run resting at the gate has no endedAt yet — the two are independent.
+    expect(rollup.endedAt).toBeNull();
+  });
+
+  it('leaves gateReachedAt null for a run that never reached a terminal gate', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', startedAt: '2026-07-01 10:00:00' });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.gateReachedAt).toBeNull();
   });
 });
 
