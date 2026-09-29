@@ -10,14 +10,17 @@ import {
 const ROOT = '/snap';
 const NONCE = '3f2c7a9e-1b4d-4e8f-9a0b-c1d2e3f4a5b6';
 
-/** An in-memory fs keyed by absolute path; `writes` records every write. */
+/** The code joins with node:path, so on win32 the paths it hands the fs use `\`. */
+const posix = (p: string): string => p.replace(/\\/g, '/');
+
+/** An in-memory fs keyed by absolute POSIX path; `writes` records every write. */
 function memFs(files: Record<string, string>): NonceMarkerFs & { writes: Array<[string, string]> } {
   const writes: Array<[string, string]> = [];
   return {
     writes,
-    readRegularFile: async (absPath) => files[absPath] ?? null,
+    readRegularFile: async (absPath) => files[posix(absPath)] ?? null,
     writeFile: async (absPath, content) => {
-      writes.push([absPath, content]);
+      writes.push([posix(absPath), content]);
     },
   };
 }
@@ -98,7 +101,7 @@ describe('injectNonceMarker', () => {
 
   it('folds an fs failure into a skip instead of throwing', async () => {
     const fs: NonceMarkerFs = {
-      readRegularFile: async (p) => (p === '/snap/index.html' ? VITE_INDEX : null),
+      readRegularFile: async (p) => (posix(p) === '/snap/index.html' ? VITE_INDEX : null),
       writeFile: async () => {
         throw new Error('EROFS');
       },
