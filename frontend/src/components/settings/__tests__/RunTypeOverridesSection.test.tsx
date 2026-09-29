@@ -332,7 +332,7 @@ describe('RunTypeOverridesSection — grouped list', () => {
     expect(within(row).getAllByTestId(/^run-type-chip-/)).toHaveLength(1);
     expect(
       within(row).getByTestId('run-type-chip-workflow:wf-global-sprint-model'),
-    ).toHaveTextContent('Model: Sonnet 5 · 1M');
+    ).toHaveTextContent('Model: Sonnet 5.5 · 1M');
     expect(
       within(row).queryByTestId('run-type-chip-workflow:wf-global-sprint-substrate'),
     ).not.toBeInTheDocument();
@@ -653,7 +653,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
     // Back on the list, the new override is summarised as a diff.
     await waitFor(() =>
       expect(screen.getByTestId('run-type-chip-workflow:wf-global-sprint-model')).toHaveTextContent(
-        'Model: Sonnet 5 · 1M',
+        'Model: Sonnet 5.5 · 1M',
       ),
     );
   });
@@ -937,7 +937,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
         'Follow defaults',
         'Fable 5.1 · 1M',
         'Opus 5.5 · 1M',
-        'Sonnet 5 · 1M',
+        'Sonnet 5.5 · 1M',
         'Haiku 4.5 · 200K',
         'Auto',
       ]);

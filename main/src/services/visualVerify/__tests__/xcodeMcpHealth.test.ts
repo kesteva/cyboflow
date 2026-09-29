@@ -124,7 +124,7 @@ const OPEN_OK: ToolScript = () => ({ structured: { workspaceIdentifier: 'workspa
 const CLOSE_OK: ToolScript = () => ({ structured: {} });
 
 describe('createXcodeApprovalAction (§B8)', () => {
-  it('opens ONLY the scaffold, closes it, re-reads the status, and SHOWS the 24 h command', async () => {
+  it.skipIf(process.platform === 'win32')('opens ONLY the scaffold, closes it, re-reads the status, and SHOWS the 24 h command', async () => {
     const h = actionWith(
       { XcodeOpenWorkspace: OPEN_OK, XcodeCloseWorkspace: CLOSE_OK },
       result({ outcome: 'approval-required', approval: 'expired', grant: { source: 'unsigned', agentId: AGENT_ID, expiresAt: 1 } }),

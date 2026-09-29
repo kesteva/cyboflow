@@ -198,7 +198,7 @@ describe('VERIFY_MOBILE_DRIVE=xcode — every observe/drive verb goes through th
     expect(refused.tools.some((t) => t.includes('screenshot'))).toBe(false);
   });
 
-  it('end to end over a REAL drive socket', async () => {
+  it.skipIf(process.platform === 'win32')('end to end over a REAL drive socket', async () => {
     const dir = await root();
     const token = mintDriveToken();
     const seen: DriveRequest[] = [];

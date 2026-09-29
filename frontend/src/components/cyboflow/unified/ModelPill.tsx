@@ -39,20 +39,20 @@ export interface ModelOption {
   description: string;
 }
 
-// Fable 5.1 is Anthropic's frontier model (1M-native, like Sonnet 5) and leads the
+// Fable 5.1 is Anthropic's frontier model (1M-native, like Sonnet 5.5) and leads the
 // list. Opus has a single honest 1M row; the spawn seam (modelContext.ts) maps
 // `fable`→claude-fable-5-1, `opus`→claude-opus-5-5[1m] (the suffix is what actually
 // unlocks 1M on the Claude Code login plane). The legacy `opus-250k` alias stays
 // resolvable (→ Opus 4.8) for back-compat but is not offered here.
-// Sonnet 5 is 1M-native (no context-1m beta, no 250K mode), so it has a single
-// honest 1M row; the `sonnet-250k` alias stays resolvable (→ Sonnet 5) for
+// Sonnet 5.5 is 1M-native (no context-1m beta, no 250K mode), so it has a single
+// honest 1M row; the `sonnet-250k` alias stays resolvable (→ Sonnet 5.5) for
 // back-compat but is not offered here. Fable can be pulled from availability (it
 // has been before) — the picker greys it out when the availability guard reports
 // it unavailable (see useModelAvailabilityStore / isModelOptionDisabled).
 export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
   { id: 'fable', label: 'Fable 5.1', context: '1M', description: 'Frontier — most capable' },
   { id: 'opus', label: 'Opus 5.5', context: '1M', description: 'More capable' },
-  { id: 'sonnet', label: 'Sonnet 5', context: '1M', description: 'Balanced' },
+  { id: 'sonnet', label: 'Sonnet 5.5', context: '1M', description: 'Balanced' },
   { id: 'haiku', label: 'Haiku 4.5', context: '200K', description: 'Fastest' },
   { id: 'auto', label: 'Auto', context: null, description: 'Let Claude pick the model' },
 ];

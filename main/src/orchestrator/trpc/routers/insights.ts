@@ -70,6 +70,7 @@ import {
   getRunEval,
   DAILY_USAGE_DEFAULT_WINDOW_DAYS,
 } from '../../insightsQueries';
+import { ACCOUNTING_VERSION } from '../../usageFold';
 import {
   dailyUsageInputSchema,
   projectIdSchema,
@@ -129,9 +130,12 @@ function zeroedRunUsageRollup(runId: string): RunUsageRollup {
     costUsd: null,
     numTurns: null,
     assistantMessageCount: 0,
+    accountingVersion: ACCOUNTING_VERSION,
+    coverage: 'complete',
     // No run row (or none matched) → no runtime timestamps to report.
     startedAt: null,
     endedAt: null,
+    gateReachedAt: null,
   };
 }
 

@@ -14,9 +14,16 @@ import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(
-    'CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, experiment_id TEXT, variant_id TEXT);',
+    'CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, experiment_id TEXT, variant_id TEXT, status TEXT, gate_reached_at TEXT);',
   );
   return db;
+}
+
+function readGateReachedAt(raw: Database.Database, runId: string): string | null {
+  const row = raw.prepare('SELECT gate_reached_at FROM workflow_runs WHERE id = ?').get(runId) as {
+    gate_reached_at: string | null;
+  };
+  return row.gate_reached_at;
 }
 
 function seedRun(raw: Database.Database, id: string, experimentId: string | null, variantId: string | null): void {
@@ -151,5 +158,70 @@ describe('handleTerminalStatusEvent', () => {
     expect(evalSnapshot).toHaveBeenCalledWith('r1');
     expect(reconcile).toHaveBeenCalledWith('exp-1');
     expect(pairwiseMaybe).toHaveBeenCalledWith('exp-1');
+  });
+
+  describe('gate_reached_at stamping (migration 145)', () => {
+    it('experiment-tagged awaiting_review => stamps gate_reached_at on the event.runId (this arm)', () => {
+      const raw = buildDb();
+      seedRun(raw, 'r1', 'exp-1', 'var-1');
+      const { deps } = makeDeps(raw);
+      handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
+      expect(readGateReachedAt(raw, 'r1')).not.toBeNull();
+    });
+
+    it('written exactly once — re-firing the SAME terminal event a 2nd time is a no-op', () => {
+      const raw = buildDb();
+      seedRun(raw, 'r1', 'exp-1', 'var-1');
+      const { deps } = makeDeps(raw);
+      handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
+      // CURRENT_TIMESTAMP has 1-second resolution, so two calls in the same test
+      // tick would coincidentally match even without the IS NULL guard. Force a
+      // distinct sentinel value in between so an overwrite is actually detectable.
+      const sentinel = '2020-01-01 00:00:00';
+      raw.prepare('UPDATE workflow_runs SET gate_reached_at = ? WHERE id = ?').run(sentinel, 'r1');
+      handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
+      expect(readGateReachedAt(raw, 'r1')).toBe(sentinel);
+    });
+
+    it('untagged run => no stamp (complete no-op, same as eval/reconcile/pairwise)', () => {
+      const raw = buildDb();
+      seedRun(raw, 'r1', null, null);
+      const { deps } = makeDeps(raw);
+      handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps);
+      expect(readGateReachedAt(raw, 'r1')).toBeNull();
+    });
+
+    it.each(['completed', 'failed', 'canceled'] as const)(
+      'experiment-tagged %s event => no stamp (only awaiting_review measures gate wait)',
+      (status) => {
+        const raw = buildDb();
+        seedRun(raw, 'r1', 'exp-1', 'var-1');
+        const { deps } = makeDeps(raw);
+        handleTerminalStatusEvent(ev('r1', status), deps);
+        expect(readGateReachedAt(raw, 'r1')).toBeNull();
+      },
+    );
+
+    it('a stamp failure (the UPDATE itself throws) is swallowed — reconcile + pairwise still fire', () => {
+      const raw = buildDb();
+      seedRun(raw, 'r1', 'exp-1', 'var-1');
+      const inner = dbAdapter(raw);
+      // Only the gate_reached_at UPDATE throws — the tag SELECT (and everything
+      // else) still goes through to the real adapter, isolating the failure to
+      // stampArmGateReachedAt's own write.
+      const flaky: TerminalEvalSubscriberDeps['db'] = {
+        ...inner,
+        prepare: (sql: string) => {
+          if (sql.includes('SET gate_reached_at')) {
+            throw new Error('db blew up');
+          }
+          return inner.prepare(sql);
+        },
+      } as TerminalEvalSubscriberDeps['db'];
+      const { deps, reconcile, pairwiseMaybe } = makeDeps(raw, { db: flaky });
+      expect(() => handleTerminalStatusEvent(ev('r1', 'awaiting_review'), deps)).not.toThrow();
+      expect(reconcile).toHaveBeenCalledWith('exp-1');
+      expect(pairwiseMaybe).toHaveBeenCalledWith('exp-1');
+    });
   });
 });

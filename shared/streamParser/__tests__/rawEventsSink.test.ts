@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { EventRouter } from '../eventRouter';
-import { RawEventsSink } from '../rawEventsSink';
+import { RawEventsSink, PROCESS_INSTANCE_ID_FIELD } from '../rawEventsSink';
 import type { ClaudeStreamEvent } from '../../types/claudeStream';
 import type { AgentStreamEvent } from '../../types/agentStream';
 import { makeRawEventsDb, countRawEvents } from '../../../main/src/orchestrator/__test_fixtures__/rawEvents';
@@ -455,5 +455,27 @@ describe('RawEventsSink', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].event_type).toBe('agent_assistant');
     expect(JSON.parse(rows[0].payload_json)).toEqual(event);
+  });
+
+  it('setProcessInstanceId: stamps the persisted payload only, never the routed event', () => {
+    const sink = new RawEventsSink(db);
+    sink.attachToRouter(router, RUN_ID);
+    const routed: ClaudeStreamEvent[] = [];
+    router.onRun(RUN_ID, (event) => routed.push(event));
+
+    router.emitForRun(RUN_ID, systemEvent);
+    sink.setProcessInstanceId('proc-1');
+    router.emitForRun(RUN_ID, assistantEvent);
+    sink.setProcessInstanceId('proc-2');
+    router.emitForRun(RUN_ID, assistantEvent);
+    sink.setProcessInstanceId(null);
+    router.emitForRun(RUN_ID, systemEvent);
+
+    const stamps = selectRows(db, RUN_ID).map(
+      (r) => (JSON.parse(r.payload_json) as Record<string, unknown>)[PROCESS_INSTANCE_ID_FIELD],
+    );
+    expect(stamps).toEqual([undefined, 'proc-1', 'proc-2', undefined]);
+    // Live subscribers see the SDK event untouched.
+    expect(routed.every((e) => !(PROCESS_INSTANCE_ID_FIELD in e))).toBe(true);
   });
 });
