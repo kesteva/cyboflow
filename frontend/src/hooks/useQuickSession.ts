@@ -124,6 +124,8 @@ interface UseQuickSessionReturn {
     designIdeaId?: string,
     kickoffPrompt?: string,
     baseBranch?: string,
+    /** Launch into this project instead of the hook's `projectId`. */
+    projectIdOverride?: number,
   ) => Promise<void>;
   /**
    * Zero-arg-friendly entry point for launches that only know a run-type key
@@ -143,6 +145,19 @@ interface UseQuickSessionReturn {
    * param signature is unchanged; do not expand it further.
    */
   startWithDefaults: (key: string) => Promise<void>;
+  /**
+   * Launch a quick session in `projectId` whose first turn is `kickoffPrompt`
+   * (the Queue page's human-task "Verify complete" / "Help me with it"). Takes
+   * the saved Quick Session defaults for model / permission mode / effort but
+   * PINS the Claude SDK substrate — the kickoff only fires on a
+   * frontend-created panel, which an interactive or non-Claude eager spawn never
+   * gives it — and takes the workspace from `worktreeMode`.
+   */
+  startWithKickoff: (args: {
+    projectId: number;
+    kickoffPrompt: string;
+    worktreeMode: QuickSessionWorktreeMode;
+  }) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -167,8 +182,10 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       designIdeaId?: string,
       kickoffPrompt?: string,
       baseBranch?: string,
+      projectIdOverride?: number,
     ): Promise<void> => {
-      if (opts.projectId === null || isStarting) return;
+      const projectId = projectIdOverride ?? opts.projectId;
+      if (projectId === null || isStarting) return;
 
       setError(null);
       setIsStarting(true);
@@ -201,7 +218,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
 
         const result = await API.sessions.createQuick({
           prompt: '',
-          projectId: opts.projectId,
+          projectId,
           ...(agentPermissionMode ? { agentPermissionMode } : {}),
           ...(substrate ? { substrate } : {}),
           ...(agentProvider ? { agentProvider } : {}),
@@ -408,5 +425,47 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
     [start],
   );
 
-  return { start, startWithDefaults, isStarting, error };
+  const startWithKickoff = useCallback(
+    ({
+      projectId,
+      kickoffPrompt,
+      worktreeMode,
+    }: {
+      projectId: number;
+      kickoffPrompt: string;
+      worktreeMode: QuickSessionWorktreeMode;
+    }): Promise<void> => {
+      const config = useConfigStore.getState().config;
+      const globalLaunchModel = config?.defaultLaunchModel?.trim() || undefined;
+      const globals: RunTypeLaunchGlobals = {
+        model: globalLaunchModel ?? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick,
+        permissionMode: config?.defaultAgentPermissionMode,
+        substrate: 'sdk',
+      };
+      const resolved = resolveRunTypeLaunchDefaults(QUICK_RUN_TYPE_KEY, config?.runTypeDefaults, globals);
+      // Pinned to Claude SDK (see the interface doc), so a model saved for a
+      // Codex default would launch Claude with a Codex id — fall back to the floor.
+      const model = isCodexModelSelection(resolved.model) ? DEFAULT_RUN_TYPE_MODEL_FLOORS.quick : resolved.model;
+      return start(
+        resolved.permissionMode,
+        'sdk',
+        undefined,
+        model,
+        undefined,
+        undefined,
+        undefined,
+        worktreeMode,
+        'claude',
+        'claude-sdk',
+        resolved.reasoningEffort,
+        undefined,
+        kickoffPrompt,
+        undefined,
+        projectId,
+      );
+    },
+    [start],
+  );
+
+  return { start, startWithDefaults, startWithKickoff, isStarting, error };
 }
