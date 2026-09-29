@@ -12,11 +12,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Learned verification runbooks.** A passing explore run now records the recipe it used as a
   runbook draft. The lane's own next request promotes that draft, so the project gets a proven
-  runbook without a separate setup flow. (The 0.4.5 notes listed this, but it first ships here.)
+  runbook without a separate setup flow.
 - **Xcode 27 drive for iOS verification.** Mobile verifications drive the app through Xcode's
   DeviceInteraction rung. The rung has its own probe, health row and approval action, and its
-  sessions are serialised when more than one simulator slot exists. (Also listed in the 0.4.5
-  notes, also first shipping here.)
+  sessions are serialised when more than one simulator slot exists. (The 0.4.5 notes listed this,
+  but it first ships here.)
 - **Serve binding as an attestation channel.** A web or cdp-app runbook can declare the serve
   binding as its channel, and a pass resting on it can be learned as a recipe.
 - **Monitor lane rescue.** The monitor is consulted before a lane's last automatic attempt, not only
@@ -57,9 +57,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   `wrong_environment` outcomes.
 - **Verifier guardrails.** During verification, dependency installs, process kills and `simctl`
   lifecycle commands go through a guard.
-- **Stage 3 mobile drive.** Standalone Xcode 27 DeviceInteraction modules drive an iOS app, and
-  Maestro now runs under a resolved `JAVA_HOME`, so the mobile drive rung is no longer silently
-  `none`.
+- **Maestro mobile drive.** Maestro now runs under a resolved `JAVA_HOME`, so the mobile drive rung
+  is no longer silently `none`. (These notes originally also listed the Xcode 27 DeviceInteraction
+  drive. It was not wired into this build and first ships in 0.4.6.)
 - **Programmatic steps run directly.** A programmatic run dispatches each step to its agent rather
   than delegating through an orchestrator turn. Direct Claude steps deny the Workflow tool.
 - **Native agent roles on Codex, OMP and pi.** A run's roles are registered natively: as Codex agent
