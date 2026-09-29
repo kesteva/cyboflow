@@ -95,6 +95,25 @@ export function useWebViewerBridge(sessionKey: string | null): void {
       },
     );
 
+    // The strip's label / URL / tripwire for EVERY tab, here rather than in
+    // WebViewTab: only the active tab's body is mounted, so a tab loading in
+    // the background (an agent's, a popup) would otherwise keep its hostname
+    // label for good.
+    const states = trpc.cyboflow.webViewer.onTabState.subscribe(
+      { sessionId: sessionKey },
+      {
+        onData: (ev) => {
+          const snap = ev.snapshot;
+          useCenterPaneStore.getState().updateWebTab(sessionKey, snap.tabId, {
+            currentUrl: snap.currentUrl ?? undefined,
+            label: snap.title ?? undefined,
+            humanTouched: snap.humanTouched,
+          });
+        },
+        onError: (err: unknown) => console.warn('[useWebViewerBridge] onTabState error:', err),
+      },
+    );
+
     const chords = trpc.cyboflow.webViewer.onReservedChord.subscribe(
       { sessionId: sessionKey },
       {
@@ -134,6 +153,7 @@ export function useWebViewerBridge(sessionKey: string | null): void {
       cancelled = true;
       consents.unsubscribe();
       agentTabs.unsubscribe();
+      states.unsubscribe();
       chords.unsubscribe();
       popups.unsubscribe();
       closed.unsubscribe();

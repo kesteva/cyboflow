@@ -20,7 +20,6 @@ import { ArrowLeft, ArrowRight, ExternalLink, RotateCw, Shield, ShieldAlert } fr
 import type { TabItem } from '../../../../shared/types/centerPane';
 import type { WebTabSnapshot } from '../../../../shared/types/webViewer';
 import { useWebViewBounds } from '../../hooks/useWebViewBounds';
-import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../../trpc/client';
 import { selectTabConsents, useWebConsentStore } from '../../stores/webConsentStore';
@@ -38,7 +37,6 @@ export interface WebViewTabProps {
 export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactElement {
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<WebTabSnapshot | null>(null);
-  const updateWebTab = useCenterPaneStore((s) => s.updateWebTab);
   // useShallow: an unrelated tab's prompt does not re-render this one.
   const consents = useWebConsentStore(useShallow(selectTabConsents(tab.id)));
   const [accessOpen, setAccessOpen] = useState(false);
@@ -46,7 +44,8 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
   useWebViewBounds({ tabId: tab.id, anchorRef, active });
 
   // Seed from main, then stay live. The snapshot is the authority for
-  // canGoBack/canGoForward/state; the store keeps the strip's label and URL.
+  // canGoBack/canGoForward/state; the strip's label and URL are kept by
+  // useWebViewerBridge, which sees every tab rather than only the mounted one.
   useEffect(() => {
     let cancelled = false;
     void trpc.cyboflow.webViewer.get
@@ -67,19 +66,13 @@ export function WebViewTab({ tab, sessionKey, active }: WebViewTabProps): ReactE
       { sessionId: sessionKey },
       {
         onData: (ev) => {
-          if (ev.snapshot.tabId !== tab.id) return;
-          setSnapshot(ev.snapshot);
-          updateWebTab(sessionKey, tab.id, {
-            currentUrl: ev.snapshot.currentUrl ?? undefined,
-            label: ev.snapshot.title ?? undefined,
-            humanTouched: ev.snapshot.humanTouched,
-          });
+          if (ev.snapshot.tabId === tab.id) setSnapshot(ev.snapshot);
         },
         onError: (err: unknown) => console.warn('[WebViewTab] onTabState error:', err),
       },
     );
     return () => sub.unsubscribe();
-  }, [sessionKey, tab.id, updateWebTab]);
+  }, [sessionKey, tab.id]);
 
   const url = snapshot?.currentUrl ?? tab.currentUrl ?? tab.initialUrl ?? '';
   const state = snapshot?.state ?? 'hidden';
