@@ -226,6 +226,49 @@ describe('ReapExecutorImpl worktree targets', () => {
     expect(results.map((r) => r.kind)).toEqual(['killed', 'pruned']);
   });
 
+  it('keeps the worktree (no broker reap, no prune) when an associated process survives or fails to die', async () => {
+    for (const mode of ['survive', 'throw'] as const) {
+      const reap = vi.fn(async () => {});
+      const prune = vi.fn(async (t: ReapWorktreeTarget) => ({ targetId: `worktree:${t.path}`, kind: 'pruned' as const }));
+      const ex = new ReapExecutorImpl({
+        killTree: async () => {
+          if (mode === 'throw') throw new Error('kill blew up');
+          return true;
+        },
+        listDescendants: async () => [],
+        isPidAlive: () => true, // unkillable: still alive after the ladder
+        reapBrokersForWorktree: reap,
+        pruneWorktree: prune,
+        selfPid: 5,
+      });
+      const results = await ex.execute(
+        manifestOf([wt('/wt/a'), wt('/wt/clean'), proc(600, { worktreePath: '/wt/a' })]),
+        OPTS,
+      );
+      expect(results.find((r) => r.targetId === 'process:600')?.kind).toBe(mode === 'survive' ? 'survived' : 'failed');
+      const kept = results.find((r) => r.targetId === 'worktree:/wt/a');
+      expect(kept?.kind).toBe('failed');
+      expect(kept?.error).toContain('600');
+      // A sibling worktree with no associated process is still pruned.
+      expect(prune).toHaveBeenCalledTimes(1);
+      expect(prune.mock.calls[0][0].path).toBe('/wt/clean');
+      expect(reap).toHaveBeenCalledTimes(1);
+      expect(reap).toHaveBeenCalledWith('/wt/clean');
+    }
+  });
+
+  it('prunes the worktree when its associated process is confirmed gone (skipped or killed)', async () => {
+    const prune = vi.fn(async (t: ReapWorktreeTarget) => ({ targetId: `worktree:${t.path}`, kind: 'pruned' as const }));
+    const ex = new ReapExecutorImpl({
+      isPidAlive: () => false, // already gone -> `skipped`
+      pruneWorktree: prune,
+      selfPid: 5,
+    });
+    const results = await ex.execute(manifestOf([wt('/wt/a'), proc(600, { worktreePath: '/wt/a' })]), OPTS);
+    expect(results.map((r) => r.kind)).toEqual(['skipped', 'pruned']);
+    expect(prune).toHaveBeenCalledTimes(1);
+  });
+
   it('fails a worktree target visibly (and reaps nothing) when pruning is not wired', async () => {
     const reap = vi.fn(async () => {});
     const ex = new ReapExecutorImpl({ reapBrokersForWorktree: reap, selfPid: 5 });

@@ -14,9 +14,12 @@
  * Worktree targets: brokers rooted in the worktree are reaped through
  * `CodexBrokerReaper.reapForWorktree` as part of the same target's teardown, then
  * the injected `pruneWorktree` runs. Process targets are all handled first, so
- * anything running inside a worktree is dead before its directory is touched.
+ * anything running inside a worktree is dead before its directory is touched. If an
+ * associated process target (same `worktreePath`) survived or failed to die, the
+ * worktree is left in place — no broker reap, no prune — and reported as `failed`.
  */
 import { collectDescendantPidsAsync, killTree } from '../../utils/platformProcess';
+import { worktreePathKey } from '../worktreeRegistry';
 import {
   reapTargetKey,
   type ReapExecutionResult,
@@ -88,12 +91,34 @@ export class ReapExecutorImpl implements ReapExecutor {
     options: { alsoDeleteBranch: boolean; projectId?: number },
   ): Promise<ReapExecutionResult[]> {
     const results: ReapExecutionResult[] = [];
+    // worktree key -> pids of associated process targets NOT confirmed gone.
+    const blockers = new Map<string, number[]>();
     // Processes first: nothing may still be running in a worktree when it is removed.
     for (const target of manifest.targets) {
-      if (target.kind === 'process') results.push(await this.killProcessTarget(target));
+      if (target.kind !== 'process') continue;
+      const result = await this.killProcessTarget(target);
+      results.push(result);
+      // `killed`/`skipped` mean confirmed gone; a survivor or a failed/unverified kill is not.
+      if ((result.kind === 'survived' || result.kind === 'failed') && target.worktreePath !== null) {
+        const key = worktreePathKey(target.worktreePath);
+        blockers.set(key, [...(blockers.get(key) ?? []), ...(result.survivorPids ?? [target.pid])]);
+      }
     }
     for (const target of manifest.targets) {
-      if (target.kind === 'worktree') results.push(await this.teardownWorktreeTarget(target, options));
+      if (target.kind !== 'worktree') continue;
+      const blocking = blockers.get(worktreePathKey(target.path));
+      if (blocking) {
+        // Removing a directory out from under a live process (or its brokers) risks
+        // EBUSY/ENOTEMPTY and data loss: keep it in place and say why.
+        const pids = [...new Set(blocking)].sort((a, b) => a - b);
+        results.push({
+          targetId: reapTargetKey(target),
+          kind: 'failed',
+          error: `Worktree kept: process${pids.length === 1 ? '' : 'es'} ${pids.join(', ')} running in it did not exit`,
+        });
+        continue;
+      }
+      results.push(await this.teardownWorktreeTarget(target, options));
     }
     return results;
   }
