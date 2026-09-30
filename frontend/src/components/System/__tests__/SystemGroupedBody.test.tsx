@@ -29,6 +29,8 @@ vi.mock('../../../stores/navigationStore', () => ({
 import {
   SystemGroupedBody,
   sortWorktrees,
+  sortProcesses,
+  sortTypeGroups,
   processName,
   formatElapsed,
   type SystemProcess,
@@ -278,5 +280,69 @@ describe('formatting', () => {
     expect(formatElapsed(720)).toBe('12m');
     expect(formatElapsed(3960)).toBe('1h 6m');
     expect(formatElapsed(6 * 86400)).toBe('6d');
+  });
+});
+
+describe('By process type sort', () => {
+  // Canonical TYPE_ORDER is claude-cli, codex-cli, shell-pty; each sort key below
+  // produces a DIFFERENT order, so a body that ignored sortBy would fail them.
+  const s = snap(
+    [
+      wt('/wt/zeta', { usage: { status: 'measured', bytes: 900 * MB, measuredAt: 1 } }),
+      wt('/wt/alpha', { usage: { status: 'measured', bytes: 50 * MB, measuredAt: 1 } }),
+      wt('/wt/mid', { usage: { status: 'queued' } }),
+    ],
+    [
+      proc(1, { processType: 'claude-cli', worktreePath: '/wt/mid', pcpu: 1, pmem: 9 }),
+      proc(2, { processType: 'codex-cli', command: 'codex a', worktreePath: '/wt/alpha', pcpu: 30, pmem: 2 }),
+      proc(3, { processType: 'shell-pty', command: 'zsh', worktreePath: '/wt/zeta', pcpu: 5, pmem: 4 }),
+    ],
+  );
+  const cardOrder = (sortBy: 'disk' | 'cpu' | 'mem' | 'owner'): string[] => {
+    const { container, unmount } = render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy={sortBy} />);
+    const ids = Array.from(container.querySelectorAll('[data-testid^="type-group-"]')).map((e) =>
+      (e.getAttribute('data-testid') ?? '').replace('type-group-', ''),
+    );
+    unmount();
+    return ids;
+  };
+
+  it('orders the type cards by the selected sort key', () => {
+    expect(cardOrder('cpu')).toEqual(['codex-cli', 'shell-pty', 'claude-cli']);
+    expect(cardOrder('mem')).toEqual(['claude-cli', 'shell-pty', 'codex-cli']);
+    expect(cardOrder('disk')).toEqual(['shell-pty', 'codex-cli', 'claude-cli']);
+    expect(cardOrder('owner')).toEqual(['codex-cli', 'claude-cli', 'shell-pty']);
+    // negative control: the canonical order is none of the above
+    expect(['claude-cli', 'codex-cli', 'shell-pty']).not.toEqual(cardOrder('cpu'));
+  });
+
+  it('owner sort orders rows by owning worktree name, not command name', () => {
+    const procs = [
+      proc(1, { command: 'aaa', worktreePath: '/wt/zeta' }),
+      proc(2, { command: 'zzz', worktreePath: '/wt/alpha' }),
+      proc(3, { command: 'mmm', worktreePath: null, owner: null }),
+    ];
+    const byPath = new Map(s.worktrees.map((w) => [w.path, w] as const));
+    expect(sortProcesses(procs, 'owner', byPath).map((p) => (p.bucket === 'foreign' ? 0 : p.pid))).toEqual([2, 1, 3]);
+    // the old command-name ordering would have been aaa, mmm, zzz
+    expect(sortProcesses(procs, 'owner').map((p) => (p.bucket === 'foreign' ? 0 : p.pid))).toEqual([1, 3, 2]);
+  });
+
+  it('disk sort orders rows by owning worktree size, unmeasured last', () => {
+    const procs = [
+      proc(1, { worktreePath: '/wt/mid', pcpu: 99 }),
+      proc(2, { worktreePath: '/wt/alpha', pcpu: 1 }),
+      proc(3, { worktreePath: '/wt/zeta', pcpu: 50 }),
+    ];
+    const byPath = new Map(s.worktrees.map((w) => [w.path, w] as const));
+    expect(sortProcesses(procs, 'disk', byPath).map((p) => (p.bucket === 'foreign' ? 0 : p.pid))).toEqual([3, 2, 1]);
+  });
+
+  it('sortTypeGroups keeps canonical order on ties', () => {
+    const groups = [
+      { type: 'claude-cli' as const, members: [proc(1, { pcpu: 1 })] },
+      { type: 'codex-cli' as const, members: [proc(2, { pcpu: 1 })] },
+    ];
+    expect(sortTypeGroups(groups, 'cpu', new Map()).map((g) => g.type)).toEqual(['claude-cli', 'codex-cli']);
   });
 });

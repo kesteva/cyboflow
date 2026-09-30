@@ -139,18 +139,61 @@ function metricsOf(p: SystemProcess): ProcessMetrics {
 const cpuOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? 0 : (p.pcpu ?? 0));
 const memOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? 0 : (p.pmem ?? 0));
 
-/** Sort processes within a table. Disk has no per-process meaning, so it keeps CPU order. */
-export function sortProcesses(processes: readonly SystemProcess[], key: SystemSortKey): SystemProcess[] {
+/** Owning-worktree lookup used to give Disk / Owner a per-process meaning (By process type). */
+export type WorktreesByPath = ReadonlyMap<string, SystemWorktree>;
+
+function ownerNameOf(p: SystemProcess, worktrees: WorktreesByPath | undefined): string | null {
+  if (p.worktreePath === null) return null;
+  return worktrees?.has(p.worktreePath) === true ? basename(p.worktreePath) : null;
+}
+
+function ownerDiskOf(p: SystemProcess, worktrees: WorktreesByPath | undefined): number | null {
+  if (p.worktreePath === null) return null;
+  const w = worktrees?.get(p.worktreePath);
+  return w === undefined ? null : diskBytesOf(w);
+}
+
+/** Ascending by name, rows with no owner last. */
+function compareOwnerNames(a: string | null, b: string | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a.localeCompare(b);
+}
+
+/** Descending by size, unmeasured last — never as 0. */
+function compareDiskDesc(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return b - a;
+}
+
+/**
+ * Sort processes within a table. Disk and Owner are properties of the OWNING
+ * worktree: with `worktrees` supplied (the By-process-type table) rows order by their
+ * owner's disk / name; without it (a single worktree's table, where every row shares
+ * one owner) they tie and fall back to CPU / name order.
+ */
+export function sortProcesses(
+  processes: readonly SystemProcess[],
+  key: SystemSortKey,
+  worktrees?: WorktreesByPath,
+): SystemProcess[] {
   const byName = (a: SystemProcess, b: SystemProcess): number => processName(a.command).localeCompare(processName(b.command));
+  const byCpu = (a: SystemProcess, b: SystemProcess): number => cpuOf(b) - cpuOf(a) || byName(a, b);
   const copy = [...processes];
   switch (key) {
     case 'mem':
       return copy.sort((a, b) => memOf(b) - memOf(a) || byName(a, b));
     case 'owner':
-      return copy.sort(byName);
+      return copy.sort(
+        (a, b) => compareOwnerNames(ownerNameOf(a, worktrees), ownerNameOf(b, worktrees)) || byName(a, b),
+      );
     case 'disk':
+      return copy.sort((a, b) => compareDiskDesc(ownerDiskOf(a, worktrees), ownerDiskOf(b, worktrees)) || byCpu(a, b));
     case 'cpu':
-      return copy.sort((a, b) => cpuOf(b) - cpuOf(a) || byName(a, b));
+      return copy.sort(byCpu);
   }
 }
 
@@ -185,6 +228,56 @@ export function sortWorktrees(
       return copy.sort((a, b) => sum(b, memOf) - sum(a, memOf) || byOwner(a, b));
     case 'owner':
       return copy.sort(byOwner);
+  }
+}
+
+export interface ProcessTypeGroup {
+  type: ProcessType;
+  members: SystemProcess[];
+}
+
+/**
+ * Order the By-process-type cards by the selected sort: aggregate CPU / memory
+ * (descending), the disk held by the distinct worktrees the group's processes live in
+ * (descending, unmeasured last), or the alphabetically-first owning worktree (groups
+ * with no owner last). Ties keep the canonical type order.
+ */
+export function sortTypeGroups(
+  groups: readonly ProcessTypeGroup[],
+  key: SystemSortKey,
+  worktrees: WorktreesByPath,
+): ProcessTypeGroup[] {
+  const typeRank = (g: ProcessTypeGroup): number => TYPE_ORDER.indexOf(g.type);
+  const sumOf = (g: ProcessTypeGroup, pick: (p: SystemProcess) => number): number =>
+    g.members.reduce((acc, p) => acc + pick(p), 0);
+  const diskOf = (g: ProcessTypeGroup): number | null => {
+    const paths = new Set<string>();
+    for (const p of g.members) if (p.worktreePath !== null) paths.add(p.worktreePath);
+    let total: number | null = null;
+    for (const path of paths) {
+      const w = worktrees.get(path);
+      const bytes = w === undefined ? null : diskBytesOf(w);
+      if (bytes !== null) total = (total ?? 0) + bytes;
+    }
+    return total;
+  };
+  const firstOwner = (g: ProcessTypeGroup): string | null => {
+    const names = g.members
+      .map((p) => ownerNameOf(p, worktrees))
+      .filter((n): n is string => n !== null)
+      .sort((a, b) => a.localeCompare(b));
+    return names[0] ?? null;
+  };
+  const copy = [...groups];
+  switch (key) {
+    case 'cpu':
+      return copy.sort((a, b) => sumOf(b, cpuOf) - sumOf(a, cpuOf) || typeRank(a) - typeRank(b));
+    case 'mem':
+      return copy.sort((a, b) => sumOf(b, memOf) - sumOf(a, memOf) || typeRank(a) - typeRank(b));
+    case 'disk':
+      return copy.sort((a, b) => compareDiskDesc(diskOf(a), diskOf(b)) || typeRank(a) - typeRank(b));
+    case 'owner':
+      return copy.sort((a, b) => compareOwnerNames(firstOwner(a), firstOwner(b)) || typeRank(a) - typeRank(b));
   }
 }
 
@@ -399,12 +492,14 @@ interface ProcessTableProps {
   sortBy: SystemSortKey;
   projectId: number;
   worktreeNames?: ReadonlyMap<string, string>;
+  /** Owning-worktree lookup so Disk / Owner sorting has meaning (By process type). */
+  worktreesByPath?: WorktreesByPath;
   handlers: SystemActionHandlers;
 }
 
 /** The nested table: confirmed rows, then the suspected tier, then foreign rows (read-only). */
-function ProcessTable({ processes, sortBy, projectId, worktreeNames, handlers }: ProcessTableProps): ReactElement {
-  const sorted = sortProcesses(processes, sortBy);
+function ProcessTable({ processes, sortBy, projectId, worktreeNames, worktreesByPath, handlers }: ProcessTableProps): ReactElement {
+  const sorted = sortProcesses(processes, sortBy, worktreesByPath);
   const confirmed = sorted.filter((p) => p.bucket === 'owned' || p.bucket === 'orphan');
   const suspected = sorted.filter((p) => p.bucket === 'suspected');
   const foreign = sorted.filter((p) => p.bucket === 'foreign');
@@ -592,10 +687,15 @@ function ByProcessType({
   handlers: SystemActionHandlers;
 }): ReactElement {
   const worktreeNames = new Map(snapshot.worktrees.map((w) => [w.path, basename(w.path)] as const));
-  const groups = TYPE_ORDER.map((type) => ({
-    type,
-    members: snapshot.processes.filter((p) => p.processType === type),
-  })).filter((g) => g.members.length > 0);
+  const worktreesByPath: WorktreesByPath = new Map(snapshot.worktrees.map((w) => [w.path, w] as const));
+  const groups = sortTypeGroups(
+    TYPE_ORDER.map((type) => ({
+      type,
+      members: snapshot.processes.filter((p) => p.processType === type),
+    })).filter((g) => g.members.length > 0),
+    sortBy,
+    worktreesByPath,
+  );
 
   return (
     <section data-testid="system-by-process-type" className="px-7 py-5">
@@ -644,6 +744,7 @@ function ByProcessType({
                   sortBy={sortBy}
                   projectId={projectId}
                   worktreeNames={worktreeNames}
+                  worktreesByPath={worktreesByPath}
                   handlers={handlers}
                 />
               </div>
