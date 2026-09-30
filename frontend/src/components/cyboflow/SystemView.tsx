@@ -283,7 +283,7 @@ export function SystemView(): ReactElement {
             )}
           </div>
           {snapshot !== null && (
-            <SystemPortsSection ports={snapshot.ports} processes={snapshot.processes} />
+            <SystemPortsSection ports={snapshot.ports} />
           )}
           </>
         )}
