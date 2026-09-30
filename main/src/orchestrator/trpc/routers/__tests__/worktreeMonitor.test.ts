@@ -2,13 +2,15 @@
  * cyboflow.worktreeMonitor router — end-to-end over a REAL git repo (actual
  * `git worktree add` in a temp dir, real WorktreeManager.listWorktrees, real
  * reconciler, real DiskUsageService with a fake `du` runner). Only the DB rows are
- * seeded fixtures (a structural fake of the two read helpers).
+ * seeded rows in a REAL temp DatabaseService (full migration chain), so the actual
+ * `getSessionWorktreeRefs` / `getRunWorktreeRefs` SQL is on the tested path.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseService } from '../../../../database/database';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { setWorktreeMonitorProvider } from '../worktreeMonitor';
@@ -23,23 +25,39 @@ let root: string;
 let repo: string;
 const wtPath = (name: string) => join(root, name);
 
-interface SessionRef { id: string; worktree_path: string; in_place: number | null; is_main_repo: number | null }
-interface RunRef { id: string; worktree_path: string }
-
-let sessions: SessionRef[];
-let runs: RunRef[];
+let svc: DatabaseService;
+let dbDir: string;
+let projectId: number;
 let duCalls: string[];
 let duGate: Array<() => void>;
 let disk: DiskUsageService;
 
+function seedSession(id: string, worktreePath: string, pid: number, flags: { in_place?: boolean; is_main_repo?: boolean } = {}): void {
+  svc.createSession({
+    id,
+    name: id,
+    initial_prompt: '',
+    worktree_name: id,
+    worktree_path: worktreePath,
+    project_id: pid,
+    in_place: flags.in_place,
+    is_main_repo: flags.is_main_repo,
+  });
+}
+
+function seedRun(id: string, worktreePath: string, pid: number): void {
+  svc.getDb()
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path)
+       VALUES (?, 'wf-1', ?, 'running', 'default', ?)`,
+    )
+    .run(id, pid, worktreePath);
+}
+
 function useProvider(): void {
   setWorktreeMonitorProvider(
     createWorktreeMonitorProvider({
-      database: {
-        getProject: (id) => (id === 1 ? { path: repo } : undefined),
-        getSessionWorktreeRefs: () => sessions,
-        getRunWorktreeRefs: () => runs,
-      },
+      database: svc,
       worktreeManager: new WorktreeManager(),
       diskUsage: disk,
     }),
@@ -64,12 +82,22 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  sessions = [
-    { id: 's-main', worktree_path: repo, in_place: 0, is_main_repo: 1 },
-    { id: 's-1', worktree_path: wtPath('sess-wt'), in_place: 0, is_main_repo: 0 },
-    { id: 's-inplace', worktree_path: wtPath('inplace-wt'), in_place: 1, is_main_repo: 0 },
-  ];
-  runs = [{ id: 'r-1', worktree_path: wtPath('run-wt') }];
+  dbDir = mkdtempSync(join(tmpdir(), 'wt-monitor-db-'));
+  svc = new DatabaseService(join(dbDir, 'test.db'));
+  svc.setMigrationsDirForTesting(join(__dirname, '..', '..', '..', '..', 'database', 'migrations'));
+  svc.initialize();
+  const project = svc.createProject('wt', repo);
+  projectId = project.id;
+  const other = svc.createProject('other', join(root, 'other-proj'));
+  seedSession('s-main', repo, projectId, { is_main_repo: true });
+  seedSession('s-1', wtPath('sess-wt'), projectId);
+  seedSession('s-inplace', wtPath('inplace-wt'), projectId, { in_place: true });
+  svc.getDb()
+    .prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', ?, 'sprint', '{}')")
+    .run(projectId);
+  seedRun('r-1', wtPath('run-wt'), projectId);
+  // Negative control: rows owned by a DIFFERENT project must not claim orphan-wt.
+  seedSession('s-other', wtPath('orphan-wt'), other.id);
   duCalls = [];
   duGate = [];
   disk = new DiskUsageService({
@@ -84,6 +112,8 @@ beforeEach(() => {
 
 afterEach(() => {
   setWorktreeMonitorProvider(null);
+  svc.close();
+  rmSync(dbDir, { recursive: true, force: true });
 });
 
 const caller = () => appRouter.createCaller(createContext()).cyboflow.worktreeMonitor;
@@ -97,13 +127,13 @@ describe('cyboflow.worktreeMonitor wiring', () => {
 
   it('rejects with PRECONDITION_FAILED when no provider is wired', async () => {
     setWorktreeMonitorProvider(null);
-    await expect(caller().registry({ projectId: 1 })).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    await expect(caller().registry({ projectId })).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
   });
 });
 
 describe('cyboflow.worktreeMonitor.registry (real git worktrees)', () => {
   it('tags every git worktree end-to-end', async () => {
-    const { worktrees } = await caller().registry({ projectId: 1 });
+    const { worktrees } = await caller().registry({ projectId });
     const byPath = new Map(worktrees.map((w) => [w.path, w]));
 
     expect(byPath.get(repo)).toMatchObject({ tag: 'is_main_repo', prunable: false, sessionId: 's-main' });
@@ -114,16 +144,22 @@ describe('cyboflow.worktreeMonitor.registry (real git worktrees)', () => {
   });
 
   it('never marks an in_place / is_main_repo entry prunable', async () => {
-    const { worktrees } = await caller().registry({ projectId: 1 });
+    const { worktrees } = await caller().registry({ projectId });
     const guarded = worktrees.filter((w) => w.tag === 'in_place' || w.tag === 'is_main_repo');
     expect(guarded.length).toBeGreaterThanOrEqual(2);
     for (const w of guarded) expect(w.prunable).toBe(false);
   });
 
   it('keeps the main checkout non-prunable even when no session row owns it', async () => {
-    sessions = sessions.filter((s) => s.id !== 's-main');
-    const { worktrees } = await caller().registry({ projectId: 1 });
+    svc.getDb().prepare("DELETE FROM sessions WHERE id = 's-main'").run();
+    const { worktrees } = await caller().registry({ projectId });
     expect(worktrees.find((w) => w.path === repo)).toMatchObject({ tag: 'is_main_repo', prunable: false });
+  });
+
+  it('ignores other projects\' rows: their session on orphan-wt leaves it orphan (project_id filter)', async () => {
+    const { worktrees } = await caller().registry({ projectId });
+    expect(worktrees.find((w) => w.path === wtPath('orphan-wt'))).toMatchObject({ tag: 'orphan' });
+    expect(worktrees.some((w) => w.sessionId === 's-other')).toBe(false);
   });
 
   it('returns an empty list for an unknown project', async () => {
@@ -132,8 +168,8 @@ describe('cyboflow.worktreeMonitor.registry (real git worktrees)', () => {
 
   // Negative control: the orphan tag is real, not a default — owning the path flips it.
   it('flips orphan -> run-owned once a run row references the path', async () => {
-    runs = [...runs, { id: 'r-2', worktree_path: wtPath('orphan-wt') }];
-    const { worktrees } = await caller().registry({ projectId: 1 });
+    seedRun('r-2', wtPath('orphan-wt'), projectId);
+    const { worktrees } = await caller().registry({ projectId });
     expect(worktrees.find((w) => w.path === wtPath('orphan-wt'))?.tag).toBe('run-owned');
   });
 });
