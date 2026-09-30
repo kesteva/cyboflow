@@ -56,7 +56,8 @@ const fakes = vi.hoisted(() => {
       this.visible = v;
     }
   }
-  return { FakeView, created };
+  const webRequest = { onBeforeRequest: vi.fn(), onCompleted: vi.fn(), onErrorOccurred: vi.fn() };
+  return { FakeView, created, webRequest };
 });
 const created = fakes.created;
 
@@ -70,7 +71,7 @@ vi.mock('electron', () => ({
       setDevicePermissionHandler: vi.fn(),
       setDisplayMediaRequestHandler: vi.fn(),
       on: vi.fn(),
-      webRequest: { onSendHeaders: vi.fn(), onCompleted: vi.fn(), onErrorOccurred: vi.fn() },
+      webRequest: fakes.webRequest,
     }),
   },
 }));
@@ -256,6 +257,34 @@ describe('telemetry wiring', () => {
     expect((await manager.get('t0'))?.state).toBe('evicted');
     // An evicted tab keeps its history — that is what an agent reads it for.
     expect(manager.telemetry.read('t0', 'console')!.entries).toHaveLength(1);
+  });
+
+  it('times requests from onBeforeRequest and never registers onSendHeaders', async () => {
+    // onSendHeaders makes Electron clone a Blob body's data pipe, which segfaults
+    // the whole app when that pipe is already gone (Sentry CYBOFLOW-APP-2Q).
+    await open('t0');
+    const wr = fakes.webRequest as Record<string, unknown>;
+    expect(wr.onSendHeaders).toBeUndefined();
+    const onBefore = fakes.webRequest.onBeforeRequest.mock.calls.at(-1)![0] as (
+      d: { id: number; timestamp: number },
+      cb: (r: object) => void,
+    ) => void;
+    const callback = vi.fn();
+    onBefore({ id: 7, timestamp: 1_000 }, callback);
+    expect(callback).toHaveBeenCalledWith({});
+
+    const onCompleted = fakes.webRequest.onCompleted.mock.calls.at(-1)![0] as (d: object) => void;
+    onCompleted({
+      id: 7,
+      url: 'https://example.com/api',
+      method: 'POST',
+      resourceType: 'xhr',
+      timestamp: 1_250,
+      webContentsId: created[0].webContents.id,
+      statusCode: 200,
+      fromCache: false,
+    });
+    expect(manager.telemetry.read('t0', 'network')!.entries[0]).toMatchObject({ durationMs: 250, status: 200 });
   });
 
   it('forgets a closed tab’s telemetry', async () => {

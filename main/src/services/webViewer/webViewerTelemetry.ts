@@ -231,7 +231,7 @@ export class WebViewerTelemetry {
     });
   }
 
-  /** `webRequest.onSendHeaders` — the start half of the request-id correlation. */
+  /** `webRequest.onBeforeRequest` — the start half of the request-id correlation. */
   requestStarted(partition: string, req: { id: number; timestamp: number }): void {
     let map = this.starts.get(partition);
     if (!map) {
