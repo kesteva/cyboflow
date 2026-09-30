@@ -190,6 +190,7 @@ import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap'
 import { MonitorReapService } from './services/monitor/monitorReapService';
 import { countDescendantPids } from './services/monitor/reapManifest';
 import { ReapExecutorImpl } from './services/monitor/reapExecutor';
+import { createWorktreePruner } from './services/monitor/worktreePruner';
 import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
 import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -5973,9 +5974,14 @@ app.whenReady().then(async () => {
             peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),
             countDescendants: countDescendantPids,
           },
-          // Process kills + broker reaping; worktree pruning attaches via `pruneWorktree`.
+          // Process kills, then broker reaping, then worktree removal (owner rows untouched).
           executor: new ReapExecutorImpl({
             reapBrokersForWorktree: (worktreePath) => codexBrokerReaper.reapForWorktree(worktreePath),
+            pruneWorktree: createWorktreePruner({
+              worktreeManager,
+              resolveProjectPath: (projectId) => databaseService.getProject(projectId)?.path ?? null,
+              clearGitStatusCache: (sessionId) => gitStatusManager.clearSessionCache(sessionId),
+            }),
           }),
         }),
       );

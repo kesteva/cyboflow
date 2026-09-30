@@ -47,7 +47,7 @@ export interface ReapExecutorDeps {
    */
   pruneWorktree?: (
     target: ReapWorktreeTarget,
-    options: { alsoDeleteBranch: boolean },
+    options: { alsoDeleteBranch: boolean; projectId?: number },
   ) => Promise<ReapExecutionResult>;
   /** SIGTERM→SIGKILL grace window in ms; defaults to {@link REAP_KILL_GRACE_MS}. */
   graceMs?: number;
@@ -83,7 +83,10 @@ export class ReapExecutorImpl implements ReapExecutor {
     this.selfPid = deps.selfPid ?? process.pid;
   }
 
-  async execute(manifest: ReapManifest, options: { alsoDeleteBranch: boolean }): Promise<ReapExecutionResult[]> {
+  async execute(
+    manifest: ReapManifest,
+    options: { alsoDeleteBranch: boolean; projectId?: number },
+  ): Promise<ReapExecutionResult[]> {
     const results: ReapExecutionResult[] = [];
     // Processes first: nothing may still be running in a worktree when it is removed.
     for (const target of manifest.targets) {
@@ -151,7 +154,7 @@ export class ReapExecutorImpl implements ReapExecutor {
 
   private async teardownWorktreeTarget(
     target: ReapWorktreeTarget,
-    options: { alsoDeleteBranch: boolean },
+    options: { alsoDeleteBranch: boolean; projectId?: number },
   ): Promise<ReapExecutionResult> {
     const targetId = reapTargetKey(target);
     const prune = this.deps.pruneWorktree;

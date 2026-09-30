@@ -163,7 +163,7 @@ export class MonitorReapService {
 
     // The branch-delete choice is the one captured (and confirmed) at resolve time.
     const alsoDeleteBranch = manifest.alsoDeleteBranch;
-    const results = await executor.execute(manifest, { alsoDeleteBranch });
+    const results = await executor.execute(manifest, { alsoDeleteBranch, projectId });
     return { ok: true, manifest, alsoDeleteBranch, results };
   }
 }

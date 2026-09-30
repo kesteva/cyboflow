@@ -116,6 +116,6 @@ export interface ReapExecutionError {
 export interface ReapExecutor {
   execute(
     manifest: ReapManifest,
-    options: { alsoDeleteBranch: boolean },
+    options: { alsoDeleteBranch: boolean; projectId?: number },
   ): Promise<ReapExecutionResult[]>;
 }

@@ -111,7 +111,7 @@ describe('monitorReap.execute', () => {
     const { manifest } = await caller().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
     const out = await caller().execute({ manifestId: manifest.id });
     expect(h.execute).toHaveBeenCalledTimes(1);
-    expect(h.execute.mock.calls[0]).toEqual([manifest, { alsoDeleteBranch: false }]);
+    expect(h.execute.mock.calls[0]).toEqual([manifest, { alsoDeleteBranch: false, projectId: 1 }]);
     expect(out.errors).toEqual([]);
     expect(out.results).toHaveLength(2);
   });
@@ -303,7 +303,7 @@ describe('monitorReap.execute', () => {
     const off = await caller().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
     // A forged extra field on execute is stripped by the input schema and never honoured.
     await caller().execute({ manifestId: off.manifest.id, alsoDeleteBranch: true } as { manifestId: string });
-    expect(h.execute.mock.calls[0][1]).toEqual({ alsoDeleteBranch: false });
+    expect(h.execute.mock.calls[0][1]).toEqual({ alsoDeleteBranch: false, projectId: 1 });
 
     const on = await caller().resolve({
       projectId: 1,
@@ -311,7 +311,7 @@ describe('monitorReap.execute', () => {
       alsoDeleteBranch: true,
     });
     await caller().execute({ manifestId: on.manifest.id });
-    expect(h.execute.mock.calls[1][1]).toEqual({ alsoDeleteBranch: true });
+    expect(h.execute.mock.calls[1][1]).toEqual({ alsoDeleteBranch: true, projectId: 1 });
   });
 
   it('re-resolving identical content mints a new id and cannot revive an expired one', async () => {
