@@ -132,6 +132,8 @@ describe('SystemView', () => {
   it('counts orphan worktrees and orphan processes in the Orphans tile', () => {
     const orphanProc = {
       bucket: 'orphan',
+      processType: 'codex-broker',
+      worktreePath: null,
       pid: 1,
       command: 'codex app-server',
       pcpu: 0,
