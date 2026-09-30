@@ -170,6 +170,12 @@ export interface VerificationAgentQueryArgs {
   systemPrompt: string;
   /** cwd of the deployed session — the provisioned snapshot worktree (or the live worktree in fallback). */
   cwd: string;
+  /**
+   * The OWNING run's worktree, stamped onto the spawn env via the spawn marker. Differs
+   * from {@link cwd} on a snapshot-backed run (cwd is a temporary checkout). Absent
+   * ⇒ `cwd` is the owning worktree.
+   */
+  markerWorktreePath?: string;
   /** The resolved Claude model id (namespace-checked upstream). */
   model?: string;
   /** The hard tool ceiling — {@link VERIFY_AGENT_ALLOWED_TOOLS}. */
@@ -3908,7 +3914,8 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           cwd,
           model,
           allowedTools: [...VERIFY_AGENT_ALLOWED_TOOLS],
-          env: stampSpawnMarker(env, cwd),
+          markerWorktreePath: req.runWorktreePath,
+          env: stampSpawnMarker(env, req.runWorktreePath),
           ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
           signal: controller.signal,
           // §A1.4 structural guards — EXPLORE ONLY, and handed to both runtimes

@@ -502,6 +502,19 @@ describe('makeVerificationAgentQuery — the harness env reaches the deployed se
       // The spawn marker rides the merged env: this process's id + the query cwd.
       expect(env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
       expect(env.CYBOFLOW_WORKTREE).toBe('/wt');
+
+      // A snapshot-backed run: cwd is the temp checkout, the marker names the owner.
+      await fn({
+        prompt: 'p',
+        systemPrompt: 's',
+        cwd: '/snap',
+        markerWorktreePath: '/run/worktree',
+        allowedTools: ['Bash'],
+        env: {},
+      });
+      const snapEnv = (lastOptions ?? {}).env as Record<string, string>;
+      expect((lastOptions ?? {}).cwd).toBe('/snap');
+      expect(snapEnv.CYBOFLOW_WORKTREE).toBe('/run/worktree');
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;

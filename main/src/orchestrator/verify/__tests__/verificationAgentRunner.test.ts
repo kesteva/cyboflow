@@ -580,9 +580,12 @@ describe('VerificationAgentRunner.run', () => {
     expect(args.env.VERIFY_PORT).toBe('29260');
     expect(args.env.VERIFY_DRIVER_PORT).toBe('29261');
     // The spawn marker is stamped onto the env handed to the query seam, scoped
-    // to the cwd the agent actually runs in.
+    // to the OWNING run's worktree — not the temporary snapshot checkout the
+    // agent runs in (cwd), which differs on a snapshot-backed run.
+    expect(args.cwd).toBe('/snap');
     expect(args.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
-    expect(args.env.CYBOFLOW_WORKTREE).toBe(args.cwd);
+    expect(args.env.CYBOFLOW_WORKTREE).toBe('/live/worktree');
+    expect(args.markerWorktreePath).toBe('/live/worktree');
     // model is the Claude-run inherit (never a gpt id).
     expect(args.model).toBe('claude-sonnet-5');
     expect(dispose).toHaveBeenCalledTimes(1);
