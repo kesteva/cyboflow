@@ -101,6 +101,8 @@ export class DiskUsageService {
   private readonly queue: string[] = [];
   private inflight: InflightMeasurement | null = null;
   private draining = false;
+  /** Callers of {@link measureFresh} parked until their path's fresh `du` settles. */
+  private readonly freshWaiters = new Map<string, Array<(bytes: number | null) => void>>();
 
   constructor(opts: DiskUsageServiceOptions = {}) {
     this.runDu = opts.runDu ?? defaultDuRunner;
@@ -155,6 +157,29 @@ export class DiskUsageService {
     return { status: 'queued' };
   }
 
+  /**
+   * Awaitable {@link requestFresh}: jumps the queue, discards any cached value, and
+   * resolves with the bytes of a `du` that STARTED after this call (`null` when it
+   * failed, e.g. the path is gone). Still runs through the serial drain loop, so
+   * the concurrency-1 rule holds. Used by the reap manifest, whose reclaim figure
+   * must never come from the stale-tolerant cache.
+   */
+  measureFresh(path: string): Promise<number | null> {
+    return new Promise<number | null>((resolve) => {
+      const waiters = this.freshWaiters.get(path);
+      if (waiters) waiters.push(resolve);
+      else this.freshWaiters.set(path, [resolve]);
+      this.requestFresh(path);
+    });
+  }
+
+  private settleFreshWaiters(path: string, bytes: number | null): void {
+    const waiters = this.freshWaiters.get(path);
+    if (!waiters) return;
+    this.freshWaiters.delete(path);
+    for (const resolve of waiters) resolve(bytes);
+  }
+
   private inBackoff(path: string): boolean {
     const failed = this.failedAt.get(path);
     if (failed === undefined) return false;
@@ -179,8 +204,11 @@ export class DiskUsageService {
         try {
           const bytes = await this.runDu(path);
           if (!job.stale) this.cache.set(path, { bytes, measuredAt: this.now() });
+          // A requeued path is re-measured next; its waiters take that newer number.
+          if (!job.requeueFront) this.settleFreshWaiters(path, bytes);
         } catch (err) {
           if (!job.stale) this.failedAt.set(path, this.now());
+          if (!job.requeueFront) this.settleFreshWaiters(path, null);
           this.logger?.warn('diskUsageService: du failed', {
             path,
             error: err instanceof Error ? err.message : String(err),

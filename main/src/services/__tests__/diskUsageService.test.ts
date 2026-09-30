@@ -241,4 +241,36 @@ describe('parseDuSkOutput', () => {
     expect(() => parseDuSkOutput('')).toThrow();
     expect(() => parseDuSkOutput('du: nope')).toThrow();
   });
+  it('measureFresh resolves with a du that started after the call, ignoring a warm cache', async () => {
+    const { svc, fake } = makeService();
+    svc.getUsage('/wt/a');
+    await fake.settle('/wt/a', 100);
+    expect(svc.getUsage('/wt/a')).toMatchObject({ status: 'measured', bytes: 100 });
+
+    let result: number | null | undefined;
+    const p = svc.measureFresh('/wt/a').then((b) => {
+      result = b;
+    });
+    await flush();
+    expect(fake.calls).toEqual(['/wt/a', '/wt/a']);
+    expect(result).toBeUndefined();
+    await fake.settle('/wt/a', 250);
+    await p;
+    expect(result).toBe(250);
+  });
+
+  it('measureFresh resolves null when du fails and never runs two du at once', async () => {
+    const { svc, fake } = makeService();
+    const a = svc.measureFresh('/wt/a');
+    const b = svc.measureFresh('/wt/b');
+    await flush();
+    expect(fake.maxActive()).toBe(1);
+    expect(fake.calls).toEqual(['/wt/a']); // b waits its turn behind a
+    await fake.settle('/wt/a', 5);
+    await expect(a).resolves.toBe(5);
+    fake.pending.find((p) => p.path === '/wt/b')?.reject(new Error('gone'));
+    await flush();
+    await expect(b).resolves.toBeNull();
+    expect(fake.maxActive()).toBe(1);
+  });
 });
