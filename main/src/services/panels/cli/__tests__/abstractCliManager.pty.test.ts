@@ -38,6 +38,7 @@ import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import { AbstractCliManager } from '../AbstractCliManager';
+import { getInstanceId } from '../../../../utils/spawnMarker';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConversationMessage } from '../../../../database/models';
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
@@ -451,6 +452,37 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
     expect(output).toContain(cwd);
     // ... and so did the injected environment variable.
     expect(output).toContain('pty-env-marker-123');
+  }, REAL_PROCESS_TIMEOUT_MS);
+
+  it('stamps CYBOFLOW_INSTANCE and CYBOFLOW_WORKTREE (= the real cwd) into the spawned env', async () => {
+    const mgr = new TestCliManager();
+    const cwd = fs.realpathSync(os.tmpdir());
+    // Negative control: the env handed to spawnPty carries NEITHER marker key
+    // (and a stale inherited instance id), so the child can only print the real
+    // id / cwd if spawnPtyProcess itself stamped them.
+    const inputEnv = cleanEnv({ CYBOFLOW_INSTANCE: 'stale-inherited-instance' });
+    expect(inputEnv.CYBOFLOW_WORKTREE).toBeUndefined();
+    const pty = await mgr.spawnPty(
+      process.execPath,
+      ['-e', 'console.log("INST=" + process.env.CYBOFLOW_INSTANCE); console.log("WT=" + process.env.CYBOFLOW_WORKTREE); process.exit(0)'],
+      cwd,
+      inputEnv
+    );
+    spawnedPtys.push(pty);
+
+    let output = '';
+    await new Promise<void>((resolve) => {
+      pty.onData((d: string) => {
+        output += d;
+      });
+      pty.onExit(() => resolve());
+    });
+
+    expect(output).toContain(`INST=${getInstanceId()}`);
+    expect(output).not.toContain('stale-inherited-instance');
+    expect(output).toContain(`WT=${cwd}`);
+    // The caller's env object is never mutated by the stamp.
+    expect(inputEnv.CYBOFLOW_WORKTREE).toBeUndefined();
   }, REAL_PROCESS_TIMEOUT_MS);
 
   it('surfaces an absent command as a nonzero child exit', async () => {

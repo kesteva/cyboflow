@@ -12,6 +12,7 @@ import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../../../
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { stampSpawnMarker } from '../../../utils/spawnMarker';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
@@ -818,6 +819,11 @@ export abstract class AbstractCliManager extends EventEmitter {
     this.logger?.verbose(`Executing ${this.getCliToolName()} command: ${fullCommand}`);
     this.logger?.verbose(`Working directory: ${cwd}`);
 
+    // Spawn-marker chokepoint: every interactive-substrate PTY (Claude, Codex, pi,
+    // OMP) reaches pty.spawn through here — subclass overrides call super — and
+    // this is the one place that holds both the final env and the real cwd.
+    const markedEnv = stampSpawnMarker(env, cwd);
+
     let ptyProcess: pty.IPty;
     let spawnAttempt = 0;
     let lastError: unknown;
@@ -835,7 +841,7 @@ export abstract class AbstractCliManager extends EventEmitter {
             cols: 80,
             rows: 30,
             cwd,
-            env
+            env: markedEnv
           });
         } else {
           // Second attempt or if we know we need Node.js: use Node.js directly
@@ -873,8 +879,8 @@ export abstract class AbstractCliManager extends EventEmitter {
           // re-booting the whole Electron app. Scope this to the execPath branch only;
           // a real external `node` never needs (or wants) this flag.
           const nodeEnv = nodePath === process.execPath
-            ? { ...env, ELECTRON_RUN_AS_NODE: '1' }
-            : env;
+            ? { ...markedEnv, ELECTRON_RUN_AS_NODE: '1' }
+            : markedEnv;
 
           ptyProcess = pty.spawn(nodePath, nodeArgs, {
             name: 'xterm-color',
