@@ -75,6 +75,16 @@ beforeEach(() => {
 });
 
 describe('SystemView', () => {
+  it('mounts the Orphans section above the grouped body', () => {
+    mockSnapshot(snap([wt('/a', measured(MB)), wt('/stale', measured(MB), 'orphan')]));
+    render(<SystemView />);
+    const orphans = screen.getByTestId('system-orphans');
+    expect(orphans).toBeInTheDocument();
+    expect(orphans.compareDocumentPosition(screen.getByTestId('system-by-worktree'))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it('mounts the Ports & sockets section from the snapshot', () => {
     mockSnapshot(snap([wt('/a', measured(MB))]));
     render(<SystemView />);
@@ -120,7 +130,14 @@ describe('SystemView', () => {
   });
 
   it('counts orphan worktrees and orphan processes in the Orphans tile', () => {
-    const orphanProc = { bucket: 'orphan', pid: 1 } as SystemSnapshotData['processes'][number];
+    const orphanProc = {
+      bucket: 'orphan',
+      pid: 1,
+      command: 'codex app-server',
+      pcpu: 0,
+      pmem: 0,
+      etimeSeconds: 1,
+    } as SystemSnapshotData['processes'][number];
     mockSnapshot(snap([wt('/a', measured(MB), 'orphan')], { processes: [orphanProc] }));
     render(<SystemView />);
     expect(screen.getByTestId('system-tile-orphans')).toHaveTextContent('1 wt · 1 proc');

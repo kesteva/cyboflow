@@ -28,6 +28,7 @@ import {
   type SystemGroupBy,
 } from '../../utils/systemGroupBy';
 import { SYSTEM_SORT_OPTIONS, SystemGroupedBody, type SystemSortKey } from '../System/SystemGroupedBody';
+import { SystemOrphansSection } from '../System/SystemOrphansSection';
 import { SystemPortsSection } from './SystemPortsSection';
 
 const REFRESH_INTERVAL_MS = 2500;
@@ -344,6 +345,7 @@ export function SystemView(): ReactElement {
             {snapshot !== null && (
               <SystemPortsSection ports={snapshot.ports} />
             )}
+            {snapshot !== null && <SystemOrphansSection snapshot={snapshot} />}
             {snapshot !== null && (
               <SystemGroupedBody snapshot={snapshot} projectId={projectId} groupBy={groupBy} sortBy={sortBy} />
             )}

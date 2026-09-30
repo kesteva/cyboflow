@@ -349,7 +349,7 @@ export function SuspectedTier({ children, className = '' }: { children: ReactNod
   );
 }
 
-function DiskFigure({ usage }: { usage: SystemWorktree['usage'] }): ReactElement {
+export function DiskFigure({ usage }: { usage: SystemWorktree['usage'] }): ReactElement {
   switch (usage.status) {
     case 'measured':
       return (
