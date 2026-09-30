@@ -14,7 +14,7 @@ import { MonitorReapService } from '../../../../services/monitor/monitorReapServ
 import { ReapManifestStash } from '../../../../services/monitor/reapManifestStash';
 import type { ReapSnapshot } from '../../../../services/monitor/reapManifest';
 import type { ReapExecutor } from '../../../reapTypes';
-import type { SystemProcessEntry, SystemWorktreeEntry } from '../../../systemTypes';
+import type { SystemOrphanProcess, SystemProcessEntry, SystemWorktreeEntry } from '../../../systemTypes';
 
 const caller = () => appRouter.createCaller(createContext()).cyboflow.monitorReap;
 
@@ -23,7 +23,7 @@ const wtEntry = (path: string, tag: 'orphan' | 'session-owned' | 'in_place'): Sy
     ? { path, branch: 'main', tag, prunable: false, usage: { status: 'queued' } }
     : { path, branch: `b-${path}`, tag, prunable: true, usage: { status: 'queued' } };
 
-const orphanProc = (pid: number): SystemProcessEntry => ({
+const orphanProc = (pid: number): SystemOrphanProcess => ({
   pid,
   ppid: 1,
   pcpu: 0,
@@ -139,7 +139,7 @@ describe('monitorReap.execute', () => {
     class LeakyStash extends ReapManifestStash {
       override take(id: string) {
         const hit = super.take(id);
-        if (hit.ok) this.put({ manifest: hit.entry.manifest, projectId: hit.entry.projectId, selection: hit.entry.selection });
+        if (hit.ok) this.put({ manifest: hit.entry.manifest, projectId: hit.entry.projectId, selection: hit.entry.selection, fingerprint: hit.entry.fingerprint });
         return hit;
       }
     }
@@ -180,6 +180,110 @@ describe('monitorReap.execute', () => {
     h.setSnapshot({ ...base, processes: [{ ...orphanProc(11), command: 'something-else' }] });
     await expect(caller().execute({ manifestId: manifest.id })).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  describe('identity drift since resolve is rejected with zero destructive calls', () => {
+    const ownedWt = (over: Partial<SystemWorktreeEntry> = {}): SystemWorktreeEntry =>
+      ({
+        path: '/wt/orphan',
+        branch: 'feat/a',
+        tag: 'orphan',
+        prunable: true,
+        sessionId: 's1',
+        usage: { status: 'queued' },
+        ...over,
+      }) as SystemWorktreeEntry;
+    const wtSnap = (w: SystemWorktreeEntry): ReapSnapshot => ({ generatedAt: 1, worktrees: [w], processes: [] });
+    const procSnap = (p: SystemProcessEntry, generatedAt = 1): ReapSnapshot => ({
+      generatedAt,
+      worktrees: [],
+      processes: [p],
+    });
+    const cliOwner = (sessionId: string) => ({ kind: 'cli' as const, panelId: 'p1', sessionId });
+
+    async function expectStale(
+      before: ReapSnapshot,
+      after: ReapSnapshot,
+      selection: Parameters<ReturnType<typeof caller>['resolve']>[0]['selection'],
+    ) {
+      const h = harness(before);
+      const { manifest } = await caller().resolve({ projectId: 1, selection });
+      h.setSnapshot(after);
+      const err = await caller().execute({ manifestId: manifest.id }).catch((e: unknown) => e);
+      expect((err as TRPCError).code).toBe('CONFLICT');
+      expect((err as TRPCError).message).toContain(MANIFEST_STALE);
+      expect(h.execute).not.toHaveBeenCalled();
+    }
+
+    const sel = { kind: 'reap-all-stale' } as const;
+
+    it('worktree branch changed', async () => {
+      await expectStale(wtSnap(ownedWt()), wtSnap(ownedWt({ branch: 'feat/other' })), sel);
+    });
+
+    it('worktree session owner changed', async () => {
+      await expectStale(wtSnap(ownedWt()), wtSnap(ownedWt({ sessionId: 's2' })), sel);
+    });
+
+    it('worktree run owner changed', async () => {
+      await expectStale(
+        wtSnap(ownedWt({ sessionId: undefined, runId: 'r1' })),
+        wtSnap(ownedWt({ sessionId: undefined, runId: 'r2' })),
+        sel,
+      );
+    });
+
+    it('same pid and command but a different ppid', async () => {
+      await expectStale(procSnap(orphanProc(11)), procSnap({ ...orphanProc(11), ppid: 42 }), sel);
+    });
+
+    it('same pid and command but a different start time (pid reuse)', async () => {
+      await expectStale(procSnap(orphanProc(11)), procSnap({ ...orphanProc(11), etimeSeconds: 500 }), sel);
+    });
+
+    it('a null etime on either side is stale', async () => {
+      await expectStale(procSnap(orphanProc(11)), procSnap({ ...orphanProc(11), etimeSeconds: null }), sel);
+      await expectStale(procSnap({ ...orphanProc(11), etimeSeconds: null }), procSnap(orphanProc(11)), sel);
+    });
+
+    it('process owner changed', async () => {
+      const a = { ...orphanProc(11), owner: cliOwner('s1') };
+      const b = { ...orphanProc(11), owner: cliOwner('s2') };
+      await expectStale(procSnap(a), procSnap(b), sel);
+    });
+
+    it('process worktree changed', async () => {
+      await expectStale(
+        procSnap({ ...orphanProc(11), worktreePath: '/wt/a' }),
+        procSnap({ ...orphanProc(11), worktreePath: '/wt/b' }),
+        sel,
+      );
+    });
+
+    it('orphan instanceId changed', async () => {
+      await expectStale(
+        procSnap(orphanProc(11)),
+        procSnap({ ...orphanProc(11), instanceId: 'another-dead' }),
+        sel,
+      );
+    });
+
+    it('a start-time drift inside the tolerance still executes', async () => {
+      const h = harness(procSnap(orphanProc(11), 10_000));
+      const { manifest } = await caller().resolve({ projectId: 1, selection: sel });
+      // Later poll: ps rounds etime one second differently for the same process.
+      h.setSnapshot(procSnap({ ...orphanProc(11), etimeSeconds: 6 }, 10_000));
+      await caller().execute({ manifestId: manifest.id });
+      expect(h.execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('a snapshot taken later with grown etime (same process) still executes', async () => {
+      const h = harness(procSnap(orphanProc(11), 10_000));
+      const { manifest } = await caller().resolve({ projectId: 1, selection: sel });
+      h.setSnapshot(procSnap({ ...orphanProc(11), etimeSeconds: 35 }, 40_000));
+      await caller().execute({ manifestId: manifest.id });
+      expect(h.execute).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('executes the branch-delete choice captured at resolve time; execute cannot change it', async () => {

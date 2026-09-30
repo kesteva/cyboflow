@@ -289,32 +289,84 @@ export async function buildReapManifest<K extends ReapManifestKind>(
   };
 }
 
+/** Two derived process start times within this many seconds are the same process (ps etime is whole seconds). */
+export const REAP_START_TIME_TOLERANCE_SECONDS = 2;
+
+/** One selected target's identity evidence. `key` must match exactly; `startTime` only within tolerance. */
+export interface ReapIdentityEntry {
+  /** Which target this is (`worktree:<normalized path>` / `process:<pid>`); the set of ids must match. */
+  id: string;
+  /** Exact-match identity evidence (branch, owner, ppid, command, bucket, ...). */
+  key: string;
+  /** Derived process start (epoch seconds); `null` for worktrees. A null start on a process never matches. */
+  startTime: number | null;
+  isProcess: boolean;
+}
+
+/** What a selection would target, as identity evidence. Compare with {@link reapFingerprintsMatch}. */
+export type ReapIdentityFingerprint = ReapIdentityEntry[];
+
+function ownerKey(p: KillableProcess): string {
+  const o = p.owner;
+  if (!o) return 'none';
+  return o.kind === 'cli'
+    ? `cli:${o.panelId}:${o.sessionId}`
+    : `run-shell:${o.runId}:${o.terminalId}`;
+}
+
 /**
- * The bucket-sensitive fingerprints a
- * selection would produce against `snapshot` right now — no `du`, git or
- * descendant work. Comparing this to a stashed manifest's own fingerprint is how
- * `monitorReap.execute` detects that the target set changed since resolve.
+ * The ONE stale-target fingerprint. Built from the selected snapshot entries
+ * (`selectTargets`), never from manifest targets, so resolve and execute derive it
+ * the same way from a snapshot. `monitorReap.resolve` stashes it next to the
+ * manifest; `execute` recomputes it against a fresh snapshot and refuses on any
+ * difference. No `du`, git or descendant work.
+ *
+ * Worktree identity: normalized path, tag, branch, session and run owner. Process
+ * identity: pid, ppid, bucket, type, command, worktree, owner, dead-instance id
+ * (orphans) and a derived start time — the pid-reuse discriminator.
  */
-export function resolveReapSelectionFingerprint<K extends ReapManifestKind>(
+export function reapIdentityFingerprint<K extends ReapManifestKind>(
   kind: K,
   selector: ReapSelectors[K],
   snapshot: ReapSnapshot,
-): string[] {
+): ReapIdentityFingerprint {
   const { worktrees, processes } = selectTargets(kind, selector, snapshot);
-  return [
-    ...worktrees.map((w) => `worktree:${w.path}|${w.tag}`),
-    ...processes.map((p) => `process:${p.pid}|${p.bucket}|${p.command}`),
-  ].sort().filter((k, i, all) => all.indexOf(k) === i);
+  const entries: ReapIdentityEntry[] = [
+    ...worktrees.map((w): ReapIdentityEntry => ({
+      id: `worktree:${worktreePathKey(w.path)}`,
+      key: JSON.stringify([worktreePathKey(w.path), w.tag, w.branch, w.sessionId ?? null, w.runId ?? null]),
+      startTime: null,
+      isProcess: false,
+    })),
+    ...processes.map((p): ReapIdentityEntry => ({
+      id: `process:${p.pid}`,
+      key: JSON.stringify([
+        p.pid,
+        p.ppid,
+        p.bucket,
+        p.processType,
+        p.command,
+        p.worktreePath === null ? null : worktreePathKey(p.worktreePath),
+        ownerKey(p),
+        p.bucket === 'orphan' ? p.instanceId : null,
+      ]),
+      startTime: p.etimeSeconds === null ? null : Math.round(snapshot.generatedAt / 1000 - p.etimeSeconds),
+      isProcess: true,
+    })),
+  ];
+  return entries
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .filter((e, i, all) => i === 0 || all[i - 1].id !== e.id);
 }
 
-/** Same fingerprint, derived from a resolved manifest's targets. */
-export function reapManifestFingerprint(manifest: ReapManifest): string[] {
-  return manifest.targets
-    .map((t) =>
-      t.kind === 'worktree'
-        ? `worktree:${t.path}|${t.tag}`
-        : `process:${t.pid}|${t.bucket}|${t.command}`,
-    )
-    .sort()
-    .filter((k, i, all) => all.indexOf(k) === i);
+/** True only when both fingerprints select the same targets with the same identity evidence. */
+export function reapFingerprintsMatch(a: ReapIdentityFingerprint, b: ReapIdentityFingerprint): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i];
+    if (x.id !== y.id || x.key !== y.key) return false;
+    if (!x.isProcess) return true;
+    if (x.startTime === null || y.startTime === null) return false;
+    return Math.abs(x.startTime - y.startTime) <= REAP_START_TIME_TOLERANCE_SECONDS;
+  });
 }

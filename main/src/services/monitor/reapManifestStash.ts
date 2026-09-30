@@ -12,6 +12,7 @@
  * costs nothing.
  */
 import type { ReapManifest, ReapSelection } from '../../orchestrator/reapTypes';
+import type { ReapIdentityFingerprint } from './reapManifest';
 
 /** How long a resolved manifest stays executable. */
 export const REAP_MANIFEST_TTL_MS = 60_000;
@@ -21,6 +22,8 @@ export interface StashedManifest {
   projectId: number;
   /** The selection the manifest was resolved from — re-derived at execute to detect drift. */
   selection: ReapSelection;
+  /** Identity fingerprint computed at resolve from the SAME snapshot the manifest was built from. */
+  fingerprint: ReapIdentityFingerprint;
   expiresAt: number;
 }
 

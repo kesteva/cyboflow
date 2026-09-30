@@ -6,10 +6,11 @@
  *   1. an executor must be wired (else PRECONDITION — nothing is consumed);
  *   2. `take` the stash entry (unknown/expired/replayed ids die here, with zero
  *      side effects);
- *   3. re-derive the SAME selection against a fresh snapshot and compare
- *      fingerprints — if the target set drifted (a process died, a worktree was
- *      removed, a new orphan appeared, a bucket changed) the manifest is stale and
- *      nothing runs. The entry stays consumed: the user must re-confirm a new one;
+ *   3. re-derive the SAME selection against a fresh snapshot and compare its
+ *      identity fingerprint with the one stashed at resolve (from the resolve-time
+ *      snapshot) — if the target set or any target's identity drifted (a process
+ *      died or its pid was reused, a worktree's branch/owner changed, a new orphan
+ *      appeared, a bucket changed) the manifest is stale and nothing runs. The entry stays consumed: the user must re-confirm a new one;
  *   4. only then hand the manifest's exact target list to the executor, with the
  *      branch-delete choice the user confirmed at resolve time (`manifest
  *      .alsoDeleteBranch`) — execute cannot change it. Changing it means resolving,
@@ -29,8 +30,9 @@ import type {
 import {
   ReapManifestError,
   buildReapManifest,
-  reapManifestFingerprint,
-  resolveReapSelectionFingerprint,
+  reapFingerprintsMatch,
+  reapIdentityFingerprint,
+  type ReapIdentityFingerprint,
   type ReapManifestDeps,
   type ReapSnapshot,
 } from './reapManifest';
@@ -54,16 +56,16 @@ function buildForSelection(
   }
 }
 
-function fingerprintForSelection(selection: ReapSelection, snapshot: ReapSnapshot): string[] {
+function fingerprintForSelection(selection: ReapSelection, snapshot: ReapSnapshot): ReapIdentityFingerprint {
   switch (selection.kind) {
     case 'row':
-      return resolveReapSelectionFingerprint('row', selection, snapshot);
+      return reapIdentityFingerprint('row', selection, snapshot);
     case 'card':
-      return resolveReapSelectionFingerprint('card', selection, snapshot);
+      return reapIdentityFingerprint('card', selection, snapshot);
     case 'kill-all-of-type':
-      return resolveReapSelectionFingerprint('kill-all-of-type', selection, snapshot);
+      return reapIdentityFingerprint('kill-all-of-type', selection, snapshot);
     case 'reap-all-stale':
-      return resolveReapSelectionFingerprint('reap-all-stale', {}, snapshot);
+      return reapIdentityFingerprint('reap-all-stale', {}, snapshot);
   }
 }
 
@@ -110,9 +112,11 @@ export class MonitorReapService {
   ): Promise<MonitorReapResolveOutcome> {
     try {
       const snapshot = await this.deps.loadSnapshot(projectId);
+      // Same snapshot for the manifest and its fingerprint: what execute later compares against.
+      const fingerprint = fingerprintForSelection(selection, snapshot);
       const built = await buildForSelection(selection, snapshot, this.deps.manifestDeps, options);
       const manifest: ReapManifest = { ...built, id: (this.deps.mintId ?? mintManifestId)() };
-      this.stash.put({ manifest, projectId, selection });
+      this.stash.put({ manifest, projectId, selection, fingerprint });
       return { ok: true, manifest };
     } catch (err) {
       if (err instanceof ReapManifestError) return { ok: false, code: err.code, message: err.message };
@@ -136,9 +140,9 @@ export class MonitorReapService {
             : 'Unknown manifest id; resolve a manifest first.',
       };
     }
-    const { manifest, projectId, selection } = taken.entry;
+    const { manifest, projectId, selection, fingerprint } = taken.entry;
 
-    let current: string[];
+    let current: ReapIdentityFingerprint;
     try {
       const snapshot = await this.deps.loadSnapshot(projectId);
       current = fingerprintForSelection(selection, snapshot);
@@ -149,8 +153,7 @@ export class MonitorReapService {
       }
       throw err;
     }
-    const resolved = reapManifestFingerprint(manifest);
-    if (current.length !== resolved.length || current.some((k, i) => k !== resolved[i])) {
+    if (!reapFingerprintsMatch(fingerprint, current)) {
       return {
         ok: false,
         code: 'stale',
