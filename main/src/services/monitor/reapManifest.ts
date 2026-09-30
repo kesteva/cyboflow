@@ -306,12 +306,11 @@ export interface ReapIdentityEntry {
 /** What a selection would target, as identity evidence. Compare with {@link reapFingerprintsMatch}. */
 export type ReapIdentityFingerprint = ReapIdentityEntry[];
 
-function ownerKey(p: KillableProcess): string {
+/** Structured (never delimiter-joined) so owner ids containing `:` cannot collide once JSON-encoded. */
+function ownerKey(p: KillableProcess): string[] | null {
   const o = p.owner;
-  if (!o) return 'none';
-  return o.kind === 'cli'
-    ? `cli:${o.panelId}:${o.sessionId}`
-    : `run-shell:${o.runId}:${o.terminalId}`;
+  if (!o) return null;
+  return o.kind === 'cli' ? ['cli', o.panelId, o.sessionId] : ['run-shell', o.runId, o.terminalId];
 }
 
 /**

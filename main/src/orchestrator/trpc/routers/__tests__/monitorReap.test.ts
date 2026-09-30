@@ -260,6 +260,18 @@ describe('monitorReap.execute', () => {
       );
     });
 
+    it('cli owner ids that differ only in where a colon sits are different owners', async () => {
+      const a = { ...orphanProc(11), owner: { kind: 'cli' as const, panelId: 'a:b', sessionId: 'c' } };
+      const b = { ...orphanProc(11), owner: { kind: 'cli' as const, panelId: 'a', sessionId: 'b:c' } };
+      await expectStale(procSnap(a), procSnap(b), sel);
+    });
+
+    it('run-shell owner ids that differ only in where a colon sits are different owners', async () => {
+      const a = { ...orphanProc(11), owner: { kind: 'run-shell' as const, runId: 'a:b', terminalId: 'c' } };
+      const b = { ...orphanProc(11), owner: { kind: 'run-shell' as const, runId: 'a', terminalId: 'b:c' } };
+      await expectStale(procSnap(a), procSnap(b), sel);
+    });
+
     it('orphan instanceId changed', async () => {
       await expectStale(
         procSnap(orphanProc(11)),

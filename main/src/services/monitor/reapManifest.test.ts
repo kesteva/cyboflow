@@ -2,12 +2,15 @@ import { describe, it, expect, vi } from 'vitest';
 import type { GitStatus } from '../../types/session';
 import type {
   SystemProcessEntry,
+  SystemProcessOwner,
   SystemProcessType,
   SystemWorktreeEntry,
 } from '../../orchestrator/systemTypes';
 import { DiskUsageService } from '../diskUsageService';
 import {
   buildReapManifest,
+  reapFingerprintsMatch,
+  reapIdentityFingerprint,
   ReapManifestError,
   type ReapManifestDeps,
   type ReapSnapshot,
@@ -315,5 +318,34 @@ describe('buildReapManifest', () => {
     );
     expect(m.targets).toEqual([]);
     expect(m.reclaimableBytes).toBe(0);
+  });
+});
+
+describe('reapIdentityFingerprint owner identity', () => {
+  const withOwner = (owner: SystemProcessOwner): ReapSnapshot => ({
+    generatedAt: 5000,
+    worktrees: [],
+    processes: [{ ...proc(12, 'orphan', null), owner } as SystemProcessEntry],
+  });
+  const fp = (owner: SystemProcessOwner) =>
+    reapIdentityFingerprint('reap-all-stale', {}, withOwner(owner));
+
+  it('cli owners whose ids differ only in colon placement do not match', () => {
+    const a = fp({ kind: 'cli', panelId: 'a:b', sessionId: 'c' });
+    const b = fp({ kind: 'cli', panelId: 'a', sessionId: 'b:c' });
+    expect(a[0].key).not.toBe(b[0].key);
+    expect(reapFingerprintsMatch(a, b)).toBe(false);
+  });
+
+  it('run-shell owners whose ids differ only in colon placement do not match', () => {
+    const a = fp({ kind: 'run-shell', runId: 'a:b', terminalId: 'c' });
+    const b = fp({ kind: 'run-shell', runId: 'a', terminalId: 'b:c' });
+    expect(a[0].key).not.toBe(b[0].key);
+    expect(reapFingerprintsMatch(a, b)).toBe(false);
+  });
+
+  it('identical owners still match (negative control for the two cases above)', () => {
+    const owner: SystemProcessOwner = { kind: 'cli', panelId: 'a:b', sessionId: 'c' };
+    expect(reapFingerprintsMatch(fp(owner), fp({ ...owner }))).toBe(true);
   });
 });
