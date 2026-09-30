@@ -36,7 +36,6 @@ import {
   type WindowStatePersistence,
 } from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
-import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
 import {
@@ -177,26 +176,15 @@ import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
-import { cancelRunHandler } from './orchestrator/cancelRunHandler';
 import { composeRunControlDeps } from './runControlDepsComposition';
-import { randomUUID } from 'node:crypto';
 import { AgentThreadDbStore } from './orchestrator/agentThread/agentThreadDbStore';
 import { AgentThreadService } from './orchestrator/agentThread/agentThreadService';
 import {
-  setProposalExecutorDeps,
-  reconcileOrphanedExecutingProposals,
   executeProposal,
   getProposalExecutorDeps,
-  type ProposalExecutorDeps,
-  type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
-import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/proposalExecutorLaunchDeps';
-import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
-import { buildProposalExecutorQuickSessionDeps } from './orchestrator/agentThread/proposalExecutorQuickSessionDeps';
-import { generateQuickWorktreeBranchName } from './ipc/session';
-import { reportEagerSpawnFailure } from './ipc/eagerSpawnFailure';
-import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
+import { composeProposalExecutorDeps } from './proposalExecutorComposition';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
 import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
@@ -243,10 +231,6 @@ import {
   dismissAndSweepHalfCreatedExperiment,
   reconcileAllRotationExperiments,
 } from './orchestrator/experimentStore';
-import {
-  createQuickSessionCore,
-  stampQuickSessionRuntimeConfig,
-} from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -3324,104 +3308,22 @@ app.whenReady().then(async () => {
       });
     }
 
-    // Global-agent proposal executor (migration 071). A user-confirmed proposal
-    // executes server-side through the SAME chokepoints, stamped actor:'user' — the
-    // executor owns the CAS state machine, the launch compensation saga, and boot
-    // reconciliation of rows stranded 'executing' by a crash. Deps mirror
-    // setExperimentsDeps: the quick-session core, the run launcher, the FULL safe
-    // session-dismiss (dismissSessionFully — cancels hosted runs + removes the
-    // worktree) + git-neutral run cancel (the same compensation primitives the A/B
-    // rollback ladder uses), the TaskChangeRouter chokepoint, and the workflow registry.
-    // Reuse the SINGLE agentThreadStore built in initializeServices (same DB) — the
-    // MCP propose handler, this executor, and the tRPC context all share one store.
-    const proposalExecutorDeps: ProposalExecutorDeps = {
-      store: agentThreadStore,
-      newIdempotencyKey: () => randomUUID(),
-      // launch-run host sessions + start-quick-session mint/brief delivery: proposalExecutorQuickSessionDeps.ts.
-      ...buildProposalExecutorQuickSessionDeps({
-        createQuickSessionCore, stampQuickSessionRuntimeConfig, reportEagerSpawnFailure,
-        quickSessionCore: { taskQueue: taskQueue!, sessionManager, workflowRegistry, getDb: () => databaseService.getDb(), dismissHalfCreatedSession: dismissSessionFully },
-        newSessionName: generateQuickWorktreeBranchName,
-        sessionManager, panelManager, substrateFacade, interactiveReplManager,
-        getClaudePanelManager: () => (require('./ipc/claudePanel') as typeof import('./ipc/claudePanel')).claudePanelManager,
-        ptyBriefing: QUICK_PTY_BRIEFING, logger: loggerLike,
-      }),
-      // launch-run: workflow resolution (by id or name, custom flows included)
-      // + shape-derived seed mapping live in proposalExecutorLaunchDeps.ts.
-      ...buildProposalExecutorLaunchDeps({
-        workflowRegistry,
-        getProjectById: (projectId) => sessionManager.getProjectById(projectId),
-        runLauncher,
-      }),
-      cancelRun: async (runId) => {
-        await cancelRunHandler(runId, cancelRunDepsBag);
-      },
-      dismissSession: dismissSessionFully,
-      runExists: (runId) =>
-        experimentsDb.prepare('SELECT 1 FROM workflow_runs WHERE id = ?').get(runId) !== undefined,
-      applyTaskChange: async (projectId, change) => {
-        await TaskChangeRouter.getInstance().applyChange(projectId, change);
-      },
-      createBacklogItem: async (projectId, item) => {
-        // The SAME chokepoint every other entity create goes through, stamped
-        // actor:'user' (the human's Confirm click is the authorship). Field mapping
-        // is one-to-one with CreateBacklogItem; parentEpicId/originatingIdeaId were
-        // already resolved to opaque ids + existence-checked at propose time
-        // (mcpQueryHandler's create-backlog-items branch).
-        const { taskId } = await TaskChangeRouter.getInstance().applyChange(projectId, {
-          actor: 'user',
-          entityType: item.taskType,
-          title: item.title,
-          summary: item.summary,
-          body: item.body,
-          priority: item.priority,
-          category: item.category,
-          scope: item.scope,
-          parentEpicId: item.parentEpicId ?? null,
-          originatingIdeaId: item.originatingIdeaId ?? null,
-        });
-        const row = experimentsDb
-          .prepare(
-            `SELECT ref FROM (
-               SELECT id, ref FROM ideas
-               UNION ALL SELECT id, ref FROM epics
-               UNION ALL SELECT id, ref FROM tasks
-             ) WHERE id = ?`,
-          )
-          .get(taskId) as { ref?: unknown } | undefined;
-        return { taskId, ...(typeof row?.ref === 'string' ? { ref: row.ref } : {}) };
-      },
-      readTaskFields: (projectId, taskId) => {
-        // The item may be an idea/epic/task (all share priority + stage_id) — resolve
-        // it across the three tables the same way TaskChangeRouter's locateEntity does.
-        const row = experimentsDb
-          .prepare(
-            `SELECT priority, stage_id AS stageId FROM (
-               SELECT id, project_id, priority, stage_id FROM ideas
-               UNION ALL SELECT id, project_id, priority, stage_id FROM epics
-               UNION ALL SELECT id, project_id, priority, stage_id FROM tasks
-             ) WHERE id = ? AND project_id = ?`,
-          )
-          .get(taskId, projectId) as TaskFieldsSnapshot | undefined;
-        return row ?? null;
-      },
-      runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
-      // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
-      ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
-      // triage-findings: the ReviewItemRouter chokepoint + a live-state read.
-      ...buildProposalExecutorReviewDeps({ reviewItemRouter: ReviewItemRouter.getInstance(), db: experimentsDb }),
-      logger: loggerLike,
-    };
-    setProposalExecutorDeps(proposalExecutorDeps);
-    console.log('[Main] proposal executor deps wired');
-
-    // Boot reconciliation: finalize any proposal stranded 'executing' by a crash
-    // (verifies observable side effects; NEVER re-runs them). Fire-and-forget +
-    // fail-soft — a reconcile failure must never wedge boot.
-    void reconcileOrphanedExecutingProposals(proposalExecutorDeps).catch((err) => {
-      loggerLike.error('[Main] proposal executor boot reconcile failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    // Global-agent proposal executor (migration 071): the deps bag + the boot
+    // reconciliation of proposals stranded 'executing' — see
+    // proposalExecutorComposition.ts (#19 step 26).
+    composeProposalExecutorDeps({
+      experimentsDb,
+      loggerLike,
+      dismissSessionFully,
+      cancelRunDepsBag,
+      agentThreadStore,
+      taskQueue,
+      sessionManager,
+      workflowRegistry,
+      databaseService,
+      substrateFacade,
+      interactiveReplManager,
+      runLauncher,
     });
 
     // Design-mode-fork launch saga (QuestionRouter.launchDesignModeOnFork /
