@@ -26,6 +26,17 @@ interface CliProcess {
   panelId: string;
   sessionId: string;
   worktreePath: string;
+  /** Set as soon as the pty's exit event fires — the record itself lingers in
+   *  `processes` until exit cleanup finishes, so readers must skip exited ones. */
+  exited?: boolean;
+}
+
+/** One live panel process, as exposed to the process snapshot service. */
+export interface OwnedCliProcess {
+  pid: number;
+  panelId: string;
+  sessionId: string;
+  worktreePath: string;
 }
 
 /**
@@ -421,6 +432,27 @@ export abstract class AbstractCliManager extends EventEmitter {
    */
   getAllProcesses(): string[] {
     return Array.from(this.processes.keys());
+  }
+
+  /**
+   * Read-only snapshot of every live panel process (pid + owning panel/session/
+   * worktree), for the process snapshot service to union with its ONE shared `ps`
+   * scan. Performs no I/O. Entries whose pty already exited (or that never got a
+   * real pid) are skipped.
+   */
+  listOwnedProcesses(): OwnedCliProcess[] {
+    const owned: OwnedCliProcess[] = [];
+    for (const entry of this.processes.values()) {
+      const pid = entry.process.pid;
+      if (entry.exited || !Number.isInteger(pid) || pid <= 0) continue;
+      owned.push({
+        pid,
+        panelId: entry.panelId,
+        sessionId: entry.sessionId,
+        worktreePath: entry.worktreePath,
+      });
+    }
+    return owned;
   }
 
   /**
@@ -938,6 +970,8 @@ export abstract class AbstractCliManager extends EventEmitter {
     });
 
     ptyProcess.onExit(async ({ exitCode, signal }) => {
+      const exitedRecord = this.processes.get(panelId);
+      if (exitedRecord && exitedRecord.process === ptyProcess) exitedRecord.exited = true;
       // Check for and kill any child processes
       const pid = ptyProcess.pid;
       if (pid) {

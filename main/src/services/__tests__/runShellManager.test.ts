@@ -344,3 +344,34 @@ describe('RunShellManager multi-terminal', () => {
     expect(mgr.isOpen('run-2')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// listOwnedShells()
+// ---------------------------------------------------------------------------
+
+describe('RunShellManager.listOwnedShells', () => {
+  it('is empty for a manager with no shells', () => {
+    const { mgr } = makeHarness();
+    expect(mgr.listOwnedShells()).toEqual([]);
+  });
+
+  it('returns one entry per live shell with pid/run/terminal/worktree', () => {
+    const { mgr } = makeHarness();
+    mgr.open('run-1');
+    mgr.open('run-1', 'run-1::t1');
+
+    expect(mgr.listOwnedShells()).toEqual([
+      { pid: 4242, runId: 'run-1', terminalId: 'run-1', worktreePath: '/wt/run-1' },
+      { pid: 4242, runId: 'run-1', terminalId: 'run-1::t1', worktreePath: '/wt/run-1' },
+    ]);
+  });
+
+  it('drops a shell whose pty has exited', () => {
+    const { mgr, spawns } = makeHarness();
+    mgr.open('run-1');
+    mgr.open('run-2');
+    spawns[0].pty.emitExit();
+
+    expect(mgr.listOwnedShells().map((s) => s.runId)).toEqual(['run-2']);
+  });
+});

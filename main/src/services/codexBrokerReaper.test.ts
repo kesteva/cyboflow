@@ -13,6 +13,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   CodexBrokerReaper,
   parseBrokerCwd,
+  isBrokerProcess,
   parsePsOutput,
   collectProcessTree,
   type CodexBrokerProcess,
@@ -59,6 +60,15 @@ describe('parseBrokerCwd', () => {
 
   it('returns null for a broker with no --cwd arg', () => {
     expect(parseBrokerCwd('node app-server-broker.mjs serve --endpoint unix:/x')).toBeNull();
+  });
+});
+
+describe('isBrokerProcess', () => {
+  it('is true for a broker row and false for its helpers and unrelated rows', () => {
+    expect(isBrokerProcess({ command: brokerCommand(WT) })).toBe(true);
+    expect(isBrokerProcess({ command: 'codex app-server' })).toBe(false);
+    // Marker without --cwd is not a reapable broker (matches the reap path).
+    expect(isBrokerProcess({ command: 'node app-server-broker.mjs serve' })).toBe(false);
   });
 });
 

@@ -71,6 +71,14 @@ interface RunShell {
   backlog: string;
 }
 
+/** One live run shell, as exposed to the process snapshot service. */
+export interface OwnedRunShell {
+  pid: number;
+  runId: string;
+  terminalId: string;
+  worktreePath: string;
+}
+
 export class RunShellManager {
   /** Keyed by terminalId (NOT runId) so a single run can host MULTIPLE worktree
    *  terminals. The primary terminal uses terminalId === runId (back-compat). */
@@ -204,6 +212,27 @@ export class RunShellManager {
       }
       this.shells.delete(terminalId);
     }
+  }
+
+  /**
+   * Read-only snapshot of every live shell (pid + owning run/terminal/worktree),
+   * for the process snapshot service to union with its ONE shared `ps` scan. No
+   * I/O. A shell that exits is dropped from the map by its onExit handler, so
+   * everything here is live; a non-positive pid (never spawned) is skipped.
+   */
+  listOwnedShells(): OwnedRunShell[] {
+    const owned: OwnedRunShell[] = [];
+    for (const shell of this.shells.values()) {
+      const pid = shell.pty.pid;
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      owned.push({
+        pid,
+        runId: shell.runId,
+        terminalId: shell.terminalId,
+        worktreePath: shell.worktreePath,
+      });
+    }
+    return owned;
   }
 
   /** Terminate every shell (app quit) so no orphaned shells / dev servers linger. */
