@@ -71,7 +71,7 @@ export class FakeCodexAppServerClient implements CodexAppServerClientLike {
 
   async initialize(_params: AppServerInitializeParams): Promise<AppServerInitializeResponse> {
     return {
-      userAgent: 'codex-cli/0.156.1',
+      userAgent: 'codex-cli/0.159.2',
       codexHome: '/home/user/.codex',
       platformFamily: 'unix',
       platformOs: 'macos',

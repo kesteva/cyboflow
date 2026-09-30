@@ -6,6 +6,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled Codex CLI upgraded 0.156.1 → 0.159.2** (`@openai/codex`). The server only offers
+  `gpt-6.1-sol` to 0.159+ clients, so it now appears in the Codex model picker. The app-server
+  protocol change is additive (gateway OAuth methods, new error codes, item timestamps).
+
 ## [0.4.6] — 2026-09-28
 
 ### Added

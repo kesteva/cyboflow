@@ -70,7 +70,7 @@ function makeManager(db: Database.Database, options: FakeCodexAppServerOptions, 
     () => ({
       executablePath: '/app/codex/bin/codex',
       pathDir: '/app/codex/codex-path',
-      version: '0.156.1',
+      version: '0.159.2',
       target: 'aarch64-apple-darwin',
     }),
     '0.1.test',
