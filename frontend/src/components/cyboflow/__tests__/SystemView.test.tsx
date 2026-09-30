@@ -238,3 +238,47 @@ describe('SystemView group-by control', () => {
     expect(screen.getByTestId('system-by-process-type')).toBeInTheDocument();
   });
 });
+
+describe('SystemView process destructive wiring', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  const owned = {
+    bucket: 'owned',
+    processType: 'claude-cli',
+    command: 'claude --resume 11',
+    worktreePath: '/a',
+    pid: 11,
+    ppid: 1,
+    pcpu: 1,
+    pmem: 1,
+    etimeSeconds: 60,
+    owner: { kind: 'cli', panelId: 'p', sessionId: 's-11' },
+  } as SystemSnapshotData['processes'][number];
+  const orphan = {
+    ...owned,
+    bucket: 'orphan',
+    pid: 12,
+    command: 'claude --resume 12',
+    worktreePath: null,
+    owner: null,
+    instanceId: 'dead',
+  } as unknown as SystemSnapshotData['processes'][number];
+
+  it('offers Kill tree / Kill all on live rows and enables Reap all stale for an orphan process', () => {
+    mockSnapshot(snap([wt('/a', measured(MB))], { processes: [owned, orphan] }));
+    render(<SystemView />);
+    expect(screen.getByTestId('kill-tree-11')).toBeInTheDocument();
+    expect(screen.getByTestId('wt-kill-all')).toBeEnabled();
+    expect(screen.getByTestId('system-reap-all-stale')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('system-groupby-process-type'));
+    expect(screen.getByTestId('type-kill-all-claude-cli')).toBeInTheDocument();
+  });
+
+  it('keeps Reap all stale disabled when nothing is stale', () => {
+    mockSnapshot(snap([wt('/a', measured(MB))], { processes: [owned] }));
+    render(<SystemView />);
+    expect(screen.getByTestId('system-reap-all-stale')).toBeDisabled();
+  });
+});

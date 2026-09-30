@@ -335,3 +335,12 @@ describe('failures are visible, per target', () => {
     expect(executeSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('negative control', () => {
+  it('without the hook\'s handlers no process kill control exists — the tests above depend on the wiring', () => {
+    render(<SystemGroupedBody snapshot={snap([proc(11)])} projectId={7} groupBy="worktree" sortBy="cpu" />);
+    expect(screen.queryByTestId('kill-tree-11')).toBeNull();
+    expect(screen.queryByTestId('wt-kill-all')).toBeNull();
+    expect(resolveSpy).not.toHaveBeenCalled();
+  });
+});

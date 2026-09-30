@@ -27,8 +27,14 @@ import {
   setSystemGroupByPreference,
   type SystemGroupBy,
 } from '../../utils/systemGroupBy';
-import { SYSTEM_SORT_OPTIONS, SystemGroupedBody, type SystemSortKey } from '../System/SystemGroupedBody';
+import {
+  SYSTEM_SORT_OPTIONS,
+  SystemGroupedBody,
+  type SystemActionableProcess,
+  type SystemSortKey,
+} from '../System/SystemGroupedBody';
 import { SystemOrphansSection } from '../System/SystemOrphansSection';
+import { useProcessReap } from '../System/useProcessReap';
 import { useWorktreeReap, WorktreeReapError } from '../System/useWorktreeReap';
 import { SystemPortsSection } from './SystemPortsSection';
 
@@ -196,6 +202,12 @@ export function SystemView(): ReactElement {
   const worktreeReap = useWorktreeReap({ projectId, onSettled: refetch });
   const staleWorktrees = snapshot?.worktrees.filter((w) => w.tag === 'orphan' && w.prunable) ?? [];
 
+  // Destructive process actions (Kill tree / Kill all / process half of Reap all stale).
+  const processReap = useProcessReap({ projectId, onSettled: refetch });
+  const orphanProcessRows =
+    snapshot?.processes.filter((p): p is SystemActionableProcess => p.bucket === 'orphan') ?? [];
+  const staleCount = staleWorktrees.length + orphanProcessRows.length;
+
   // Ticks once a second so "Updated Ns ago" advances between the 2.5s polls.
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => {
@@ -268,6 +280,7 @@ export function SystemView(): ReactElement {
         <WorktreeReapError error={worktreeReap.error} onDismiss={worktreeReap.clearError} />
       )}
       {worktreeReap.dialog}
+      {processReap.overlay}
 
       <div className="flex-1 overflow-y-auto">
         {projectId === null ? (
@@ -355,11 +368,15 @@ export function SystemView(): ReactElement {
               <button
                 type="button"
                 data-testid="system-reap-all-stale"
-                disabled={staleWorktrees.length === 0 || worktreeReap.busy}
-                onClick={() => worktreeReap.reapAllStale(staleWorktrees)}
+                disabled={staleCount === 0 || worktreeReap.busy || processReap.busy}
+                onClick={() => {
+                  // One click, both halves: each resolves its own manifest and opens its own confirm.
+                  if (orphanProcessRows.length > 0) processReap.reapAllStale(orphanProcessRows);
+                  if (staleWorktrees.length > 0) worktreeReap.reapAllStale(staleWorktrees);
+                }}
                 className="ml-auto inline-flex items-center gap-1.5 rounded-button border border-status-error/40 bg-status-error/10 px-2.5 py-1 font-mono text-xs font-bold text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Reap all stale{staleWorktrees.length > 0 ? ` (${staleWorktrees.length})` : ''}
+                Reap all stale{staleCount > 0 ? ` (${staleCount})` : ''}
               </button>
             </div>
             {snapshot !== null && (
@@ -373,6 +390,8 @@ export function SystemView(): ReactElement {
                 groupBy={groupBy}
                 sortBy={sortBy}
                 onPruneWorktree={worktreeReap.prune}
+                onKillTree={processReap.handlers.onKillTree}
+                onKillAll={processReap.handlers.onKillAll}
               />
             )}
           </>
