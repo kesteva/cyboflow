@@ -212,8 +212,60 @@ describe('buildReapManifest', () => {
     expect(dirty).toMatchObject({ dirty: true, dirtyFileCount: 3, aheadOfMain: 2 });
     // Run-owned: no session id, so nothing in the cache to consult → unknown, not clean.
     const run = m.targets.find((t) => t.kind === 'worktree' && t.path === '/wt/run');
-    expect(run).toMatchObject({ dirty: null, aheadOfMain: null });
+    expect(run).toMatchObject({ dirty: null, dirtyFileCount: null, aheadOfMain: null });
+    expect(m.dirtyCountUnknownTargetCount).toBe(1);
     expect(peekGitStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('untracked-only work is dirty with an unavailable count, never a confident zero', async () => {
+    // GitStatusManager sets hasUntrackedFiles but its filesChanged excludes untracked files.
+    const peekGitStatus = () => ({
+      status: { state: 'untracked', hasUntrackedFiles: true, filesChanged: 0 } as GitStatus,
+    });
+    const m = await buildReapManifest(
+      'row',
+      { worktreePaths: ['/wt/session'] },
+      snapshot,
+      makeDeps({ peekGitStatus }),
+    );
+    expect(m.targets[0]).toMatchObject({ dirty: true, dirtyFileCount: null });
+    expect(m.dirtyCountUnknownTargetCount).toBe(1);
+    expect(m.dirtyFileCount).toBe(0); // lower bound; the unknown count flags it
+  });
+
+  it('a clean cached worktree reports a real zero count', async () => {
+    const peekGitStatus = () => ({ status: { state: 'clean', filesChanged: 0 } as GitStatus });
+    const m = await buildReapManifest(
+      'row',
+      { worktreePaths: ['/wt/session'] },
+      snapshot,
+      makeDeps({ peekGitStatus }),
+    );
+    expect(m.targets[0]).toMatchObject({ dirty: false, dirtyFileCount: 0 });
+    expect(m.dirtyCountUnknownTargetCount).toBe(0);
+  });
+
+  it('same snapshot generation but a changed measured size yields a different id', async () => {
+    const at = (bytes: number) =>
+      buildReapManifest('card', { worktreePath: '/wt/orphan-b' }, snapshot, makeDeps({ measureFresh: async () => bytes }));
+    const [a, b, a2] = [await at(100), await at(200), await at(100)];
+    expect(a.id).not.toBe(b.id);
+    expect(a.id).toBe(a2.id);
+  });
+
+  it('changed git annotation or descendant count within one generation yields a different id', async () => {
+    const base = await buildReapManifest('reap-all-stale', {}, snapshot, makeDeps());
+    const moreKids = await buildReapManifest(
+      'reap-all-stale',
+      {},
+      snapshot,
+      makeDeps({ countDescendants: async () => 7 }),
+    );
+    expect(moreKids.id).not.toBe(base.id);
+    const dirtyGit = { peekGitStatus: () => ({ status: { state: 'modified', filesChanged: 1 } as GitStatus }) };
+    const w1 = await buildReapManifest('row', { worktreePaths: ['/wt/session'] }, snapshot, makeDeps());
+    const w2 = await buildReapManifest('row', { worktreePaths: ['/wt/session'] }, snapshot, makeDeps(dirtyGit));
+    expect(w2.id).not.toBe(w1.id);
   });
 
   it('descendantPidCount is populated per process target via the injected helper', async () => {

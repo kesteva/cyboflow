@@ -69,7 +69,12 @@ export interface ReapWorktreeTarget {
   reclaimableBytes: number | null;
   /** Uncommitted/untracked work would be discarded; null when the git cache has no entry. */
   dirty: boolean | null;
-  dirtyFileCount: number;
+  /**
+   * Uncommitted file count. null = unavailable: no git cache entry, or the worktree
+   * has untracked files (GitStatusManager's `filesChanged` excludes them, so any
+   * number would under-report). Never 0 when the count is merely unknown.
+   */
+  dirtyFileCount: number | null;
   /** Commits ahead of the base branch; null when the git cache has no entry. */
   aheadOfMain: number | null;
 }
@@ -91,7 +96,11 @@ export interface ReapProcessTarget {
 export type ReapTarget = ReapWorktreeTarget | ReapProcessTarget;
 
 export interface ReapManifest {
-  /** Content hash of the target identities + flags + snapshot generation. */
+  /**
+   * Content hash of everything the user confirms: kind, snapshot generation, the
+   * full target list (identities, measured sizes, git annotations, pid counts) and
+   * `alsoDeleteBranch`. Two manifests share an id only if they are identical.
+   */
   id: string;
   kind: ReapManifestKind;
   /** `generatedAt` of the snapshot this was built against. */
@@ -103,8 +112,10 @@ export interface ReapManifest {
   reclaimableBytes: number;
   /** Worktree targets whose size could not be measured (the total is then a lower bound). */
   unmeasuredTargetCount: number;
-  /** Total uncommitted files across worktree targets (annotation only). */
+  /** Known uncommitted files across worktree targets — a lower bound when `dirtyCountUnknownTargetCount > 0`. */
   dirtyFileCount: number;
+  /** Worktree targets whose uncommitted-file count is unavailable (see {@link ReapWorktreeTarget.dirtyFileCount}). */
+  dirtyCountUnknownTargetCount: number;
   /** Total commits ahead of the base branch across worktree targets (annotation only). */
   aheadOfMainCount: number;
   /** Total descendant pids across process targets. */
@@ -170,11 +181,12 @@ function gitAnnotation(
   deps: ReapManifestDeps,
 ): Pick<ReapWorktreeTarget, 'dirty' | 'dirtyFileCount' | 'aheadOfMain'> {
   const cached = sessionId === null ? null : deps.peekGitStatus(sessionId);
-  if (!cached) return { dirty: null, dirtyFileCount: 0, aheadOfMain: null };
+  if (!cached) return { dirty: null, dirtyFileCount: null, aheadOfMain: null };
   const s = cached.status;
-  const dirtyFileCount = s.filesChanged ?? 0;
-  const dirty =
-    s.hasUncommittedChanges === true || s.hasUntrackedFiles === true || dirtyFileCount > 0;
+  const tracked = s.filesChanged ?? 0;
+  const dirty = s.hasUncommittedChanges === true || s.hasUntrackedFiles === true || tracked > 0;
+  // `filesChanged` never counts untracked files, so with any present the true total is unknown.
+  const dirtyFileCount = s.hasUntrackedFiles === true ? null : tracked;
   return { dirty, dirtyFileCount, aheadOfMain: s.ahead ?? 0 };
 }
 
@@ -258,11 +270,14 @@ function manifestId(
   snapshotGeneratedAt: number,
   alsoDeleteBranch: boolean,
 ): string {
-  const identity = targets
-    .map((t) => (t.kind === 'worktree' ? `w:${t.path}` : `p:${t.pid}`))
+  // Hash the fully resolved targets (sizes, git annotations, pid counts included),
+  // not just their identities: a stash keyed by id must never map one id to two
+  // different confirmation payloads. Sorted for order-independence.
+  const canonical = targets
+    .map((t) => JSON.stringify(t, Object.keys(t).sort()))
     .sort();
   const hash = createHash('sha256')
-    .update(JSON.stringify({ kind, identity, snapshotGeneratedAt, alsoDeleteBranch }))
+    .update(JSON.stringify({ kind, canonical, snapshotGeneratedAt, alsoDeleteBranch }))
     .digest('hex');
   return `reap_${hash.slice(0, 24)}`;
 }
@@ -320,7 +335,8 @@ export async function buildReapManifest<K extends ReapManifestKind>(
     targets,
     reclaimableBytes: worktreeTargets.reduce((sum, t) => sum + (t.reclaimableBytes ?? 0), 0),
     unmeasuredTargetCount: worktreeTargets.filter((t) => t.reclaimableBytes === null).length,
-    dirtyFileCount: worktreeTargets.reduce((sum, t) => sum + t.dirtyFileCount, 0),
+    dirtyFileCount: worktreeTargets.reduce((sum, t) => sum + (t.dirtyFileCount ?? 0), 0),
+    dirtyCountUnknownTargetCount: worktreeTargets.filter((t) => t.dirtyFileCount === null).length,
     aheadOfMainCount: worktreeTargets.reduce((sum, t) => sum + (t.aheadOfMain ?? 0), 0),
     descendantPidCount: processTargets.reduce((sum, t) => sum + t.descendantPidCount, 0),
     alsoDeleteBranch,
