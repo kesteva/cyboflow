@@ -257,15 +257,61 @@ describe('ReapExecutorImpl worktree targets', () => {
     }
   });
 
-  it('prunes the worktree when its associated process is confirmed gone (skipped or killed)', async () => {
+  it('prunes the worktree when its dead-root process had no descendants (`skipped`)', async () => {
     const prune = vi.fn(async (t: ReapWorktreeTarget) => ({ targetId: `worktree:${t.path}`, kind: 'pruned' as const }));
     const ex = new ReapExecutorImpl({
-      isPidAlive: () => false, // already gone -> `skipped`
+      isPidAlive: () => false, // already gone, nothing known beneath it -> `skipped`
       pruneWorktree: prune,
       selfPid: 5,
     });
     const results = await ex.execute(manifestOf([wt('/wt/a'), proc(600, { worktreePath: '/wt/a' })]), OPTS);
     expect(results.map((r) => r.kind)).toEqual(['skipped', 'pruned']);
+    expect(prune).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the worktree when a dead root had descendants whose liveness cannot be verified', async () => {
+    const reap = vi.fn(async () => {});
+    const prune = vi.fn(async (t: ReapWorktreeTarget) => ({ targetId: `worktree:${t.path}`, kind: 'pruned' as const }));
+    const killTreeFn = vi.fn<ReapKillTree>(async () => true);
+    const ex = new ReapExecutorImpl({
+      killTree: killTreeFn,
+      isPidAlive: () => false, // root exited after the manifest was resolved
+      reapBrokersForWorktree: reap,
+      pruneWorktree: prune,
+      selfPid: 5,
+    });
+    const results = await ex.execute(
+      manifestOf([wt('/wt/a'), proc(600, { worktreePath: '/wt/a', descendantPidCount: 2 })]),
+      OPTS,
+    );
+    const procResult = results.find((r) => r.targetId === 'process:600');
+    expect(procResult?.kind).toBe('failed');
+    expect(procResult?.error).toContain('Root pid 600 already exited');
+    expect(procResult?.error).toContain('2 descendant(s)');
+    const kept = results.find((r) => r.targetId === 'worktree:/wt/a');
+    expect(kept?.kind).toBe('failed');
+    expect(kept?.error).toContain('could not be verified');
+    expect(kept?.error).not.toContain('did not exit');
+    expect(prune).not.toHaveBeenCalled();
+    expect(reap).not.toHaveBeenCalled();
+    expect(killTreeFn).not.toHaveBeenCalled();
+  });
+
+  it('prunes the worktree when its associated process was killed', async () => {
+    const prune = vi.fn(async (t: ReapWorktreeTarget) => ({ targetId: `worktree:${t.path}`, kind: 'pruned' as const }));
+    let dead = false;
+    const ex = new ReapExecutorImpl({
+      killTree: async () => {
+        dead = true;
+        return true;
+      },
+      listDescendants: async () => [],
+      isPidAlive: () => !dead,
+      pruneWorktree: prune,
+      selfPid: 5,
+    });
+    const results = await ex.execute(manifestOf([wt('/wt/a'), proc(600, { worktreePath: '/wt/a' })]), OPTS);
+    expect(results.map((r) => r.kind)).toEqual(['killed', 'pruned']);
     expect(prune).toHaveBeenCalledTimes(1);
   });
 

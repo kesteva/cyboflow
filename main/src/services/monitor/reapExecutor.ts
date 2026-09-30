@@ -16,7 +16,9 @@
  * the injected `pruneWorktree` runs. Process targets are all handled first, so
  * anything running inside a worktree is dead before its directory is touched. If an
  * associated process target (same `worktreePath`) survived or failed to die, the
- * worktree is left in place — no broker reap, no prune — and reported as `failed`.
+ * worktree is left in place — no broker reap, no prune — and reported as `failed`. A
+ * root that already exited with known descendants counts the same way: its children can
+ * no longer be enumerated, so their liveness is unverified.
  */
 import { collectDescendantPidsAsync, killTree } from '../../utils/platformProcess';
 import { worktreePathKey } from '../worktreeRegistry';
@@ -31,6 +33,9 @@ import {
 
 /** SIGTERM → SIGKILL grace window for a reap kill (killTree's own default is 2s). */
 export const REAP_KILL_GRACE_MS = 5000;
+
+/** Tail of the error for a dead root whose known descendants cannot be re-checked. */
+const UNVERIFIED_MARKER = 'could not be verified gone';
 
 /** The kill primitive: `killTree`'s shape, injectable so tests never signal real pids. */
 export type ReapKillTree = (pid: number, opts: Parameters<typeof killTree>[1]) => Promise<boolean>;
@@ -91,17 +96,23 @@ export class ReapExecutorImpl implements ReapExecutor {
     options: { alsoDeleteBranch: boolean; projectId?: number },
   ): Promise<ReapExecutionResult[]> {
     const results: ReapExecutionResult[] = [];
-    // worktree key -> pids of associated process targets NOT confirmed gone.
-    const blockers = new Map<string, number[]>();
+    // worktree key -> associated process targets NOT confirmed gone: pids known alive
+    // (or failed to die) vs pids whose descendants' liveness could not be verified.
+    const blockers = new Map<string, { alive: number[]; unverified: number[] }>();
     // Processes first: nothing may still be running in a worktree when it is removed.
     for (const target of manifest.targets) {
       if (target.kind !== 'process') continue;
       const result = await this.killProcessTarget(target);
       results.push(result);
-      // `killed`/`skipped` mean confirmed gone; a survivor or a failed/unverified kill is not.
+      // `killed` means the tree is confirmed gone, and `skipped` only a root that was
+      // already dead with no descendants at resolve time. A survivor, a failed kill, or
+      // a dead root whose known descendants could not be re-checked is not confirmed.
       if ((result.kind === 'survived' || result.kind === 'failed') && target.worktreePath !== null) {
         const key = worktreePathKey(target.worktreePath);
-        blockers.set(key, [...(blockers.get(key) ?? []), ...(result.survivorPids ?? [target.pid])]);
+        const entry = blockers.get(key) ?? { alive: [], unverified: [] };
+        if (result.kind === 'failed' && result.error?.includes(UNVERIFIED_MARKER)) entry.unverified.push(target.pid);
+        else entry.alive.push(...(result.survivorPids ?? [target.pid]));
+        blockers.set(key, entry);
       }
     }
     for (const target of manifest.targets) {
@@ -110,11 +121,19 @@ export class ReapExecutorImpl implements ReapExecutor {
       if (blocking) {
         // Removing a directory out from under a live process (or its brokers) risks
         // EBUSY/ENOTEMPTY and data loss: keep it in place and say why.
-        const pids = [...new Set(blocking)].sort((a, b) => a - b);
+        const fmt = (list: number[]): string => {
+          const pids = [...new Set(list)].sort((a, b) => a - b);
+          return `process${pids.length === 1 ? '' : 'es'} ${pids.join(', ')}`;
+        };
+        const reasons: string[] = [];
+        if (blocking.alive.length > 0) reasons.push(`${fmt(blocking.alive)} running in it did not exit`);
+        if (blocking.unverified.length > 0) {
+          reasons.push(`liveness of ${fmt(blocking.unverified)} descendants could not be verified`);
+        }
         results.push({
           targetId: reapTargetKey(target),
           kind: 'failed',
-          error: `Worktree kept: process${pids.length === 1 ? '' : 'es'} ${pids.join(', ')} running in it did not exit`,
+          error: `Worktree kept: ${reasons.join('; ')}`,
         });
         continue;
       }
@@ -132,7 +151,18 @@ export class ReapExecutorImpl implements ReapExecutor {
       return { targetId, kind: 'failed', error: `Refusing to kill protected pid ${pid}` };
     }
     try {
-      if (!this.isPidAlive(pid)) return { targetId, kind: 'skipped' };
+      if (!this.isPidAlive(pid)) {
+        // A dead root can no longer be walked for descendants, so children known when the
+        // manifest was resolved may still be running: unverified, not a success.
+        if (target.descendantPidCount > 0) {
+          return {
+            targetId,
+            kind: 'failed',
+            error: `Root pid ${pid} already exited; its ${target.descendantPidCount} descendant(s) ${UNVERIFIED_MARKER}`,
+          };
+        }
+        return { targetId, kind: 'skipped' };
+      }
 
       // Enumerated up front so children orphaned mid-ladder are still reached.
       const descendantPids = await this.listDescendants(pid);
