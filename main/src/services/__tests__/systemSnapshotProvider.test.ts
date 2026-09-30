@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { spawn } from 'node:child_process';
+import { stampSpawnMarker } from '../../utils/spawnMarker';
 import { createSystemSnapshotProvider, toSystemProcessEntry } from '../systemSnapshotProvider';
 import type { SnapshottedProcess } from '../processSnapshot/processSnapshotService';
 
@@ -47,8 +49,10 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
     expect(out.filter((p) => p.bucket === 'foreign')).toHaveLength(1);
   });
 
-  it('without any marker reader nothing can be an orphan', async () => {
-    const out = await build([proc(40, 'orphaned-child')]).loadProcesses(new Set());
+  it('without any marker observed nothing can be an orphan', async () => {
+    const out = await build([proc(40, 'orphaned-child')], {
+      readMarkers: async () => new Map(),
+    }).loadProcesses(new Set());
     expect(out.map((p) => p.bucket)).not.toContain('orphan');
   });
 
@@ -75,4 +79,32 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
     });
     expect(entry).toMatchObject({ bucket: 'orphan', sweepEligible: true, pid: 1 });
   });
+});
+
+describe('createSystemSnapshotProvider default marker source (production path)', () => {
+  // No `readMarkers` injected: the provider must read the real environment of a
+  // real child stamped by stampSpawnMarker, or a marked orphan is undetectable.
+  it.skipIf(process.platform === 'win32')(
+    'classifies a real child stamped with a dead instance as an orphan',
+    async () => {
+      const worktree = '/tmp/cyboflow-marker-test wt';
+      const child = spawn(process.execPath, ['-e', 'setTimeout(function(){},30000)'], {
+        env: { ...stampSpawnMarker({ PATH: process.env.PATH ?? '' }, worktree), CYBOFLOW_INSTANCE: 'dead-instance' },
+        stdio: 'ignore',
+      });
+      try {
+        const pid = child.pid as number;
+        await new Promise((r) => setTimeout(r, 300));
+        const provider = build([proc(pid, 'node -e setTimeout')], {
+          readInstanceRecords: async () => [{ instanceId: 'dead-instance', pid: 999_999, startedAt: '' }],
+          isPidAlive: () => false,
+        });
+        const out = await provider.loadProcesses(new Set([worktree]));
+        expect(out.find((p) => 'pid' in p && p.pid === pid)?.bucket).toBe('orphan');
+      } finally {
+        child.kill('SIGKILL');
+      }
+    },
+    15_000,
+  );
 });

@@ -30,6 +30,7 @@ import {
   type SpawnMarkerObservation,
 } from './processSnapshot/classify';
 import type { SnapshottedProcess } from './processSnapshot/processSnapshotService';
+import { createSpawnMarkerReader } from './processSnapshot/spawnMarkerReader';
 import type { WorktreeTruth } from './processSnapshot/worktreeTruth';
 
 export interface SystemSnapshotProviderDeps {
@@ -45,9 +46,10 @@ export interface SystemSnapshotProviderDeps {
   /** This process's instance id. Defaults to {@link getInstanceId}. */
   getSelfInstanceId?: () => string;
   /**
-   * Reads the spawn marker off scanned rows' environments. No reader ships with
-   * the scan yet, so by default rows carry no marker: nothing can reach
-   * `orphan`, and unmanaged cyboflow-shaped rows stay `suspected`.
+   * Reads the spawn marker off scanned rows' environments. Defaults to the real
+   * reader ({@link createSpawnMarkerReader}: one `ps -E` spawn on darwin,
+   * `/proc/<pid>/environ` on linux, none on win32). Rows it cannot read carry no
+   * marker, so they can never reach `orphan`.
    */
   readMarkers?: (rows: readonly SnapshottedProcess[]) => Promise<Map<number, SpawnMarkerObservation>>;
 }
@@ -146,6 +148,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
   const readRecords = deps.readInstanceRecords ?? (() => readInstanceRecordsFromDisk());
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
   const selfId = deps.getSelfInstanceId ?? getInstanceId;
+  const readMarkers = deps.readMarkers ?? createSpawnMarkerReader();
 
   return {
     loadWorktrees: (projectId) => deps.worktrees.loadRegistry(projectId),
@@ -156,7 +159,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
       const rows = await deps.processSnapshot.snapshot();
       const [records, markers] = await Promise.all([
         readRecords(),
-        deps.readMarkers ? deps.readMarkers(rows) : Promise.resolve(new Map<number, SpawnMarkerObservation>()),
+        readMarkers(rows),
       ]);
       const marked: MarkedProcess[] = rows.map((r) => ({ ...r, marker: markers.get(r.pid) ?? null }));
       const liveInstances = buildLiveInstanceSet(selfId(), records, isPidAlive);
