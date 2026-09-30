@@ -8,8 +8,9 @@
  * the destructive path can be gated by the compiler:
  *   - only {@link OrphanProcess} carries `sweepEligible: true`; a sweep-set builder
  *     takes `OrphanProcess[]`, so a `suspected` row cannot be handed to it.
- *   - {@link ForeignProcess} carries no numeric pid at all (only a display label),
- *     so nothing on it can reach `killTree`/`forceKillPids` without a cast.
+ *   - {@link ForeignProcess} carries NO number-typed field at all (pid label and
+ *     cpu/mem/elapsed figures are pre-formatted strings), so nothing on it can
+ *     reach `killTree`/`forceKillPids` (which take a `number`) without a cast.
  *   - {@link SuspectedProcess} is NEVER promoted to orphan: without a spawn marker
  *     we have no proof it is cyboflow's, so it is shown, not swept.
  *
@@ -69,15 +70,21 @@ export function buildLiveInstanceSet(
   return { selfInstanceId, liveInstanceIds: live, deadInstanceIds: dead };
 }
 
-/** Fields every bucket shares. */
-interface ClassifiedBase {
+/** Non-numeric fields every bucket shares. */
+interface ClassifiedCommon {
   processType: ProcessType;
   command: string;
+  worktreePath: string | null;
+}
+
+/** Raw resource figures — every bucket EXCEPT foreign (see {@link ForeignProcess}). */
+interface NumericMetrics {
   pcpu: number | null;
   pmem: number | null;
   etimeSeconds: number | null;
-  worktreePath: string | null;
 }
+
+type ClassifiedBase = ClassifiedCommon & NumericMetrics;
 
 /** Belongs to a live cyboflow instance — this one. Killable through the normal per-owner paths. */
 export interface OwnedProcess extends ClassifiedBase {
@@ -107,13 +114,16 @@ export interface SuspectedProcess extends ClassifiedBase {
 
 /**
  * Someone else's: an unrelated process, or another live instance's child.
- * Read-only by construction — deliberately NO `pid`/`ppid` (or any other number a
- * kill call could take); `pidLabel` is display text only.
+ * Read-only by construction — deliberately NO `pid`/`ppid` and NO number-typed
+ * field anywhere (a nullable `number` narrows to `number` after a null check and
+ * would satisfy a `killTree(pid: number)` signature). `pidLabel` and `display`
+ * are formatted strings for rendering only.
  */
-export interface ForeignProcess extends ClassifiedBase {
+export interface ForeignProcess extends ClassifiedCommon {
   bucket: 'foreign';
   readOnly: true;
   pidLabel: string;
+  display: { cpu: string | null; mem: string | null; elapsed: string | null };
   /** The other live instance it belongs to, when the marker says so. */
   foreignInstanceId: string | null;
 }
@@ -131,10 +141,13 @@ export function selectSweepSet(classified: readonly ClassifiedProcess[]): Orphan
 
 const MAX_ANCESTRY_DEPTH = 32;
 
+function common(p: SnapshottedProcess): ClassifiedCommon {
+  return { processType: p.processType, command: p.command, worktreePath: p.worktreePath };
+}
+
 function base(p: SnapshottedProcess): ClassifiedBase {
   return {
-    processType: p.processType,
-    command: p.command,
+    ...common(p),
     pcpu: p.pcpu,
     pmem: p.pmem,
     etimeSeconds: p.etimeSeconds,
@@ -208,10 +221,15 @@ export function classify(
   };
 
   const foreign = (p: MarkedProcess, foreignInstanceId: string | null): ForeignProcess => ({
-    ...base(p),
+    ...common(p),
     bucket: 'foreign',
     readOnly: true,
     pidLabel: String(p.pid),
+    display: {
+      cpu: p.pcpu === null ? null : String(p.pcpu),
+      mem: p.pmem === null ? null : String(p.pmem),
+      elapsed: p.etimeSeconds === null ? null : String(p.etimeSeconds),
+    },
     foreignInstanceId,
   });
 

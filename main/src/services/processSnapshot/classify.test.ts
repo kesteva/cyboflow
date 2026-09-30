@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   buildLiveInstanceSet,
   classify,
@@ -209,6 +209,17 @@ describe('sweep-set structure', () => {
   });
 });
 
+/** Keys of T whose type is (or transitively contains) a number/bigint. */
+type NumericKeys<T> = {
+  [K in keyof T]-?: [Extract<NonNullable<T[K]>, number | bigint>] extends [never]
+    ? NonNullable<T[K]> extends object
+      ? [NumericKeys<NonNullable<T[K]>>] extends [never]
+        ? never
+        : K
+      : never
+    : K;
+}[keyof T];
+
 describe('foreign entries are unkillable by construction', () => {
   const foreign = classify(FIXTURE, live, truth).filter(
     (c): c is ForeignProcess => c.bucket === 'foreign',
@@ -224,9 +235,29 @@ describe('foreign entries are unkillable by construction', () => {
     }
   });
 
+  it('has no number-typed field anywhere (compile-time), while the other buckets keep theirs', () => {
+    expectTypeOf<NumericKeys<ForeignProcess>>().toEqualTypeOf<never>();
+    expectTypeOf<NumericKeys<OrphanProcess>>().not.toEqualTypeOf<never>();
+    for (const f of foreign) {
+      const walk = (v: unknown): void => {
+        expect(typeof v).not.toBe('number');
+        if (v && typeof v === 'object') Object.values(v).forEach(walk);
+      };
+      walk(f);
+    }
+  });
+
   it('cannot be passed to a killTree-shaped call without an unsafe cast', () => {
     const killTreeLike = (pid: number): number => pid;
     const f = foreign[0];
+    if (f.display.cpu !== null) {
+      // @ts-expect-error display figures are strings, not numbers
+      killTreeLike(f.display.cpu);
+    }
+    // @ts-expect-error the metric fields do not exist on a foreign entry
+    killTreeLike(f.pcpu);
+    // @ts-expect-error the metric fields do not exist on a foreign entry
+    killTreeLike(f.etimeSeconds);
     // @ts-expect-error pidLabel is a string, not a pid
     killTreeLike(f.pidLabel);
     // @ts-expect-error there is no pid property on a foreign entry
