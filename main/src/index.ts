@@ -6,7 +6,6 @@ installTimerCensus();
 
 import { app, BrowserWindow, ipcMain, screen, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
-import * as os from 'os';
 import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
 import { ConfigManager, readTelemetryConfigSync } from './services/configManager';
@@ -39,20 +38,15 @@ import {
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
-import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
+import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
 import {
   shouldBlockArtifactFrameNavigation,
   isExternallyOpenable,
   isSafeExternalOpenTarget,
   shouldBlockScriptedFrameNavigationFromRegistry,
 } from './ipc/artifactFrameGuard';
-import { registerDesignPrototypeServerHandlers } from './ipc/designPrototypeServer';
+import { composeDesignMode } from './designModeComposition';
 import { DesignPrototypeServerManager } from './services/designPrototypeServer';
-import {
-  DesignFrameWatchdog,
-  DESIGN_PROTO_SERVER_EVENT_CHANNEL,
-  type FrameLike,
-} from './services/designFrameWatchdog';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import {
@@ -116,13 +110,10 @@ import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
 import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
 import {
   DesignFeedbackOutbox,
-  setDesignBatchNotifier,
 } from './orchestrator/feedback/designFeedbackOutbox';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
-import { DesignHandoffService } from './orchestrator/design/designHandoffService';
-import { GateSideEffects } from './orchestrator/gateSideEffects';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { composeProgrammaticRunner, type MonitorSteeringActions } from './programmaticRunnerComposition';
 import { findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
@@ -209,7 +200,6 @@ import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/pr
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
 import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
-import { WIDGET_THEME_TOKENS } from '../../shared/customViews/theme';
 import { CustomWidgetServerManager } from './services/customWidgetServer';
 import {
   runClaudeSdkSessionPreflights,
@@ -2946,166 +2936,21 @@ async function initializeServices(): Promise<boolean> {
   // prototype/index.html for a ui-prototype/generic artifact (run subtree, else
   // the committed snapshot store) with a restrictive CSP <meta> injected.
   registerArtifactHtmlHandlers(ipcMain, services);
-  // Design Mode v1 (design-mode.md "Process isolation" + "Server lifecycle") —
-  // the token-gated loopback prototype server + its runaway-frame watchdog. The
-  // watchdog reads the main window's frame subtree, per-process metrics, and cpu
-  // count via Electron-backed seams (the service modules stay Electron-free); the
-  // manager loads the canonical interactive-prototype bytes fresh per request. The
-  // two reference each other (watchdog reads the manager's live targets; the
-  // manager start/stops the watchdog), so the watchdog closes over the
-  // module-level manager var, which is assigned on the next line.
-  const designFrameWatchdog = new DesignFrameWatchdog({
-    // Both loopback servers share this ONE watchdog instance — the Custom
-    // Views tier-3 widget server (docs/proposals/CUSTOM-VIEWS.md §5.4) is a
-    // second, process-global source of scripted frames, so its live target is
-    // concatenated onto the design-prototype server's per-run ones.
-    getTargets: () => [...(designPrototypeServerManager?.getTargets() ?? []), ...(customWidgetServerManager?.getTargets() ?? [])],
-    getFrames: () => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return [];
-      try {
-        // A killed OOPIF's WebFrameMain throws on property access — the watchdog
-        // guards each read; enumerating the subtree itself is guarded here.
-        return win.webContents.mainFrame.framesInSubtree as unknown as FrameLike[];
-      } catch {
-        return [];
-      }
-    },
-    getMetrics: () =>
-      app.getAppMetrics().map((m) => ({
-        pid: m.pid,
-        percentCPUUsage: m.cpu?.percentCPUUsage ?? 0,
-        workingSetSizeKB: m.memory?.workingSetSize ?? 0,
-      })),
-    killPid: (pid: number) => process.kill(pid, 'SIGKILL'),
-    sendToRenderer: (event) => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return;
-      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, event);
-    },
-    cpuCount: os.cpus().length,
-    logger: cyboflowLogger,
+  // Design Mode v1 prototype server + runaway-frame watchdog, the Custom Views
+  // widget server, DesignHandoffService, GateSideEffects and the design-feedback
+  // outbox — see designModeComposition.ts (#19 step 25).
+  const designMode = composeDesignMode({
+    services,
+    cyboflowDb,
+    cyboflowLogger,
+    databaseService,
+    sessionManager,
+    customViewsStore,
+    getMainWindow: () => mainWindow,
   });
-  designPrototypeServerManager = new DesignPrototypeServerManager({
-    loadHtml: (runId: string) => loadCanonicalPrototypeHtml(services, runId, 'interactive-prototype'),
-    watchdog: designFrameWatchdog,
-    onServerStopped: (runId: string) => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return;
-      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, { runId, kind: 'server-stopped' });
-    },
-    logger: cyboflowLogger,
-  });
-  registerDesignPrototypeServerHandlers(ipcMain, designPrototypeServerManager);
-  // Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
-  // §5.4) — the SAME watchdog as the prototype server above (its getTargets
-  // already concatenates both managers). loadWidget reads the store built in
-  // initializeServices(); customViewsStore is non-null by the time a widget
-  // frame can request one (it is constructed before this window-bound wiring
-  // ever runs), but the closure guards it defensively anyway.
-  customWidgetServerManager = new CustomWidgetServerManager({
-    loadWidget: (widgetId: string) => customViewsStore?.getWidget(widgetId) ?? null,
-    theme: WIDGET_THEME_TOKENS,
-    watchdog: designFrameWatchdog,
-    logger: cyboflowLogger,
-  });
-  // No ipcMain.handle registration here — customWidgetServerManager.ensure/stop
-  // are exposed as the cyboflow.customWidgetServer tRPC router (ratchet-blocked
-  // otherwise: main/src/ipc/__tests__/noNewIpcHandlers.test.ts). Wired into
-  // createContext via `customWidgetServer: customWidgetServerManager ?? undefined`
-  // below, alongside `customViews`.
-  // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
-  // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
-  // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
-  // + snapshot base dir are injected here (electron-backed) so the service module
-  // stays standalone-typecheck-safe. loadPrototypeHtml returns the RAW canonical
-  // bytes (live subtree, else committed store); the render path injects the CSP.
-  DesignHandoffService.initialize({
-    db: cyboflowDb,
-    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
-    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
-    logger: cyboflowLogger,
-  });
-  // Design/brief GATE side effects — the one place a human's "approve" at an
-  // approve-ideas / approve-design / approve-brief gate becomes durable state:
-  // the run's prototype bound to each approved idea as an `approved_designs` row
-  // (which survives the run's artifact cascade delete, unlike the artifact
-  // itself), the project's solution thoroughness stamped from the brief, and the
-  // adversarial reviewer's remaining entries logged as accepted-risk findings.
-  //
-  // A singleton for the same reason DesignHandoffService is one: three call sites
-  // reach it — the programmatic gate opener below, `resolveReviewItem` for the
-  // orchestrated plane, and runExecutor's settle — and two of those build their
-  // dependency bags in separate files. Threaded as an optional dep instead, it
-  // would compile at both and silently do nothing at one.
-  //
-  // Wired HERE (after DesignHandoffService) so it shares the SAME snapshot tree
-  // and prototype-byte reader: a flow-bound design and a Design Mode approval must
-  // be readable through one path. It initializes AFTER ReviewItemRouter /
-  // IdeaComponentRouter, whose getInstance() it captures.
-  GateSideEffects.initialize({
-    db: cyboflowDb,
-    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
-    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
-    ideaComponentRouter: IdeaComponentRouter.getInstance(),
-    reviewItemRouter: ReviewItemRouter.getInstance(),
-    // Reuses the EXISTING project-changed channel (the same one projects:update
-    // emits on) so the renderer refetches a thoroughness stamp with no new
-    // listener — and, critically, no new ipcMain.handle, which the
-    // noNewIpcHandlers ratchet would freeze.
-    emitProjectUpdated: (projectId: number) => {
-      const project = databaseService.getProject(projectId);
-      if (project) sessionManager.emit('project:updated', project);
-    },
-    logger: cyboflowLogger,
-  });
-  // Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged durable
-  // outbox") — the delivery pipeline that drives a queued design-feedback batch
-  // through guards → 'dispatching' → the SDK revision turn → 'dispatched', and
-  // re-delivers whatever a crash left in flight.
-  //
-  // Wired HERE, after registerIpcHandlers, because `dispatchTurn` goes through
-  // the Claude panel continue path (the same internals behind the
-  // 'claude-panels:continue' IPC handler), and claudePanelManager only exists
-  // once the IPC handlers are registered. The lazy require mirrors taskQueue's
-  // continueQueue — index.ts must not take a static import on ipc/claudePanel.
-  //
-  // The lifecycle guards are the service's DB-backed defaults; only the SDK turn
-  // and the clock are host-supplied.
-  designFeedbackOutbox = new DesignFeedbackOutbox({
-    db: cyboflowDb,
-    feedbackRouter: FeedbackRouter.getInstance(),
-    dispatchTurn: async ({ sessionId, prompt }): Promise<void> => {
-      const session = sessionManager.getSession(sessionId);
-      if (!session) throw new Error(`design session ${sessionId} no longer exists`);
-      const claudePanel = panelManager
-        .getPanelsForSession(sessionId)
-        .find((panel) => panel.type === 'claude');
-      if (!claudePanel) throw new Error(`design session ${sessionId} has no Claude panel to deliver the turn to`);
-      const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
-      if (!claudePanelManager) throw new Error('the Claude panel manager is not available yet');
-      const conversationHistory = sessionManager.getPanelConversationMessages(claudePanel.id);
-      // Resolves once the SDK has ACCEPTED the turn — that acceptance is exactly
-      // what the outbox records as 'dispatched'.
-      await claudePanelManager.continuePanel(
-        claudePanel.id,
-        session.worktreePath,
-        prompt,
-        conversationHistory,
-      );
-      // Echo the dispatched turn into the panel transcript, exactly as the
-      // 'claude-panels:continue' IPC path does via handlePanelContinue — without
-      // this the host-sent revision turn is invisible in the design session's
-      // chat (the "sends missing from transcript" bug class).
-      sessionManager.addPanelConversationMessage(claudePanel.id, 'user', prompt);
-    },
-    logger: cyboflowLogger,
-  });
-  // The sendDesignBatch mutation's fire-and-track poke (the design analogue of
-  // setRevisionLauncher). notifyQueued never rejects, so voiding it is safe.
-  setDesignBatchNotifier((batchId: string) => {
-    void designFeedbackOutbox?.notifyQueued(batchId);
-  });
+  designPrototypeServerManager = designMode.designPrototypeServerManager;
+  customWidgetServerManager = designMode.customWidgetServerManager;
+  designFeedbackOutbox = designMode.designFeedbackOutbox;
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   
