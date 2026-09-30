@@ -35,6 +35,7 @@ import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
 import { systemRouter } from './routers/system';
 import { monitorRouter } from './routers/monitor';
+import { monitorReapRouter } from './routers/monitorReap';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
 import { variantsRouter } from './routers/variants';
@@ -68,6 +69,7 @@ export const appRouter = router({
     insights: insightsRouter,
     mcps: mcpsRouter,
     monitor: monitorRouter,
+    monitorReap: monitorReapRouter,
     plugins: pluginsRouter,
     providerUsage: providerUsageRouter,
     questions: questionsRouter,

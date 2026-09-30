@@ -185,7 +185,10 @@ import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setWorktreeMonitorProvider } from './orchestrator/trpc/routers/worktreeMonitor';
 import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvider';
-import { setSystemProvider } from './orchestrator/trpc/routers/system';
+import { buildSystemSnapshot, setSystemProvider } from './orchestrator/trpc/routers/system';
+import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap';
+import { MonitorReapService } from './services/monitor/monitorReapService';
+import { countDescendantPids } from './services/monitor/reapManifest';
 import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
 import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -5939,26 +5942,41 @@ app.whenReady().then(async () => {
     console.log('[Main] worktreeMonitor deps wired');
 
     if (orchSocketServerForSystem) {
-      setSystemProvider(
-        createSystemSnapshotProvider({
-          // ONE ps scan per snapshot() call, unioned with the managers' owned handles.
-          processSnapshot: new ProcessSnapshotService({
-            cliManager: ptyCliManagersForSystem,
-            // Read lazily: the run-shell manager is constructed later in boot.
-            runShellManager: {
-              listOwnedShells: () => runShellManager?.listOwnedShells() ?? [],
-            },
-            isBrokerProcess,
-          }),
-          worktrees: createWorktreeMonitorProvider({
-            database: databaseService,
-            worktreeManager,
-            diskUsage: diskUsageService,
-          }),
-          orchSocket: orchSocketServerForSystem,
+      const systemSnapshotProvider = createSystemSnapshotProvider({
+        // ONE ps scan per snapshot() call, unioned with the managers' owned handles.
+        processSnapshot: new ProcessSnapshotService({
+          cliManager: ptyCliManagersForSystem,
+          // Read lazily: the run-shell manager is constructed later in boot.
+          runShellManager: {
+            listOwnedShells: () => runShellManager?.listOwnedShells() ?? [],
+          },
+          isBrokerProcess,
+        }),
+        worktrees: createWorktreeMonitorProvider({
+          database: databaseService,
+          worktreeManager,
+          diskUsage: diskUsageService,
+        }),
+        orchSocket: orchSocketServerForSystem,
+      });
+      setSystemProvider(systemSnapshotProvider);
+      console.log('[Main] system deps wired');
+
+      // Manifest-then-execute gate for the System view's destructive actions.
+      // Manifests resolve against the same aggregated snapshot the view renders.
+      // The execution primitives attach via `setExecutor` when they land; until
+      // then `monitorReap.execute` reports PRECONDITION_FAILED and consumes nothing.
+      setMonitorReapProvider(
+        new MonitorReapService({
+          loadSnapshot: (projectId) => buildSystemSnapshot(systemSnapshotProvider, projectId),
+          manifestDeps: {
+            measureFresh: (p) => diskUsageService.measureFresh(p),
+            peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),
+            countDescendants: countDescendantPids,
+          },
         }),
       );
-      console.log('[Main] system deps wired');
+      console.log('[Main] monitorReap deps wired');
     }
 
     // Subscription-usage meters. The store hydrates its last-known readings from

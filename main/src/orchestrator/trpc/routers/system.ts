@@ -103,7 +103,8 @@ function startingSnapshot(): SystemSnapshot {
   };
 }
 
-async function buildSnapshot(provider: SystemSnapshotProvider, projectId: number): Promise<SystemSnapshot> {
+/** Assemble the aggregated snapshot from a provider (also what `monitorReap` resolves manifests against). */
+export async function buildSystemSnapshot(provider: SystemSnapshotProvider, projectId: number): Promise<SystemSnapshot> {
   const probe = provider.probePort ?? ((port: number, label: string) => probePort(port, label));
   const diskSizing = diskSizingCapability(provider.platform ?? process.platform);
   const registry = await provider.loadWorktrees(projectId);
@@ -146,6 +147,6 @@ export const systemRouter = router({
     .query(async ({ input }): Promise<SystemSnapshot> => {
       const provider = _systemProvider;
       if (provider === null) return startingSnapshot();
-      return buildSnapshot(provider, input.projectId);
+      return buildSystemSnapshot(provider, input.projectId);
     }),
 });

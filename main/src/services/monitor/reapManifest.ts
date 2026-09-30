@@ -39,8 +39,21 @@ import type {
 } from '../../orchestrator/systemTypes';
 import { collectDescendantPidsAsync } from '../../utils/platformProcess';
 import { worktreePathKey } from '../worktreeRegistry';
+import type {
+  ReapManifest,
+  ReapManifestKind,
+  ReapProcessTarget,
+  ReapTarget,
+  ReapWorktreeTarget,
+} from '../../orchestrator/reapTypes';
 
-export type ReapManifestKind = 'row' | 'card' | 'kill-all-of-type' | 'reap-all-stale';
+export type {
+  ReapManifest,
+  ReapManifestKind,
+  ReapProcessTarget,
+  ReapTarget,
+  ReapWorktreeTarget,
+} from '../../orchestrator/reapTypes';
 
 /** What each manifest kind selects. */
 export interface ReapSelectors {
@@ -56,73 +69,6 @@ export interface ReapSelectors {
 
 /** The slice of the aggregated snapshot a manifest is built from. */
 export type ReapSnapshot = Pick<SystemSnapshot, 'generatedAt' | 'processes' | 'worktrees'>;
-
-export interface ReapWorktreeTarget {
-  kind: 'worktree';
-  path: string;
-  branch: string;
-  /** Registry tag; only prunable tags ever appear here. */
-  tag: 'session-owned' | 'run-owned' | 'orphan';
-  sessionId: string | null;
-  runId: string | null;
-  /** Fresh `du` bytes, or null when the measurement failed / is unsupported. */
-  reclaimableBytes: number | null;
-  /** Uncommitted/untracked work would be discarded; null when the git cache has no entry. */
-  dirty: boolean | null;
-  /**
-   * Uncommitted file count. null = unavailable: no git cache entry, or the worktree
-   * has untracked files (GitStatusManager's `filesChanged` excludes them, so any
-   * number would under-report). Never 0 when the count is merely unknown.
-   */
-  dirtyFileCount: number | null;
-  /** Commits ahead of the base branch; null when the git cache has no entry. */
-  aheadOfMain: number | null;
-}
-
-export interface ReapProcessTarget {
-  kind: 'process';
-  pid: number;
-  processType: SystemProcessType;
-  bucket: 'owned' | 'orphan' | 'suspected';
-  command: string;
-  worktreePath: string | null;
-  sessionId: string | null;
-  runId: string | null;
-  /** False for `suspected` (no spawn marker): killing it needs the harder confirm. */
-  taggedAsCyboflow: boolean;
-  descendantPidCount: number;
-}
-
-export type ReapTarget = ReapWorktreeTarget | ReapProcessTarget;
-
-export interface ReapManifest {
-  /**
-   * Content hash of everything the user confirms: kind, snapshot generation, the
-   * full target list (identities, measured sizes, git annotations, pid counts) and
-   * `alsoDeleteBranch`. Two manifests share an id only if they are identical.
-   */
-  id: string;
-  kind: ReapManifestKind;
-  /** `generatedAt` of the snapshot this was built against. */
-  snapshotGeneratedAt: number;
-  /** Epoch ms the manifest was built (the fresh `du` figures are as of this time). */
-  builtAt: number;
-  targets: ReapTarget[];
-  /** Sum of the targets' measured bytes. */
-  reclaimableBytes: number;
-  /** Worktree targets whose size could not be measured (the total is then a lower bound). */
-  unmeasuredTargetCount: number;
-  /** Known uncommitted files across worktree targets — a lower bound when `dirtyCountUnknownTargetCount > 0`. */
-  dirtyFileCount: number;
-  /** Worktree targets whose uncommitted-file count is unavailable (see {@link ReapWorktreeTarget.dirtyFileCount}). */
-  dirtyCountUnknownTargetCount: number;
-  /** Total commits ahead of the base branch across worktree targets (annotation only). */
-  aheadOfMainCount: number;
-  /** Total descendant pids across process targets. */
-  descendantPidCount: number;
-  /** Delete the branch when pruning. Defaults false; true only when explicitly requested. */
-  alsoDeleteBranch: boolean;
-}
 
 export type ReapManifestErrorCode = 'not_found' | 'not_prunable';
 
@@ -341,4 +287,34 @@ export async function buildReapManifest<K extends ReapManifestKind>(
     descendantPidCount: processTargets.reduce((sum, t) => sum + t.descendantPidCount, 0),
     alsoDeleteBranch,
   };
+}
+
+/**
+ * The bucket-sensitive fingerprints a
+ * selection would produce against `snapshot` right now — no `du`, git or
+ * descendant work. Comparing this to a stashed manifest's own fingerprint is how
+ * `monitorReap.execute` detects that the target set changed since resolve.
+ */
+export function resolveReapSelectionFingerprint<K extends ReapManifestKind>(
+  kind: K,
+  selector: ReapSelectors[K],
+  snapshot: ReapSnapshot,
+): string[] {
+  const { worktrees, processes } = selectTargets(kind, selector, snapshot);
+  return [
+    ...worktrees.map((w) => `worktree:${w.path}|${w.tag}`),
+    ...processes.map((p) => `process:${p.pid}|${p.bucket}|${p.command}`),
+  ].sort().filter((k, i, all) => all.indexOf(k) === i);
+}
+
+/** Same fingerprint, derived from a resolved manifest's targets. */
+export function reapManifestFingerprint(manifest: ReapManifest): string[] {
+  return manifest.targets
+    .map((t) =>
+      t.kind === 'worktree'
+        ? `worktree:${t.path}|${t.tag}`
+        : `process:${t.pid}|${t.bucket}|${t.command}`,
+    )
+    .sort()
+    .filter((k, i, all) => all.indexOf(k) === i);
 }
