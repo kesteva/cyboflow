@@ -173,7 +173,7 @@ import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../sh
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
-import { CodexBrokerReaper } from './services/codexBrokerReaper';
+import { CodexBrokerReaper, isBrokerProcess } from './services/codexBrokerReaper';
 import { diskUsageService } from './services/diskUsageService';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
@@ -185,6 +185,9 @@ import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setWorktreeMonitorProvider } from './orchestrator/trpc/routers/worktreeMonitor';
 import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvider';
+import { setSystemProvider } from './orchestrator/trpc/routers/system';
+import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
+import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
 import { ProviderUsagePoller } from './services/providerUsage/providerUsagePoller';
@@ -637,6 +640,11 @@ let archiveProgressManager: ArchiveProgressManager;
 // Run user-shells (worktree-terminal feature). Module-level so the before-quit
 // handler (outside the orchestrator-setup block) can destroyAll() on app quit.
 let runShellManager: RunShellManager | null = null;
+// cyboflow.system boot inputs. Assigned in initializeServices (where the socket
+// server and PTY managers are constructed) and read when setSystemProvider runs in
+// the whenReady block, which cannot see initializeServices' locals.
+let orchSocketServerForSystem: OrchSocketServer | null = null;
+let ptyCliManagersForSystem: AbstractCliManager[] = [];
 
 // Reaper for the detached `python3 -m http.server` prototype servers the
 // Planner/Ship ui-prototype subagent starts (TASK-057). Module-level so the
@@ -2505,6 +2513,8 @@ async function initializeServices(): Promise<boolean> {
   // socket actually listening — it is a pure client and dies with ECONNREFUSED if
   // it connects before the bind completes. The dedicated .catch here keeps a bind
   // failure from surfacing as an unhandled rejection before that gate attaches.
+  orchSocketServerForSystem = orchSocketServer;
+  ptyCliManagersForSystem = [interactiveCliManager, codexPtyManager, ompPtyManager, piPtyManager];
   const orchSocketReady = orchSocketServer.start();
   orchSocketReady.catch((err) => {
     cyboflowLogger.error(
@@ -5927,6 +5937,29 @@ app.whenReady().then(async () => {
       }),
     );
     console.log('[Main] worktreeMonitor deps wired');
+
+    if (orchSocketServerForSystem) {
+      setSystemProvider(
+        createSystemSnapshotProvider({
+          // ONE ps scan per snapshot() call, unioned with the managers' owned handles.
+          processSnapshot: new ProcessSnapshotService({
+            cliManager: ptyCliManagersForSystem,
+            // Read lazily: the run-shell manager is constructed later in boot.
+            runShellManager: {
+              listOwnedShells: () => runShellManager?.listOwnedShells() ?? [],
+            },
+            isBrokerProcess,
+          }),
+          worktrees: createWorktreeMonitorProvider({
+            database: databaseService,
+            worktreeManager,
+            diskUsage: diskUsageService,
+          }),
+          orchSocket: orchSocketServerForSystem,
+        }),
+      );
+      console.log('[Main] system deps wired');
+    }
 
     // Subscription-usage meters. The store hydrates its last-known readings from
     // user_preferences so the review queue shows something before the first poll

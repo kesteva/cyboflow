@@ -33,6 +33,7 @@ import { sessionGitRouter } from './routers/sessionGit';
 import { sessionsRouter } from './routers/sessions';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
+import { systemRouter } from './routers/system';
 import { monitorRouter } from './routers/monitor';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
@@ -75,6 +76,7 @@ export const appRouter = router({
     sessionGit: sessionGitRouter,
     sessions: sessionsRouter,
     substrates: substratesRouter,
+    system: systemRouter,
     tasks: tasksRouter,
     tracker: trackerRouter,
     variants: variantsRouter,
