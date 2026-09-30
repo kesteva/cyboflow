@@ -11,6 +11,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - **Bundled Codex CLI upgraded 0.156.1 → 0.159.2** (`@openai/codex`). The server only offers
   `gpt-6.1-sol` to 0.159+ clients, so it now appears in the Codex model picker. The app-server
   protocol change is additive (gateway OAuth methods, new error codes, item timestamps).
+- The runtime-mix Sol tier now targets `gpt-6.1-sol` (was `gpt-6-sol`): Opus- and Fable-tier
+  steps on mixed runs go there. Mixed runs launched after this fork a new spec revision.
 
 ## [0.4.6] — 2026-09-28
 
