@@ -5,6 +5,7 @@ import { isValidEffortForProvider } from '../../../../../../shared/types/reasoni
 import { codexPermissionFlagsForMode } from '../codexPtyManager';
 import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
 import { getShellPath } from '../../../../utils/shellPath';
+import { stampSpawnMarker } from '../../../../utils/spawnMarker';
 import { orchTokenEnv } from '../../../../orchestrator/orchAuthToken';
 import { managedTestConcurrencyEnv } from '../../../../../../shared/types/testConcurrency';
 import type {
@@ -45,6 +46,7 @@ export const CODEX_STANDARD_SERVICE_TIER = 'default';
 
 function buildMcpConfig(
   runId: string,
+  worktreePath: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   mcpScope?: ClaudeSpawnerOptions['mcpScope'],
   disabledMcpServers: readonly string[] = [],
@@ -60,7 +62,9 @@ function buildMcpConfig(
       cyboflow: {
         command: runtimeConfig.nodeExecutablePath,
         args: [runtimeConfig.bridgeScriptPath],
-        env: {
+        // Stamped with the spawn marker (spawnMarker.ts) so the bridge process is
+        // attributable to this app instance and worktree.
+        env: stampSpawnMarker({
           CYBOFLOW_RUN_ID: runId,
           CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
           // Bearer token for `runId` (orchAuthToken.ts) — the socket server
@@ -78,7 +82,7 @@ function buildMcpConfig(
           // packaged app with no standalone node on PATH — without this flag,
           // messaging Codex boots a whole new Cyboflow app. See electronNodeGuard.
           ...electronRunAsNodeGuardEnv(runtimeConfig.nodeExecutablePath),
-        },
+        }, worktreePath),
         required: true,
         default_tools_approval_mode: 'approve',
         // Codex's MCP client aborts any tools/call after 300s by default — fatal
@@ -119,13 +123,14 @@ function mergePathValue(
 
 export function buildCodexAppServerEnvironment(
   runId: string,
+  worktreePath: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   inheritedEnvironment: NodeJS.ProcessEnv = process.env,
   resolveShellPath: () => string = getShellPath,
 ): NodeJS.ProcessEnv {
   const pathKey =
     Object.keys(inheritedEnvironment).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
-  return {
+  return stampSpawnMarker({
     ...inheritedEnvironment,
     [pathKey]: mergePathValue(resolveShellPath(), inheritedEnvironment[pathKey]),
     CYBOFLOW_RUN_ID: runId,
@@ -137,7 +142,7 @@ export function buildCodexAppServerEnvironment(
     // including the project gate — inherits this env, so marking it here is what
     // makes a Codex lane's gate self-govern its vitest fork pool.
     ...managedTestConcurrencyEnv(),
-  };
+  }, worktreePath);
 }
 
 export function buildCodexAppServerThreadConfiguration(
@@ -174,7 +179,7 @@ export function buildCodexAppServerThreadConfiguration(
       approvalPolicy: 'never',
       approvalsReviewer: 'user',
       config: {
-        ...buildMcpConfig(runId, runtimeConfig, options.mcpScope, isolation?.disabledMcpServers ?? []),
+        ...buildMcpConfig(runId, options.worktreePath, runtimeConfig, options.mcpScope, isolation?.disabledMcpServers ?? []),
         // Every built-in surface a read-only sandbox does not already close,
         // each by its documented key (Codex config reference), verified by a
         // direct app-server probe on the pinned build (0.153.3, 2026-09-09):
@@ -241,7 +246,7 @@ export function buildCodexAppServerThreadConfiguration(
     approvalPolicy: permissionFlags.approval,
     approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user',
     config: {
-      ...buildMcpConfig(runId, runtimeConfig, options.mcpScope),
+      ...buildMcpConfig(runId, options.worktreePath, runtimeConfig, options.mcpScope),
       // The run's deployable roles as NATIVE Codex agent roles (agentRoles.ts),
       // so `spawn_agent({ agent_type: "cyboflow-<key>" })` runs a child under
       // that role's prompt. Verified live (0.153.3 and 0.156.1):

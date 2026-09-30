@@ -330,7 +330,7 @@ function appServerEnvironment(
   runtimeConfig: CodexMcpRuntimeConfig,
   options: ClaudeSpawnerOptions,
 ): NodeJS.ProcessEnv {
-  const env = buildCodexAppServerEnvironment(runId, runtimeConfig);
+  const env = buildCodexAppServerEnvironment(runId, options.worktreePath, runtimeConfig);
   return options.laneEnv ? { ...env, ...options.laneEnv } : env;
 }
 
