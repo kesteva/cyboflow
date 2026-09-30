@@ -194,9 +194,9 @@ describe('makeCodexVerificationAgentQuery', () => {
     expect(thread.approvalPolicy).toBe('never');
     expect(thread.ephemeral).toBe(true);
     expect(thread.developerInstructions).toBe(SYSTEM_PROMPT);
-    // Hermetic in config terms — NO cyboflow MCP server attached, and with no
-    // explore mode no login-shell switch either: no `config` at all.
-    expect('config' in thread).toBe(false);
+    // Hermetic in config terms — NO cyboflow MCP server attached, the user's
+    // plugins off, and with no explore mode no login-shell switch either.
+    expect(thread.config).toEqual({ features: { plugins: false } });
 
     const turn = asRecord(client.requests.find((r) => r.method === 'turn/start')?.params);
     expect(turn.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
@@ -233,11 +233,14 @@ describe('makeCodexVerificationAgentQuery', () => {
     }
 
     it('explore: the shell tool stays out of login shells, so the shim stays ahead of /opt/homebrew/bin', async () => {
-      expect((await threadConfigFor({ executionMode: 'explore' })).config).toEqual({ allow_login_shell: false });
+      expect((await threadConfigFor({ executionMode: 'explore' })).config).toEqual({
+        features: { plugins: false },
+        allow_login_shell: false,
+      });
     });
 
-    it.each(['pinned', 'legacy'] as const)('%s: no config — the thread starts exactly as before the feature', async (executionMode) => {
-      expect('config' in (await threadConfigFor({ executionMode }))).toBe(false);
+    it.each(['pinned', 'legacy'] as const)('%s: only the plugin shutoff — login shells keep their default', async (executionMode) => {
+      expect((await threadConfigFor({ executionMode })).config).toEqual({ features: { plugins: false } });
     });
   });
 

@@ -12,9 +12,10 @@
  * `sandbox: 'danger-full-access'` / `approvalPolicy: 'never'` with a turn-level
  * `sandboxPolicy: { type: 'dangerFullAccess' }` — parity with the Claude verifier's
  * actual (OS-unsandboxed) posture, since the verifier must build/serve/drive a real
- * deliverable. It is nevertheless HERMETIC in config terms: the thread's only `config`
- * key — and only on an EXPLORE run — is `allow_login_shell: false` (see startThread
- * below), so there is no cyboflow MCP server and no cyboflow-state write path.
+ * deliverable. It is nevertheless HERMETIC in config terms: the thread's `config`
+ * carries only `features.plugins: false` and — on an EXPLORE run only —
+ * `allow_login_shell: false` (see startThread below), so there is no cyboflow MCP
+ * server and no cyboflow-state write path.
  * The workflow persona + immutable harness contract ride as `developerInstructions`.
  *
  * Like verificationAgentQuery, on timeout/error this THROWS a
@@ -524,9 +525,11 @@ export function makeCodexVerificationAgentQuery(
           ...(args.cwd ? { cwd: args.cwd } : {}),
           // Parity with the Claude verifier's OS-unsandboxed posture; hermetic in
           // config terms — no MCP server config is attached, so no cyboflow MCP
-          // server.
+          // server, and the user's installed plugins are switched off (a plugin's
+          // OAuth MCP server blocks thread/start on a macOS keychain prompt; see
+          // ClaudeSpawnerOptions.disableUserCodexPlugins).
           sandbox: 'danger-full-access',
-          // The ONE config key, EXPLORE ONLY: keep the shell tool out of LOGIN
+          // EXPLORE ONLY: keep the shell tool out of LOGIN
           // shells. A login shell re-sorts PATH on macOS (path_helper + `brew
           // shellenv` put `/opt/homebrew/bin` back in front), which pushes the
           // runner's dependency-guard PATH shim (dependencyGuardShim.ts, §A1.4
@@ -535,7 +538,10 @@ export function makeCodexVerificationAgentQuery(
           // first; this keeps the prepended shim dir ahead of it. Pinned and
           // legacy runs get no shim, so they keep the login-shell default (and
           // the profile-derived env a pre-explore recipe may rely on).
-          ...(explore ? { config: { allow_login_shell: false } } : {}),
+          config: {
+            features: { plugins: false },
+            ...(explore ? { allow_login_shell: false } : {}),
+          },
           approvalPolicy: 'never',
           // The workflow persona + immutable harness contract ride here.
           developerInstructions: args.systemPrompt,
