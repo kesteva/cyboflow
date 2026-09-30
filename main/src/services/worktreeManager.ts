@@ -118,7 +118,7 @@ export class WorktreeManager {
   }
 
   /**
-   * Best-effort eager expiry of the removed worktree's cached disk size. Fail-soft
+   * Best-effort eager expiry of a created/removed worktree's cached disk size (and its ancestors'). Fail-soft
    * for the same reason as {@link reapCodexBrokers}: a throwing/rejecting hook must
    * never turn a successful removal into an error.
    */
@@ -281,6 +281,12 @@ export class WorktreeManager {
           'worktree', 'add', '-b', branchName, END_OF_OPTIONS, worktreePath, baseRef,
         ]);
       }
+
+      // A worktree nested under an already-measured checkout (default `<project>/worktrees/<name>`)
+      // is part of that checkout's cached `du`; the System view subtracts nested entries' sizes from
+      // it, so a parent measured BEFORE this child existed would be under-reported. `invalidate`
+      // expires cached ancestors too.
+      await this.invalidateDiskUsage(worktreePath);
 
       console.log(`[WorktreeManager] Worktree created successfully at: ${worktreePath}`);
 

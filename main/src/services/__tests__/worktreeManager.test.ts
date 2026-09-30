@@ -15,6 +15,7 @@ import { execSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { WorktreeManager, MergeConflictError, isMergeConflictError } from '../worktreeManager';
+import { DiskUsageService } from '../diskUsageService';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // The `(integration)` suites below each drive real `git` subprocesses against a
@@ -714,6 +715,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
       const invalidate = vi.fn();
       const manager = new WorktreeManager(undefined, undefined, { invalidate });
       const { worktreePath } = await manager.createWorktree(tmpDir, 'inv1');
+      invalidate.mockClear();
 
       await manager.removeWorktree(tmpDir, 'inv1');
       expect(invalidate).toHaveBeenCalledTimes(1);
@@ -732,6 +734,7 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
       const invalidate = vi.fn();
       const manager = new WorktreeManager(undefined, undefined, { invalidate });
       const { worktreePath } = await manager.createWorktree(tmpDir, 'inv2');
+      invalidate.mockClear();
 
       await manager.removeWorktreeByPath(tmpDir, worktreePath);
       expect(invalidate).toHaveBeenCalledTimes(1);
@@ -740,6 +743,52 @@ describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
       await manager.removeWorktreeByPath(tmpDir, worktreePath);
       expect(invalidate).toHaveBeenCalledTimes(2);
       expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+    });
+  });
+
+  it('invalidates on creation so a nested worktree expires its cached ancestor measurements', async () => {
+    await withTempDir('worktree-create-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv-create');
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      const deterministic = await manager.createDeterministicWorktree(tmpDir, 'task', 'c'.repeat(32));
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(deterministic.worktreePath);
+    });
+  });
+
+  it('does not invalidate when creation fails', async () => {
+    await withTempDir('worktree-create-inval-fail-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      await expect(manager.createWorktree(tmpDir, 'bad-base', undefined, 'no-such-branch')).rejects.toThrow(/Failed to create worktree/);
+      expect(invalidate).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a parent checkout measured before a nested worktree existed re-measures after creation (real DiskUsageService)', async () => {
+    await withTempDir('worktree-create-parent-du-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const svc = new DiskUsageService({ runDu: async () => 1024, sleep: async () => {}, staggerMs: 0 });
+      const manager = new WorktreeManager(undefined, undefined, svc);
+      // Prime the parent's cache: measured before the child exists.
+      svc.getUsage(tmpDir);
+      await vi.waitFor(() => expect(svc.getUsage(tmpDir).status).toBe('measured'));
+
+      await manager.createWorktree(tmpDir, 'nested-child');
+
+      expect(svc.getUsage(tmpDir).status).not.toBe('measured');
+
+      // Negative control: without the hook the parent's stale measurement survives creation.
+      await vi.waitFor(() => expect(svc.getUsage(tmpDir).status).toBe('measured'));
+      await new WorktreeManager().createWorktree(tmpDir, 'nested-unhooked');
+      expect(svc.getUsage(tmpDir).status).toBe('measured');
     });
   });
 
