@@ -19,6 +19,7 @@ const DEAD = 'inst-dead';
 const live: LiveInstanceSet = {
   selfInstanceId: SELF,
   liveInstanceIds: new Set([SELF, OTHER_LIVE]),
+  deadInstanceIds: new Set([DEAD]),
 };
 const truth = buildWorktreeTruthFixture(['/wt/known']);
 
@@ -93,6 +94,22 @@ describe('classify', () => {
     const c = out[0];
     expect(c.bucket).toBe('owned');
     if (c.bucket === 'owned') expect(c.instanceId).toBe(SELF);
+  });
+
+  it('self-stamped marker WITHOUT a manager handle → suspected, not owned', () => {
+    const stray = proc(110, 'claude --leaked', {
+      marker: { instanceId: SELF, worktree: '/wt/known' },
+    });
+    const [c] = classify([stray], live, truth);
+    expect(c.bucket).toBe('suspected');
+    expect(selectSweepSet([c])).toEqual([]);
+  });
+
+  it('marker naming an instance that is neither live nor confirmed dead → suspected', () => {
+    const unknown = proc(111, 'codex', { marker: { instanceId: 'inst-unknown', worktree: null } });
+    const [c] = classify([unknown], live, truth);
+    expect(c.bucket).toBe('suspected');
+    expect(selectSweepSet([c])).toEqual([]);
   });
 
   it('manager handle without a marker → owned', () => {
@@ -229,9 +246,10 @@ describe('buildLiveInstanceSet', () => {
     );
     expect(set.selfInstanceId).toBe(SELF);
     expect([...set.liveInstanceIds].sort()).toEqual([OTHER_LIVE, SELF].sort());
+    expect([...set.deadInstanceIds]).toEqual([DEAD]);
   });
 
-  it('feeds classify: a record whose pid died turns its children into orphans', () => {
+  it('feeds classify: a record whose pid died (confirmed dead) turns its children into orphans', () => {
     const set = buildLiveInstanceSet(SELF, [{ instanceId: OTHER_LIVE, pid: 11 }], () => false);
     const [c] = classify(
       [proc(9, 'codex', { marker: { instanceId: OTHER_LIVE, worktree: null } })],
@@ -239,5 +257,16 @@ describe('buildLiveInstanceSet', () => {
       truth,
     );
     expect(c.bucket).toBe('orphan');
+  });
+
+  it('an instance id with no record at all is unknown, never swept', () => {
+    const set = buildLiveInstanceSet(SELF, [], () => false);
+    const res = classify(
+      [proc(9, 'codex', { marker: { instanceId: 'inst-never-recorded', worktree: null } })],
+      set,
+      truth,
+    );
+    expect(res[0].bucket).toBe('suspected');
+    expect(selectSweepSet(res)).toEqual([]);
   });
 });

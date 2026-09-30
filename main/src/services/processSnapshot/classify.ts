@@ -42,6 +42,12 @@ export interface LiveInstanceSet {
   readonly selfInstanceId: string;
   /** Every instance id whose liveness record names a still-running pid (self included). */
   readonly liveInstanceIds: ReadonlySet<string>;
+  /**
+   * Instance ids CONFIRMED dead: a liveness record exists and its pid is gone.
+   * Absence from both sets means "unknown" (record missing/unreadable) — that is
+   * NOT proof of death, so an unknown id is never sweep-eligible.
+   */
+  readonly deadInstanceIds: ReadonlySet<string>;
 }
 
 /**
@@ -54,10 +60,13 @@ export function buildLiveInstanceSet(
   isPidAlive: (pid: number) => boolean,
 ): LiveInstanceSet {
   const live = new Set<string>([selfInstanceId]);
+  const dead = new Set<string>();
   for (const r of records) {
+    if (r.instanceId === selfInstanceId) continue;
     if (isPidAlive(r.pid)) live.add(r.instanceId);
+    else dead.add(r.instanceId);
   }
-  return { selfInstanceId, liveInstanceIds: live };
+  return { selfInstanceId, liveInstanceIds: live, deadInstanceIds: dead };
 }
 
 /** Fields every bucket shares. */
@@ -161,8 +170,11 @@ function selfLooksCyboflow(p: MarkedProcess, truth: WorktreeTruth): boolean {
 
 /**
  * Classify every row. Order of evidence, strongest first:
- *  1. A spawn marker decides ownership outright: this instance → owned, another
- *     live instance → foreign, an instance that is gone → orphan.
+ *  1. A spawn marker: another live instance → foreign; an instance CONFIRMED dead
+ *     (liveness record present, pid gone) → orphan; this instance AND a matching
+ *     manager handle → owned. A marker alone never yields owned/orphan: a
+ *     self-stamped row with no handle, or an id that is neither live nor
+ *     confirmed dead (record missing/unreadable), is only suspected.
  *  2. No marker, but this app's own manager holds the handle → owned.
  *  3. No marker, cyboflow-shaped (see {@link selfLooksCyboflow}, or an ancestor is
  *     cyboflow's) → suspected.
@@ -208,10 +220,18 @@ export function classify(
     if (marker) {
       const id = marker.instanceId;
       if (id === liveInstances.selfInstanceId) {
-        return { ...base(p), bucket: 'owned', process: p, owner: p.owner, instanceId: id };
+        // The marker names this live instance; ownership also needs the manager's handle.
+        if (p.owner !== null) {
+          return { ...base(p), bucket: 'owned', process: p, owner: p.owner, instanceId: id };
+        }
+        return { ...base(p), bucket: 'suspected', process: p };
       }
       if (liveInstances.liveInstanceIds.has(id)) return foreign(p, id);
-      return { ...base(p), bucket: 'orphan', sweepEligible: true, process: p, instanceId: id };
+      if (liveInstances.deadInstanceIds.has(id)) {
+        return { ...base(p), bucket: 'orphan', sweepEligible: true, process: p, instanceId: id };
+      }
+      // Unknown instance: absence of a record is not proof the owner is dead.
+      return { ...base(p), bucket: 'suspected', process: p };
     }
     if (p.owner !== null) {
       return {
