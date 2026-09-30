@@ -178,12 +178,20 @@ export interface ProcessSnapshotRow {
   command: string;
 }
 
-/** A `ps` percentage column: a plain decimal, or `-` for kernel processes. */
+/**
+ * A `ps` percentage column. `ok: false` means the token is shaped like a
+ * shifted-in etime (contains `:`), i.e. the row's columns are misaligned and
+ * the whole row must be skipped. Any other unparseable token (`-`, `abc`,
+ * `1,5`) is a malformed value in the right slot: the row is kept and the field
+ * is `null`.
+ */
 function parsePercentToken(token: string): { ok: boolean; value: number | null } {
-  if (token === '-') return { ok: true, value: null };
-  if (!/^\d+(?:\.\d+)?$/.test(token)) return { ok: false, value: null };
-  const value = Number.parseFloat(token);
-  return { ok: true, value: Number.isFinite(value) ? value : null };
+  if (/^\d+(?:\.\d+)?$/.test(token)) {
+    const value = Number.parseFloat(token);
+    return { ok: true, value: Number.isFinite(value) ? value : null };
+  }
+  if (token.includes(':')) return { ok: false, value: null };
+  return { ok: true, value: null };
 }
 
 /**
@@ -194,7 +202,7 @@ function parsePercentToken(token: string): { ok: boolean; value: number | null }
  * against the macOS `ps: <keyword>: keyword not found` gotcha (an unknown -o
  * keyword still exits 0 and silently drops its column, shifting every later
  * field left): a shifted line puts a non-numeric token in the pcpu/pmem slot or
- * a command word in the etime slot, and such a row is SKIPPED rather than
+ * a command word in the etime slot (a `:`-shaped token in a percent slot), and such a row is SKIPPED rather than
  * mis-parsed. An etime token that merely looks like a time (digits, `:`, `-`
  * only) but fails {@link parseEtime} keeps the row with `etimeSeconds: null`.
  */

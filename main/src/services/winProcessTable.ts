@@ -47,8 +47,10 @@ function lineExpr(format: WinProcessLineFormat): string {
       return [
         ETIME_EXPR,
         // Lifetime CPU% = (kernel+user 100ns ticks) / elapsed; `-` when elapsed is 0.
-        `$cpu = if ($e.TotalSeconds -gt 0) { '{0:N1}' -f ((([double]$_.KernelModeTime + [double]$_.UserModeTime) / 1e7) / $e.TotalSeconds * 100) } else { '-' };`,
-        `$mem = if ($totalMem -gt 0) { '{0:N1}' -f ([double]$_.WorkingSetSize / $totalMem * 100) } else { '-' };`,
+        // `.ToString('F1', InvariantCulture)`, not `-f '{0:N1}'`: `-f` honours the host
+        // locale (decimal commas, grouping separators) which the dot-decimal parser rejects.
+        `$cpu = if ($e.TotalSeconds -gt 0) { (((([double]$_.KernelModeTime + [double]$_.UserModeTime) / 1e7) / $e.TotalSeconds * 100)).ToString('F1', [cultureinfo]::InvariantCulture) } else { '-' };`,
+        `$mem = if ($totalMem -gt 0) { ([double]$_.WorkingSetSize / $totalMem * 100).ToString('F1', [cultureinfo]::InvariantCulture) } else { '-' };`,
         `'{0} {1} {2} {3} {4} {5}' -f $_.ProcessId, $_.ParentProcessId, $cpu, $mem, $et, $_.CommandLine`,
       ].join(' ');
   }

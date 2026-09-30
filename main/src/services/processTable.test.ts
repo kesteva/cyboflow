@@ -130,6 +130,14 @@ describe('parsePsOutputWithCpuMem', () => {
     ]);
   });
 
+  it('keeps the row and yields null for a non-numeric (not shifted) pcpu/pmem token', () => {
+    const rows = parsePsOutputWithCpuMem('4 1 12,5 abc 00:10 /bin/foo\n8 1 1.5 0,3 00:10 /bin/bar\n');
+    expect(rows).toEqual([
+      { pid: 4, ppid: 1, pcpu: null, pmem: null, etimeSeconds: 10, command: '/bin/foo' },
+      { pid: 8, ppid: 1, pcpu: 1.5, pmem: null, etimeSeconds: 10, command: '/bin/bar' },
+    ]);
+  });
+
   it('skips a row shifted by a silently dropped column instead of mis-parsing it', () => {
     // pcpu column dropped: pmem lands in pcpu, etime in pmem.
     expect(parsePsOutputWithCpuMem('10 1 0.3 05:30 /bin/foo bar\n')).toEqual([]);
