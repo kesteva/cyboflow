@@ -22,6 +22,7 @@ import { API } from '../../utils/api';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useSystemSnapshot, type SystemSnapshotData } from '../../hooks/useSystemSnapshot';
+import { SystemPortsSection } from './SystemPortsSection';
 
 const REFRESH_INTERVAL_MS = 2500;
 
@@ -248,6 +249,7 @@ export function SystemView(): ReactElement {
             Select a project to monitor its processes and worktrees.
           </div>
         ) : (
+          <>
           <div
             data-testid="system-toolbar"
             className="flex flex-wrap gap-3 border-b border-border-primary px-7 py-4"
@@ -280,6 +282,10 @@ export function SystemView(): ReactElement {
               </>
             )}
           </div>
+          {snapshot !== null && (
+            <SystemPortsSection ports={snapshot.ports} processes={snapshot.processes} />
+          )}
+          </>
         )}
       </div>
     </div>

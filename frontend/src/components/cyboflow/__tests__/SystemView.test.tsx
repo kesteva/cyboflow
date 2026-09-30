@@ -75,6 +75,13 @@ beforeEach(() => {
 });
 
 describe('SystemView', () => {
+  it('mounts the Ports & sockets section from the snapshot', () => {
+    mockSnapshot(snap([wt('/a', measured(MB))]));
+    render(<SystemView />);
+    expect(screen.getByTestId('system-ports')).toBeInTheDocument();
+    expect(screen.getByTestId('system-port-orch-sock')).toBeInTheDocument();
+  });
+
   it('renders the header eyebrow and the four stat tiles', () => {
     mockSnapshot(snap([wt('/a', measured(5 * MB)), wt('/b', measured(MB), 'orphan')]));
     render(<SystemView />);
