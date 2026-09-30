@@ -99,10 +99,14 @@ export class ReapExecutorImpl implements ReapExecutor {
     // worktree key -> associated process targets NOT confirmed gone: pids known alive
     // (or failed to die) vs pids whose descendants' liveness could not be verified.
     const blockers = new Map<string, { alive: number[]; unverified: number[] }>();
+    // Pids (targets and their descendants) an earlier `killed` target's tree already took
+    // down: a batch can hold both a parent and its child, and the child is then gone by
+    // the time its own turn comes.
+    const covered = new Set<number>();
     // Processes first: nothing may still be running in a worktree when it is removed.
     for (const target of manifest.targets) {
       if (target.kind !== 'process') continue;
-      const result = await this.killProcessTarget(target);
+      const result = await this.killProcessTarget(target, covered);
       results.push(result);
       // `killed` means the tree is confirmed gone, and `skipped` only a root that was
       // already dead with no descendants at resolve time. A survivor, a failed kill, or
@@ -143,7 +147,10 @@ export class ReapExecutorImpl implements ReapExecutor {
   }
 
   /** Kill one process target's full descendant tree; report survivors, never swallow them. */
-  async killProcessTarget(target: ReapProcessTarget): Promise<ReapExecutionResult> {
+  async killProcessTarget(
+    target: ReapProcessTarget,
+    covered: Set<number> = new Set(),
+  ): Promise<ReapExecutionResult> {
     const targetId = reapTargetKey(target);
     const { pid } = target;
     // pid 0/1 or our own process would take down far more than a stale child.
@@ -152,6 +159,8 @@ export class ReapExecutorImpl implements ReapExecutor {
     }
     try {
       if (!this.isPidAlive(pid)) {
+        // Killed with, and verified gone alongside, an earlier target's tree.
+        if (covered.has(pid)) return { targetId, kind: 'killed' };
         // A dead root can no longer be walked for descendants, so children known when the
         // manifest was resolved may still be running: unverified, not a success.
         if (target.descendantPidCount > 0) {
@@ -201,6 +210,8 @@ export class ReapExecutorImpl implements ReapExecutor {
         const detail = ladderErrors.length > 0 ? `: ${ladderErrors.join('; ')}` : '';
         return { targetId, kind: 'failed', error: `Kill ladder did not complete cleanly${detail}` };
       }
+      covered.add(pid);
+      for (const d of descendantPids) covered.add(d);
       return { targetId, kind: 'killed' };
     } catch (err) {
       return { targetId, kind: 'failed', error: errorMessage(err) };

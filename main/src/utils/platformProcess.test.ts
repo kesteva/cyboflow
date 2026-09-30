@@ -14,8 +14,10 @@
  *  - 'enumerate': runCommandManager — pgid resolved BEFORE any signal, group
  *    members the tree walk missed swept into the per-descendant kills.
  */
+import { execSync, spawn } from 'node:child_process';
 import { describe, it, expect, vi } from 'vitest';
 import {
+  collectDescendantPids,
   collectDescendantPidsAsync,
   describeProcesses,
   firstCommandToken,
@@ -617,6 +619,40 @@ describe('collectDescendantPidsAsync', () => {
     await expect(collectDescendantPidsAsync(0, { platform: 'linux' })).resolves.toEqual([]);
     await expect(collectDescendantPidsAsync(-5, { platform: 'linux' })).resolves.toEqual([]);
     await expect(collectDescendantPidsAsync(1.5, { platform: 'linux' })).resolves.toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('default POSIX child lister (real process tree)', () => {
+  it('finds a real process tree with the un-injected lister, sync and async', async () => {
+    const root = spawn('sh', ['-c', 'sleep 30 & sleep 30 & wait'], { stdio: 'ignore' });
+    try {
+      const rootPid = root.pid as number;
+      // Let the shell fork both sleeps.
+      for (let i = 0; i < 50; i++) {
+        if ((await collectDescendantPidsAsync(rootPid)).length >= 2) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const viaAsync = await collectDescendantPidsAsync(rootPid);
+      const viaSync = collectDescendantPids(rootPid);
+      expect(viaAsync.length).toBeGreaterThanOrEqual(2);
+      expect([...viaSync].sort()).toEqual([...viaAsync].sort());
+
+      if (process.platform === 'darwin') {
+        // Negative control: the GNU-only `ps --ppid` command the default used to run
+        // lists nothing for the same live tree on macOS — the pre-fix behaviour.
+        const gnu = execSync(`ps -o pid= --ppid ${rootPid} 2>/dev/null || true`, { encoding: 'utf8' });
+        expect(gnu.trim()).toBe('');
+      }
+    } finally {
+      const pids = [root.pid as number, ...(await collectDescendantPidsAsync(root.pid as number))];
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
   });
 });
 

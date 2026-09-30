@@ -127,11 +127,14 @@ export interface CollectDescendantPidsOptions extends PlatformProcessOptions {
 }
 
 /**
- * Default POSIX one-level lister. The `2>/dev/null || true` suffix keeps a
- * "no such process" race from throwing; the recursion just ends.
+ * Default POSIX one-level lister. `pgrep -P` is portable across macOS/BSD and
+ * Linux; GNU `ps --ppid` is Linux-only and, on macOS, fails silently behind the
+ * `|| true` — every default-lister caller then saw a childless tree. The
+ * `2>/dev/null || true` suffix keeps a "no such process" race (pgrep exits 1
+ * on no match) from throwing; the recursion just ends.
  */
 function defaultPosixChildPids(parentPid: number): number[] {
-  const output = execSync(`ps -o pid= --ppid ${parentPid} 2>/dev/null || true`, {
+  const output = execSync(`pgrep -P ${parentPid} 2>/dev/null || true`, {
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -189,7 +192,7 @@ export function collectDescendantPids(rootPid: number, opts: CollectDescendantPi
  * `2>/dev/null || true` suffix as the synchronous default.
  */
 async function defaultPosixChildPidsAsync(parentPid: number): Promise<number[]> {
-  const { stdout } = await promisify(exec)(`ps -o pid= --ppid ${parentPid} 2>/dev/null || true`, {
+  const { stdout } = await promisify(exec)(`pgrep -P ${parentPid} 2>/dev/null || true`, {
     encoding: 'utf8',
     windowsHide: true,
   });

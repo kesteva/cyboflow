@@ -87,6 +87,36 @@ describe('ReapExecutorImpl process targets', () => {
     expect(opts?.posixTermDescendants).toBe(true);
   });
 
+  it('does not report a child target as unverified when a parent target in the same batch already killed it', async () => {
+    // Live smoke: "Kill all (N)" on a type card holds a shell (100) and its child (101);
+    // killing 100's tree takes 101 with it, so 101's own turn finds a dead root.
+    const alive = new Set([100, 101, 102]);
+    const killTreeFn = vi.fn<ReapKillTree>(async () => {
+      alive.clear();
+      return true;
+    });
+    const ex = new ReapExecutorImpl({
+      killTree: killTreeFn,
+      listDescendants: async (pid) => (pid === 100 ? [101, 102] : []),
+      isPidAlive: (p) => alive.has(p),
+      selfPid: 5,
+    });
+    const results = await ex.execute(
+      manifestOf([proc(100, { descendantPidCount: 2 }), proc(101, { descendantPidCount: 1 })]),
+      OPTS,
+    );
+    expect(results.map((r) => [r.targetId, r.kind])).toEqual([
+      ['process:100', 'killed'],
+      ['process:101', 'killed'],
+    ]);
+    expect(killTreeFn).toHaveBeenCalledTimes(1);
+
+    // Negative control: a dead root that NO earlier target covered is still unverified.
+    const solo = new ReapExecutorImpl({ killTree: killTreeFn, isPidAlive: () => false, selfPid: 5 });
+    const [unverified] = await solo.execute(manifestOf([proc(103, { descendantPidCount: 1 })]), OPTS);
+    expect(unverified.kind).toBe('failed');
+  });
+
   it('reports descendants that survive the ladder as `survived` with survivorPids', async () => {
     let rootDead = false;
     const killTreeFn: ReapKillTree = async (_pid, opts) => {
