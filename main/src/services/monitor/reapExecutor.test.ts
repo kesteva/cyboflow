@@ -116,6 +116,57 @@ describe('ReapExecutorImpl process targets', () => {
     expect(res.survivorPids).toEqual([300]);
   });
 
+  it('re-probes pre-captured descendants: a child orphaned by a dead root is still a survivor', async () => {
+    const alive = new Set([900, 901]);
+    // The ladder verifies only the CURRENT parent walk: root dies, the orphaned child
+    // 901 no longer hangs off it, so killTree reports a clean success.
+    const killTreeFn: ReapKillTree = async () => {
+      alive.delete(900);
+      return true;
+    };
+    const ex = new ReapExecutorImpl({
+      killTree: killTreeFn,
+      listDescendants: async () => [901],
+      isPidAlive: (p) => alive.has(p),
+      selfPid: 5,
+    });
+    const [res] = await ex.execute(manifestOf([proc(900)]), OPTS);
+    expect(res).toEqual({ targetId: 'process:900', kind: 'survived', survivorPids: [901] });
+    // Negative control: same setup with the child also dead is a clean kill.
+    alive.clear();
+    alive.add(900);
+    const killAll: ReapKillTree = async () => {
+      alive.clear();
+      return true;
+    };
+    const ok = new ReapExecutorImpl({
+      killTree: killAll,
+      listDescendants: async () => [901],
+      isPidAlive: (p) => alive.has(p),
+      selfPid: 5,
+    });
+    const [clean] = await ok.execute(manifestOf([proc(900)]), OPTS);
+    expect(clean.kind).toBe('killed');
+  });
+
+  it('a killTree that returns false without survivors (internal ladder error) is `failed`, not `killed`', async () => {
+    let dead = false;
+    const killTreeFn: ReapKillTree = async (_pid, opts) => {
+      dead = true;
+      opts?.onError?.(new Error('ps exploded'));
+      return false;
+    };
+    const ex = new ReapExecutorImpl({
+      killTree: killTreeFn,
+      listDescendants: async () => [],
+      isPidAlive: () => !dead,
+      selfPid: 5,
+    });
+    const [res] = await ex.execute(manifestOf([proc(950)]), OPTS);
+    expect(res.kind).toBe('failed');
+    expect(res.error).toContain('ps exploded');
+  });
+
   it('skips a pid that is already gone without invoking the ladder', async () => {
     const killTreeFn = vi.fn<ReapKillTree>(async () => true);
     const ex = new ReapExecutorImpl({ killTree: killTreeFn, isPidAlive: () => false, selfPid: 5 });

@@ -109,7 +109,8 @@ export class ReapExecutorImpl implements ReapExecutor {
       // Enumerated up front so children orphaned mid-ladder are still reached.
       const descendantPids = await this.listDescendants(pid);
       const reported: number[] = [];
-      await this.killTreeFn(pid, {
+      const ladderErrors: string[] = [];
+      const ladderOk = await this.killTreeFn(pid, {
         descendantPids,
         graceMs: this.graceMs,
         // The pid is not necessarily a process-group leader, so never resolve (and
@@ -120,13 +121,26 @@ export class ReapExecutorImpl implements ReapExecutor {
         onSurvivors: (remaining) => {
           reported.push(...remaining);
         },
+        onError: (error) => {
+          ladderErrors.push(errorMessage(error));
+        },
       });
 
-      // killTree's verification only walks descendants; the root is checked here.
+      // killTree's verification walks the CURRENT parent tree, so a child orphaned
+      // when its parent exited drops out of that walk. Every pid captured before the
+      // ladder (and the root) is therefore re-probed here.
       const survivors = new Set<number>(reported);
-      if (this.isPidAlive(pid)) survivors.add(pid);
+      for (const candidate of [pid, ...descendantPids]) {
+        if (candidate !== this.selfPid && this.isPidAlive(candidate)) survivors.add(candidate);
+      }
       if (survivors.size > 0) {
         return { targetId, kind: 'survived', survivorPids: [...survivors].sort((a, b) => a - b) };
+      }
+      // `false` with nothing left alive means the ladder itself broke (it returns
+      // false on an internal error): the outcome is unverified, never a success.
+      if (!ladderOk) {
+        const detail = ladderErrors.length > 0 ? `: ${ladderErrors.join('; ')}` : '';
+        return { targetId, kind: 'failed', error: `Kill ladder did not complete cleanly${detail}` };
       }
       return { targetId, kind: 'killed' };
     } catch (err) {
