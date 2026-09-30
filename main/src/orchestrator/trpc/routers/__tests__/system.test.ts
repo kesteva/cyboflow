@@ -100,7 +100,7 @@ describe('cyboflow.system.snapshot — delegation', () => {
 });
 
 describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
-  function build() {
+  function build(registryPaths: string[] = ['/wt/a', '/wt/b']) {
     const listProcesses = vi.fn(async (): Promise<ProcessSnapshotRow[]> => [
       { pid: 10, ppid: 1, pcpu: 1, pmem: 1, etimeSeconds: 5, command: 'claude' },
       { pid: 11, ppid: 1, pcpu: 0, pmem: 0, etimeSeconds: 9, command: '/usr/bin/other' },
@@ -122,10 +122,8 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
       processSnapshot,
       readMarkers,
       worktrees: {
-        loadRegistry: async (): Promise<WorktreeMonitorRegistryEntry[]> => [
-          { ...WORKTREE, path: '/wt/a' },
-          { ...WORKTREE, path: '/wt/b', tag: 'orphan', prunable: true },
-        ],
+        loadRegistry: async (): Promise<WorktreeMonitorRegistryEntry[]> =>
+          registryPaths.map((path) => ({ ...WORKTREE, path })),
         getDiskUsage: (p) => disk.getUsage(p),
       },
       orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
@@ -169,6 +167,33 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
     // First read is queued/measuring — never a bare number.
     for (const w of snap.worktrees) expect(['queued', 'measuring']).toContain(w.usage.status);
     expect(snap.processes.map((p) => p.bucket).sort()).toEqual(['foreign', 'owned']);
+  });
+
+  it('a second snapshot() inside the TTL starts no further du runs (entries come back measured)', async () => {
+    const { provider, listProcesses, runDu } = build();
+    setSystemProvider(provider);
+
+    await caller().snapshot({ projectId: 1 });
+    await vi.waitFor(() => expect(runDu).toHaveBeenCalledTimes(2));
+    // Let both queued measurements settle into the cache.
+    let second = await caller().snapshot({ projectId: 1 });
+    await vi.waitFor(async () => {
+      second = await caller().snapshot({ projectId: 1 });
+      expect(second.worktrees.map((w) => w.usage.status)).toEqual(['measured', 'measured']);
+    });
+
+    expect(runDu).toHaveBeenCalledTimes(2);
+    expect(listProcesses.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a duplicate registry path is measured only once', async () => {
+    const { provider, runDu } = build(['/wt/a', '/wt/a']);
+    setSystemProvider(provider);
+
+    await caller().snapshot({ projectId: 1 });
+    await vi.waitFor(() => expect(runDu).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(runDu).toHaveBeenCalledTimes(1);
   });
 });
 
