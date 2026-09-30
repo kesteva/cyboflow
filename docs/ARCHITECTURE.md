@@ -724,7 +724,8 @@ and measured cost budget: `docs/design/process-worktree-monitor.md`; live macOS 
 - **Write side — `cyboflow.monitorReap`: resolve → confirm → execute.** Every destructive action
   (Prune, Kill tree, Kill all of a type, Reap all stale) first calls `resolve`, which builds a
   `ReapManifest` server-side (`services/monitor/reapManifest.ts`: targets, fresh target-scoped
-  `du`, dirty/ahead counts from the `GitStatusManager` cache, descendant PID counts) and stashes
+  `du`, dirty/ahead counts from a fresh one-shot `probeWorktreeGit` read — the `GitStatusManager`
+  cache is only the fallback when the probe yields nothing — and descendant PID counts) and stashes
   it in memory (~60 s TTL) under a server-minted id. The renderer shows exactly that manifest in
   `ManifestConfirmDialog` / `KillProcessConfirmDialog`, then calls `execute` with **only the
   id**. A fabricated, expired, replayed or drifted id is rejected (`NOT_FOUND` /
