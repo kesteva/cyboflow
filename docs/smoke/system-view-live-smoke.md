@@ -187,7 +187,7 @@ the directory itself was then removed with the repo.)
 ## Not fixed / not exercised
 
 - **Orphaned processes cannot exist on macOS.** `spawnMarkerReader.ts` reads `CYBOFLOW_INSTANCE` only from
-  `/proc/<pid>/environ` (linux); on darwin no row carries a marker, so nothing classifies above `suspected`
+  `/proc/<pid>/environ` (linux); on darwin no row is *marker*-classified (rows with a manager handle still classify `owned`, marker-less cyboflow-shaped rows `suspected`, and no row can be `orphan`)
   ("ORPHANED PROCESSES — 0 orphaned" throughout). The process half of Reap-all-stale therefore had no target here;
   the live path was covered instead by Kill tree / Kill all on `suspected` rows behind the "not tagged" confirm.
   The marker-based orphan reap remains covered by the real-process e2e (TASK-260), not by this macOS smoke.

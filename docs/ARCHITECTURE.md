@@ -716,8 +716,10 @@ and measured cost budget: `docs/design/process-worktree-monitor.md`; live macOS 
   ancestry, no spawn marker) is a distinct result variant that cannot be promoted. Ownership
   rests on the spawn marker (`CYBOFLOW_INSTANCE` / `CYBOFLOW_WORKTREE`, stamped at every spawn
   site by `utils/spawnMarker.ts` and enforced by `utils/__tests__/spawnMarkerCoverage.test.ts`);
-  the marker reader only exists on linux, so on macOS/Windows nothing classifies above
-  `suspected`. The worktree registry (`services/worktreeRegistry.ts`, served by
+  the marker reader only exists on linux. On macOS/Windows a process this app holds a manager
+  handle for still classifies `owned`, marker-less cyboflow-shaped processes classify
+  `suspected` and everything else `foreign`; `orphan` needs a marker naming a dead instance, so
+  no sweep-eligible orphans appear on those platforms. The worktree registry (`services/worktreeRegistry.ts`, served by
   `cyboflow.worktreeMonitor`) is a derived read model — `sessions` ∪ `workflow_runs` ∪
   `WorktreeManager.listWorktrees()` — with no table of its own. On win32 the router stays
   registered; only `du` sizing is reported `unsupported`.
