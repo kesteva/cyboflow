@@ -3,6 +3,7 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import { killTree, listPidPpidTable } from '../utils/platformProcess';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { collectDescendantPids, parseProcessTable, type ProcessTableRow } from './processTable';
@@ -133,7 +134,7 @@ export class TerminalSessionManager extends EventEmitter {
       cwd: worktreePath,
       cols: 80,
       rows: 24,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: shellPath,
         WORKTREE_PATH: worktreePath,
@@ -145,7 +146,7 @@ export class TerminalSessionManager extends EventEmitter {
         // @deprecated Legacy Crystal-era name kept for backward compat with user
         // shell scripts. TODO(post-v1): remove after deprecation window.
         CRYSTAL_SESSION_ID: sessionId,
-      },
+      }, worktreePath),
     });
 
     // Store the session

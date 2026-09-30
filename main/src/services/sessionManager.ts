@@ -15,6 +15,7 @@ import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
 import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -1056,10 +1057,10 @@ export class SessionManager extends EventEmitter {
       stdio: 'pipe',
       detached: process.platform !== 'win32',
       windowsHide: true,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: shellPath
-      }
+      }, workingDirectory)
     });
 
     // Handle output - send to logs instead of terminal
@@ -1184,7 +1185,7 @@ export class SessionManager extends EventEmitter {
     return { success: overallSuccess, output: allOutput };
   }
   
-  private async execWithShellPath(command: string, options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
+  private async execWithShellPath(command: string, options: { cwd: string }): Promise<{ stdout: string; stderr: string }> {
     const { exec } = require('child_process');
     const { promisify } = require('util');
     const execAsync = promisify(exec);
@@ -1193,10 +1194,10 @@ export class SessionManager extends EventEmitter {
     return execAsync(command, {
       ...options,
       windowsHide: true,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: shellPath
-      }
+      }, options.cwd)
     });
   }
 
