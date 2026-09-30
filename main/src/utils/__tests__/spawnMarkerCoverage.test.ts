@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import ts from 'typescript';
 
 const SRC = path.resolve(__dirname, '..', '..');
 
@@ -61,97 +62,175 @@ const MARKER_LITERAL =
 /**
  * Per-site enforcement. `callsStamp` alone accepts ONE stamp anywhere in a module,
  * so a module with two spawn sites could lose the stamp at one and still pass.
- * Each entry names a spawn site by regex, how many such sites the module has, and
- * the site's call/object text is then checked for a stamped `env`.
- *  - `open: '('`  — anchor is a call; the args must carry a stamped `env` property.
- *  - `open: '{'`  — anchor opens an object literal (e.g. an MCP server block).
- *  - `open: 'return'` — anchor is `return stampSpawnMarker(` in a pure env builder.
+ * Each entry names a spawn site structurally (an AST node, not a source regex) and
+ * how many such sites the module has; every site's `env` must then resolve to a
+ * stamped value.
+ *  - `call`         — a CallExpression whose callee text is `callee`; every `env`
+ *                     property in its object-literal arguments (one nesting level,
+ *                     e.g. `options: { env }`) must be stamped.
+ *  - `property`     — a PropertyAssignment named `name` holding an object literal
+ *                     (e.g. an MCP server block); its `env` property must be stamped.
+ *  - `return-stamp` — a `return stampSpawnMarker(...)` in a pure env builder (the
+ *                     node itself IS the stamp).
  */
-interface SpawnSite {
-  anchor: RegExp;
-  count: number;
-  open: '(' | '{' | 'return';
-}
+type SpawnSite =
+  | { kind: 'call'; callee: string; count: number }
+  | { kind: 'property'; name: string; count: number }
+  | { kind: 'return-stamp'; count: number };
+
 const SPAWN_SITES: Record<string, SpawnSite[]> = {
-  'services/panels/cli/AbstractCliManager.ts': [{ anchor: /\bpty\.spawn\(/g, count: 2, open: '(' }],
+  'services/panels/cli/AbstractCliManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 2 }],
   'services/sessionManager.ts': [
-    { anchor: /(?<![\w.])spawn\(/g, count: 1, open: '(' },
-    { anchor: /\bexecAsync\(/g, count: 1, open: '(' },
+    { kind: 'call', callee: 'spawn', count: 1 },
+    { kind: 'call', callee: 'execAsync', count: 1 },
   ],
-  'services/terminalSessionManager.ts': [{ anchor: /\bpty\.spawn\(/g, count: 1, open: '(' }],
-  'services/terminalPanelManager.ts': [{ anchor: /\bpty\.spawn\(/g, count: 1, open: '(' }],
-  'services/runShellManager.ts': [{ anchor: /\bthis\.spawn\(/g, count: 1, open: '(' }],
-  'services/runCommandManager.ts': [{ anchor: /\bpty\.spawn\(/g, count: 1, open: '(' }],
+  'services/terminalSessionManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
+  'services/terminalPanelManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
+  'services/runShellManager.ts': [{ kind: 'call', callee: 'this.spawn', count: 1 }],
+  'services/runCommandManager.ts': [{ kind: 'call', callee: 'pty.spawn', count: 1 }],
   'services/panels/codex/appServer/runConfig.ts': [
-    { anchor: /\bcyboflow:\s*\{/g, count: 1, open: '{' },
-    { anchor: /\breturn\s+stampSpawnMarker\(/g, count: 1, open: 'return' },
+    { kind: 'property', name: 'cyboflow', count: 1 },
+    { kind: 'return-stamp', count: 1 },
   ],
-  'services/panels/logPanel/logsManager.ts': [{ anchor: /(?<![\w.])spawn\(/g, count: 1, open: '(' }],
-  'services/visualVerify/devServerManager.ts': [{ anchor: /\bconst child = spawn\(/g, count: 2, open: '(' }],
-  'orchestrator/verify/verificationAgentRunner.ts': [{ anchor: /\bawait queryFn\(/g, count: 1, open: '(' }],
-  'orchestrator/verify/verificationAgentQuery.ts': [{ anchor: /\bconst q = query\(/g, count: 1, open: '(' }],
-  'orchestrator/mcpServer/mcpServerLifecycle.ts': [{ anchor: /\bconst child = spawn\(/g, count: 1, open: '(' }],
+  'services/panels/logPanel/logsManager.ts': [{ kind: 'call', callee: 'spawn', count: 1 }],
+  'services/visualVerify/devServerManager.ts': [{ kind: 'call', callee: 'spawn', count: 2 }],
+  'orchestrator/verify/verificationAgentRunner.ts': [{ kind: 'call', callee: 'queryFn', count: 1 }],
+  'orchestrator/verify/verificationAgentQuery.ts': [{ kind: 'call', callee: 'query', count: 1 }],
+  'orchestrator/mcpServer/mcpServerLifecycle.ts': [{ kind: 'call', callee: 'spawn', count: 1 }],
 };
 
-/** Drop block and whole-line-ish `//` comments so parens/braces in prose can't unbalance extraction. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[\s;,{(])\/\/.*$/gm, '$1');
+const MARKER_KEYS = new Set(['CYBOFLOW_INSTANCE', 'CYBOFLOW_WORKTREE']);
+
+function propName(p: ts.ObjectLiteralElementLike): string | undefined {
+  const n = p.name;
+  if (n && (ts.isIdentifier(n) || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))) return n.text;
+  return undefined;
 }
 
-/** Text between the bracket at `openIdx` and its match (exclusive), or null if unbalanced. */
-function balanced(src: string, openIdx: number): string | null {
-  const pairs: Record<string, string> = { '(': ')', '{': '}' };
-  const open = src[openIdx];
-  const close = pairs[open];
-  let depth = 0;
-  for (let i = openIdx; i < src.length; i++) {
-    if (src[i] === open) depth++;
-    else if (src[i] === close && --depth === 0) return src.slice(openIdx + 1, i);
+function unwrap(e: ts.Expression): ts.Expression {
+  let cur = e;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isSatisfiesExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = cur.expression;
+  }
+  return cur;
+}
+
+/** The nearest visible `const`/`let`/`var` initializer for `name` at `from`, lexically; null if unresolved. */
+function resolveInitializer(name: string, from: ts.Node): ts.Expression | null {
+  const declIn = (list: ts.VariableDeclarationList | undefined, use: ts.Node): ts.VariableDeclaration | null => {
+    if (!list) return null;
+    const hits = list.declarations.filter((d) => ts.isIdentifier(d.name) && d.name.text === name);
+    if (hits.length === 0) return null;
+    const before = hits.filter((d) => d.pos <= use.pos);
+    return before.length > 0 ? before[before.length - 1] : hits[0];
+  };
+  for (let scope: ts.Node | undefined = from.parent; scope; scope = scope.parent) {
+    // Shadowing binders that carry no analysable initializer: unresolved -> not stamped.
+    if (ts.isFunctionLike(scope) && scope.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === name)) {
+      return null;
+    }
+    if (ts.isCatchClause(scope) && scope.variableDeclaration && ts.isIdentifier(scope.variableDeclaration.name)) {
+      if (scope.variableDeclaration.name.text === name) return null;
+    }
+    let found: ts.VariableDeclaration | null = null;
+    if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) || ts.isCaseClause(scope)) {
+      const stmts: readonly ts.Statement[] = ts.isCaseClause(scope) ? scope.statements : (scope as ts.Block).statements;
+      for (const st of stmts) {
+        if (ts.isVariableStatement(st)) found = declIn(st.declarationList, from) ?? found;
+      }
+    } else if (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) {
+      const init = scope.initializer;
+      if (init && ts.isVariableDeclarationList(init)) found = declIn(init, from);
+    }
+    if (found) return found.initializer ?? null;
   }
   return null;
 }
 
-/** Identifiers whose initializer is (transitively) the output of stampSpawnMarker. */
-function stampedIdents(src: string): Set<string> {
-  const decls = [...src.matchAll(/(?:const|let)\s+(\w+)[^=\n]*=\s*([^;]+);/g)];
-  const stamped = new Set<string>();
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const [, name, init] of decls) {
-      if (stamped.has(name)) continue;
-      const derived = /\bstampSpawnMarker\(/.test(init) || [...stamped].some((s) => new RegExp(`\\b${s}\\b`).test(init));
-      if (derived) {
-        stamped.add(name);
-        grew = true;
-      }
-    }
+/** True when `expr` evaluates to (a value derived from) the output of stampSpawnMarker. */
+function isStamped(expr: ts.Expression, seen: Set<ts.Node> = new Set()): boolean {
+  const e = unwrap(expr);
+  if (ts.isCallExpression(e)) return ts.isIdentifier(e.expression) && e.expression.text === 'stampSpawnMarker';
+  if (ts.isConditionalExpression(e)) return isStamped(e.whenTrue, seen) && isStamped(e.whenFalse, seen);
+  if (ts.isObjectLiteralExpression(e)) {
+    // Stamped iff a stamped spread is present and nothing after it can overwrite the marker keys.
+    let stampedAt = -1;
+    e.properties.forEach((p, i) => {
+      if (ts.isSpreadAssignment(p) && isStamped(p.expression, seen)) stampedAt = i;
+    });
+    if (stampedAt < 0) return false;
+    return e.properties.slice(stampedAt + 1).every((p) => {
+      if (ts.isSpreadAssignment(p)) return isStamped(p.expression, seen);
+      const key = propName(p);
+      return key !== undefined && !MARKER_KEYS.has(key); // computed keys could be the marker: not provably safe
+    });
   }
-  return stamped;
-}
-
-/** True when the site's `env` property (explicit or shorthand) is a stamped value. */
-function envIsStamped(block: string, stamped: Set<string>): boolean {
-  const prop = /\benv\s*:\s*(stampSpawnMarker\s*\(|(\w+)\b)/.exec(block);
-  if (prop) return prop[2] === undefined ? true : stamped.has(prop[2]);
-  if (/[{,]\s*env\s*(?=[,}])|^\s*env\s*(?=[,}])/.test(block)) return stamped.has('env');
+  if (ts.isIdentifier(e)) {
+    if (seen.has(e)) return false;
+    seen.add(e);
+    const init = resolveInitializer(e.text, e);
+    return init !== null && isStamped(init, seen);
+  }
   return false;
 }
 
-/** One entry per anchored spawn site: whether that site's final env is stamped. */
-export function spawnSiteStamps(rawSrc: string, sites: SpawnSite[]): { count: number; unstamped: number }[] {
-  const src = stripComments(rawSrc);
-  const stamped = stampedIdents(src);
-  return sites.map((site) => {
-    const matches = [...src.matchAll(site.anchor)];
-    let unstamped = 0;
-    for (const m of matches) {
-      if (site.open === 'return') continue; // the anchor itself IS the stamp call
-      const idx = m.index + m[0].length - 1;
-      const block = balanced(src, idx);
-      if (block === null || !envIsStamped(block, stamped)) unstamped++;
+/** Every `env` property reachable in an object literal, descending one level into non-env properties. */
+function envProps(obj: ts.ObjectLiteralExpression, depth = 0): ts.ObjectLiteralElementLike[] {
+  const out: ts.ObjectLiteralElementLike[] = [];
+  for (const p of obj.properties) {
+    if (propName(p) === 'env' && (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))) out.push(p);
+    else if (depth === 0 && ts.isPropertyAssignment(p)) {
+      const v = unwrap(p.initializer);
+      if (ts.isObjectLiteralExpression(v)) out.push(...envProps(v, 1));
     }
-    return { count: matches.length, unstamped };
+  }
+  return out;
+}
+
+function envPropStamped(p: ts.ObjectLiteralElementLike): boolean {
+  if (ts.isShorthandPropertyAssignment(p)) return isStamped(p.name);
+  return ts.isPropertyAssignment(p) && isStamped(p.initializer);
+}
+
+/** True when the object literals given have at least one `env` and EVERY `env` is stamped. */
+function objectsStamped(objs: ts.ObjectLiteralExpression[]): boolean {
+  const props = objs.flatMap((o) => envProps(o));
+  return props.length > 0 && props.every(envPropStamped);
+}
+
+function visitAll(node: ts.Node, visit: (n: ts.Node) => void): void {
+  visit(node);
+  node.forEachChild((c) => visitAll(c, visit));
+}
+
+/** One entry per structural spawn site kind: how many sites exist and how many carry an unstamped env. */
+export function spawnSiteStamps(rawSrc: string, sites: SpawnSite[]): { count: number; unstamped: number }[] {
+  const sf = ts.createSourceFile('module.ts', rawSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  return sites.map((site) => {
+    let count = 0;
+    let unstamped = 0;
+    visitAll(sf, (n) => {
+      if (site.kind === 'call' && ts.isCallExpression(n) && n.expression.getText(sf) === site.callee) {
+        count++;
+        if (!objectsStamped(n.arguments.filter(ts.isObjectLiteralExpression))) unstamped++;
+      } else if (site.kind === 'property' && ts.isPropertyAssignment(n) && propName(n) === site.name) {
+        const v = unwrap(n.initializer);
+        if (ts.isObjectLiteralExpression(v)) {
+          count++;
+          if (!objectsStamped([v])) unstamped++;
+        }
+      } else if (site.kind === 'return-stamp' && ts.isReturnStatement(n) && n.expression) {
+        const e = unwrap(n.expression);
+        if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === 'stampSpawnMarker') count++;
+      }
+    });
+    return { count, unstamped };
   });
 }
 
@@ -180,8 +259,8 @@ describe('spawn marker chokepoint coverage', () => {
     const results = spawnSiteStamps(read(rel), sites);
     results.forEach((r, i) => {
       // A count drift means a spawn site was added/removed: update SPAWN_SITES deliberately.
-      expect(r.count, `${rel}: site ${sites[i].anchor} count`).toBe(sites[i].count);
-      expect(r.unstamped, `${rel}: unstamped sites for ${sites[i].anchor}`).toBe(0);
+      expect(r.count, `${rel}: site ${JSON.stringify(sites[i])} count`).toBe(sites[i].count);
+      expect(r.unstamped, `${rel}: unstamped sites for ${JSON.stringify(sites[i])}`).toBe(0);
     });
   });
 
@@ -231,13 +310,63 @@ describe('spawn marker chokepoint coverage', () => {
       expect(handWritesMarker(`childEnv.CYBOFLOW_WORKTREE ??= cwd;`)).toBe(true);
       expect(handWritesMarker(`const v = process.env.CYBOFLOW_INSTANCE;`)).toBe(false);
     });
+    const spawnSite = (count: number): SpawnSite[] => [{ kind: 'call', callee: 'spawn', count }];
+    const HEAD = `import { stampSpawnMarker } from '../utils/spawnMarker';\n`;
     it('rejects a module where only one of two spawn sites is stamped', () => {
-      const site: SpawnSite = { anchor: /\bconst child = spawn\(/g, count: 2, open: '(' };
-      const src = `import { stampSpawnMarker } from '../utils/spawnMarker';
+      const src = `${HEAD}
         const a = spawn(cmd, { env: stampSpawnMarker({ ...process.env }, cwd) });
-        const child = spawn(cmd, { env: { ...process.env, PORT: '1' } });`.replace('const a', 'const child');
+        const b = spawn(cmd, { env: { ...process.env, PORT: '1' } });`;
       expect(callsStamp(src)).toBe(true); // the module-level check would wave this through
-      expect(spawnSiteStamps(src, [site])).toEqual([{ count: 2, unstamped: 1 }]);
+      expect(spawnSiteStamps(src, spawnSite(2))).toEqual([{ count: 2, unstamped: 1 }]);
+    });
+    it('is scope-aware: a stamped `env` in one function does not vouch for an unstamped `env` in another', () => {
+      const src = `${HEAD}
+        function good() {
+          const env = stampSpawnMarker(base, cwd);
+          return spawn(cmd, { env });
+        }
+        function bad() {
+          const env = { ...process.env };
+          return spawn(cmd, { env });
+        }`;
+      expect(spawnSiteStamps(src, spawnSite(2))).toEqual([{ count: 2, unstamped: 1 }]);
+    });
+    it('is scope-aware: an unstamped inner `env` shadowing a stamped outer one is unstamped', () => {
+      const src = `${HEAD}
+        const env = stampSpawnMarker(base, cwd);
+        function inner() {
+          const env = { ...process.env };
+          return spawn(cmd, { env });
+        }
+        function outer() {
+          return spawn(cmd, { env });
+        }`;
+      expect(spawnSiteStamps(src, spawnSite(2))).toEqual([{ count: 2, unstamped: 1 }]);
+    });
+    it('is scope-aware: a parameter named env is unresolved, not stamped', () => {
+      const src = `${HEAD}
+        const env = stampSpawnMarker(base, cwd);
+        function f(env) { return spawn(cmd, { env }); }`;
+      expect(spawnSiteStamps(src, spawnSite(1))).toEqual([{ count: 1, unstamped: 1 }]);
+    });
+    it('checks EVERY env property at a site, including a nested options.env', () => {
+      const src = `${HEAD}
+        const marked = stampSpawnMarker(base, cwd);
+        spawn(cmd, { env: marked, options: { env: process.env } });
+        spawn(cmd, { env: marked, options: { env: marked } });
+        spawn(cmd, { env: process.env, env: marked });`;
+      expect(spawnSiteStamps(src, spawnSite(3))).toEqual([{ count: 3, unstamped: 2 }]);
+    });
+    it('rejects a spread-stamped object that then overwrites a marker key or spreads unstamped env', () => {
+      const src = `${HEAD}
+        const marked = stampSpawnMarker(base, cwd);
+        spawn(cmd, { env: { ...marked, CYBOFLOW_INSTANCE: 'x' } });
+        spawn(cmd, { env: { ...marked, ...process.env } });
+        spawn(cmd, { env: { ...marked, PATH: p } });`;
+      expect(spawnSiteStamps(src, spawnSite(3))).toEqual([{ count: 3, unstamped: 2 }]);
+    });
+    it('a spawn with no env property at all is unstamped', () => {
+      expect(spawnSiteStamps(`${HEAD}spawn(cmd, { cwd });`, spawnSite(1))).toEqual([{ count: 1, unstamped: 1 }]);
     });
     it('catches losing the stamp at ONE real devServerManager site (in-memory mutation)', () => {
       const rel = 'services/visualVerify/devServerManager.ts';
@@ -247,18 +376,19 @@ describe('spawn marker chokepoint coverage', () => {
       const mutated = real.slice(0, idx) + 'env: (' + real.slice(idx + 'env: stampSpawnMarker('.length);
       expect(spawnSiteStamps(mutated, SPAWN_SITES[rel])[0].unstamped).toBe(1);
     });
-    it('accepts stamped sites via derived identifiers and shorthand env', () => {
-      const site: SpawnSite = { anchor: /\bconst child = spawn\(/g, count: 2, open: '(' };
-      const src = `import { stampSpawnMarker } from '../utils/spawnMarker';
+    it('accepts stamped sites via derived identifiers, conditionals and shorthand env', () => {
+      const src = `${HEAD}
         const marked = stampSpawnMarker(base, cwd);
         const derived = flag ? { ...marked, X: '1' } : marked;
-        const child = spawn(cmd, { env: derived });
-        const child = spawn(cmd, { cwd, env: marked, stdio: 'pipe' });`;
-      expect(spawnSiteStamps(src, [site])).toEqual([{ count: 2, unstamped: 0 }]);
-      const shorthand = `const env = stampSpawnMarker(base, cwd);\nconst child = spawn(cmd, { stdio: 'pipe', env });`;
-      expect(spawnSiteStamps(shorthand, [site])).toEqual([{ count: 1, unstamped: 0 }]);
-      const bare = `const env = base;\nconst child = spawn(cmd, { stdio: 'pipe', env });`;
-      expect(spawnSiteStamps(bare, [site])).toEqual([{ count: 1, unstamped: 1 }]);
+        spawn(cmd, { env: derived });
+        spawn(cmd, { cwd, env: marked, stdio: 'pipe' });`;
+      expect(spawnSiteStamps(src, spawnSite(2))).toEqual([{ count: 2, unstamped: 0 }]);
+      const shorthand = `const env = stampSpawnMarker(base, cwd);\nspawn(cmd, { stdio: 'pipe', env });`;
+      expect(spawnSiteStamps(shorthand, spawnSite(1))).toEqual([{ count: 1, unstamped: 0 }]);
+      const bare = `const env = base;\nspawn(cmd, { stdio: 'pipe', env });`;
+      expect(spawnSiteStamps(bare, spawnSite(1))).toEqual([{ count: 1, unstamped: 1 }]);
+      const halfCond = `const marked = stampSpawnMarker(base, cwd);\nconst e = f ? marked : process.env;\nspawn(cmd, { env: e });`;
+      expect(spawnSiteStamps(halfCond, spawnSite(1))).toEqual([{ count: 1, unstamped: 1 }]);
     });
     it('accepts a properly stamped module', () => {
       const ok = `import { stampSpawnMarker } from '../utils/spawnMarker';\nconst e = stampSpawnMarker(env, cwd);`;
