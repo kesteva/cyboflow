@@ -258,8 +258,9 @@ import {
   stampQuickSessionRuntimeConfig,
 } from './services/createQuickSessionCore';
 import * as fs from 'fs';
-import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
+import { getDevDebugLogPath, appendDevDebugLog, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
+import { installMainConsoleForwarding } from './mainConsoleForwarding';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
@@ -1338,152 +1339,17 @@ async function createWindow() {
     }
   });
 
-  // Override console methods to forward to renderer and logger
-  console.log = (...args: unknown[]) => {
-    // Format the message
-    const message = formatConsoleArgs(args);
-
-    // Write to logger if available
-    if (logger) {
-      logger.info(message);
-    } else {
-      originalLog.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'log', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only). In production the renderer never mirrors
-    // backend logs, so this IPC send + serialization would be pure overhead on
-    // every log line — gate it on isDevelopment (F2).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'log', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalLog('[Main] Failed to send log to renderer:', e);
-      }
-    }
-  };
-
-  console.error = (...args: unknown[]) => {
-    // Prevent infinite recursion by checking if we're already in an error handler
-    if ((console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError) {
-      return originalError.apply(console, args);
-    }
-    
-    (console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError = true;
-    
-    try {
-      // If logger is not initialized or we're in the logger itself, use original console
-      if (!logger) {
-        originalError.apply(console, args);
-        return;
-      }
-
-      const message = formatConsoleArgs(args);
-
-      // Extract Error object if present
-      const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
-
-      // Use logger but with recursion protection
-      logger.error(message, errorObj);
-
-      // In development, also write to backend debug log file
-      if (isDevelopment) {
-        appendDevDebugLog('backend', 'error', 'BACKEND', message, { error: originalError });
-      }
-
-      // Forward to renderer (dev-only, F2 — see console.log override above).
-      if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-        try {
-          mainWindow.webContents.send('main-log', 'error', message);
-        } catch (e) {
-          // If sending to renderer fails, use original console to avoid recursion
-          originalError('[Main] Failed to send error to renderer:', e);
-        }
-      }
-    } catch (e) {
-      // If anything fails in the error handler, fall back to original
-      originalError.apply(console, args);
-    } finally {
-      (console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError = false;
-    }
-  };
-
-  console.warn = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    // Extract Error object if present for warnings too
-    const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
-
-    if (logger) {
-      logger.warn(message, errorObj);
-    } else {
-      originalWarn.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'warn', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'warn', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalWarn('[Main] Failed to send warning to renderer:', e);
-      }
-    }
-  };
-
-  console.info = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    if (logger) {
-      logger.info(message);
-    } else {
-      originalInfo.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'info', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'info', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalInfo('[Main] Failed to send info to renderer:', e);
-      }
-    }
-  };
-
-  console.debug = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'debug', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'debug', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        console.error('[Main] Failed to send debug to renderer:', e);
-      }
-    }
-  };
+  // Override console methods to forward to renderer and logger — see
+  // mainConsoleForwarding.ts (#19 step 24); re-installed on every createWindow().
+  installMainConsoleForwarding({
+    getMainWindow: () => mainWindow,
+    getLogger: () => logger,
+    isDevelopment,
+    originalLog,
+    originalError,
+    originalWarn,
+    originalInfo,
+  });
 
   // Log any renderer errors
   mainWindow.webContents.on('render-process-gone', (event, details) => {
