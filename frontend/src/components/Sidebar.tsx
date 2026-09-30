@@ -2,7 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug, ChevronLeft } from 'lucide-react';
+import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, MonitorCog, Bug, ChevronLeft } from 'lucide-react';
 import { BugReportDialog } from './BugReportDialog';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
@@ -12,6 +12,7 @@ import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
+import { isWindowsPlatform } from '../utils/platform';
 import {
   guidedStepNumber,
   guidedStepTotal,
@@ -76,10 +77,14 @@ interface SidebarProps {
   verifyQueueActive?: boolean;
   /** Toggle the Verify-Queue center pane. */
   onToggleVerifyQueue?: () => void;
+  /** Whether the System pane (process & worktree monitor) is the active center view. */
+  systemActive?: boolean;
+  /** Toggle the System center pane. */
+  onToggleSystem?: () => void;
 }
 
 // Shared className for the circular icon "pill" that fronts each primary rail
-// item (Task backlog / Insights / Workflows / Verify Queue). Hoisted so the one
+// item (Task backlog / Insights / Workflows / Verify Queue / System). Hoisted so the one
 // string is the single source of truth instead of being repeated per item.
 const pillClass =
   'flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive';
@@ -108,6 +113,8 @@ export const Sidebar = memo(function Sidebar({
   onToggleWorkflows,
   verifyQueueActive = false,
   onToggleVerifyQueue,
+  systemActive = false,
+  onToggleSystem,
 }: SidebarProps) {
   // Settings dialog state lives in navigationStore, not here: any surface can
   // need to open it (e.g. the chat's provider-disabled failure row offering
@@ -487,6 +494,32 @@ export const Sidebar = memo(function Sidebar({
             <span className="block text-[10px] text-text-secondary">Visual verification</span>
           </span>
         </button>
+
+        {/* System — primary rail item directly below Verify Queue; opens the
+            full-width System pane (live process & worktree monitor). Entirely
+            absent on Windows: its disk sizing / process reaping is POSIX-shaped. */}
+        {!isWindowsPlatform() && (
+          <button
+            type="button"
+            onClick={() => onToggleSystem?.()}
+            aria-pressed={systemActive}
+            data-testid="system-rail-item"
+            className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
+              systemActive
+                ? 'border-border-emphasized bg-surface-primary'
+                : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
+            }`}
+            style={systemActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+          >
+            <span className={pillClass}>
+              <MonitorCog className="h-3 w-3" strokeWidth={2} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11.5px] font-bold leading-tight text-text-primary">System</span>
+              <span className="block text-[10px] text-text-secondary">System · live process &amp; worktree monitor</span>
+            </span>
+          </button>
+        )}
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
           <div className="px-4 py-2 text-sm uppercase flex items-center justify-between overflow-hidden">
