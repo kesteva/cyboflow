@@ -131,6 +131,7 @@ import {
 import { materializeDependencyGuardShim, type DependencyGuardShimOptions } from './dependencyGuardShim';
 import { FORBIDDEN_DEP_COMMAND_PATTERN } from './dependencyCommandGuard';
 import { raceWithAbort } from './verificationLeases';
+import { stampSpawnMarker } from '../../utils/spawnMarker';
 
 // The contract text moved to its own module when it became mode-conditional
 // (runbook-optional-verification.md §A1.1); re-exported so every existing
@@ -3907,7 +3908,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           cwd,
           model,
           allowedTools: [...VERIFY_AGENT_ALLOWED_TOOLS],
-          env,
+          env: stampSpawnMarker(env, cwd),
           ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
           signal: controller.signal,
           // §A1.4 structural guards — EXPLORE ONLY, and handed to both runtimes
