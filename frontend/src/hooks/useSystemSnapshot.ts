@@ -13,7 +13,7 @@
  * changes on every server call, so the content-equal compare ignores it —
  * otherwise no poll would ever look unchanged and every tick would re-render.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
 import type { AppRouter } from '../../../shared/types/trpc';
@@ -37,6 +37,14 @@ export interface UseSystemSnapshotResult {
   /** True only until the FIRST seed resolves (subsequent polls do not flip it). */
   isLoading: boolean;
   error: Error | null;
+  /** Fetch now (out of band of the poll timer). No-op while the hook is inert. */
+  refetch: () => void;
+  /**
+   * Wall-clock ms of the last SUCCESSFUL fetch (null before the first). Bumped
+   * even when the content-equal dedupe keeps the previous snapshot object, so a
+   * relative "Updated Ns ago" can't be frozen by `generatedAt`.
+   */
+  lastUpdatedAt: number | null;
 }
 
 const DEFAULT_REFETCH_INTERVAL_MS = 2500;
@@ -59,12 +67,17 @@ export function useSystemSnapshot({
   const [snapshot, setSnapshot] = useState<SystemSnapshotData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  // Points at the live effect's fetcher; null while the hook is inert.
+  const fetchRef = useRef<((firstLoad: boolean) => void) | null>(null);
 
   useEffect(() => {
     if (projectId === null || !enabled) {
+      fetchRef.current = null;
       setSnapshot(null);
       setIsLoading(false);
       setError(null);
+      setLastUpdatedAt(null);
       return;
     }
 
@@ -79,6 +92,7 @@ export function useSystemSnapshot({
         .then((next) => {
           if (cancelled) return;
           setSnapshot((prev) => (prev !== null && snapshotEqual(prev, next) ? prev : next));
+          setLastUpdatedAt(Date.now());
           setError(null);
           if (firstLoad) setIsLoading(false);
         })
@@ -88,6 +102,7 @@ export function useSystemSnapshot({
           if (firstLoad) setIsLoading(false);
         });
     };
+    fetchRef.current = fetchOnce;
 
     // Seed immediately, then poll on the interval.
     fetchOnce(true);
@@ -95,9 +110,14 @@ export function useSystemSnapshot({
 
     return () => {
       cancelled = true;
+      fetchRef.current = null;
       clearInterval(timer);
     };
   }, [projectId, refetchIntervalMs, enabled]);
 
-  return { snapshot, isLoading, error };
+  const refetch = useCallback((): void => {
+    fetchRef.current?.(false);
+  }, []);
+
+  return { snapshot, isLoading, error, refetch, lastUpdatedAt };
 }

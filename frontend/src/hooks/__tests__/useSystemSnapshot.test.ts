@@ -159,4 +159,43 @@ describe('useSystemSnapshot', () => {
     });
     expect(snapshotQuerySpy).toHaveBeenCalledTimes(1);
   });
+
+  it('refetch() issues one more query out of band of the poll timer', async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useSystemSnapshot({ projectId: 1, refetchIntervalMs: 60_000 }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(snapshotQuerySpy).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      result.current.refetch();
+      await Promise.resolve();
+    });
+    expect(snapshotQuerySpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetch() is a no-op while inert', () => {
+    const { result } = renderHook(() => useSystemSnapshot({ projectId: null }));
+    result.current.refetch();
+    expect(snapshotQuerySpy).not.toHaveBeenCalled();
+  });
+
+  it('bumps lastUpdatedAt on every successful fetch even when the snapshot is content-equal', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    // Same content, different generatedAt: the dedupe keeps the first object.
+    snapshotQuerySpy.mockResolvedValueOnce(snap(1)).mockResolvedValueOnce(snap(2));
+    const { result } = renderHook(() => useSystemSnapshot({ projectId: 1, refetchIntervalMs: 1000 }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const first = result.current.snapshot;
+    expect(result.current.lastUpdatedAt).toBe(1_000);
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+    expect(result.current.snapshot).toBe(first);
+    expect(result.current.lastUpdatedAt).toBe(2_000);
+  });
 });

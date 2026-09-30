@@ -17,7 +17,7 @@
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import { API } from '../../utils/api';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -169,10 +169,19 @@ export function SystemView(): ReactElement {
 
   // Mounted only while the System pane is the center surface, so polling is
   // inherently gated on visibility: closing the view unmounts it and stops `ps`.
-  const { snapshot, isLoading, error } = useSystemSnapshot({
+  const { snapshot, isLoading, error, refetch, lastUpdatedAt } = useSystemSnapshot({
     projectId,
     refetchIntervalMs: REFRESH_INTERVAL_MS,
   });
+
+  // Ticks once a second so "Updated Ns ago" advances between the 2.5s polls.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const updatedAgoSeconds =
+    lastUpdatedAt === null ? null : Math.max(0, Math.floor((now - lastUpdatedAt) / 1000));
 
   const orphanWorktrees = snapshot?.worktrees.filter((w) => w.tag === 'orphan').length ?? 0;
   const orphanProcesses = snapshot?.processes.filter((p) => p.bucket === 'orphan').length ?? 0;
@@ -185,14 +194,25 @@ export function SystemView(): ReactElement {
           <h2 className="text-base font-bold text-text-primary">System</h2>
         </div>
         <div className="ml-auto flex items-center gap-3">
-          {snapshot !== null && (
+          {updatedAgoSeconds !== null && (
             <span data-testid="system-updated" className="text-[11px] text-text-tertiary">
-              Updated {new Date(snapshot.generatedAt).toLocaleTimeString()}
+              Updated {updatedAgoSeconds}s ago
             </span>
           )}
           <span className="eyebrow rounded-button border border-border-primary px-1.5 py-0.5 text-[10px] text-text-secondary">
             Auto-refresh · {REFRESH_INTERVAL_MS / 1000}s
           </span>
+          <button
+            type="button"
+            data-testid="system-refresh"
+            aria-label="Refresh system snapshot"
+            disabled={projectId === null}
+            onClick={refetch}
+            className="inline-flex items-center gap-1.5 rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 font-mono text-xs text-text-secondary transition-colors hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RefreshCw className="h-3 w-3" aria-hidden="true" />
+            Refresh
+          </button>
           <label className="flex items-center gap-2">
             <span className="eyebrow text-text-tertiary">Project</span>
             <select

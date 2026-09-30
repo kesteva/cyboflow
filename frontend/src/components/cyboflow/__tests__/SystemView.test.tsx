@@ -7,19 +7,20 @@
  * contract is exercised in isolation.
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 
-const { useSystemSnapshotSpy, getAllSpy } = vi.hoisted(() => ({
+const { useSystemSnapshotSpy, getAllSpy, navState } = vi.hoisted(() => ({
   useSystemSnapshotSpy: vi.fn(),
   getAllSpy: vi.fn(),
+  navState: { activeProjectId: 1 as number | null },
 }));
 
 vi.mock('../../../hooks/useSystemSnapshot', () => ({ useSystemSnapshot: useSystemSnapshotSpy }));
 vi.mock('../../../utils/api', () => ({ API: { projects: { getAll: getAllSpy } } }));
 vi.mock('../../../stores/navigationStore', () => ({
-  useNavigationStore: (sel: (s: { activeProjectId: number | null }) => unknown) => sel({ activeProjectId: 1 }),
+  useNavigationStore: (sel: (s: { activeProjectId: number | null }) => unknown) => sel({ activeProjectId: navState.activeProjectId }),
 }));
 
 import { SystemView, formatDiskBytes, summarizeDisk } from '../SystemView';
@@ -50,13 +51,26 @@ function snap(worktrees: Worktree[], overrides: Partial<SystemSnapshotData> = {}
 const MB = 1024 * 1024;
 const measured = (bytes: number): Usage => ({ status: 'measured', bytes, measuredAt: 1 });
 
-function mockSnapshot(snapshot: SystemSnapshotData | null, extra: { isLoading?: boolean; error?: Error | null } = {}) {
-  useSystemSnapshotSpy.mockReturnValue({ snapshot, isLoading: extra.isLoading ?? false, error: extra.error ?? null });
+const refetchSpy = vi.fn();
+
+function mockSnapshot(
+  snapshot: SystemSnapshotData | null,
+  extra: { isLoading?: boolean; error?: Error | null; lastUpdatedAt?: number | null } = {},
+) {
+  useSystemSnapshotSpy.mockReturnValue({
+    snapshot,
+    isLoading: extra.isLoading ?? false,
+    error: extra.error ?? null,
+    refetch: refetchSpy,
+    lastUpdatedAt: extra.lastUpdatedAt === undefined ? Date.now() : extra.lastUpdatedAt,
+  });
 }
 
 beforeEach(() => {
   useSystemSnapshotSpy.mockReset();
   getAllSpy.mockReset();
+  refetchSpy.mockReset();
+  navState.activeProjectId = 1;
   getAllSpy.mockResolvedValue({ success: true, data: [{ id: 1, name: 'proj' }] });
 });
 
@@ -103,6 +117,49 @@ describe('SystemView', () => {
     mockSnapshot(snap([wt('/a', measured(MB), 'orphan')], { processes: [orphanProc] }));
     render(<SystemView />);
     expect(screen.getByTestId('system-tile-orphans')).toHaveTextContent('1 wt · 1 proc');
+  });
+
+  describe('header freshness + Refresh', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('shows "Updated Ns ago" that advances with time', () => {
+      mockSnapshot(snap([]));
+      render(<SystemView />);
+      expect(screen.getByTestId('system-updated')).toHaveTextContent('Updated 0s ago');
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId('system-updated')).toHaveTextContent('Updated 3s ago');
+    });
+
+    it('omits the updated label before the first successful fetch', () => {
+      mockSnapshot(null, { lastUpdatedAt: null });
+      render(<SystemView />);
+      expect(screen.queryByTestId('system-updated')).not.toBeInTheDocument();
+    });
+
+    it('Refresh calls the hook refetch once per click', () => {
+      mockSnapshot(snap([]));
+      render(<SystemView />);
+      const button = screen.getByTestId('system-refresh');
+      expect(button).toHaveAttribute('aria-label', 'Refresh system snapshot');
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      expect(refetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('Refresh is disabled when no project is selected', () => {
+      navState.activeProjectId = null;
+      getAllSpy.mockResolvedValue({ success: true, data: [] });
+      mockSnapshot(null, { lastUpdatedAt: null });
+      render(<SystemView />);
+      expect(screen.getByTestId('system-refresh')).toBeDisabled();
+    });
   });
 
   it('shows a non-fatal error banner', () => {
