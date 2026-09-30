@@ -49,4 +49,12 @@ describe('ReapManifestStash', () => {
     expect(stash.has('old')).toBe(false);
     expect(stash.has('new')).toBe(true);
   });
+
+  it('refuses to replace an already-stashed id (no revival / expiry extension)', () => {
+    const stash = new ReapManifestStash(() => 0);
+    stash.put({ manifest: manifest('a'), projectId: 1, selection: { kind: 'reap-all-stale' } });
+    expect(() =>
+      stash.put({ manifest: manifest('a'), projectId: 1, selection: { kind: 'reap-all-stale' } }),
+    ).toThrow(/already stashed/);
+  });
 });

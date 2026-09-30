@@ -182,11 +182,32 @@ describe('monitorReap.execute', () => {
     expect(h.execute).not.toHaveBeenCalled();
   });
 
-  it('passes an explicit alsoDeleteBranch override through; default stays false', async () => {
+  it('executes the branch-delete choice captured at resolve time; execute cannot change it', async () => {
     const h = harness(base);
+    const off = await caller().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
+    // A forged extra field on execute is stripped by the input schema and never honoured.
+    await caller().execute({ manifestId: off.manifest.id, alsoDeleteBranch: true } as { manifestId: string });
+    expect(h.execute.mock.calls[0][1]).toEqual({ alsoDeleteBranch: false });
+
+    const on = await caller().resolve({
+      projectId: 1,
+      selection: { kind: 'reap-all-stale' },
+      alsoDeleteBranch: true,
+    });
+    await caller().execute({ manifestId: on.manifest.id });
+    expect(h.execute.mock.calls[1][1]).toEqual({ alsoDeleteBranch: true });
+  });
+
+  it('re-resolving identical content mints a new id and cannot revive an expired one', async () => {
+    let t = 1000;
+    const h = harness(base, { now: () => t });
     const a = await caller().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
-    await caller().execute({ manifestId: a.manifest.id, alsoDeleteBranch: true });
-    expect(h.execute.mock.calls[0][1]).toEqual({ alsoDeleteBranch: true });
+    t += 61_000;
+    const b = await caller().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
+    expect(b.manifest.id).not.toBe(a.manifest.id);
+    await expect(caller().execute({ manifestId: a.manifest.id })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await caller().execute({ manifestId: b.manifest.id });
+    expect(h.execute).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces survivors and failures in an explicit errors field, not bare success', async () => {

@@ -4,9 +4,9 @@
  *
  *   resolve  → the server builds a `ReapManifest` for a selection and stashes it
  *              (in memory, ~60s TTL) under an id IT minted;
- *   execute  → the client hands back ONLY that id (plus an optional branch-delete
- *              choice); the server looks the manifest up and runs exactly its
- *              target list. A fabricated, expired, replayed or drifted id is
+ *   execute  → the client hands back ONLY that id; the server looks the manifest up
+ *              and runs exactly its target list, with the branch-delete choice
+ *              captured at resolve time (execute cannot alter what was confirmed). A fabricated, expired, replayed or drifted id is
  *              rejected with zero destructive effect — never silently re-resolved.
  *
  * Errors: unknown/fabricated/replayed id → NOT_FOUND; expired id or a target set
@@ -50,10 +50,7 @@ export interface MonitorReapProvider {
     selection: ReapSelection,
     options: { alsoDeleteBranch?: boolean },
   ): Promise<MonitorReapResolveResult>;
-  execute(
-    manifestId: string,
-    override: { alsoDeleteBranch?: boolean },
-  ): Promise<MonitorReapExecuteResult>;
+  execute(manifestId: string): Promise<MonitorReapExecuteResult>;
 }
 
 let _provider: MonitorReapProvider | null = null;
@@ -126,7 +123,7 @@ export const monitorReapRouter = router({
 
   /** Execute a previously-resolved, unexpired, single-use manifest by id. */
   execute: protectedProcedure
-    .input(z.object({ manifestId: z.string().min(1), alsoDeleteBranch: z.boolean().optional() }))
+    .input(z.object({ manifestId: z.string().min(1) }))
     .mutation(
       async ({
         input,
@@ -136,9 +133,7 @@ export const monitorReapRouter = router({
         results: ReapExecutionResult[];
         errors: ReapExecutionError[];
       }> => {
-        const out = await requireProvider().execute(input.manifestId, {
-          alsoDeleteBranch: input.alsoDeleteBranch,
-        });
+        const out = await requireProvider().execute(input.manifestId);
         if (!out.ok) {
           switch (out.code) {
             case 'not_found':

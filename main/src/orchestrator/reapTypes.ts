@@ -48,9 +48,10 @@ export type ReapTarget = ReapWorktreeTarget | ReapProcessTarget;
 
 export interface ReapManifest {
   /**
-   * Content hash of everything the user confirms: kind, snapshot generation, the
-   * full target list (identities, measured sizes, git annotations, pid counts) and
-   * `alsoDeleteBranch`. Two manifests share an id only if they are identical.
+   * Unguessable single-use confirmation token, minted fresh by the server on every
+   * resolve (never derived from content, so identical content re-resolved yields a
+   * different id). The manifest carries everything the user confirms: kind, snapshot
+   * generation, the full target list and `alsoDeleteBranch`; execute runs exactly it.
    */
   id: string;
   kind: ReapManifestKind;

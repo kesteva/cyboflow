@@ -38,6 +38,11 @@ export class ReapManifestStash {
 
   put(entry: Omit<StashedManifest, 'expiresAt'>): void {
     this.sweep();
+    // Ids are minted unique per resolve; a collision would let a fresh put revive or
+    // extend an older confirmation, so it is a bug, never a silent replace.
+    if (this.entries.has(entry.manifest.id)) {
+      throw new Error(`Reap manifest id already stashed: ${entry.manifest.id}`);
+    }
     this.entries.set(entry.manifest.id, { ...entry, expiresAt: this.now() + this.ttlMs });
   }
 

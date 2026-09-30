@@ -10,8 +10,16 @@
  *      fingerprints — if the target set drifted (a process died, a worktree was
  *      removed, a new orphan appeared, a bucket changed) the manifest is stale and
  *      nothing runs. The entry stays consumed: the user must re-confirm a new one;
- *   4. only then hand the manifest's exact target list to the executor.
+ *   4. only then hand the manifest's exact target list to the executor, with the
+ *      branch-delete choice the user confirmed at resolve time (`manifest
+ *      .alsoDeleteBranch`) — execute cannot change it. Changing it means resolving,
+ *      and confirming, a new manifest.
+ *
+ * Every resolve mints a fresh, unguessable single-use id (never the builder's content
+ * hash), so re-resolving identical content can neither revive an expired/consumed id
+ * nor extend its expiry.
  */
+import { randomUUID } from 'node:crypto';
 import type {
   ReapExecutionResult,
   ReapExecutor,
@@ -59,6 +67,10 @@ function fingerprintForSelection(selection: ReapSelection, snapshot: ReapSnapsho
   }
 }
 
+function mintManifestId(): string {
+  return `reap_${randomUUID()}`;
+}
+
 export type MonitorReapExecuteOutcome =
   | { ok: true; manifest: ReapManifest; alsoDeleteBranch: boolean; results: ReapExecutionResult[] }
   | { ok: false; code: 'not_found' | 'expired' | 'stale' | 'unavailable'; message: string };
@@ -74,6 +86,8 @@ export interface MonitorReapServiceDeps {
   /** Execution primitives; absent until they are wired — execute then reports `unavailable`. */
   executor?: ReapExecutor;
   stash?: ReapManifestStash;
+  /** Mints the per-resolve stash id; injectable for tests. */
+  mintId?: () => string;
 }
 
 export class MonitorReapService {
@@ -96,7 +110,8 @@ export class MonitorReapService {
   ): Promise<MonitorReapResolveOutcome> {
     try {
       const snapshot = await this.deps.loadSnapshot(projectId);
-      const manifest = await buildForSelection(selection, snapshot, this.deps.manifestDeps, options);
+      const built = await buildForSelection(selection, snapshot, this.deps.manifestDeps, options);
+      const manifest: ReapManifest = { ...built, id: (this.deps.mintId ?? mintManifestId)() };
       this.stash.put({ manifest, projectId, selection });
       return { ok: true, manifest };
     } catch (err) {
@@ -105,10 +120,7 @@ export class MonitorReapService {
     }
   }
 
-  async execute(
-    manifestId: string,
-    override: { alsoDeleteBranch?: boolean } = {},
-  ): Promise<MonitorReapExecuteOutcome> {
+  async execute(manifestId: string): Promise<MonitorReapExecuteOutcome> {
     const executor = this.executor;
     if (!executor) {
       return { ok: false, code: 'unavailable', message: 'Reap execution is not available yet.' };
@@ -146,9 +158,8 @@ export class MonitorReapService {
       };
     }
 
-    // Only an explicit boolean overrides the branch choice the manifest carried.
-    const alsoDeleteBranch =
-      typeof override.alsoDeleteBranch === 'boolean' ? override.alsoDeleteBranch : manifest.alsoDeleteBranch;
+    // The branch-delete choice is the one captured (and confirmed) at resolve time.
+    const alsoDeleteBranch = manifest.alsoDeleteBranch;
     const results = await executor.execute(manifest, { alsoDeleteBranch });
     return { ok: true, manifest, alsoDeleteBranch, results };
   }
