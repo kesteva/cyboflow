@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RunShellManager, type ManagedPty, type ShellSpawner } from '../runShellManager';
+import { getInstanceId } from '../../utils/spawnMarker';
 
 vi.mock('../../utils/shellDetector', () => ({
   ShellDetector: { getDefaultShell: () => ({ path: '/bin/zsh', name: 'zsh', args: [] }) },
@@ -140,6 +141,28 @@ describe('RunShellManager.open', () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    }
+  });
+
+  it('stamps the spawn marker and coexists with the inherited run-scoped strip', () => {
+    // An inherited CYBOFLOW_INSTANCE (hosting instance) must be overwritten by
+    // this process's own id, while the run-scoped vars stay stripped.
+    const previous = { instance: process.env.CYBOFLOW_INSTANCE, runId: process.env.CYBOFLOW_RUN_ID };
+    process.env.CYBOFLOW_INSTANCE = 'stale-inherited-instance';
+    process.env.CYBOFLOW_RUN_ID = 'outer-run';
+    try {
+      const { mgr, spawns } = makeHarness({ worktree: '/wt/run-1' });
+      expect(mgr.open('run-1')).toEqual({ ok: true });
+      const env = spawns[0].options.env ?? {};
+      expect(env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+      expect(env.CYBOFLOW_INSTANCE).not.toBe('stale-inherited-instance');
+      expect(env.CYBOFLOW_WORKTREE).toBe('/wt/run-1');
+      expect(env.CYBOFLOW_RUN_ID).toBeUndefined();
+    } finally {
+      if (previous.instance === undefined) delete process.env.CYBOFLOW_INSTANCE;
+      else process.env.CYBOFLOW_INSTANCE = previous.instance;
+      if (previous.runId === undefined) delete process.env.CYBOFLOW_RUN_ID;
+      else process.env.CYBOFLOW_RUN_ID = previous.runId;
     }
   });
 

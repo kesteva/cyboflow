@@ -30,6 +30,7 @@
 import type { IPtyForkOptions, IWindowsPtyForkOptions } from '@homebridge/node-pty-prebuilt-multiarch';
 import { ShellDetector } from '../utils/shellDetector';
 import { getShellPath } from '../utils/shellPath';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 
 /**
  * The narrow slice of node-pty's `IPty` this manager uses. Typed structurally so
@@ -137,7 +138,7 @@ export class RunShellManager {
       cols: 80,
       rows: 30,
       cwd,
-      env,
+      env: stampSpawnMarker(env, cwd),
     });
 
     const shell: RunShell = { pty: ptyProcess, runId, terminalId, worktreePath: cwd, backlog: '' };
