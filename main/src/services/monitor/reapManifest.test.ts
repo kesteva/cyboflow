@@ -156,6 +156,25 @@ describe('buildReapManifest', () => {
     expect(m.reclaimableBytes).toBe(0);
   });
 
+  it("kill-all-of-type never reaches another project's worktree or an unattributed row", async () => {
+    const scoped: ReapSnapshot = {
+      ...snapshot,
+      processes: [
+        ...snapshot.processes,
+        proc(21, 'owned', '/other-project/wt/x', 'claude-cli'), // live, another project's worktree
+        proc(22, 'suspected', null, 'claude-cli'), // resolved to no worktree
+        proc(23, 'owned', '/wt/run/', 'claude-cli'), // this project's worktree, trailing slash
+      ],
+    };
+    const m = await buildReapManifest('kill-all-of-type', { processType: 'claude-cli' }, scoped, makeDeps());
+    // 14 (/wt/session) and 23 (/wt/run) are this project's; 12 is an unattributed orphan.
+    expect(paths(m)).toEqual(['p:14', 'p:23']);
+    expect(reapIdentityFingerprint('kill-all-of-type', { processType: 'claude-cli' }, scoped).map((e) => e.id)).toEqual([
+      'process:14',
+      'process:23',
+    ]);
+  });
+
   it('reclaimableBytes comes from a fresh, target-scoped du — not the ambient cache', async () => {
     let size = 100;
     const runDu = vi.fn(async (_path: string) => size);

@@ -148,6 +148,18 @@ export function toSystemProcessEntry(c: ClassifiedProcess): SystemProcessEntry {
   }
 }
 
+/**
+ * A `foreign` row with no instance id is simply someone else's program (a browser
+ * helper, an editor, a shell): no cyboflow handle, marker, worktree mention or
+ * cyboflow ancestor. The monitor is about cyboflow's processes, so these never ship
+ * in the snapshot — otherwise the whole host `ps` table (hundreds of read-only rows)
+ * floods every project's body and Process count. Another live instance's child
+ * (`foreignInstanceId` set) is still cyboflow's, so it stays, read-only.
+ */
+export function isUnrelatedHostProcess(c: ClassifiedProcess): boolean {
+  return c.bucket === 'foreign' && c.foreignInstanceId === null;
+}
+
 export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): SystemSnapshotProvider {
   const readRecords = deps.readInstanceRecords ?? (() => readInstanceRecordsFromDisk());
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
@@ -170,7 +182,11 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
       const liveInstances = buildLiveInstanceSet(selfId(), records, isPidAlive);
       // The registry's path set IS the worktree truth (sessions/runs ∪ git).
       const truth: WorktreeTruth = { knownWorktreePaths };
-      return classify(marked, liveInstances, truth).map(toSystemProcessEntry);
+      // Classify the WHOLE table (ancestry walks need every row), then drop unrelated host
+      // processes before they reach the wire: see {@link isUnrelatedHostProcess}.
+      return classify(marked, liveInstances, truth)
+        .filter((c) => !isUnrelatedHostProcess(c))
+        .map(toSystemProcessEntry);
     },
   };
 }

@@ -719,12 +719,15 @@ and measured cost budget: `docs/design/process-worktree-monitor.md`; live macOS 
   the marker reader only exists on linux. On macOS/Windows a process this app holds a manager
   handle for still classifies `owned`, marker-less cyboflow-shaped processes classify
   `suspected` and everything else `foreign`; `orphan` needs a marker naming a dead instance, so
-  no sweep-eligible orphans appear on those platforms. The worktree registry (`services/worktreeRegistry.ts`, served by
+  no sweep-eligible orphans appear on those platforms. Unrelated host processes (`foreign` with
+  no instance id) are classified but dropped before the wire, so the snapshot never carries the
+  whole host `ps` table; another live instance's children stay, read-only. The worktree registry (`services/worktreeRegistry.ts`, served by
   `cyboflow.worktreeMonitor`) is a derived read model — `sessions` ∪ `workflow_runs` ∪
   `WorktreeManager.listWorktrees()` — with no table of its own. On win32 the router stays
   registered; only `du` sizing is reported `unsupported`.
 - **Write side — `cyboflow.monitorReap`: resolve → confirm → execute.** Every destructive action
-  (Prune, Kill tree, Kill all of a type, Reap all stale) first calls `resolve`, which builds a
+  (Prune, Kill tree, Kill all of a type — scoped to the selected project's worktrees, Reap all
+  stale — orphan processes are machine-wide by design) first calls `resolve`, which builds a
   `ReapManifest` server-side (`services/monitor/reapManifest.ts`: targets, fresh target-scoped
   `du`, dirty/ahead counts from a fresh one-shot `probeWorktreeGit` read — the `GitStatusManager`
   cache is only the fallback when the probe yields nothing — and descendant PID counts) and stashes

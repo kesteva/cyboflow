@@ -263,7 +263,8 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
     expect(measured).toEqual(['/wt/a', '/wt/b']);
     // First read is queued/measuring — never a bare number.
     for (const w of snap.worktrees) expect(['queued', 'measuring']).toContain(w.usage.status);
-    expect(snap.processes.map((p) => p.bucket).sort()).toEqual(['foreign', 'owned']);
+    // The unrelated host process (11, /usr/bin/other) is classified foreign and never shipped.
+    expect(snap.processes.map((p) => p.bucket).sort()).toEqual(['owned']);
   });
 
   it('a second snapshot() inside the TTL starts no further du runs (entries come back measured)', async () => {

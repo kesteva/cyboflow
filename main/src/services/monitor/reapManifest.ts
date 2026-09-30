@@ -62,7 +62,7 @@ export interface ReapSelectors {
   row: { worktreePaths?: readonly string[]; pids?: readonly number[] };
   /** A worktree card: the worktree itself plus every process running in it. */
   card: { worktreePath: string };
-  /** Every killable (non-foreign) process of one type. */
+  /** Every killable (non-foreign) process of one type running in one of the snapshot's worktrees. */
   'kill-all-of-type': { processType: SystemProcessType };
   /** No selection: derived entirely from the snapshot's orphan buckets. */
   'reap-all-stale': Record<string, never>;
@@ -206,14 +206,25 @@ function selectTargets<K extends ReapManifestKind>(
       return { worktrees: [wt], processes };
     }
     case 'kill-all-of-type': {
+      // Project-scoped: the process scan is host-wide, so without this a Kill all from
+      // one project's view would also kill this instance's live processes running in
+      // ANOTHER project's worktrees. Only rows attributed to one of the snapshot's
+      // (i.e. the selected project's) worktrees qualify; an unattributed row
+      // (`worktreePath: null`) is never bulk-killed — it stays individually killable.
       const sel = selector as ReapSelectors['kill-all-of-type'];
+      const projectPaths = new Set(snapshot.worktrees.map((w) => wtKey(w.path)));
       const processes = snapshot.processes
         .filter(isKillable)
-        .filter((p) => p.processType === sel.processType);
+        .filter((p) => p.processType === sel.processType)
+        .filter((p) => p.worktreePath !== null && projectPaths.has(wtKey(p.worktreePath)));
       return { worktrees: [], processes };
     }
     case 'reap-all-stale': {
       // Filtered BEFORE any target exists: only orphans are ever considered.
+      // Worktrees are project-scoped by construction (the snapshot's registry is the
+      // selected project's). Orphan PROCESSES are deliberately machine-wide: their
+      // owning instance is confirmed dead, so no project owns them any more, and the
+      // Orphans section lists (and the toolbar counts) exactly this same host-wide set.
       const worktrees = snapshot.worktrees.filter(isPrunable).filter((w) => w.tag === 'orphan');
       const processes = snapshot.processes.filter(isKillable).filter((p) => p.bucket === 'orphan');
       return { worktrees, processes };

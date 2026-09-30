@@ -46,7 +46,19 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
     expect(bucket(10)).toBe('owned');
     expect(bucket(20)).toBe('suspected');
     expect(bucket(40)).toBe('orphan');
-    expect(out.filter((p) => p.bucket === 'foreign')).toHaveLength(1);
+    // The unrelated host process (30) is classified foreign and then dropped from the wire.
+    expect(out.filter((p) => p.bucket === 'foreign')).toHaveLength(0);
+    expect(out).toHaveLength(3);
+  });
+
+  it("drops unrelated host processes but keeps another live instance's child (read-only)", async () => {
+    const out = await build([proc(30, '/usr/bin/unrelated'), proc(50, 'node child')], {
+      readInstanceRecords: async () => [{ instanceId: 'other', pid: 4242, startedAt: '' }],
+      isPidAlive: () => true,
+      readMarkers: async () => new Map([[50, { instanceId: 'other', worktree: '/wt/other' }]]),
+    }).loadProcesses(new Set());
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ bucket: 'foreign', pidLabel: '50', foreignInstanceId: 'other' });
   });
 
   it('without any marker observed nothing can be an orphan', async () => {
@@ -57,7 +69,11 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
   });
 
   it('foreign wire entries carry no number-typed field (no pid to kill)', async () => {
-    const [foreign] = await build([proc(30, '/usr/bin/unrelated')]).loadProcesses(new Set());
+    const [foreign] = await build([proc(30, 'node child')], {
+      readInstanceRecords: async () => [{ instanceId: 'other', pid: 4242, startedAt: '' }],
+      isPidAlive: () => true,
+      readMarkers: async () => new Map([[30, { instanceId: 'other', worktree: null }]]),
+    }).loadProcesses(new Set());
     expect(foreign.bucket).toBe('foreign');
     for (const value of Object.values(foreign)) expect(typeof value).not.toBe('number');
     expect(foreign).not.toHaveProperty('pid');

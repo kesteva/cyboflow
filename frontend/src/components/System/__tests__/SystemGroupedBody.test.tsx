@@ -213,6 +213,19 @@ describe('trust tiers', () => {
     expect(screen.getByTestId('type-kill-all-unknown')).toBeDisabled();
   });
 
+  it("Kill all counts only this project's worktrees — never another project's or an unattributed row", () => {
+    const s = snap(
+      [wt('/wt/a')],
+      [proc(1), proc(2, { worktreePath: '/other-project/wt/x' }), proc(3, { bucket: 'suspected', worktreePath: null, owner: null })],
+    );
+    render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy="cpu" {...handlers} />);
+    expect(screen.getByTestId('type-aggregate-claude-cli')).toHaveTextContent('3 processes');
+    fireEvent.click(screen.getByTestId('type-kill-all-claude-cli'));
+    expect(screen.getByTestId('type-kill-all-claude-cli')).toHaveTextContent('Kill all (1)');
+    const [killed] = handlers.onKillAll.mock.calls[0] as [Array<{ pid: number }>];
+    expect(killed.map((p) => p.pid)).toEqual([1]);
+  });
+
   it('renders suspected rows in their own tier with the marker', () => {
     const s = snap([wt('/wt/a')], [proc(1), proc(2, { bucket: 'suspected', owner: null })]);
     render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="worktree" sortBy="cpu" />);

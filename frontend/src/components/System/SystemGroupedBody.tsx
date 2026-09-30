@@ -751,7 +751,12 @@ function ByProcessType({
       ) : (
         <div className="flex flex-col gap-3">
           {groups.map(({ type, members }) => {
-            const killable = members.filter(isActionable);
+            // Mirrors the server's `kill-all-of-type` scope: the scan is host-wide, so only
+            // rows running in one of THIS project's worktrees are bulk-killable; the rest
+            // (another project's, or unattributed) stay individually killable only.
+            const killable = members
+              .filter(isActionable)
+              .filter((p) => p.worktreePath !== null && worktreesByPath.has(p.worktreePath));
             const cpu = members.reduce((acc, p) => acc + cpuOf(p), 0);
             const mem = members.reduce((acc, p) => acc + memOf(p), 0);
             return (
