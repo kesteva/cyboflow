@@ -189,6 +189,7 @@ import { buildSystemSnapshot, setSystemProvider } from './orchestrator/trpc/rout
 import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap';
 import { MonitorReapService } from './services/monitor/monitorReapService';
 import { countDescendantPids } from './services/monitor/reapManifest';
+import { ReapExecutorImpl } from './services/monitor/reapExecutor';
 import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
 import { ProcessSnapshotService } from './services/processSnapshot/processSnapshotService';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
@@ -5964,8 +5965,6 @@ app.whenReady().then(async () => {
 
       // Manifest-then-execute gate for the System view's destructive actions.
       // Manifests resolve against the same aggregated snapshot the view renders.
-      // The execution primitives attach via `setExecutor` when they land; until
-      // then `monitorReap.execute` reports PRECONDITION_FAILED and consumes nothing.
       setMonitorReapProvider(
         new MonitorReapService({
           loadSnapshot: (projectId) => buildSystemSnapshot(systemSnapshotProvider, projectId),
@@ -5974,6 +5973,10 @@ app.whenReady().then(async () => {
             peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),
             countDescendants: countDescendantPids,
           },
+          // Process kills + broker reaping; worktree pruning attaches via `pruneWorktree`.
+          executor: new ReapExecutorImpl({
+            reapBrokersForWorktree: (worktreePath) => codexBrokerReaper.reapForWorktree(worktreePath),
+          }),
         }),
       );
       console.log('[Main] monitorReap deps wired');
