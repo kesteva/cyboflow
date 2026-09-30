@@ -462,6 +462,13 @@ export interface KillTreeOptions extends PlatformProcessOptions {
    *    per-descendant kill list.
    */
   posixGroupMode?: 'lookup' | 'root' | 'enumerate';
+  /**
+   * POSIX only, default false. Also SIGTERM every enumerated descendant right
+   * after the root/group SIGTERM, and hold the grace window until the root, the
+   * group AND every descendant are dead. For a root that is not a process-group
+   * leader, descendants outside its group otherwise receive only SIGKILL.
+   */
+  posixTermDescendants?: boolean;
   /** Re-enumeration for the verification passes; async allowed. */
   listDescendants?: () => number[] | Promise<number[]>;
   /**
@@ -637,6 +644,17 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
         log.warn(`Could not send SIGTERM to process group ${pgid}`, error);
       }
 
+      if (opts.posixTermDescendants) {
+        // Descendants outside the root's group never see the group SIGTERM.
+        for (const childPid of descendantPids) {
+          try {
+            sendSignal(childPid, 'SIGTERM');
+          } catch (error) {
+            // ESRCH: already gone.
+          }
+        }
+      }
+
       if (graceMs > 0) {
         log.info(`Waiting ${graceMs}ms for graceful shutdown`);
       }
@@ -648,7 +666,11 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
         // gone, bounded at the grace window, before forcing SIGKILL below.
         const deadline = Date.now() + graceMs;
         while (Date.now() < deadline) {
-          if (!probeAlive(pid) && !probeAlive(-pgid)) {
+          if (
+            !probeAlive(pid) &&
+            !probeAlive(-pgid) &&
+            !(opts.posixTermDescendants && descendantPids.some(probeAlive))
+          ) {
             break;
           }
           await sleep(pollIntervalMs);

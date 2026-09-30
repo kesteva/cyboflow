@@ -84,6 +84,7 @@ describe('ReapExecutorImpl process targets', () => {
     expect(REAP_KILL_GRACE_MS).toBe(5000);
     expect(opts?.descendantPids).toEqual([101]);
     expect(opts?.posixGroupMode).toBe('root');
+    expect(opts?.posixTermDescendants).toBe(true);
   });
 
   it('reports descendants that survive the ladder as `survived` with survivorPids', async () => {

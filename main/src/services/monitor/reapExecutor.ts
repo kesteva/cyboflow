@@ -115,8 +115,9 @@ export class ReapExecutorImpl implements ReapExecutor {
         graceMs: this.graceMs,
         // The pid is not necessarily a process-group leader, so never resolve (and
         // signal) its real group: 'root' only targets `-<pid>`, a harmless ESRCH
-        // when it leads no group. Descendants are killed individually.
+        // when it leads no group. Descendants get TERM individually, then KILL.
         posixGroupMode: 'root',
+        posixTermDescendants: true,
         isPidAlive: this.isPidAlive,
         onSurvivors: (remaining) => {
           reported.push(...remaining);

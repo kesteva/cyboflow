@@ -217,6 +217,90 @@ describe('killTree POSIX — group resolution shapes', () => {
   });
 });
 
+describe('killTree POSIX — posixTermDescendants', () => {
+  /** Non-group-leader root 4242 with out-of-group descendants 5001/5002. */
+  async function run(extra: { posixTermDescendants?: boolean }) {
+    const events: string[] = [];
+    const alive = new Set([4242, 5001, 5002]);
+    const opts = baseOpts();
+    opts.descendantPids = [5001, 5002];
+    // A pid exits once TERMed, so the grace poll ends early when all get one.
+    const termed = new Set<number>();
+    opts.sendSignal = vi.fn((signalPid, signal) => {
+      events.push(`signal:${signalPid}:${signal}`);
+      if (signal === 'SIGTERM') termed.add(signalPid);
+    });
+    opts.isPidAlive = vi.fn((probePid: number) => {
+      if (probePid < 0) return false;
+      return !termed.has(probePid) && alive.has(probePid);
+    });
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(`exec:${command}`);
+      return Promise.resolve({ stdout: '' });
+    });
+    await killTree(4242, {
+      ...opts,
+      execCommand,
+      graceMs: 1000,
+      pollIntervalMs: 5,
+      posixGroupMode: 'root',
+      ...extra,
+    });
+    return events;
+  }
+
+  it('SIGTERMs every descendant before the grace wait and before any kill -9 on them', async () => {
+    const events = await run({ posixTermDescendants: true });
+    expect(events).toEqual([
+      'signal:4242:SIGTERM',
+      'exec:kill -TERM -4242',
+      'signal:5001:SIGTERM',
+      'signal:5002:SIGTERM',
+      'signal:4242:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:kill -9 5001',
+      'exec:kill -9 5002',
+      'exec:pkill -9 -P 4242',
+    ]);
+  });
+
+  it('holds the grace window while a descendant is still alive, and still escalates after it', async () => {
+    const opts = baseOpts();
+    opts.descendantPids = [5001];
+    const events: string[] = [];
+    opts.sendSignal = vi.fn((signalPid, signal) => {
+      events.push(`signal:${signalPid}:${signal}`);
+    });
+    // Root and group are dead from the start; only the descendant lingers.
+    opts.isPidAlive = vi.fn((probePid: number) => probePid === 5001);
+    const start = Date.now();
+    await killTree(4242, {
+      ...opts,
+      execCommand: vi.fn(() => Promise.resolve({ stdout: '' })),
+      graceMs: 60,
+      pollIntervalMs: 5,
+      posixGroupMode: 'root',
+      posixTermDescendants: true,
+    });
+    expect(Date.now() - start).toBeGreaterThanOrEqual(60);
+    expect(events).toContain('signal:5001:SIGTERM');
+  });
+
+  it('default (flag unset) keeps the old sequence: no per-descendant SIGTERM', async () => {
+    const events = await run({});
+    expect(events.filter((e) => e.endsWith(':SIGTERM'))).toEqual(['signal:4242:SIGTERM']);
+    expect(events).toEqual([
+      'signal:4242:SIGTERM',
+      'exec:kill -TERM -4242',
+      'signal:4242:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:kill -9 5001',
+      'exec:kill -9 5002',
+      'exec:pkill -9 -P 4242',
+    ]);
+  });
+});
+
 describe('killTree win32 — the taskkill ladder', () => {
   it('graceful /T, then /T /F, then a per-descendant /F for each alive enumerated child', async () => {
     const events: string[] = [];
