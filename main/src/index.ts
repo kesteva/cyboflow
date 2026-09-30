@@ -183,6 +183,8 @@ import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
+import { setWorktreeMonitorProvider } from './orchestrator/trpc/routers/worktreeMonitor';
+import { createWorktreeMonitorProvider } from './services/worktreeMonitorProvider';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
 import { ProviderUsagePoller } from './services/providerUsage/providerUsagePoller';
@@ -5916,6 +5918,15 @@ app.whenReady().then(async () => {
 
     setHealthProvider(orchestratorHealth);
     console.log('[Main] health.mcpServer deps wired');
+
+    setWorktreeMonitorProvider(
+      createWorktreeMonitorProvider({
+        database: databaseService,
+        worktreeManager,
+        diskUsage: diskUsageService,
+      }),
+    );
+    console.log('[Main] worktreeMonitor deps wired');
 
     // Subscription-usage meters. The store hydrates its last-known readings from
     // user_preferences so the review queue shows something before the first poll

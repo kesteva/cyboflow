@@ -43,6 +43,7 @@ import { ompRouter } from './routers/omp';
 import { ompCommandRouter } from './routers/ompCommand';
 import { webViewerRouter } from './routers/webViewer';
 import { workspaceFilesRouter } from './routers/workspaceFiles';
+import { worktreeMonitorRouter } from './routers/worktreeMonitor';
 
 export const appRouter = router({
   cyboflow: router({
@@ -83,6 +84,7 @@ export const appRouter = router({
     omp: ompRouter,
     ompCommand: ompCommandRouter,
     workspaceFiles: workspaceFilesRouter,
+    worktreeMonitor: worktreeMonitorRouter,
   }),
 });
 
