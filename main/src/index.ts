@@ -74,8 +74,8 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
-import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
+import { listRunAgentTargets, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
+import { resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
 import { makeSessionSummarizer } from './orchestrator/sessionSummary/sessionSummaryQuery';
@@ -97,7 +97,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter, taskChangeEvents } from './orchestrator/taskChangeRouter';
 import { attachHumanTaskReviewItemCloser } from './orchestrator/humanTaskReviewItemCloser';
-import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
+import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
 import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
@@ -126,16 +126,10 @@ import { DesignHandoffService } from './orchestrator/design/designHandoffService
 import { GateSideEffects } from './orchestrator/gateSideEffects';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
-import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
-import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
-import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { composeProgrammaticRunner, type MonitorSteeringActions } from './programmaticRunnerComposition';
+import { findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
-import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
-import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
-  DefaultMonitorSession,
-  DefaultHistoryReader,
   MonitorRegistry,
   type MonitorActionResult,
   type MonitorContext,
@@ -144,7 +138,6 @@ import {
 import { retryRunHandler, type RetryRunDeps } from './orchestrator/retryRunHandler';
 import { rewindRunHandler, type RewindRunDeps } from './orchestrator/rewindRunHandler';
 import { laneRewindHandler, type LaneRewindDeps } from './orchestrator/laneRewindHandler';
-import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
@@ -166,9 +159,8 @@ import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
-import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
+import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
 import type { ClaudePanelState } from '../../shared/types/panels';
-import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
 import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
@@ -277,9 +269,6 @@ import { VariantResolver } from './orchestrator/variantResolver';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
-import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
-import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
-import { readRunDigest } from './orchestrator/runDigestReader';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -316,14 +305,13 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
-import { stripInheritedLaneEnv, checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -534,31 +522,8 @@ let monitorSwitchToOrchestrated:
 // bound in the tRPC dep-wiring block where db / runExecutor / the routers are all
 // live. Grouped into one holder object (rather than 10 separate module vars)
 // since they share a wiring site. Null until wired → each action reports "not available yet"
-// instead of acting.
-interface MonitorSteeringActions {
-  addTask(runId: string, input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
-  removeTask(runId: string, input: { taskRef: string }): Promise<MonitorActionResult>;
-  editTask(
-    runId: string,
-    input: { taskRef: string; title?: string; body?: string; priority?: string },
-  ): Promise<MonitorActionResult>;
-  skipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  unskipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  steerStep(
-    runId: string,
-    input: { stepId: string; guidance: string; taskRef?: string },
-  ): Promise<MonitorActionResult>;
-  rewindToStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  rewindLaneToStep(
-    runId: string,
-    input: { taskRef: string; stepId: string },
-  ): Promise<MonitorActionResult>;
-  resolveReviewItem(
-    runId: string,
-    input: { reviewItemId: string; outcome?: 'approve' | 'reject' | 'revise'; resolution?: string },
-  ): Promise<MonitorActionResult>;
-  fileNote(runId: string, input: { title: string; body?: string }): Promise<MonitorActionResult>;
-}
+// instead of acting. (The MonitorSteeringActions interface lives in
+// programmaticRunnerComposition.ts, its only other reader.)
 let monitorSteeringActions: MonitorSteeringActions | null = null;
 
 /**
@@ -572,11 +537,6 @@ let laneTriageActions: LaneTriageActions | null = null;
 let monitorFindingSink: ReturnType<typeof buildMonitorFindingSink> | null = null;
 let setAsideFindingSink: ReturnType<typeof buildSetAsideFindingSink> | null = null;
 let gateEscalationSinks: GateEscalationSinks | null = null;
-/** Fallback when a steering action fires before the dep-wiring block ran. */
-const STEERING_NOT_WIRED: MonitorActionResult = {
-  ok: false,
-  message: "That action isn't available yet — try again in a moment.",
-};
 // Monitor-session construction closure (monitor lazy-rehydration): assigned when
 // the monitorFactory is built in initializeServices() and reused by the lazy
 // rehydrator wired in the tRPC dep-wiring block, so a session REVIVED after an
@@ -2725,482 +2685,31 @@ async function initializeServices(): Promise<boolean> {
     },
   };
 
-  // Programmatic-run driver (execution-model seam, Stage 2). When a run's
-  // immutable `execution_model` stamp is 'programmatic', RunExecutor delegates the
-  // whole run to this collaborator: host code (the WorkflowController) walks the
-  // run's DAG, running each step as a scoped agent turn via the SAME spawn surface
-  // (substrateFacade), driving the live timeline through buildStepTransitionEvent
-  // (the same path cyboflow_report_step uses), and resolving human gates by
-  // opening a blocking review item via HumanStepManager + awaiting its resolution
-  // on reviewItemChangeEvents. Default 'orchestrated' runs never touch this.
-  const programmaticRunner = new DefaultProgrammaticRunner({
-    spawner: substrateFacade,
-    // Enables the controller's agentless visual-verify enqueue capability
-    // (enqueueTaskVerification — verification-agent redesign §5.3): absent, the
-    // step cleanly skips (fail-open) and visual verification never fires on the
-    // programmatic plane.
-    db: rawDb,
-    reporter: {
-      report: (runId, stepId, status) =>
-        void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
-    },
-    gate: buildReviewQueueHumanGate({
-      events: reviewItemChangeEvents,
-      channelFor: reviewItemProjectChannel,
-      logger: cyboflowLogger,
-    }),
-    // Per-step idea scope for programmatic prompts. The ownership projection
-    // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
-    // raw-prompt path picks up the idea its context step creates before optional
-    // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
-    runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
-    // §11 (lane-runbook-bootstrap): the files this run's bootstrap committed,
-    // rendered as a do-not-touch list on address-review. That step "fixes in
-    // place", and both files are booby-trapped for a well-meant fix — the
-    // runbook's proof is content-addressed against the committed bytes, and the
-    // rung-1 config edit is what makes the environment stand up at all.
-    bootstrapProtectedPathsProvider: (runId) => runbookBootstrapStamps.writtenPathsForRun(runId),
-    // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
-    // FULL effective agent set (project overrides + workflow agentConfigs + variant
-    // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/model/providerModel/effort. Absent EVERY override
-    // (unoverridden agent) -> undefined, so the step spawns under the run-level
-    // provider/runtime/model with no per-agent effort. Effort is returned even
-    // without a runtime override so a Claude agent can carry a reasoning-effort pin
-    // (IDEA-029), and `model` likewise so a Claude agent can carry a MODEL pin: a
-    // programmatic step turn IS the agent (a top-level spawn), so the agent
-    // overlay's `model:` frontmatter never binds on this plane and this resolver is
-    // the pin's only channel. The alias is resolved to its concrete snapshot here
-    // (mirroring the overlay writer) so the spawn receives a real model id.
-    resolveStepAgent: (runId, agentKey) => {
-      const eff = resolveRunEffectiveAgents(rawDb, runId);
-      const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
-      // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
-      // written by the MCP workflow-config tools as well as the editor, so a pin
-      // naming a provider the user switched off in Settings → Integrations can
-      // reach here even though the editor hides it. Drop just the runtime pin
-      // (keeping model/effort) so the step falls back to the run-level provider,
-      // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
-      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
-      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
-      if (a.runtime && pinnedRuntime === undefined) {
-        cyboflowLogger.warn(
-          `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
-        );
-      }
-      // bareModelId resolves the alias to the current concrete snapshot at the
-      // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
-      // `opus` pin spawns `claude-opus-5-5` (default window), matching the
-      // orchestrated overlay's `model:` frontmatter semantics (modelContext.ts),
-      // NOT the 1M variant a run-level `opus` picker would select. Intentional:
-      // per-agent pins are window-agnostic and consistent across both planes.
-      const model = bareModelId(a.model, isModelUsable);
-      return {
-        ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
-        ...(model ? { model } : {}),
-        // a.providerModel is already normalized (providerModel ?? codexModel) by
-        // effectiveAgents; codexModel mirrors it so a not-yet-migrated consumer of
-        // this return shape (there is none left in-tree, but the field stays a
-        // read-compat alias) still sees the correct value.
-        ...(a.providerModel ? { providerModel: a.providerModel, codexModel: a.providerModel } : {}),
-        ...(a.effort ? { effort: a.effort } : {}),
-      };
-    },
-    // Direct step dispatch: the role's effective prompt (same layering as above).
-    resolveStepRole: (runId, agentKey) => {
-      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
-      return systemPrompt ? { systemPrompt } : undefined;
-    },
-    // Blocking-review-items checkpoint: parks a programmatic run at each step
-    // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
-    // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
-    // resumes. Reuses HumanStepManager for the park/resume/count primitives so the
-    // same aggregate-unblock invariant governs both gate decisions and findings.
-    blockingGate: new ReviewQueueBlockingItemsGate(
-      HumanStepManager.getInstance(),
-      reviewItemChangeEvents,
-      reviewItemProjectChannel,
-      cyboflowLogger,
-    ),
-    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
-    systemicGate: buildSystemicPauseGate({
-      events: reviewItemChangeEvents,
-      channelFor: reviewItemProjectChannel,
-      logger: cyboflowLogger,
-    }),
-    // Visual merge-gate (programmatic actuation): closes the prose-only boundary so
-    // a PROGRAMMATIC sprint parks each lane after visual-verify, awaits the async
-    // verdict the VerificationScheduler delivers, and re-dispatches implement on a
-    // FAIL (or fails the lane at the cap) — instead of integrating prematurely or
-    // leaving a FAILed lane parked. Subscribes to the scheduler's verificationEvents
-    // + reads the merge-gate's lane write. Inert for verify-disabled / non-sprint runs.
-    visualGate: new SchedulerVisualVerifyGate({
-      db: cyboflowDb,
-      events: verificationEvents,
-      channelFor: verificationChannel,
-      logger: cyboflowLogger,
-    }),
-    // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
-    // human-seam plane, folding the old Stage 3 supervisor + supervisor-chat into
-    // one token-frugal `MonitorSession` in the run's existing Chat pane. ALWAYS ON
-    // for programmatic runs (supervisor-role redesign, 2026-07-05 — the old
-    // `programmaticSupervisor` opt-in is gone): the supervisor is a Q&A partner the
-    // human can query at ANY point, and escalations surface in BOTH the chat and
-    // the review queue. A `DefaultMonitorSession` over the real on-demand query fns
-    // (monitorQuery.ts) + a HistoryReader bound to cyboflowDb; it reads the WHOLE
-    // history ONLY when it must act, and costs zero tokens during routine progress.
-    // The run's `injectEvent` (2nd factory arg, from the run context — Slice B) is
-    // owned by the session so `converse` renders both sides of an exchange into the
-    // Chat pane (the tRPC `monitor.send` seam); the runner registers the session in
-    // MonitorRegistry so the router reaches it. NOT headlessly verifiable — it
-    // makes a real Claude call.
-    monitorFactory: ((): ((
-      ctx: MonitorContext,
-      injectEvent: (event: ClaudeStreamEvent) => void,
-    ) => MonitorSession | undefined) => {
-      const structuredQuery = makeSdkStructuredQuery(claudeExecutablePath, cyboflowLogger);
-      const textQuery = makeSdkTextQuery(claudeExecutablePath, cyboflowLogger);
-      // 3rd arg = the RUN-DELIVERABLES reader (CR-6): what this run produced,
-      // folded into the gate + review-loop prompts.
-      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger, (r) => readRunDigest(cyboflowDb, r, cyboflowLogger));
-      // Also published to the module-scoped buildMonitorSession holder so the
-      // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
-      // byte-identical sessions when reviving a run's chat after an app restart.
-      const buildSession = (
-        ctx: MonitorContext,
-        injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
-      ): MonitorSession =>
-        new DefaultMonitorSession({
-          ctx,
-          history,
-          structuredQuery,
-          textQuery,
-          injectEvent,
-          // Monitor-actuation seam: the retry_step action executes through the
-          // SAME retryRunHandler chokepoint as runs.retryStep, bound lazily via
-          // the module-scoped holder (the RunExecutor does not exist yet at
-          // monitorFactory construction time — see monitorRetryStep's docblock).
-          actions: {
-            retryStep: (stepId) =>
-              monitorRetryStep
-                ? monitorRetryStep(ctx.runId, stepId)
-                : Promise.resolve({
-                    ok: false,
-                    message: 'Retry is not wired yet — try again in a moment.',
-                  }),
-            switchToOrchestrated: (reason) =>
-              monitorSwitchToOrchestrated
-                ? monitorSwitchToOrchestrated(ctx.runId, reason)
-                : Promise.resolve({
-                    ok: false,
-                    message: 'Handover is not wired yet — try again in a moment.',
-                  }),
-            // The 9 confirm-gated steering actions, all delegating to the single
-            // late-bound monitorSteeringActions holder (wired in the dep-wiring
-            // block). Each threads the session's own runId.
-            addTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.addTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            removeTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.removeTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            editTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.editTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            skipStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.skipStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            unskipStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.unskipStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            steerStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.steerStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            rewindToStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.rewindToStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            rewindLaneToStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.rewindLaneToStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            resolveReviewItem: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.resolveReviewItem(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            fileNote: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.fileNote(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-          },
-          logger: cyboflowLogger,
-        });
-      buildMonitorSession = buildSession;
-      return buildSession;
-    })(),
-    // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
-    // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can
-    // resolve a fanOut step's item set + drive a sprint lane per item ON THE
-    // PROGRAMMATIC PLANE. Reuses the SAME sprintLaneStore already wired below — the
-    // lane events fire on sprintLaneChannel(runId), so useSprintLanes lights up live
-    // with zero new subscription. Returns undefined when the run carries no batch_id
-    // (not a seeded sprint) ⇒ the host gets no driver ⇒ no host-driven fan-out
-    // (byte-identical to today; orchestrated sprints still drive lanes via the MCP
-    // backstop). driveLane is fail-soft — a lane-store error is swallowed + logged so
-    // a broken lane write never aborts the controller walk.
-    fanOutDriverFactory: ({ batchId }) => {
-      if (!batchId) return undefined;
-      return {
-        resolveItems: (_runId, over) =>
-          over === 'tasks'
-            ? sprintLaneStore
-                .listLanes(batchId)
-                // Crash-safe resume: skip lanes already settled (integrated/
-                // failed/blocked) so a re-entered fanOut step does not re-run
-                // completed work, flip a failed lane back to integrated, or
-                // let a BLOCKED child re-enter without its failed parent
-                // (Item 6, Codex C3 — a blocked lane never started and stays
-                // excluded until an explicit reset, e.g. resetFailedLanes,
-                // re-queues it) — mirrors the monotonic-forward guard in
-                // deriveLaneFromTaskDispatch. On a fresh run all lanes are
-                // 'queued', so every task is returned.
-                .filter(
-                  (lane) => lane.status !== 'integrated' && lane.status !== 'failed' && lane.status !== 'blocked',
-                )
-                .map((lane) => lane.taskId)
-            : [],
-        // DAG ordering (2026-06-22): expose the batch's BLOCKING edges so the
-        // controller dispatches a task only after its prerequisites integrate.
-        // Reads task_dependencies for the batch's lane task ids; returns taskId →
-        // [prerequisite taskIds]. An empty map ⇒ flat waves (no dependencies).
-        dependencies: (_runId, over) => {
-          const map = new Map<string, string[]>();
-          if (over !== 'tasks') return map;
-          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
-          if (taskIds.length === 0) return map;
-          const placeholders = taskIds.map(() => '?').join(',');
-          const rows = rawDb
-            .prepare(
-              `SELECT task_id, depends_on_task_id FROM task_dependencies
-                 WHERE kind = 'blocking' AND task_id IN (${placeholders})`,
-            )
-            .all(...taskIds) as Array<{ task_id: string; depends_on_task_id: string }>;
-          for (const row of rows) {
-            const prereqs = map.get(row.task_id) ?? [];
-            prereqs.push(row.depends_on_task_id);
-            map.set(row.task_id, prereqs);
-          }
-          return map;
-        },
-        // Same task-file rows the task editor persists are the concurrency source
-        // of truth. This deliberately does not inspect task prompt/body text.
-        expectedFiles: (_runId, over) => {
-          const map = new Map<string, string[]>();
-          if (over !== 'tasks') return map;
-          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
-          if (taskIds.length === 0) return map;
-          const placeholders = taskIds.map(() => '?').join(',');
-          const rows = rawDb
-            .prepare(`SELECT task_id, file_path FROM task_files WHERE task_id IN (${placeholders})`)
-            .all(...taskIds) as Array<{ task_id: string; file_path: string }>;
-          for (const row of rows) {
-            const files = map.get(row.task_id) ?? [];
-            files.push(row.file_path);
-            map.set(row.task_id, files);
-          }
-          return map;
-        },
-        // Commit-integrity backstop: 'integrated' means "complete AND committed
-        // in the session worktree", which inner-step verdicts alone cannot
-        // establish — a lane whose `git commit` was denied by a permission gate
-        // reported green with its changes left untracked on disk (observed live).
-        // Read the run's worktree HEAD at lane start and re-read it at lane end;
-        // the controller refuses to integrate a lane that moved HEAD nowhere and
-        // left the tree dirty. Every failure path (no worktree row, git error)
-        // degrades to "no probe" / a rethrow the controller swallows, so the
-        // backstop can only withhold a false integrate, never invent a failure.
-        beginCommitProbe: async (rid) => {
-          const row = rawDb
-            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
-            .get(rid) as { worktree_path?: unknown } | undefined;
-          const worktreePath =
-            row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
-              ? row.worktree_path
-              : null;
-          if (worktreePath === null) return undefined;
-          const readHead = async (): Promise<string> =>
-            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
-          // `--untracked-files=all` lists files, not collapsed directories, so a new
-          // file inside an already-untracked directory still reads as NEW dirt.
-          const readDirtyPaths = async (): Promise<string[]> =>
-            parsePorcelainPaths(
-              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
-            );
-          const startHead = await readHead();
-          // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
-          // not this lane's uncommitted work. A failed read degrades to "unknown"
-          // (newDirtyPaths absent ⇒ every dirty path counts), never to a failure.
-          let startDirty: Set<string> | undefined;
-          try {
-            startDirty = new Set(await readDirtyPaths());
-          } catch {
-            startDirty = undefined;
-          }
-          return async () => {
-            const endHead = await readHead();
-            const dirtyPaths = await readDirtyPaths();
-            // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
-            // same shared worktree, mid-lane. HEAD then moves for a reason that
-            // is not any lane's work — and since the only case that withholds
-            // 'integrated' is "HEAD did not move AND the tree is dirty", an
-            // advanced HEAD would let a lane that committed nothing integrate
-            // anyway. That is the exact failure this probe exists to catch, so
-            // the bootstrap's own commits are subtracted before the comparison.
-            //
-            // Fail-soft on purpose, in the direction that PRESERVES the probe: a
-            // rev-list that throws leaves headAdvanced as the plain sha
-            // comparison, which is what shipped.
-            let headAdvanced = endHead !== startHead;
-            if (headAdvanced) {
-              try {
-                const bootstrapShas = new Set(runbookBootstrapStamps.commitShasForRun(rid));
-                if (bootstrapShas.size > 0) {
-                  const between = (
-                    await runGitAsync(worktreePath, ['rev-list', `${startHead}..${endHead}`])
-                  )
-                    .split('\n')
-                    .map((line) => line.trim())
-                    .filter((line) => line.length > 0);
-                  // Compared by PREFIX in both directions: the stamp records
-                  // whatever `rev-parse HEAD` returned (full) but a hand-written
-                  // or abbreviated sha must still match.
-                  headAdvanced = between.some(
-                    (sha) =>
-                      ![...bootstrapShas].some((b) => sha.startsWith(b) || b.startsWith(sha)),
-                  );
-                }
-              } catch {
-                // Keep the plain comparison.
-              }
-            }
-            return {
-              headAdvanced,
-              dirty: dirtyPaths.length > 0,
-              dirtyPaths,
-              ...(startDirty !== undefined
-                ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
-                : {}),
-              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
-            };
-          };
-        },
-        // Targeted failed→running un-settle for the controller's MONITOR LANE
-        // RESCUE at the visual merge gate: that gate durably writes the lane
-        // 'failed' before the controller's awaitVerdict resolves, so a rescued
-        // lane is already settled in the store while its walk is still live.
-        // Status-guarded to 'failed' inside the store (a no-op otherwise) and
-        // fail-soft there too, so no try/catch is needed here.
-        reviveLane: ({ itemId }) => {
-          sprintLaneStore.reviveLane(batchId, itemId);
-        },
-        driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
-          try {
-            sprintLaneStore.updateLane({
-              runId: rid,
-              batchId,
-              taskId: itemId,
-              allowedStepIds,
-              ...(status !== undefined ? { status } : {}),
-              ...(currentStepId !== undefined ? { currentStepId } : {}),
-              ...(attempt !== undefined ? { attempt } : {}),
-            });
-          } catch (err) {
-            cyboflowLogger.debug('[fanOutDriver] driveLane skipped (fail-soft)', {
-              runId: rid,
-              itemId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        },
-      };
-    },
-    // Live batch_id reader (generalize-parallel-fan-out follow-up): backs the
-    // fan-out driver provider's mid-walk re-read so `ship`'s materialize-batch
-    // step (which UPDATEs workflow_runs.batch_id strictly AFTER this run's
-    // ProgrammaticRunContext is built) is honored on the SAME walk instead of a
-    // permanently-null one-shot snapshot silently degrading execute-tasks to a
-    // single agent step. Reuses the SAME WorkflowRegistry row reader RunExecutor
-    // itself uses to snapshot ctx.run at the top of execute() — just re-invoked
-    // live rather than once.
-    readRunBatchId: (runId) => workflowRegistry.getRunById(runId)?.batch_id ?? null,
-    // Sprint task-scope provider (grounding fix, 2026-06-22): resolve the
-    // `# Sprint tasks` block body for a sprint run's batch so the programmatic step
-    // prompts carry the real task set (reuses the SAME buildSeedTasksBlock helper +
-    // readers the orchestrated getPrompt path uses, so both planes emit identical
-    // scope). Without it the analyze-dependencies step agent never sees the tasks,
-    // concludes "No dependencies", and the dependents fan out concurrently and fail.
-    seedTasksProvider: (batchId) =>
-      buildSeedTasksBlock(
-        batchId,
-        { listLaneTaskIds: (b) => sprintLaneStore.listLanes(b).map((lane) => lane.taskId) },
-        ideaBodyReader,
-        cyboflowLogger,
-      ),
-    // ── Autonomous LANE TRIAGE (monitor lane rescue) ────────────────────────
-    // All three route through the late-bound `laneTriageActions` holder so they
-    // reuse the SAME TaskMutationDeps / ReviewItemRouter seams the monitor's chat
-    // actions use. Unwired, each degrades to the no-lane-triage posture.
-    laneTriageTaskReader: (runId, itemId) => laneTriageActions?.readTask(runId, itemId),
-    laneTriageAdjustTask: (runId, input) =>
-      laneTriageActions
-        ? laneTriageActions.adjustTask(runId, input)
-        : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
-    laneTriageFindingSink: (runId, input) =>
-      laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
-    // ── SUPERVISED REVIEW LOOP (monitor steering each automatic design lap) ──
-    // Same late-bound posture: unwired, BOTH reject — the host then abandons a
-    // supervisor resolve, and keeps a set-aside entry in the lap (never dropped).
-    monitorFindingSink: (runId, input) =>
-      monitorFindingSink ? monitorFindingSink(runId, input) : Promise.reject(new Error('monitor finding sink not wired yet')),
-    setAsideFindingSink: (runId, input) =>
-      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.reject(new Error('set-aside finding sink not wired yet')),
-    // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
-    // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
-    // recommendation, i.e. today's card exactly.
-    escalationSinks: () => gateEscalationSinks,
-    // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
-    // closure the scheduler's §3.2 degrade gate and the health panel's badge use
-    // — there must never be a third reading of `verify_runbook_local.status`.
-    // Read LAZILY through the module holder (it is assigned inside
-    // initializeServices, like every other late-bound probe): an unset holder
-    // resolves `null`, which the posture reads as UNKNOWN and answers 'available'
-    // for, never as "this project has no runbook".
-    verifyRunbookStatus: async (projectId, modality, probePath) =>
-      verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
-    // §A6 — the posture reads the runbook-optional kill switch LIVE, like gate 3.
-    verifyLiveConfig: () => configManager.getVisualVerifyConfig(),
-    // Per-step result sink (migration 033): persist each settled step so results
-    // are queryable + crash-safe resume can skip individually-completed steps.
-    stepResultRecorder: (runId, report) =>
-      StepResultStore.tryGetInstance()?.record({
-        runId,
-        stepId: report.stepId,
-        phaseId: report.phaseId,
-        outcome: report.outcome,
-        attempts: report.attempts,
-        ...(report.error !== undefined ? { error: report.error } : {}),
-        ...(report.deliberate !== undefined ? { deliberate: report.deliberate } : {}),
-      }),
-    logger: cyboflowLogger,
+  // Programmatic-run driver (execution-model seam, Stage 2) — composed in
+  // programmaticRunnerComposition.ts (#19 step 16). The monitor-session builder
+  // it publishes is assigned to the module holder the lazy rehydrator reads.
+  const programmaticRunnerComposition = composeProgrammaticRunner({
+    substrateFacade,
+    rawDb,
+    cyboflowDb,
+    cyboflowLogger,
+    configManager,
+    workflowRegistry,
+    claudeExecutablePath,
+    sprintLaneStore,
+    runbookBootstrapStamps,
+    ideaBodyReader,
+    getMonitorRetryStep: () => monitorRetryStep,
+    getMonitorSwitchToOrchestrated: () => monitorSwitchToOrchestrated,
+    getMonitorSteeringActions: () => monitorSteeringActions,
+    getLaneTriageActions: () => laneTriageActions,
+    getMonitorFindingSink: () => monitorFindingSink,
+    getSetAsideFindingSink: () => setAsideFindingSink,
+    getGateEscalationSinks: () => gateEscalationSinks,
+    getVerifyRunbookStatus: () => verifyRunbookStatus,
   });
+  const programmaticRunner = programmaticRunnerComposition.programmaticRunner;
+  buildMonitorSession = programmaticRunnerComposition.buildMonitorSession;
 
   // Selected-finding reader (migration 034) — injected as the trailing
   // RunExecutor arg; reads through the same narrow DatabaseLike adapter the
