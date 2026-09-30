@@ -21,6 +21,10 @@ export interface ManifestConfirmTarget {
   descendantPidCount?: number;
   /** False when the process carries no cyboflow spawn marker. */
   taggedAsCyboflow?: boolean;
+  /** Disk bytes this target frees; null/absent when not measured. */
+  reclaimBytes?: number | null;
+  /** RAM bytes this target frees; null/absent when not measured. */
+  ramBytes?: number | null;
 }
 
 export interface ManifestConfirmData {
@@ -28,6 +32,8 @@ export interface ManifestConfirmData {
   targets: ManifestConfirmTarget[];
   /** Fresh-measured bytes the action frees; null when unknown. */
   reclaimableBytes: number | null;
+  /** Total RAM the action frees; null/absent when unknown. */
+  reclaimableRamBytes?: number | null;
 }
 
 export interface ManifestConfirmOptions {
@@ -93,15 +99,18 @@ export function ManifestConfirmDialog({
 
   if (!isOpen) return null;
 
-  const { targets, reclaimableBytes } = manifest;
+  const { targets, reclaimableBytes, reclaimableRamBytes } = manifest;
   const dirtyTargets = targets.filter((t) => (t.dirtyFileCount ?? 0) > 0);
   const aheadTargets = targets.filter((t) => (t.aheadOfMainCount ?? 0) > 0);
   const hasWorktree = targets.some((t) => t.kind === 'worktree');
   const deleteBranchVisible = showDeleteBranch ?? hasWorktree;
+  const reclaimParts: string[] = [];
+  if (reclaimableBytes != null) reclaimParts.push(`${formatManifestBytes(reclaimableBytes)} disk`);
+  if (reclaimableRamBytes != null) reclaimParts.push(`${formatManifestBytes(reclaimableRamBytes)} RAM`);
   const subtitle =
-    reclaimableBytes === null
+    reclaimParts.length === 0
       ? plural(targets.length, 'target')
-      : `${plural(targets.length, 'target')} · ${formatManifestBytes(reclaimableBytes)} reclaimable`;
+      : `${plural(targets.length, 'target')} · ${reclaimParts.join(' · ')} reclaimable`;
 
   return (
     <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50" data-testid="manifest-confirm-dialog">
@@ -186,6 +195,22 @@ export function ManifestConfirmDialog({
                       {target.aheadOfMainCount} ahead of main
                     </span>
                   )}
+                  {target.reclaimBytes != null && (
+                    <span
+                      className="rounded border border-border-primary px-1.5 py-0.5 text-text-secondary"
+                      data-testid={`manifest-target-${target.id}-disk`}
+                    >
+                      {formatManifestBytes(target.reclaimBytes)} disk
+                    </span>
+                  )}
+                  {target.ramBytes != null && (
+                    <span
+                      className="rounded border border-border-primary px-1.5 py-0.5 text-text-secondary"
+                      data-testid={`manifest-target-${target.id}-ram`}
+                    >
+                      {formatManifestBytes(target.ramBytes)} RAM
+                    </span>
+                  )}
                   {!isWorktree && target.descendantPidCount !== undefined && (
                     <span className="rounded border border-border-primary px-1.5 py-0.5 text-text-secondary">
                       {plural(target.descendantPidCount, 'descendant PID')}
@@ -209,7 +234,14 @@ export function ManifestConfirmDialog({
           </label>
         )}
 
-        <div className="flex justify-end space-x-3">
+        <p className="mb-3 text-right text-xs font-medium text-status-error" data-testid="manifest-irreversible">
+          This cannot be undone
+        </p>
+
+        <div className="flex items-center justify-end space-x-3">
+          <span className="text-xs text-text-muted" data-testid="manifest-esc-hint">
+            Esc to cancel
+          </span>
           <button
             type="button"
             onClick={onCancel}

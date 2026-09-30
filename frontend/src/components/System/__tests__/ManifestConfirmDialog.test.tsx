@@ -48,7 +48,7 @@ describe('ManifestConfirmDialog', () => {
   it('renders every manifest field', () => {
     setup();
     expect(screen.getByText('Reap 2 targets?')).toBeInTheDocument();
-    expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent('2 targets · 3 GB reclaimable');
+    expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent('2 targets · 3 GB disk reclaimable');
     expect(screen.getByText('agent-sprint-1')).toBeInTheDocument();
     expect(screen.getByText('/tmp/wt/agent-sprint-1')).toBeInTheDocument();
     expect(screen.getByText('codex app-server')).toBeInTheDocument();
@@ -106,6 +106,62 @@ describe('ManifestConfirmDialog', () => {
     expect(screen.queryByLabelText('Also delete branch')).not.toBeInTheDocument();
     expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent('1 target');
     expect(screen.getByTestId('manifest-confirm-subtitle')).not.toHaveTextContent('reclaimable');
+  });
+});
+
+describe('ManifestConfirmDialog reclaim figures and footer', () => {
+  const MB = 1024 * 1024;
+  const withRam: ManifestConfirmData = {
+    id: 'man-ram',
+    reclaimableBytes: 3 * 1024 * MB,
+    reclaimableRamBytes: 512 * MB,
+    targets: [
+      { id: 'wt-1', kind: 'worktree', name: 'wt', reclaimBytes: 312 * MB },
+      { id: 'p-1', kind: 'process', name: 'proc', ramBytes: 88 * MB, reclaimBytes: null },
+      { id: 'p-2', kind: 'process', name: 'bare' },
+    ],
+  };
+
+  it('shows disk and RAM totals in the subtitle', () => {
+    setup({ manifest: withRam });
+    expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent(
+      '3 targets · 3 GB disk · 512 MB RAM reclaimable',
+    );
+  });
+
+  it('drops the RAM total when null or absent', () => {
+    setup({ manifest: { ...withRam, reclaimableRamBytes: null } });
+    const sub = screen.getByTestId('manifest-confirm-subtitle');
+    expect(sub).toHaveTextContent('3 targets · 3 GB disk reclaimable');
+    expect(sub).not.toHaveTextContent('RAM');
+  });
+
+  it('drops the disk total when null but keeps RAM', () => {
+    setup({ manifest: { ...withRam, reclaimableBytes: null } });
+    const sub = screen.getByTestId('manifest-confirm-subtitle');
+    expect(sub).toHaveTextContent('3 targets · 512 MB RAM reclaimable');
+    expect(sub).not.toHaveTextContent('disk');
+  });
+
+  it('drops both totals when both are null', () => {
+    setup({ manifest: { ...withRam, reclaimableBytes: null, reclaimableRamBytes: null } });
+    expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent(/^3 targets$/);
+  });
+
+  it('shows each target reclaim figure inline and omits absent ones', () => {
+    setup({ manifest: withRam });
+    expect(screen.getByTestId('manifest-target-wt-1-disk')).toHaveTextContent('312 MB disk');
+    expect(screen.queryByTestId('manifest-target-wt-1-ram')).not.toBeInTheDocument();
+    expect(screen.getByTestId('manifest-target-p-1-ram')).toHaveTextContent('88 MB RAM');
+    expect(screen.queryByTestId('manifest-target-p-1-disk')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('manifest-target-p-2-disk')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('manifest-target-p-2-ram')).not.toBeInTheDocument();
+  });
+
+  it('renders the irreversibility line and the Esc hint', () => {
+    setup();
+    expect(screen.getByTestId('manifest-irreversible')).toHaveTextContent('This cannot be undone');
+    expect(screen.getByTestId('manifest-esc-hint')).toHaveTextContent('Esc to cancel');
   });
 });
 
