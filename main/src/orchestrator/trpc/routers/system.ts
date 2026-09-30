@@ -13,6 +13,15 @@
  * No timer or polling lives here: `snapshot` does its work only when a subscriber
  * invokes it, so with the System view closed no `ps` or `du` runs at all.
  *
+ * Windows (chosen approach: option 1 — the router stays registered on every
+ * platform). The process listing already normalizes win32 through
+ * winProcessTable.ts / platformProcess.ts, so processes, the worktree registry
+ * and ports are served for real. Only worktree disk sizing (`du`, POSIX-only) is
+ * unsupported there: `capabilities.diskSizing` is `{ supported: false, reason }`,
+ * each worktree's `usage` is `{ status: 'unsupported', reason }`, and no `du` is
+ * ever requested. The platform is injectable via `SystemSnapshotProvider.platform`
+ * (PlatformProcessOptions convention) so tests can pin either platform.
+ *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/* — only structural types and portProbe.ts.
  */
@@ -22,6 +31,8 @@ import { probePort, type PortProbeResult } from '../../portProbe';
 import {
   CDP_PROBE_PORT,
   DEV_RENDERER_PROBE_PORT,
+  DISK_SIZING_UNSUPPORTED_REASON,
+  type SystemCapability,
   type OrchSocketSnapshot,
   type SystemProcessEntry,
   type SystemSnapshot,
@@ -52,6 +63,8 @@ export interface SystemSnapshotProvider {
   orchSocket: SystemOrchSocketSource;
   /** Port probe seam; defaults to the real `probePort` (tests inject a fake `connect`). */
   probePort?: (port: number, label: string) => Promise<PortProbeResult>;
+  /** Platform seam (PlatformProcessOptions convention); defaults to the host platform. */
+  platform?: NodeJS.Platform;
 }
 
 let _systemProvider: SystemSnapshotProvider | null = null;
@@ -64,6 +77,12 @@ export function setSystemProvider(provider: SystemSnapshotProvider | null): void
 const DEV_RENDERER_LABEL = 'dev renderer';
 const CDP_LABEL = 'CDP';
 
+function diskSizingCapability(platform: NodeJS.Platform): SystemCapability {
+  return platform === 'win32'
+    ? { supported: false, reason: DISK_SIZING_UNSUPPORTED_REASON }
+    : { supported: true };
+}
+
 function emptyOrchSocket(): OrchSocketSnapshot {
   return { connectionCount: 0, runBindings: {} };
 }
@@ -73,6 +92,7 @@ function startingSnapshot(): SystemSnapshot {
   return {
     status: 'starting',
     generatedAt: Date.now(),
+    capabilities: { diskSizing: diskSizingCapability(process.platform) },
     processes: [],
     worktrees: [],
     ports: {
@@ -85,6 +105,7 @@ function startingSnapshot(): SystemSnapshot {
 
 async function buildSnapshot(provider: SystemSnapshotProvider, projectId: number): Promise<SystemSnapshot> {
   const probe = provider.probePort ?? ((port: number, label: string) => probePort(port, label));
+  const diskSizing = diskSizingCapability(provider.platform ?? process.platform);
   const registry = await provider.loadWorktrees(projectId);
   const [processes, devRenderer, cdp] = await Promise.all([
     provider.loadProcesses(new Set(registry.map((w) => w.path))),
@@ -93,11 +114,15 @@ async function buildSnapshot(provider: SystemSnapshotProvider, projectId: number
   ]);
   const worktrees: SystemWorktreeEntry[] = registry.map((entry) => ({
     ...entry,
-    usage: provider.getDiskUsage(entry.path),
+    // Unsupported: never touch the disk service, so no `du` is queued.
+    usage: diskSizing.supported
+      ? provider.getDiskUsage(entry.path)
+      : { status: 'unsupported' as const, reason: diskSizing.reason },
   }));
   return {
     status: 'ready',
     generatedAt: Date.now(),
+    capabilities: { diskSizing },
     processes,
     worktrees,
     ports: {

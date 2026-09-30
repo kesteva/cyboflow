@@ -93,8 +93,27 @@ export interface SystemForeignProcess extends SystemProcessCommon {
 
 export type SystemProcessEntry = SystemManagedProcess | SystemOrphanProcess | SystemForeignProcess;
 
-/** A registry entry plus its disk-usage tri-state (`bytes` exists only when measured). */
-export type SystemWorktreeEntry = WorktreeMonitorRegistryEntry & { usage: WorktreeMonitorDiskUsage };
+/**
+ * A worktree's disk figure: the tri-state (`bytes` exists only when measured), or
+ * `unsupported` where sizing cannot run (win32 — `du` is POSIX-only). Never a bare
+ * number, so an unsized path can't render as "0 MB".
+ */
+export type SystemWorktreeUsage =
+  | WorktreeMonitorDiskUsage
+  | { status: 'unsupported'; reason: string };
+
+/** A registry entry plus its disk usage. */
+export type SystemWorktreeEntry = WorktreeMonitorRegistryEntry & { usage: SystemWorktreeUsage };
+
+/**
+ * Whether a POSIX-only capability is available on this platform. An explicit
+ * `supported: false` — never an empty payload that would read as "nothing there".
+ */
+export type SystemCapability = { supported: true } | { supported: false; reason: string };
+
+/** Why win32 has no disk sizing: `du` has no Windows equivalent wired in yet. */
+export const DISK_SIZING_UNSUPPORTED_REASON =
+  'Worktree disk sizing is not supported on Windows yet (it relies on `du`).';
 
 /**
  * The aggregated `cyboflow.system.snapshot` payload. `status: 'starting'` is the
@@ -104,6 +123,8 @@ export interface SystemSnapshot {
   status: 'starting' | 'ready';
   /** Epoch ms the snapshot was assembled. */
   generatedAt: number;
+  /** Platform capabilities: only genuinely POSIX-only parts are ever marked unsupported. */
+  capabilities: { diskSizing: SystemCapability };
   processes: SystemProcessEntry[];
   worktrees: SystemWorktreeEntry[];
   ports: PortsAndSocketsSnapshot;

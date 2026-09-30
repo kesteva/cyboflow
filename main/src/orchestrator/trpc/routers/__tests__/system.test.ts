@@ -99,6 +99,59 @@ describe('cyboflow.system.snapshot — delegation', () => {
   });
 });
 
+describe('cyboflow.system.snapshot — platform gating', () => {
+  function providerFor(platform: NodeJS.Platform) {
+    const getDiskUsage = vi.fn(() => ({ status: 'queued' as const }));
+    const provider: SystemSnapshotProvider = {
+      loadWorktrees: vi.fn(async () => [WORKTREE]),
+      getDiskUsage,
+      loadProcesses: vi.fn(async () => [PROCESS]),
+      orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
+      probePort: async (port: number, label: string) => ({ port, label, inUse: false }),
+      platform,
+    };
+    return { provider, getDiskUsage };
+  }
+
+  it('win32: never throws, keeps real process data, marks only disk sizing unsupported', async () => {
+    const { provider, getDiskUsage } = providerFor('win32');
+    setSystemProvider(provider);
+
+    const snap = await caller().snapshot({ projectId: 1 });
+
+    expect(snap.status).toBe('ready');
+    expect(snap.capabilities.diskSizing.supported).toBe(false);
+    expect(snap.capabilities.diskSizing).toMatchObject({ reason: expect.stringContaining('Windows') });
+    // Real process + worktree data still surfaces — not a blanket not-supported.
+    expect(snap.processes).toEqual([PROCESS]);
+    expect(snap.worktrees.map((w) => w.path)).toEqual(['/wt/a']);
+    // Disk usage is an explicit "unsupported", never a number, and no du is requested.
+    expect(snap.worktrees[0].usage).toMatchObject({ status: 'unsupported' });
+    expect(snap.worktrees[0].usage).not.toHaveProperty('bytes');
+    expect(getDiskUsage).not.toHaveBeenCalled();
+  });
+
+  it('darwin/linux: disk sizing is supported and getDiskUsage is consulted as before', async () => {
+    for (const platform of ['darwin', 'linux'] as const) {
+      const { provider, getDiskUsage } = providerFor(platform);
+      setSystemProvider(provider);
+
+      const snap = await caller().snapshot({ projectId: 1 });
+
+      expect(snap.capabilities.diskSizing).toEqual({ supported: true });
+      expect(snap.processes).toEqual([PROCESS]);
+      expect(snap.worktrees[0].usage).toEqual({ status: 'queued' });
+      expect(getDiskUsage).toHaveBeenCalledWith('/wt/a');
+    }
+  });
+
+  it('the starting fallback still resolves, with a capabilities entry', async () => {
+    const snap = await caller().snapshot({ projectId: 1 });
+    expect(snap.status).toBe('starting');
+    expect(typeof snap.capabilities.diskSizing.supported).toBe('boolean');
+  });
+});
+
 describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
   function build(registryPaths: string[] = ['/wt/a', '/wt/b']) {
     const listProcesses = vi.fn(async (): Promise<ProcessSnapshotRow[]> => [

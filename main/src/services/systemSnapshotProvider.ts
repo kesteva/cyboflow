@@ -39,6 +39,8 @@ export interface SystemSnapshotProviderDeps {
   orchSocket: SystemOrchSocketSource;
   /** Port probe seam; defaults to the real `probePort`. */
   probePort?: SystemSnapshotProvider['probePort'];
+  /** Platform seam; defaults to the host platform. */
+  platform?: NodeJS.Platform;
   /** Liveness records under `<data dir>/instances/`. Defaults to reading that directory. */
   readInstanceRecords?: () => Promise<InstanceRecord[]>;
   /** Defaults to `process.kill(pid, 0)`. */
@@ -157,6 +159,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
     getDiskUsage: (p) => deps.worktrees.getDiskUsage(p),
     orchSocket: deps.orchSocket,
     probePort: deps.probePort,
+    platform: deps.platform,
     async loadProcesses(knownWorktreePaths) {
       const rows = await deps.processSnapshot.snapshot();
       const [records, markers] = await Promise.all([
