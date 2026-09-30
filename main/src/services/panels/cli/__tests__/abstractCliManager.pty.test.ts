@@ -460,7 +460,12 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
     // Negative control: the env handed to spawnPty carries NEITHER marker key
     // (and a stale inherited instance id), so the child can only print the real
     // id / cwd if spawnPtyProcess itself stamped them.
-    const inputEnv = cleanEnv({ CYBOFLOW_INSTANCE: 'stale-inherited-instance' });
+    // cleanEnv() copies process.env, which already carries both keys when the
+    // suite runs inside a marked Cyboflow child — strip them explicitly first.
+    const inputEnv = cleanEnv();
+    delete inputEnv.CYBOFLOW_INSTANCE;
+    delete inputEnv.CYBOFLOW_WORKTREE;
+    inputEnv.CYBOFLOW_INSTANCE = 'stale-inherited-instance';
     expect(inputEnv.CYBOFLOW_WORKTREE).toBeUndefined();
     const pty = await mgr.spawnPty(
       process.execPath,
