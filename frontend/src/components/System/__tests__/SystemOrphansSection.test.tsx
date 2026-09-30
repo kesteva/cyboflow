@@ -98,6 +98,46 @@ describe('SystemOrphansSection', () => {
     expect(screen.queryByText('live')).not.toBeInTheDocument();
   });
 
+  it('renders each orphan as a card with the reclaim note, Orphan badge, owner line and stats', () => {
+    render(<SystemOrphansSection snapshot={fixture} />);
+    expect(screen.getByTestId('orphan-reclaim-note')).toHaveTextContent(
+      'No live session or run owns these — this is the reap backlog.',
+    );
+    const [wtCard] = screen.getAllByTestId('orphan-wt-row');
+    expect(within(wtCard).getByTestId('orphan-badge')).toHaveTextContent('Orphan');
+    expect(within(wtCard).getByTestId('orphan-owner')).toHaveTextContent('No owning session or run');
+    expect(within(wtCard).getByTestId('kind-tile-worktree')).toBeInTheDocument();
+    expect(within(wtCard).getByText('branch')).toBeInTheDocument();
+    expect(within(wtCard).getByText('disk')).toBeInTheDocument();
+
+    const [procCard] = screen.getAllByTestId('orphan-proc-row');
+    expect(within(procCard).getByTestId('orphan-badge')).toHaveTextContent('Orphan');
+    expect(within(procCard).getByTestId('orphan-owner')).toHaveTextContent('No owning worktree');
+    for (const label of ['pid', 'cpu', 'mem', 'up']) {
+      expect(within(procCard).getByText(label)).toBeInTheDocument();
+    }
+    expect(within(procCard).getByText('11')).toBeInTheDocument();
+  });
+
+  it('derives the process owner line from its vanished worktree and marks suspected rows', () => {
+    render(
+      <SystemOrphansSection
+        snapshot={snap(
+          [wt('/wt/live')],
+          [
+            proc(21, { worktreePath: '/gone/sprint-abc' }),
+            proc(22, { bucket: 'suspected', sweepEligible: undefined, instanceId: undefined }),
+          ],
+        )}
+      />,
+    );
+    const rows = screen.getAllByTestId('orphan-proc-row');
+    expect(within(rows[0]).getByTestId('orphan-owner')).toHaveTextContent(
+      'Its worktree sprint-abc no longer exists',
+    );
+    expect(within(rows[1]).getByTestId('orphan-badge')).toHaveTextContent('Suspected');
+  });
+
   it('labels a partial disk total and never renders an unmeasured worktree as 0 MB', () => {
     render(<SystemOrphansSection snapshot={fixture} />);
     expect(screen.getByTestId('orphan-worktrees-summary')).toHaveTextContent('2 stale · 300 MB on disk (1 of 2 measured)');
