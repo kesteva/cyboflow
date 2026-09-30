@@ -29,6 +29,7 @@ import {
 } from '../../utils/systemGroupBy';
 import { SYSTEM_SORT_OPTIONS, SystemGroupedBody, type SystemSortKey } from '../System/SystemGroupedBody';
 import { SystemOrphansSection } from '../System/SystemOrphansSection';
+import { useWorktreeReap, WorktreeReapError } from '../System/useWorktreeReap';
 import { SystemPortsSection } from './SystemPortsSection';
 
 const REFRESH_INTERVAL_MS = 2500;
@@ -190,6 +191,11 @@ export function SystemView(): ReactElement {
     refetchIntervalMs: REFRESH_INTERVAL_MS,
   });
 
+  // Destructive worktree actions (Prune, Reap all stale): resolve → confirm → execute
+  // against the monitorReap contract, refreshing the snapshot after every attempt.
+  const worktreeReap = useWorktreeReap({ projectId, onSettled: refetch });
+  const staleWorktrees = snapshot?.worktrees.filter((w) => w.tag === 'orphan' && w.prunable) ?? [];
+
   // Ticks once a second so "Updated Ns ago" advances between the 2.5s polls.
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => {
@@ -257,6 +263,11 @@ export function SystemView(): ReactElement {
           Failed to refresh the system snapshot: {error.message}
         </div>
       )}
+
+      {worktreeReap.error !== null && (
+        <WorktreeReapError error={worktreeReap.error} onDismiss={worktreeReap.clearError} />
+      )}
+      {worktreeReap.dialog}
 
       <div className="flex-1 overflow-y-auto">
         {projectId === null ? (
@@ -341,13 +352,28 @@ export function SystemView(): ReactElement {
                   ))}
                 </select>
               </label>
+              <button
+                type="button"
+                data-testid="system-reap-all-stale"
+                disabled={staleWorktrees.length === 0 || worktreeReap.busy}
+                onClick={() => worktreeReap.reapAllStale(staleWorktrees)}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-button border border-status-error/40 bg-status-error/10 px-2.5 py-1 font-mono text-xs font-bold text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Reap all stale{staleWorktrees.length > 0 ? ` (${staleWorktrees.length})` : ''}
+              </button>
             </div>
             {snapshot !== null && (
               <SystemPortsSection ports={snapshot.ports} />
             )}
             {snapshot !== null && <SystemOrphansSection snapshot={snapshot} />}
             {snapshot !== null && (
-              <SystemGroupedBody snapshot={snapshot} projectId={projectId} groupBy={groupBy} sortBy={sortBy} />
+              <SystemGroupedBody
+                snapshot={snapshot}
+                projectId={projectId}
+                groupBy={groupBy}
+                sortBy={sortBy}
+                onPruneWorktree={worktreeReap.prune}
+              />
             )}
           </>
         )}

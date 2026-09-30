@@ -20,11 +20,12 @@
  * worktrees to the Orphans section; By-process-type shows every process.
  */
 import type { ReactElement, ReactNode } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, MoreHorizontal } from 'lucide-react';
 import type { SystemSnapshotData } from '../../hooks/useSystemSnapshot';
 import type { SystemGroupBy } from '../../utils/systemGroupBy';
 import { openSystemRun, openSystemSession } from '../../utils/systemNavigation';
 import { KindTag } from '../cyboflow/KindTag';
+import { Dropdown } from '../ui/Dropdown';
 import { formatManifestBytes } from './formatManifestBytes';
 
 export type SystemProcess = SystemSnapshotData['processes'][number];
@@ -71,6 +72,9 @@ const OWNER_LABEL: Record<SystemWorktree['tag'], string> = {
   is_main_repo: 'Main repo',
   orphan: 'Orphan',
 };
+
+/** Shown wherever Prune is disabled for an `in_place` / `is_main_repo` worktree. */
+export const PRUNE_BLOCKED_REASON = 'Your real checkout — it can never be pruned';
 
 export interface SystemActionHandlers {
   /** Kill one process's tree. Never invoked for a foreign row. */
@@ -583,13 +587,40 @@ function WorktreeCard({ worktree, processes, sortBy, projectId, handlers }: Work
               Open run
             </button>
           )}
+          {handlers.onPruneWorktree !== undefined && (
+            <Dropdown
+              position="bottom-right"
+              width="md"
+              triggerClassName={`${BUTTON} inline-flex items-center`}
+              trigger={
+                <span data-testid="wt-menu" role="button" aria-label={`More actions for ${name}`}>
+                  <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                </span>
+              }
+              items={[
+                {
+                  id: 'prune',
+                  label: <span data-testid="wt-menu-prune">Prune worktree</span>,
+                  description: worktree.prunable ? undefined : PRUNE_BLOCKED_REASON,
+                  variant: 'danger',
+                  disabled: !worktree.prunable,
+                  onClick: () => handlers.onPruneWorktree?.(worktree),
+                },
+              ]}
+            />
+          )}
         </div>
       </div>
       {processes.length > 0 && (
         <ProcessTable processes={processes} sortBy={sortBy} projectId={projectId} handlers={handlers} />
       )}
       {(handlers.onKillAll !== undefined || handlers.onPruneWorktree !== undefined) && (
-        <div className="flex justify-end gap-2 border-t border-border-primary px-3.5 py-2">
+        <div className="flex items-center justify-end gap-2 border-t border-border-primary px-3.5 py-2">
+          {handlers.onPruneWorktree !== undefined && !worktree.prunable && (
+            <span data-testid="wt-prune-reason" className="mr-auto text-[11px] text-text-tertiary">
+              {PRUNE_BLOCKED_REASON}
+            </span>
+          )}
           {handlers.onKillAll !== undefined && (
             <button
               type="button"
@@ -607,7 +638,7 @@ function WorktreeCard({ worktree, processes, sortBy, projectId, handlers }: Work
               data-testid="wt-prune"
               className={BUTTON_DANGER}
               disabled={!worktree.prunable}
-              title={worktree.prunable ? undefined : 'Your real checkout — it can never be pruned'}
+              title={worktree.prunable ? undefined : PRUNE_BLOCKED_REASON}
               onClick={() => handlers.onPruneWorktree?.(worktree)}
             >
               Prune worktree

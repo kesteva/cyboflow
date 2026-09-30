@@ -15,6 +15,11 @@ export interface ManifestConfirmTarget {
   detail?: string;
   /** Uncommitted files in a worktree target; > 0 marks it dirty. */
   dirtyFileCount?: number;
+  /**
+   * The worktree is known dirty even though the file count is not (e.g. untracked
+   * files are present). Marks it dirty exactly like `dirtyFileCount > 0`.
+   */
+  dirty?: boolean;
   /** Commits ahead of main in a worktree target; > 0 marks it ahead. */
   aheadOfMainCount?: number;
   /** Descendant PIDs that die with a process target. */
@@ -100,7 +105,7 @@ export function ManifestConfirmDialog({
   if (!isOpen) return null;
 
   const { targets, reclaimableBytes, reclaimableRamBytes } = manifest;
-  const dirtyTargets = targets.filter((t) => (t.dirtyFileCount ?? 0) > 0);
+  const dirtyTargets = targets.filter((t) => t.dirty === true || (t.dirtyFileCount ?? 0) > 0);
   const aheadTargets = targets.filter((t) => (t.aheadOfMainCount ?? 0) > 0);
   const hasWorktree = targets.some((t) => t.kind === 'worktree');
   const deleteBranchVisible = showDeleteBranch ?? hasWorktree;
@@ -185,10 +190,16 @@ export function ManifestConfirmDialog({
                   {target.detail && <div className="truncate font-mono text-xs text-text-muted">{target.detail}</div>}
                 </div>
                 <div className="flex flex-shrink-0 flex-wrap justify-end gap-1 text-xs">
-                  {(target.dirtyFileCount ?? 0) > 0 && (
+                  {(target.dirtyFileCount ?? 0) > 0 ? (
                     <span className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-status-warning">
                       {plural(target.dirtyFileCount ?? 0, 'dirty file')}
                     </span>
+                  ) : (
+                    target.dirty === true && (
+                      <span className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-status-warning">
+                        uncommitted changes
+                      </span>
+                    )
                   )}
                   {(target.aheadOfMainCount ?? 0) > 0 && (
                     <span className="rounded border border-status-warning/40 bg-status-warning/10 px-1.5 py-0.5 text-status-warning">
