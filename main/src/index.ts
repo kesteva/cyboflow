@@ -187,8 +187,7 @@ import {
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
-import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
-import { orchSocketEndpoint } from './orchestrator/mcpServer/orchSocketEndpoint';
+import { composeOrchSocketServer } from './orchSocketComposition';
 import { approvalEvents, questionEvents, runStatusEvents, stuckEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
@@ -232,7 +231,6 @@ import type { ClaudeStreamEvent, StreamEnvelope } from '../../shared/types/claud
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
-import { buildBuiltInWorkflows } from './orchestrator/workflows/builtInWorkflows';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
@@ -2313,107 +2311,21 @@ async function initializeServices(): Promise<boolean> {
     getProposal: (id) => agentThreadStore.getProposal(id),
   });
 
-  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
-  // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
-  // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
-  // tools are routable.  Started here (before the RunLauncher block) so its
-  // socket path is available to the providers, the McpServerLifecycle, and the
-  // CLI manager below.  `cyboflowDb`/`cyboflowLogger` are already in scope above.
-  // `onInteractiveTurnEnd` wires the Stop-hook turn-end seam (IDEA-030):
-  // mcpQueryHandler cannot import main/src/services directly (ORCHESTRATOR
-  // LAYERING RULE), so the callback is threaded in here where
-  // `interactiveCliManager` is already narrowed to InteractiveClaudeManager
-  // (the throw-guard above at its construction site).
-  const orchSocketServer = new OrchSocketServer(
-    orchSocketEndpoint(getCyboflowSubdirectory('sockets', 'orch.sock')),
+  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link,
+  // built + started in orchSocketComposition.ts (#19 step 21). Started here
+  // (before the RunLauncher block) so its socket path is available to the
+  // providers, the McpServerLifecycle, and the CLI manager below; orchSocketReady
+  // gates the MCP subprocess on the socket actually listening.
+  const { orchSocketServer, orchSocketReady } = composeOrchSocketServer({
     cyboflowDb,
     cyboflowLogger,
-    {
-      onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId),
-      onInteractiveQuestionOpen: (runId) => interactiveCliManager.notifyQuestionOpen(runId),
-      // Global-agent proposal writer: the cyboflow_propose_action MCP tool (global
-      // scope) inserts agent_proposals rows through this store. Without it the
-      // handler fails closed (returns an error) — so it must be the SAME instance
-      // the executor + tRPC context read.
-      agentThreadStore,
-      // Custom-widget-authoring global-agent tools (cyboflow_db_schema /
-      // _widget_preview / _widget_save, docs/proposals/CUSTOM-VIEWS.md §9 row
-      // S6): the SAME `customViewsService` instance constructed above, so a
-      // saved widget draft is visible to the exact service the renderer's
-      // tRPC router reads. Absent only if this handler runs before boot
-      // wiring completes (never the case in production).
-      customViews: customViewsService ?? undefined,
-      // Global-agent scoped filesystem tools (cyboflow_fs_read / _list / _grep):
-      // the always-included roots are the registered project paths; this dep
-      // supplies the user-configured EXTRA folders on top. Absent ⇒ [] (project
-      // folders only). The orchestrator handler realpath's + scope-checks every
-      // access — this only widens the root set, never bypasses enforcement.
-      getAssistantFolderAccess: () => configManager.getAssistantFolderAccess(),
-      getAssistantExcludedProjectPaths: () => configManager.getAssistantExcludedProjectPaths(),
-      // Phase 2 §5.2 seam 1: the cyboflow_register_verify_runbook tool writes the
-      // MACHINE-LOCAL runbook record through this store. Deliberately the SAME
-      // instance the VerificationScheduler was initialized with above — the setup
-      // flow registers a draft here and the ENGINE proves that exact record on a
-      // passing setup-proof run, so the two halves of "derive → prove" must be
-      // looking at one store over one DB.
-      verifyRunbookStore,
-      // The GLOBAL visual-verify config, read LIVE per call — the same accessor
-      // the WorkflowRegistry injects into createRun. Only the `__quick__` chat
-      // sentinel consults it: its run stamp is minted on the session's first turn
-      // and has no UPDATE path, so a quick session resolves its verify posture at
-      // CALL time through this closure instead. A closure (not the resolved value)
-      // so toggling the master switch in Settings takes effect on the next tool
-      // call rather than requiring a restart.
-      getVisualVerifyConfig: () => configManager.getVisualVerifyConfig(),
-      // The sprint task-cap override, read LIVE for the same reason: the
-      // cyboflow_create_sprint_batch backstop must honor the CURRENT setting, not
-      // one frozen at launch.
-      getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
-      // Web-viewer observe tools; consent lives behind the seam (webViewerComposition.ts).
-      webViewerAgent: webViewerComposition?.webViewerAgent,
-      // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
-      // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
-      // surface so quick sessions can edit flows + variants over MCP without the
-      // handler importing the concrete registry. ensureGlobalBuiltIns is a
-      // zero-arg closure here (supplying the in-repo built-ins), matching the
-      // structural type; every other method forwards 1:1.
-      workflowConfig: {
-        getById: (id) => workflowRegistry.getById(id),
-        listByProject: (projectId) => workflowRegistry.listByProject(projectId),
-        ensureGlobalBuiltIns: () => workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows()),
-        getBaselineRotation: (id) => workflowRegistry.getBaselineRotation(id),
-        getEffectiveDefinition: (id) => workflowRegistry.getEffectiveDefinition(id),
-        updateSpec: (id, def) => workflowRegistry.updateSpec(id, def),
-        resetSpec: (id) => workflowRegistry.resetSpec(id),
-        createCustom: (params) => workflowRegistry.createCustom(params),
-        deleteWorkflow: (id) => workflowRegistry.deleteWorkflow(id),
-        listVariants: (id, opts) => workflowRegistry.listVariants(id, opts),
-        createVariantFromCurrent: (id, label, opts) =>
-          workflowRegistry.createVariantFromCurrent(id, label, opts),
-        updateVariant: (variantId, patch) => workflowRegistry.updateVariant(variantId, patch),
-        setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
-        deleteVariant: (variantId) => workflowRegistry.deleteVariant(variantId),
-        setBaselineRotation: (id, patch) => workflowRegistry.setBaselineRotation(id, patch),
-      },
-      // Ad-hoc code-review eval tool (cyboflow_run_eval): forward to the EvalWorker
-      // singleton initialized above, which owns the ONE definition of the snapshot
-      // deps (diff closure, app version, config toggles, enqueue) shared with the
-      // automatic human-review trigger — so the two mint paths can never drift.
-      // Deliberately NOT error-swallowed here (unlike the automatic trigger's
-      // snapshot()): an explicit caller must get a reason, and the MCP handler maps
-      // a throw to an ok:false reply.
-      runAdHocEval: (runId) => EvalWorker.getInstance().runAdHoc(runId),
-    },
-  );
-  // Keep the start promise so the MCP subprocess (below) can be gated on the
-  // socket actually listening — it is a pure client and dies with ECONNREFUSED if
-  // it connects before the bind completes. The dedicated .catch here keeps a bind
-  // failure from surfacing as an unhandled rejection before that gate attaches.
-  const orchSocketReady = orchSocketServer.start();
-  orchSocketReady.catch((err) => {
-    cyboflowLogger.error(
-      `[Cyboflow Orch IPC] socket server start failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    interactiveCliManager,
+    agentThreadStore,
+    customViewsService,
+    verifyRunbookStore,
+    webViewerComposition,
+    configManager,
+    workflowRegistry,
   });
 
   // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
