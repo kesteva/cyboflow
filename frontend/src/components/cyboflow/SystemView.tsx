@@ -22,6 +22,12 @@ import { API } from '../../utils/api';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useSystemSnapshot, type SystemSnapshotData } from '../../hooks/useSystemSnapshot';
+import {
+  getSystemGroupByPreference,
+  setSystemGroupByPreference,
+  type SystemGroupBy,
+} from '../../utils/systemGroupBy';
+import { SYSTEM_SORT_OPTIONS, SystemGroupedBody, type SystemSortKey } from '../System/SystemGroupedBody';
 import { SystemPortsSection } from './SystemPortsSection';
 
 const REFRESH_INTERVAL_MS = 2500;
@@ -143,7 +149,15 @@ function DiskTile({ disk }: { disk: DiskTileState | null }): ReactElement {
   );
 }
 
+const GROUP_BY_OPTIONS: ReadonlyArray<{ value: SystemGroupBy; label: string }> = [
+  { value: 'worktree', label: 'By worktree' },
+  { value: 'process-type', label: 'By process type' },
+];
+
 export function SystemView(): ReactElement {
+  // Hydrated from the persisted preference on mount; defaults to "By worktree".
+  const [groupBy, setGroupBy] = useState<SystemGroupBy>(() => getSystemGroupByPreference());
+  const [sortBy, setSortBy] = useState<SystemSortKey>('disk');
   const activeProjectId = useNavigationStore((s) => s.activeProjectId);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<number | null>(activeProjectId);
@@ -250,41 +264,89 @@ export function SystemView(): ReactElement {
           </div>
         ) : (
           <>
-          <div
-            data-testid="system-toolbar"
-            className="flex flex-wrap gap-3 border-b border-border-primary px-7 py-4"
-          >
-            {snapshot === null && isLoading ? (
-              [0, 1, 2, 3].map((i) => (
-                <div
-                  key={i}
-                  data-testid="system-tile-loading"
-                  className="h-[68px] min-w-[150px] flex-1 animate-pulse motion-reduce:animate-none rounded-card bg-bg-secondary"
-                />
-              ))
-            ) : (
-              <>
-                <StatTile testId="system-tile-worktrees" label="Worktrees">
-                  {snapshot?.worktrees.length ?? 0}
-                </StatTile>
-                <StatTile testId="system-tile-processes" label="Processes">
-                  {snapshot?.processes.length ?? 0}
-                </StatTile>
-                <DiskTile disk={snapshot === null ? null : summarizeDisk(snapshot)} />
-                <StatTile
-                  testId="system-tile-orphans"
-                  label="Orphans"
-                  tone="warning"
-                  sub={`${orphanWorktrees} wt · ${orphanProcesses} proc`}
+            <div
+              data-testid="system-toolbar"
+              className="flex flex-wrap items-center gap-3 border-b border-border-primary px-7 py-4"
+            >
+              {snapshot === null && isLoading ? (
+                [0, 1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    data-testid="system-tile-loading"
+                    className="h-[68px] min-w-[150px] flex-1 animate-pulse motion-reduce:animate-none rounded-card bg-bg-secondary"
+                  />
+                ))
+              ) : (
+                <>
+                  <StatTile testId="system-tile-worktrees" label="Worktrees">
+                    {snapshot?.worktrees.length ?? 0}
+                  </StatTile>
+                  <StatTile testId="system-tile-processes" label="Processes">
+                    {snapshot?.processes.length ?? 0}
+                  </StatTile>
+                  <DiskTile disk={snapshot === null ? null : summarizeDisk(snapshot)} />
+                  <StatTile
+                    testId="system-tile-orphans"
+                    label="Orphans"
+                    tone="warning"
+                    sub={`${orphanWorktrees} wt · ${orphanProcesses} proc`}
+                  >
+                    {orphanWorktrees + orphanProcesses}
+                  </StatTile>
+                </>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-4 border-b border-border-primary px-7 py-3">
+              <div
+                role="radiogroup"
+                aria-label="Group by"
+                data-testid="system-groupby"
+                className="inline-flex overflow-hidden rounded-button border border-border-primary"
+              >
+                {GROUP_BY_OPTIONS.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={groupBy === value}
+                    data-testid={`system-groupby-${value}`}
+                    onClick={() => {
+                      setGroupBy(value);
+                      setSystemGroupByPreference(value);
+                    }}
+                    className={`px-3 py-1 font-mono text-xs transition-colors ${
+                      groupBy === value
+                        ? 'bg-bg-secondary font-bold text-text-primary'
+                        : 'bg-bg-primary text-text-secondary hover:text-text-primary'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2">
+                <span className="eyebrow text-text-tertiary">Sort</span>
+                <select
+                  data-testid="system-sort"
+                  aria-label="Sort by"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SystemSortKey)}
+                  className="rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 font-mono text-xs text-text-secondary transition-colors hover:border-border-emphasized hover:text-text-primary focus:border-border-emphasized focus:outline-none"
                 >
-                  {orphanWorktrees + orphanProcesses}
-                </StatTile>
-              </>
+                  {SYSTEM_SORT_OPTIONS.map(({ key, label }) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {snapshot !== null && (
+              <SystemPortsSection ports={snapshot.ports} />
             )}
-          </div>
-          {snapshot !== null && (
-            <SystemPortsSection ports={snapshot.ports} />
-          )}
+            {snapshot !== null && (
+              <SystemGroupedBody snapshot={snapshot} projectId={projectId} groupBy={groupBy} sortBy={sortBy} />
+            )}
           </>
         )}
       </div>

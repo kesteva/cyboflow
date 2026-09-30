@@ -199,3 +199,25 @@ describe('summarizeDisk / formatDiskBytes', () => {
     expect(formatDiskBytes(2.2 * 1024 * MB)).toBe('2.2 GB');
   });
 });
+
+describe('SystemView group-by control', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('defaults to By worktree and persists the toggle across remount', () => {
+    mockSnapshot(snap([wt('/a', measured(MB))]));
+    const first = render(<SystemView />);
+    expect(screen.getByTestId('system-groupby-worktree')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('system-by-worktree')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('system-groupby-process-type'));
+    expect(screen.getByTestId('system-groupby-process-type')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('system-by-process-type')).toBeInTheDocument();
+    first.unmount();
+
+    render(<SystemView />);
+    expect(screen.getByTestId('system-groupby-process-type')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('system-by-process-type')).toBeInTheDocument();
+  });
+});
