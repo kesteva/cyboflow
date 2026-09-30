@@ -338,6 +338,36 @@ describe('By process type sort', () => {
     expect(sortProcesses(procs, 'disk', byPath).map((p) => (p.bucket === 'foreign' ? 0 : p.pid))).toEqual([3, 2, 1]);
   });
 
+  it('type card aggregate sums CPU/mem over ALL members, foreign included', () => {
+    const s = snap([wt('/wt/a')], [
+      proc(1, { pcpu: 1, pmem: 0.5 }),
+      foreign('~pid 9', { processType: 'claude-cli', display: { cpu: '2.0%', mem: '1.0%', elapsed: '3h' } }),
+    ]);
+    render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy="cpu" {...handlers} />);
+    expect(screen.getByTestId('type-aggregate-claude-cli')).toHaveTextContent('2 processes · 3.0% CPU · 1.5% mem');
+    // Kill all still counts only the actionable member.
+    expect(screen.getByTestId('type-kill-all-claude-cli')).toHaveTextContent('Kill all (1)');
+  });
+
+  it('a foreign-only type card shows its figures and a disabled Kill all', () => {
+    const s = snap([wt('/wt/a')], [foreign('~pid 9')]);
+    render(<SystemGroupedBody snapshot={s} projectId={7} groupBy="process-type" sortBy="cpu" {...handlers} />);
+    expect(screen.getByTestId('type-aggregate-unknown')).toHaveTextContent('1 process · 2.0% CPU · 1.0% mem');
+    expect(screen.getByTestId('type-kill-all-unknown')).toBeDisabled();
+  });
+
+  it('sortTypeGroups orders by a total that comes mostly from a foreign process', () => {
+    const groups = [
+      { type: 'claude-cli' as const, members: [proc(1, { pcpu: 5, pmem: 5 })] },
+      {
+        type: 'unknown' as const,
+        members: [foreign('~pid 9', { display: { cpu: '40.0%', mem: '30.0%', elapsed: null } })],
+      },
+    ];
+    expect(sortTypeGroups(groups, 'cpu', new Map()).map((g) => g.type)).toEqual(['unknown', 'claude-cli']);
+    expect(sortTypeGroups(groups, 'mem', new Map()).map((g) => g.type)).toEqual(['unknown', 'claude-cli']);
+  });
+
   it('sortTypeGroups keeps canonical order on ties', () => {
     const groups = [
       { type: 'claude-cli' as const, members: [proc(1, { pcpu: 1 })] },

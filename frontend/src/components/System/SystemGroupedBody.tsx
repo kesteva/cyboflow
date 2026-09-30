@@ -136,8 +136,18 @@ function metricsOf(p: SystemProcess): ProcessMetrics {
   };
 }
 
-const cpuOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? 0 : (p.pcpu ?? 0));
-const memOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? 0 : (p.pmem ?? 0));
+/**
+ * Numeric CPU/memory figure of a row, for sorting and aggregate totals. Foreign rows
+ * carry formatted strings only (read-only by construction), so parse what the row
+ * displays — the totals then always match the rows they summarise. Unparseable → 0.
+ */
+function figureOf(displayed: string | null): number {
+  const n = displayed === null ? Number.NaN : Number.parseFloat(displayed);
+  return Number.isFinite(n) ? n : 0;
+}
+
+const cpuOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? figureOf(p.display.cpu) : (p.pcpu ?? 0));
+const memOf = (p: SystemProcess): number => (p.bucket === 'foreign' ? figureOf(p.display.mem) : (p.pmem ?? 0));
 
 /** Owning-worktree lookup used to give Disk / Owner a per-process meaning (By process type). */
 export type WorktreesByPath = ReadonlyMap<string, SystemWorktree>;
@@ -711,8 +721,8 @@ function ByProcessType({
         <div className="flex flex-col gap-3">
           {groups.map(({ type, members }) => {
             const killable = members.filter(isActionable);
-            const cpu = killable.reduce((acc, p) => acc + (p.pcpu ?? 0), 0);
-            const mem = killable.reduce((acc, p) => acc + (p.pmem ?? 0), 0);
+            const cpu = members.reduce((acc, p) => acc + cpuOf(p), 0);
+            const mem = members.reduce((acc, p) => acc + memOf(p), 0);
             return (
               <div
                 key={type}
