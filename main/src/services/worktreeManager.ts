@@ -44,6 +44,16 @@ export interface WorktreeBrokerReaper {
 }
 
 /**
+ * Narrow seam for the disk-usage cache (see DiskUsageService.invalidate). A removed
+ * worktree's cached size is stale the instant the tree is gone, so removal calls this
+ * hook on every path. Minimal interface so WorktreeManager stays decoupled from the
+ * concrete service and unit-testable with a fake.
+ */
+export interface WorktreeDiskUsageInvalidator {
+  invalidate(worktreePath: string): void | Promise<void>;
+}
+
+/**
  * Typed, identifiable error thrown by {@link WorktreeManager.mergeWorktreeToBranch}
  * when rebasing a per-task run branch onto the integration branch hits a conflict
  * (or the integration update is not a fast-forward). The retired scheduler-model
@@ -87,6 +97,7 @@ export class WorktreeManager {
   constructor(
     private configManager?: ConfigManager,
     private codexBrokerReaper?: WorktreeBrokerReaper,
+    private diskUsageInvalidator?: WorktreeDiskUsageInvalidator,
   ) {
     // No longer initialized with a single repo path
   }
@@ -103,6 +114,20 @@ export class WorktreeManager {
       await this.codexBrokerReaper.reapForWorktree(worktreePath);
     } catch (error) {
       console.warn(`[WorktreeManager] Codex broker reap failed for ${worktreePath}:`, error);
+    }
+  }
+
+  /**
+   * Best-effort eager expiry of the removed worktree's cached disk size. Fail-soft
+   * for the same reason as {@link reapCodexBrokers}: a throwing/rejecting hook must
+   * never turn a successful removal into an error.
+   */
+  private async invalidateDiskUsage(worktreePath: string): Promise<void> {
+    if (!this.diskUsageInvalidator) return;
+    try {
+      await this.diskUsageInvalidator.invalidate(worktreePath);
+    } catch (error) {
+      console.warn(`[WorktreeManager] Disk-usage invalidation failed for ${worktreePath}:`, error);
     }
   }
 
@@ -322,6 +347,7 @@ export class WorktreeManager {
           // Still reap: a manually-deleted worktree can leave its detached Codex
           // broker running with a now-gone cwd.
           await this.reapCodexBrokers(worktreePath);
+          await this.invalidateDiskUsage(worktreePath);
           return;
         }
 
@@ -329,6 +355,7 @@ export class WorktreeManager {
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
       await this.reapCodexBrokers(worktreePath);
+      await this.invalidateDiskUsage(worktreePath);
     });
   }
 
@@ -354,11 +381,13 @@ export class WorktreeManager {
             errorMessage.includes('No such file or directory')) {
           console.log(`Worktree ${worktreePath} already removed or doesn't exist, skipping...`);
           await this.reapCodexBrokers(worktreePath);
+          await this.invalidateDiskUsage(worktreePath);
           return;
         }
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
       await this.reapCodexBrokers(worktreePath);
+      await this.invalidateDiskUsage(worktreePath);
     });
   }
 

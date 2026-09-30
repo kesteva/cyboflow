@@ -707,6 +707,79 @@ describe('WorktreeManager.removeWorktree (integration)', () => {
   });
 });
 
+describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
+  it('invalidates the absolute worktree path on removeWorktree — success and idempotent paths', async () => {
+    await withTempDir('worktree-rm-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv1');
+
+      await manager.removeWorktree(tmpDir, 'inv1');
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      // Already gone → idempotent early-return branch still invalidates.
+      await manager.removeWorktree(tmpDir, 'inv1');
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+    });
+  });
+
+  it('invalidates the path on removeWorktreeByPath — success and idempotent paths', async () => {
+    await withTempDir('worktree-rmpath-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv2');
+
+      await manager.removeWorktreeByPath(tmpDir, worktreePath);
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      await manager.removeWorktreeByPath(tmpDir, worktreePath);
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+    });
+  });
+
+  it('a throwing or rejecting hook never fails a removal', async () => {
+    await withTempDir('worktree-rm-inval-throw-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const throwing = new WorktreeManager(undefined, undefined, {
+          invalidate: () => { throw new Error('boom'); },
+        });
+        const rejecting = new WorktreeManager(undefined, undefined, {
+          invalidate: () => Promise.reject(new Error('nope')),
+        });
+        const a = await throwing.createWorktree(tmpDir, 'inv3');
+        const b = await rejecting.createWorktree(tmpDir, 'inv4');
+
+        await expect(throwing.removeWorktreeByPath(tmpDir, a.worktreePath)).resolves.toBeUndefined();
+        await expect(rejecting.removeWorktree(tmpDir, 'inv4')).resolves.toBeUndefined();
+        expect(existsSync(a.worktreePath)).toBe(false);
+        expect(existsSync(b.worktreePath)).toBe(false);
+        // Idempotent branch is fail-soft too.
+        await expect(throwing.removeWorktree(tmpDir, 'inv3')).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  it('does not invalidate when removal fails with an unrelated git error', async () => {
+    await withTempDir('worktree-rm-inval-fail-', async (tmpDir) => {
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, undefined, { invalidate });
+      await expect(manager.removeWorktree(tmpDir, 'whatever')).rejects.toThrow(/Failed to remove worktree/);
+      expect(invalidate).not.toHaveBeenCalled();
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // checkForRebaseConflicts / rebaseMainIntoWorktree / abortRebase — the
 // pre-merge conflict gate and the mid-rebase recovery path.

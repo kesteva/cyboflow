@@ -174,6 +174,7 @@ import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
+import { diskUsageService } from './services/diskUsageService';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
@@ -1816,8 +1817,7 @@ async function initializeServices(): Promise<boolean> {
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  // Create worktree manager
-  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper);
+  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper, diskUsageService);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();
