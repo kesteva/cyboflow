@@ -176,12 +176,12 @@ describe('agent env injection', () => {
   });
 
   it('the codex app-server env carries the marker', () => {
-    const env = buildCodexAppServerEnvironment('run-1', runtimeConfig, { PATH: '/usr/bin' }, () => '/usr/bin');
+    const env = buildCodexAppServerEnvironment('run-1', '/tmp/worktree', runtimeConfig, { PATH: '/usr/bin' }, () => '/usr/bin');
     expect(env[MANAGED_TEST_CONCURRENCY_ENV]).toBe('1');
   });
 
   it('the codex app-server env still carries its existing run identity', () => {
-    const env = buildCodexAppServerEnvironment('run-1', runtimeConfig, { PATH: '/usr/bin' }, () => '/usr/bin');
+    const env = buildCodexAppServerEnvironment('run-1', '/tmp/worktree', runtimeConfig, { PATH: '/usr/bin' }, () => '/usr/bin');
     expect(env.CYBOFLOW_RUN_ID).toBe('run-1');
     expect(env.CYBOFLOW_ORCH_SOCKET).toBe('/tmp/orch.sock');
   });

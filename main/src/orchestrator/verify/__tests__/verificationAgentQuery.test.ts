@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import { getInstanceId } from '../../../utils/spawnMarker';
 import {
   makeFakeQuery,
   sdkAssistantText,
@@ -498,6 +499,9 @@ describe('makeVerificationAgentQuery — the harness env reaches the deployed se
       expect(env.VERIFY_DATA_DIR).toBe('/artifacts/data/vr-1');
       // …and everything the process already had is still there.
       expect(env.CYBOFLOW_QUERY_ENV_PROBE).toBe('inherited');
+      // The spawn marker rides the merged env: this process's id + the query cwd.
+      expect(env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+      expect(env.CYBOFLOW_WORKTREE).toBe('/wt');
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;

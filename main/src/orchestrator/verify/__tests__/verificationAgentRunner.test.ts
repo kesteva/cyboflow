@@ -49,6 +49,7 @@ import { pathEnvKey } from '../harnessEnv';
 import type { PinnedRunbookRecord } from '../runbookStore';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import { setSeamErrorSink } from '../../telemetrySink';
+import { getInstanceId } from '../../../utils/spawnMarker';
 import type { EffectiveAgent } from '../../agents/effectiveAgents';
 import type {
   VerificationTaskV1,
@@ -578,6 +579,10 @@ describe('VerificationAgentRunner.run', () => {
     expect(args.allowedTools).toEqual(['Bash', 'Read', 'Grep', 'Glob']);
     expect(args.env.VERIFY_PORT).toBe('29260');
     expect(args.env.VERIFY_DRIVER_PORT).toBe('29261');
+    // The spawn marker is stamped onto the env handed to the query seam, scoped
+    // to the cwd the agent actually runs in.
+    expect(args.env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+    expect(args.env.CYBOFLOW_WORKTREE).toBe(args.cwd);
     // model is the Claude-run inherit (never a gpt id).
     expect(args.model).toBe('claude-sonnet-5');
     expect(dispose).toHaveBeenCalledTimes(1);

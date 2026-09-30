@@ -20,6 +20,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DevServerManager, interpolatePort } from '../devServerManager';
+import { getInstanceId } from '../../../utils/spawnMarker';
 import type { DeliverableVerifyConfig } from '../../../../../shared/types/visualVerification';
 import {
   isAlive,
@@ -106,6 +107,39 @@ describe('DevServerManager', () => {
       } finally {
         await handle.release();
         delete process.env.OUTFILE;
+      }
+    } finally {
+      await rmDir(dir);
+    }
+  });
+
+  it('stamps the spawn marker (instance + cwd) on both the build and start spawns', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cvv-dev-'));
+    try {
+      const dump = (file: string): string =>
+        `const fs=require("fs");` +
+        `fs.writeFileSync(${JSON.stringify(join(dir, file))}, JSON.stringify({i:process.env.CYBOFLOW_INSTANCE,w:process.env.CYBOFLOW_WORKTREE}));`;
+      const build = await nodeScript(dir, 'build.js', dump('build.json'));
+      const start = await nodeScript(
+        dir,
+        'start.js',
+        `${dump('start.json')}console.log("SERVER READY");setInterval(()=>{},1000);`,
+      );
+      const mgr = new DevServerManager(FAST);
+      const handle = await mgr.spawn({
+        config: deliverable({ build, start, readyWhen: 'SERVER READY' }),
+        port: 5174,
+        cwd: dir,
+        signal: new AbortController().signal,
+      });
+      try {
+        for (const file of ['build.json', 'start.json']) {
+          const rec = JSON.parse(await readFile(join(dir, file), 'utf-8')) as { i: string; w: string };
+          expect(rec.i).toBe(getInstanceId());
+          expect(rec.w).toBe(dir);
+        }
+      } finally {
+        await handle.release();
       }
     } finally {
       await rmDir(dir);
