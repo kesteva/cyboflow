@@ -11,8 +11,9 @@
  * The branch-delete choice is locked into the manifest at resolve time and
  * execute cannot override it. So when the user ticks "Also delete branch" in the
  * dialog, the selection is re-resolved with `alsoDeleteBranch: true` and the NEW
- * manifest (same targets, or the dialog re-opens on the updated list) is what
- * runs. Without the tick the exact manifest the dialog rendered is executed.
+ * manifest is shown in the dialog for a second confirmation — its figures (disk,
+ * dirty work, ahead counts, descendants) may differ from the first, so it is never
+ * executed unseen. Only a manifest the user confirmed as rendered is executed.
  *
  * Failures never vanish: a rejected resolve/execute, a stale manifest, and every
  * per-target failure/survivor in a partial result land in `error`, rendered by
@@ -45,6 +46,8 @@ interface PendingReap {
   title: string;
   raw: ReapManifestData;
   confirm: ManifestConfirmData;
+  /** True once the manifest was rebuilt for the branch choice and the user has yet to see it. */
+  refreshed: boolean;
 }
 
 function errorText(err: unknown): string {
@@ -75,11 +78,6 @@ function labelFor(manifest: ReapManifestData, targetId: string): string {
   const hit = manifest.targets.find((t) => reapTargetId(t) === targetId);
   if (hit === undefined) return targetId;
   return hit.kind === 'worktree' ? basename(hit.path) : `pid ${hit.pid}`;
-}
-
-function sameTargets(a: ReapManifestData, b: ReapManifestData): boolean {
-  const ids = (m: ReapManifestData): string => m.targets.map(reapTargetId).sort().join('\n');
-  return ids(a) === ids(b);
 }
 
 export interface UseWorktreeReapArgs {
@@ -117,7 +115,7 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
           setError({ message: 'Nothing to remove — no matching worktrees were found.', details: [] });
           return;
         }
-        setPending({ projectId, selection, title: title(manifest), raw: manifest, confirm: toManifestConfirmData(manifest) });
+        setPending({ projectId, selection, title: title(manifest), raw: manifest, confirm: toManifestConfirmData(manifest), refreshed: false });
       } catch (err: unknown) {
         setError({ message: `Could not prepare the removal: ${errorText(err)}`, details: [] });
       } finally {
@@ -155,22 +153,24 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
       setBusy(true);
       setError(null);
       try {
-        let toRun = pending.raw;
-        if (toRun.alsoDeleteBranch !== options.deleteBranch) {
-          // The choice is fixed at resolve time: re-resolve with it, and only run the
-          // result if it still names exactly the targets the user confirmed.
+        if (pending.raw.alsoDeleteBranch !== options.deleteBranch) {
+          // The branch choice is fixed at resolve time, so re-resolve with it. The rebuilt
+          // manifest may differ in more than its targets (sizes, dirty work, ahead counts,
+          // descendants) — never run one the user has not seen: show it and confirm again.
           const { manifest } = await trpc.cyboflow.monitorReap.resolve.mutate({
             projectId: pending.projectId,
             selection: pending.selection,
             alsoDeleteBranch: options.deleteBranch,
           });
-          if (!sameTargets(pending.raw, manifest)) {
-            setPending({ ...pending, raw: manifest, confirm: toManifestConfirmData(manifest) });
-            setError({ message: 'The targets changed while you were confirming. Review the updated list and confirm again.', details: [] });
+          if (manifest.targets.length === 0) {
+            setPending(null);
+            setError({ message: 'Nothing to remove — no matching worktrees were found.', details: [] });
             return;
           }
-          toRun = manifest;
+          setPending({ ...pending, raw: manifest, confirm: toManifestConfirmData(manifest), refreshed: true });
+          return;
         }
+        const toRun = pending.raw;
         const out = await trpc.cyboflow.monitorReap.execute.mutate({ manifestId: toRun.id });
         setPending(null);
         const problems = executionProblems(toRun, out);
@@ -199,13 +199,34 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
         manifest={pending.confirm}
         title={pending.title}
         confirmText="Prune"
-        banners={untagged ? <UntaggedProcessBanner /> : undefined}
+        initialDeleteBranch={pending.raw.alsoDeleteBranch}
+        banners={
+          untagged || pending.refreshed ? (
+            <>
+              {pending.refreshed && <RefreshedManifestBanner />}
+              {untagged && <UntaggedProcessBanner />}
+            </>
+          ) : undefined
+        }
         onConfirm={(shown, options) => void confirm(shown, options)}
         onCancel={cancel}
       />
     );
 
   return { prune, reapAllStale, busy, error, clearError: () => setError(null), dialog };
+}
+
+/** Shown after the manifest was rebuilt for the branch choice: the figures may have moved. */
+function RefreshedManifestBanner(): ReactElement {
+  return (
+    <div
+      role="status"
+      data-testid="prune-refreshed-notice"
+      className="rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm text-text-primary"
+    >
+      The list was refreshed for your branch choice. Review it and confirm again.
+    </div>
+  );
 }
 
 /** A card prune also kills the card's processes; one without a cyboflow marker gets the harder warning. */

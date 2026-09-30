@@ -183,7 +183,7 @@ describe('deleteBranch', () => {
     expect(resolveMutate).toHaveBeenCalledTimes(1);
   });
 
-  it('checked: re-resolves with alsoDeleteBranch true and executes that manifest', async () => {
+  it('checked: re-resolves with alsoDeleteBranch true, shows the new manifest, and executes it only after a second confirm', async () => {
     const first = manifest('reap_first', ['/wt/a']);
     const second = manifest('reap_second', ['/wt/a'], { alsoDeleteBranch: true });
     resolveMutate.mockResolvedValueOnce({ manifest: first }).mockResolvedValueOnce({ manifest: second });
@@ -194,13 +194,39 @@ describe('deleteBranch', () => {
     fireEvent.click(screen.getByTestId('manifest-delete-branch'));
     fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
 
-    await waitFor(() => expect(executeMutate).toHaveBeenCalledTimes(1));
+    expect(await screen.findByTestId('prune-refreshed-notice')).toBeInTheDocument();
     expect(resolveMutate).toHaveBeenNthCalledWith(2, {
       projectId: 7,
       selection: { kind: 'card', worktreePath: '/wt/a' },
       alsoDeleteBranch: true,
     });
+    expect(executeMutate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId('manifest-delete-branch')).toBeChecked());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
+    await waitFor(() => expect(executeMutate).toHaveBeenCalledTimes(1));
     expect(executeMutate).toHaveBeenCalledWith({ manifestId: 'reap_second' });
+    expect(resolveMutate).toHaveBeenCalledTimes(2);
+  });
+
+  it('checked and the targets are unchanged but a shown value moved: the new value is displayed and nothing executes until re-confirmed', async () => {
+    const first = manifest('reap_a', ['/wt/a']);
+    const second = manifest('reap_b', ['/wt/a'], { alsoDeleteBranch: true });
+    second.targets = second.targets.map((t) => (t.kind === 'worktree' ? { ...t, dirty: true, dirtyFileCount: 4 } : t));
+    second.dirtyFileCount = 4;
+    resolveMutate.mockResolvedValueOnce({ manifest: first }).mockResolvedValueOnce({ manifest: second });
+    executeMutate.mockResolvedValue(okExecute(second));
+    render(<Harness worktrees={[wt('/wt/a')]} />);
+    fireEvent.click(screen.getByTestId('wt-prune'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    expect(screen.queryByTestId('manifest-dirty-warning')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('manifest-delete-branch'));
+    fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
+
+    expect(await screen.findByTestId('manifest-dirty-warning')).toBeInTheDocument();
+    expect(executeMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
+    await waitFor(() => expect(executeMutate).toHaveBeenCalledWith({ manifestId: 'reap_b' }));
   });
 
   it('checked but the targets changed on re-resolve: nothing executes and the updated list is shown', async () => {
@@ -213,9 +239,9 @@ describe('deleteBranch', () => {
     fireEvent.click(screen.getByTestId('manifest-delete-branch'));
     fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
 
-    expect(await screen.findByTestId('system-reap-error-message')).toHaveTextContent('targets changed');
+    expect(await screen.findByTestId('manifest-target-worktree:/wt/extra')).toBeInTheDocument();
+    expect(screen.getByTestId('prune-refreshed-notice')).toBeInTheDocument();
     expect(executeMutate).not.toHaveBeenCalled();
-    expect(screen.getByTestId('manifest-target-worktree:/wt/extra')).toBeInTheDocument();
   });
 });
 

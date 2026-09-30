@@ -55,6 +55,8 @@ export interface ManifestConfirmDialogProps {
   banners?: ReactNode;
   /** Defaults to true when the manifest contains at least one worktree target. */
   showDeleteBranch?: boolean;
+  /** Initial state of "Also delete branch" for each fresh manifest; defaults to unchecked. */
+  initialDeleteBranch?: boolean;
   /** Receives the exact manifest object that was passed in. */
   onConfirm: (manifest: ManifestConfirmData, options: ManifestConfirmOptions) => void;
   onCancel: () => void;
@@ -75,17 +77,19 @@ export function ManifestConfirmDialog({
   cancelText = 'Cancel',
   banners,
   showDeleteBranch,
+  initialDeleteBranch = false,
   onConfirm,
   onCancel,
 }: ManifestConfirmDialogProps) {
-  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [deleteBranch, setDeleteBranch] = useState(initialDeleteBranch);
 
   // Hand-rolled scrim (not ui/Modal), so it takes its own occlusion lease.
   useOcclusion(isOpen, 'manifest-confirm-dialog');
 
-  // A fresh manifest (or a reopen) always starts with the branch kept.
+  // A fresh manifest (or a reopen) starts from the caller's choice — the branch kept by default.
   useEffect(() => {
-    setDeleteBranch(false);
+    setDeleteBranch(initialDeleteBranch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only on a new manifest / reopen
   }, [isOpen, manifest.id]);
 
   // Esc cancels. Enter is deliberately NOT bound: a stray Enter must never fire a
