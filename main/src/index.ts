@@ -373,6 +373,8 @@ for (const key of [
   'CYBOFLOW_RUN_ARTIFACTS_DIR',
   'CYBOFLOW_SUBSTRATE',
   'CYBOFLOW_EXECUTION_MODEL',
+  // Identity of a HOSTING instance (spawnMarker.ts) — this process mints its own.
+  'CYBOFLOW_INSTANCE',
 ]) {
   delete process.env[key];
 }
