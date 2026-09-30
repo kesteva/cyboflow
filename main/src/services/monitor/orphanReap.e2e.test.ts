@@ -1,25 +1,35 @@
 /**
- * End-to-end orphan reap with REAL OS processes: a fake cyboflow "instance" process
- * and a child tagged as its own. The instance is killed out from under the child
- * (crash / force-quit), the real classifier re-scans it as `orphan`, and the reap goes
- * through the same tRPC resolve → execute contract the System view uses (not a direct
- * kill). Only the snapshot loader is assembled here; kill is the real ladder.
+ * End-to-end orphan reap with REAL OS processes. A fake cyboflow "instance" process
+ * (spawned with the real `stampSpawnMarker` env) itself spawns a child that inherits
+ * the marker. The instance is SIGKILLed out from under the child (crash / force-quit),
+ * a FRESH production snapshot (real `ps` scan → ProcessSnapshotService → marker reader
+ * → classifier, via createSystemSnapshotProvider) re-scans it as `orphan`, and the reap
+ * goes through the same tRPC resolve → execute contract the System view uses (not a
+ * direct kill). Nothing is planted: the marker is read back off the real child's
+ * environment, and every snapshot is a new scan.
+ *
+ * Marker reading: production reads `/proc/<pid>/environ` on linux only (darwin has no
+ * environment reader). The test injects `readEnviron` — /proc on linux, `ps -Eww` on
+ * darwin — into the real reader, scoped to just this test's two pids so unrelated
+ * markers on the developer's machine can never become reap targets.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { promises as fsp } from 'node:fs';
 import { appRouter } from '../../orchestrator/trpc/router';
 import { createContext } from '../../orchestrator/trpc/context';
 import { setMonitorReapProvider } from '../../orchestrator/trpc/routers/monitorReap';
-import { classify, buildLiveInstanceSet, type MarkedProcess } from '../processSnapshot/classify';
-import { buildWorktreeTruthFixture } from '../processSnapshot/worktreeTruth';
-import { toSystemProcessEntry } from '../systemSnapshotProvider';
+import { getInstanceId, stampSpawnMarker } from '../../utils/spawnMarker';
+import { ProcessSnapshotService } from '../processSnapshot/processSnapshotService';
+import { createSpawnMarkerReader } from '../processSnapshot/spawnMarkerReader';
+import { createSystemSnapshotProvider } from '../systemSnapshotProvider';
 import { MonitorReapService } from './monitorReapService';
 import { ReapExecutorImpl } from './reapExecutor';
 import type { ReapSnapshot } from './reapManifest';
 
 const api = () => appRouter.createCaller(createContext()).cyboflow.monitorReap;
+/** The running "app" (this test process): distinct from the fake instance that owns the child. */
 const SELF = 'self-instance';
-const DEAD = 'fake-instance-1';
 
 const isAlive = (pid: number): boolean => {
   try {
@@ -29,8 +39,49 @@ const isAlive = (pid: number): boolean => {
     return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
 };
-const spawnSleeper = (): ChildProcess =>
-  spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore', detached: true });
+const ppidOf = (pid: number): number =>
+  Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)]).toString().trim());
+const waitFor = async (cond: () => boolean, ms: number): Promise<boolean> => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return cond();
+};
+
+/** The instance process: spawns one child (inheriting its stamped env) and prints the child's pid. */
+const INSTANCE_SCRIPT = `
+const { spawn } = require('node:child_process');
+const c = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+process.stdout.write(String(c.pid) + '\\n');
+setInterval(() => {}, 1000);
+`;
+
+async function spawnInstanceWithChild(env: Record<string, string>): Promise<{ instance: ChildProcess; childPid: number }> {
+  const instance = spawn(process.execPath, ['-e', INSTANCE_SCRIPT], { stdio: ['ignore', 'pipe', 'ignore'], env });
+  const childPid = await new Promise<number>((resolve, reject) => {
+    let buf = '';
+    instance.stdout!.on('data', (d: Buffer) => {
+      buf += d.toString();
+      if (buf.includes('\n')) resolve(Number(buf.trim()));
+    });
+    instance.once('exit', () => reject(new Error('instance exited before reporting its child')));
+  });
+  return { instance, childPid };
+}
+
+/** Environment blob (NUL-separated) for a pid, the way the production linux reader gets it. */
+async function readEnviron(pid: number): Promise<string | null> {
+  try {
+    if (process.platform === 'linux') return await fsp.readFile(`/proc/${pid}/environ`, 'latin1');
+    // darwin: `ps -Eww` appends the environment after argv; stamped values contain no spaces.
+    const out = execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)]).toString().trim();
+    return out.split(/\s+/).join('\0');
+  } catch {
+    return null;
+  }
+}
 
 const cleanup: number[] = [];
 afterEach(() => {
@@ -44,30 +95,32 @@ afterEach(() => {
   }
 });
 
-/** Real `ps` row for one pid, tagged with the instance that spawned it. */
-function taggedRow(pid: number, instanceId: string): MarkedProcess {
-  const out = execFileSync('ps', ['-o', 'ppid=,command=', '-p', String(pid)]).toString().trim();
-  const [ppid, ...cmd] = out.split(/\s+/);
-  return {
-    pid,
-    ppid: Number(ppid),
-    pcpu: 0,
-    pmem: 0,
-    etimeSeconds: 1,
-    command: cmd.join(' '),
-    processType: 'unknown',
-    worktreePath: null,
-    owner: null,
-    marker: { instanceId, worktree: '/wt/fake' },
-  };
-}
-
-function harness(rows: () => MarkedProcess[], instancePid: number) {
-  const loadSnapshot = async (): Promise<ReapSnapshot> => {
-    const live = buildLiveInstanceSet(SELF, [{ instanceId: DEAD, pid: instancePid }], isAlive);
-    const processes = classify(rows(), live, buildWorktreeTruthFixture()).map(toSystemProcessEntry);
-    return { generatedAt: Date.now(), worktrees: [], processes };
-  };
+/**
+ * Wires the REAL snapshot pipeline: every `loadSnapshot()` is a fresh `ps` scan with the
+ * marker read off the live process environments. Only the liveness record (which pid
+ * embodies the fake instance) and the marker-read pid scope are supplied.
+ */
+function harness(instanceId: string, instancePid: number, scopedPids: number[]) {
+  const provider = createSystemSnapshotProvider({
+    processSnapshot: new ProcessSnapshotService({
+      cliManager: { listOwnedProcesses: () => [] },
+      runShellManager: { listOwnedShells: () => [] },
+    }),
+    worktrees: { loadRegistry: async () => { throw new Error('unused'); }, getDiskUsage: () => { throw new Error('unused'); } },
+    orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
+    getSelfInstanceId: () => SELF,
+    readInstanceRecords: async () => [{ instanceId, pid: instancePid, startedAt: new Date().toISOString() }],
+    isPidAlive: isAlive,
+    readMarkers: createSpawnMarkerReader({
+      platform: 'linux', // force the environ path; the injected reader supplies darwin's environment
+      readEnviron: async (pid) => (scopedPids.includes(pid) ? readEnviron(pid) : null),
+    }),
+  });
+  const loadSnapshot = async (): Promise<ReapSnapshot> => ({
+    generatedAt: Date.now(),
+    worktrees: [],
+    processes: await provider.loadProcesses(new Set()),
+  });
   setMonitorReapProvider(
     new MonitorReapService({
       loadSnapshot,
@@ -78,37 +131,58 @@ function harness(rows: () => MarkedProcess[], instancePid: number) {
   return loadSnapshot;
 }
 
-describe('orphan reap end to end (real processes)', () => {
+describe.skipIf(process.platform === 'win32')('orphan reap end to end (real processes)', () => {
   it('reclassifies a child as orphan after its instance dies, then reaps it via resolve → execute', async () => {
-    const instance = spawnSleeper();
-    const child = spawnSleeper();
-    cleanup.push(instance.pid!, child.pid!);
-    const childRow = taggedRow(child.pid!, DEAD);
-    const load = harness(() => [childRow], instance.pid!);
+    // Real marker stamp: the instance id comes from the production helper, not a literal.
+    const instanceId = getInstanceId();
+    const env = stampSpawnMarker(process.env, '/wt/fake');
+    const { instance, childPid } = await spawnInstanceWithChild(env);
+    cleanup.push(instance.pid!, childPid);
+    const instancePid = instance.pid!;
+
+    // The child really is the instance's child, so killing the instance orphans it.
+    expect(ppidOf(childPid)).toBe(instancePid);
+
+    const load = harness(instanceId, instancePid, [instancePid, childPid]);
 
     // While the instance lives, the child is another live instance's: foreign, never sweepable.
-    const before = (await load()).processes.find((p) => p.bucket === 'foreign');
+    const before = (await load()).processes.find((p) => p.bucket === 'foreign' && p.pidLabel === String(childPid));
     expect(before).toBeDefined();
     const pre = await api().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
     expect(pre.manifest.targets).toEqual([]);
-    expect(isAlive(child.pid!)).toBe(true);
+    expect(isAlive(childPid)).toBe(true);
 
     // Crash the instance out from under the child.
-    process.kill(instance.pid!, 'SIGKILL');
-    await new Promise((r) => instance.once('exit', r));
-    expect(isAlive(instance.pid!)).toBe(false);
+    process.kill(instancePid, 'SIGKILL');
+    await new Promise((r) => (instance.exitCode !== null || instance.signalCode !== null ? r(null) : instance.once('exit', r)));
+    expect(isAlive(instancePid)).toBe(false);
+    expect(isAlive(childPid)).toBe(true);
+    expect(ppidOf(childPid)).not.toBe(instancePid);
 
-    const orphan = (await load()).processes.find((p) => p.bucket === 'orphan');
-    expect(orphan).toMatchObject({ bucket: 'orphan', pid: child.pid, instanceId: DEAD });
+    // A brand-new production scan sees the marker on the real child and the dead instance.
+    const orphan = (await load()).processes.find((p) => p.bucket === 'orphan' && p.pid === childPid);
+    expect(orphan).toMatchObject({ bucket: 'orphan', pid: childPid, instanceId });
 
     const { manifest } = await api().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
-    expect(manifest.targets.map((t) => (t.kind === 'process' ? t.pid : null))).toEqual([child.pid]);
+    expect(manifest.targets.map((t) => (t.kind === 'process' ? t.pid : null))).toEqual([childPid]);
     const out = await api().execute({ manifestId: manifest.id });
 
     expect(out.errors).toEqual([]);
-    expect(out.results).toEqual([expect.objectContaining({ targetId: `process:${child.pid}`, kind: 'killed' })]);
-    // Reap the zombie so a dead-but-unreaped child doesn't read alive to signal 0.
-    await new Promise((r) => setTimeout(r, 200));
-    expect(isAlive(child.pid!)).toBe(false);
+    expect(out.results).toEqual([expect.objectContaining({ targetId: `process:${childPid}`, kind: 'killed' })]);
+    // The reparented child is reaped by init; poll so a dead-but-unreaped entry can't read alive.
+    expect(await waitFor(() => !isAlive(childPid), 5000)).toBe(true);
+  }, 60_000);
+
+  it('negative control: when the marker is not readable off the child, the dead instance never makes it an orphan', async () => {
+    const instanceId = getInstanceId();
+    const { instance, childPid } = await spawnInstanceWithChild(stampSpawnMarker(process.env, '/wt/fake'));
+    cleanup.push(instance.pid!, childPid);
+    const load = harness(instanceId, instance.pid!, []); // reader scoped to no pids: no marker observed
+    process.kill(instance.pid!, 'SIGKILL');
+    await new Promise((r) => (instance.exitCode !== null || instance.signalCode !== null ? r(null) : instance.once('exit', r)));
+    const processes = (await load()).processes;
+    expect(processes.some((p) => p.bucket === 'orphan' && p.pid === childPid)).toBe(false);
+    const { manifest } = await api().resolve({ projectId: 1, selection: { kind: 'reap-all-stale' } });
+    expect(manifest.targets).toEqual([]);
   }, 60_000);
 });
