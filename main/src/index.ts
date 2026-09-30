@@ -6,7 +6,6 @@ installTimerCensus();
 
 import { app, BrowserWindow, ipcMain, screen, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
-import * as os from 'os';
 import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
 import { ConfigManager, readTelemetryConfigSync } from './services/configManager';
@@ -37,23 +36,16 @@ import {
   type WindowStatePersistence,
 } from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
-import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
-import { restInteractiveSessionIdle } from './ipc/interactiveSessionRest';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
-import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
+import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
 import {
   shouldBlockArtifactFrameNavigation,
   isExternallyOpenable,
   isSafeExternalOpenTarget,
   shouldBlockScriptedFrameNavigationFromRegistry,
 } from './ipc/artifactFrameGuard';
-import { registerDesignPrototypeServerHandlers } from './ipc/designPrototypeServer';
+import { composeDesignMode } from './designModeComposition';
 import { DesignPrototypeServerManager } from './services/designPrototypeServer';
-import {
-  DesignFrameWatchdog,
-  DESIGN_PROTO_SERVER_EVENT_CHANNEL,
-  type FrameLike,
-} from './services/designFrameWatchdog';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import {
@@ -74,8 +66,8 @@ import { panelManager } from './services/panelManager';
 import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
-import { listRunAgentTargets, resolveRunEffectiveAgents, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
-import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
+import { listRunAgentTargets, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
+import { resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
 import { makeSessionSummarizer } from './orchestrator/sessionSummary/sessionSummaryQuery';
@@ -97,7 +89,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter, taskChangeEvents } from './orchestrator/taskChangeRouter';
 import { attachHumanTaskReviewItemCloser } from './orchestrator/humanTaskReviewItemCloser';
-import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
+import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
 import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
@@ -117,34 +109,19 @@ import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
 import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
 import {
   DesignFeedbackOutbox,
-  setDesignBatchNotifier,
 } from './orchestrator/feedback/designFeedbackOutbox';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
-import { DesignHandoffService } from './orchestrator/design/designHandoffService';
-import { GateSideEffects } from './orchestrator/gateSideEffects';
-import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
-import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
-import { buildReviewQueueHumanGate } from './orchestrator/humanGateWiring';
-import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
-import { buildSystemicPauseGate, findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
+import { composeProgrammaticRunner, type MonitorSteeringActions } from './programmaticRunnerComposition';
+import { findPendingSystemicPause, resolveSystemicPauseItem } from './orchestrator/systemicPauseGateWiring';
 import { detectProvider } from './ipc/providerDetection';
-import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
-import { parsePorcelainPaths } from './orchestrator/programmatic/commitIntegrity';
 import {
-  DefaultMonitorSession,
-  DefaultHistoryReader,
-  MonitorRegistry,
   type MonitorActionResult,
   type MonitorContext,
   type MonitorSession,
 } from './orchestrator/programmatic/monitor';
-import { retryRunHandler, type RetryRunDeps } from './orchestrator/retryRunHandler';
-import { rewindRunHandler, type RewindRunDeps } from './orchestrator/rewindRunHandler';
-import { laneRewindHandler, type LaneRewindDeps } from './orchestrator/laneRewindHandler';
-import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
@@ -157,18 +134,15 @@ import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
-import { createGitOps, backfillLandedSprintCloseOuts } from './ipc/gitOps';
+import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setSwitchRunAgentsDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setRewindRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setInterruptAndSendDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
+import { setSwitchRunAgentsDeps, setStartRunDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
+import { composeRunLiveDeps } from './runLiveDepsComposition';
 import { RunShellManager } from './services/runShellManager';
-import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
-import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
-import type { ClaudePanelState } from '../../shared/types/panels';
-import { gateRuntimePin } from './orchestrator/stepSpawnTarget';
 import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
@@ -186,79 +160,39 @@ import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsag
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
 import { ProviderUsagePoller } from './services/providerUsage/providerUsagePoller';
 import { pollClaudeUsage, pollCodexRateLimits } from './services/providerUsage/providerUsagePollAdapters';
+import { composeMonitorActions } from './monitorActionsComposition';
 import {
-  setReviewItemsRunProbe,
-  setResolveVerdictNudgeDeps,
-} from './orchestrator/trpc/routers/reviewItems';
-import { setMonitorRehydrator, setFinalGateHandover } from './orchestrator/trpc/routers/monitor';
-import { createFinalGateHandover } from './orchestrator/finalGateHandover';
-import { createMonitorRehydrator } from './orchestrator/programmatic/monitorRehydration';
-import { composeMonitorReviewQueueActions } from './monitorReviewQueueComposition';
-import {
-  addTaskToRun,
-  removeTaskFromRun,
-  editRunTask,
-  type TaskMutationDeps,
-  type TaskMutationResult,
-  type TaskMutationNoOpReason,
-} from './orchestrator/taskMutationHandler';
-import {
-  buildGateEscalationSinks,
-  buildLaneTriageActions,
   buildMonitorFindingSink,
   buildSetAsideFindingSink,
   type GateEscalationSinks,
   type LaneTriageActions,
-  type MonitorActionSinkDeps,
 } from './orchestrator/monitorActionSinks';
-import { resolveWorkflowDefinition } from '../../shared/types/workflows';
-import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
-import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
-import { orchSocketEndpoint } from './orchestrator/mcpServer/orchSocketEndpoint';
+import { composeOrchSocketServer } from './orchSocketComposition';
 import { approvalEvents, questionEvents, runStatusEvents, stuckEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
-import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
-import { cancelRunHandler } from './orchestrator/cancelRunHandler';
-import { randomUUID } from 'node:crypto';
+import { composeRunControlDeps } from './runControlDepsComposition';
 import { AgentThreadDbStore } from './orchestrator/agentThread/agentThreadDbStore';
 import { AgentThreadService } from './orchestrator/agentThread/agentThreadService';
 import {
-  setProposalExecutorDeps,
-  reconcileOrphanedExecutingProposals,
   executeProposal,
   getProposalExecutorDeps,
-  type ProposalExecutorDeps,
-  type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
-import { buildProposalExecutorLaunchDeps } from './orchestrator/agentThread/proposalExecutorLaunchDeps';
-import { buildProposalExecutorReviewDeps } from './orchestrator/agentThread/proposalExecutorReviewDeps';
-import { buildProposalExecutorQuickSessionDeps } from './orchestrator/agentThread/proposalExecutorQuickSessionDeps';
-import { generateQuickWorktreeBranchName } from './ipc/session';
-import { reportEagerSpawnFailure } from './ipc/eagerSpawnFailure';
-import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
+import { composeProposalExecutorDeps } from './proposalExecutorComposition';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
 import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
-import { WIDGET_THEME_TOKENS } from '../../shared/customViews/theme';
 import { CustomWidgetServerManager } from './services/customWidgetServer';
 import {
-  DESIGN_MODE_KICKOFF_PROMPT,
-  finishDesignSessionCreate,
-  type DesignSessionLaunchDeps,
-} from './orchestrator/designSessionLaunch';
-import { validateDesignIdeaLink } from './services/designIdeaValidation';
-import {
   runClaudeSdkSessionPreflights,
-  type ClaudeSdkPreflightFailure,
 } from './services/claudeSdkSessionPreflight';
-import { findIdeaBusyReason } from './orchestrator/ideaBusy';
+import { composeDesignSessionLaunchDeps } from './designSessionLaunchComposition';
 import { setOpenIdeaSessionDeps } from './services/openIdeaSessionCore';
 import { agentThreadEvents } from './orchestrator/trpc/routers/agentThread';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
@@ -269,7 +203,6 @@ import type { ClaudeStreamEvent, StreamEnvelope } from '../../shared/types/claud
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
-import { buildBuiltInWorkflows } from './orchestrator/workflows/builtInWorkflows';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
@@ -277,9 +210,6 @@ import { VariantResolver } from './orchestrator/variantResolver';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
-import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
-import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
-import { readRunDigest } from './orchestrator/runDigestReader';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -292,38 +222,27 @@ import {
 import { readWorkflowPromptForRow, resolveRunPromptContext } from './orchestrator/workflowPromptReaderAdapter';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import {
-  recoverActiveStateOrphans,
-  recoverArchivedSessionRunOrphans,
-  backfillArchivedSessionReviewItems,
-  backfillInterruptedOutcomes,
-  backfillTerminalOutcomes,
   stampSessionRunsOutcome,
 } from './orchestrator/runRecovery';
-import { runBootUsageBackfills } from './orchestrator/runUsageBackfill';
-import { replayCodexRunUsage } from './services/panels/codex/codexUsageReplay';
-import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
+import { runBootRecovery } from './bootRecovery';
+import { composeExperimentsDeps } from './experimentsComposition';
 import {
   recoverExperiments,
   dismissAndSweepHalfCreatedExperiment,
   reconcileAllRotationExperiments,
 } from './orchestrator/experimentStore';
-import {
-  createQuickSessionCore,
-  resolveNonClaudeSessionRuntime,
-  stampQuickSessionRuntimeConfig,
-} from './services/createQuickSessionCore';
 import * as fs from 'fs';
-import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
+import { getDevDebugLogPath, appendDevDebugLog, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
+import { installMainConsoleForwarding } from './mainConsoleForwarding';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
-import { stripInheritedLaneEnv, checkWorktreeBuildSlots } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -335,22 +254,6 @@ export let mainWindow: BrowserWindow | null = null;
 // Module-level so the 'Quit Anyway' app.exit() path can flush it; re-bound on
 // every createWindow (the previous controller disposes itself on 'closed').
 let windowStatePersistence: WindowStatePersistence | null = null;
-
-/**
- * Design-mode-FORK wording for each rung of the shared SDK-pinned pre-flight
- * ladder (services/claudeSdkSessionPreflight.ts). Deliberately terser than the
- * `sessions:create-quick` handler's copy — this fork has no renderer client, so
- * the text lands in a review-queue finding rather than a toast. Kept
- * byte-identical to what createDesignSession threw before the ladder was
- * extracted.
- */
-const DESIGN_FORK_PREFLIGHT_MESSAGES: Readonly<Record<ClaudeSdkPreflightFailure, string>> = {
-  provider_disabled: 'Design sessions require Claude, which is turned off in Settings → Integrations.',
-  claude_not_detected:
-    'Design sessions require the Claude SDK substrate — Claude credentials/binary not detected.',
-  interactive_pty_only:
-    'Design sessions cannot run on the interactive substrate, but this app is locked to interactive-PTY-only mode.',
-};
 
 // Strip PER-RUN cyboflow env inherited from a HOSTING cyboflow session
 // (dogfooding: `pnpm dev` launched from a shell inside another cyboflow
@@ -534,31 +437,8 @@ let monitorSwitchToOrchestrated:
 // bound in the tRPC dep-wiring block where db / runExecutor / the routers are all
 // live. Grouped into one holder object (rather than 10 separate module vars)
 // since they share a wiring site. Null until wired → each action reports "not available yet"
-// instead of acting.
-interface MonitorSteeringActions {
-  addTask(runId: string, input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
-  removeTask(runId: string, input: { taskRef: string }): Promise<MonitorActionResult>;
-  editTask(
-    runId: string,
-    input: { taskRef: string; title?: string; body?: string; priority?: string },
-  ): Promise<MonitorActionResult>;
-  skipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  unskipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  steerStep(
-    runId: string,
-    input: { stepId: string; guidance: string; taskRef?: string },
-  ): Promise<MonitorActionResult>;
-  rewindToStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  rewindLaneToStep(
-    runId: string,
-    input: { taskRef: string; stepId: string },
-  ): Promise<MonitorActionResult>;
-  resolveReviewItem(
-    runId: string,
-    input: { reviewItemId: string; outcome?: 'approve' | 'reject' | 'revise'; resolution?: string },
-  ): Promise<MonitorActionResult>;
-  fileNote(runId: string, input: { title: string; body?: string }): Promise<MonitorActionResult>;
-}
+// instead of acting. (The MonitorSteeringActions interface lives in
+// programmaticRunnerComposition.ts, its only other reader.)
 let monitorSteeringActions: MonitorSteeringActions | null = null;
 
 /**
@@ -572,11 +452,6 @@ let laneTriageActions: LaneTriageActions | null = null;
 let monitorFindingSink: ReturnType<typeof buildMonitorFindingSink> | null = null;
 let setAsideFindingSink: ReturnType<typeof buildSetAsideFindingSink> | null = null;
 let gateEscalationSinks: GateEscalationSinks | null = null;
-/** Fallback when a steering action fires before the dep-wiring block ran. */
-const STEERING_NOT_WIRED: MonitorActionResult = {
-  ok: false,
-  message: "That action isn't available yet — try again in a moment.",
-};
 // Monitor-session construction closure (monitor lazy-rehydration): assigned when
 // the monitorFactory is built in initializeServices() and reused by the lazy
 // rehydrator wired in the tRPC dep-wiring block, so a session REVIVED after an
@@ -1438,152 +1313,17 @@ async function createWindow() {
     }
   });
 
-  // Override console methods to forward to renderer and logger
-  console.log = (...args: unknown[]) => {
-    // Format the message
-    const message = formatConsoleArgs(args);
-
-    // Write to logger if available
-    if (logger) {
-      logger.info(message);
-    } else {
-      originalLog.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'log', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only). In production the renderer never mirrors
-    // backend logs, so this IPC send + serialization would be pure overhead on
-    // every log line — gate it on isDevelopment (F2).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'log', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalLog('[Main] Failed to send log to renderer:', e);
-      }
-    }
-  };
-
-  console.error = (...args: unknown[]) => {
-    // Prevent infinite recursion by checking if we're already in an error handler
-    if ((console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError) {
-      return originalError.apply(console, args);
-    }
-    
-    (console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError = true;
-    
-    try {
-      // If logger is not initialized or we're in the logger itself, use original console
-      if (!logger) {
-        originalError.apply(console, args);
-        return;
-      }
-
-      const message = formatConsoleArgs(args);
-
-      // Extract Error object if present
-      const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
-
-      // Use logger but with recursion protection
-      logger.error(message, errorObj);
-
-      // In development, also write to backend debug log file
-      if (isDevelopment) {
-        appendDevDebugLog('backend', 'error', 'BACKEND', message, { error: originalError });
-      }
-
-      // Forward to renderer (dev-only, F2 — see console.log override above).
-      if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-        try {
-          mainWindow.webContents.send('main-log', 'error', message);
-        } catch (e) {
-          // If sending to renderer fails, use original console to avoid recursion
-          originalError('[Main] Failed to send error to renderer:', e);
-        }
-      }
-    } catch (e) {
-      // If anything fails in the error handler, fall back to original
-      originalError.apply(console, args);
-    } finally {
-      (console.error as typeof console.error & { __isHandlingError?: boolean }).__isHandlingError = false;
-    }
-  };
-
-  console.warn = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    // Extract Error object if present for warnings too
-    const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
-
-    if (logger) {
-      logger.warn(message, errorObj);
-    } else {
-      originalWarn.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'warn', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'warn', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalWarn('[Main] Failed to send warning to renderer:', e);
-      }
-    }
-  };
-
-  console.info = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    if (logger) {
-      logger.info(message);
-    } else {
-      originalInfo.apply(console, args);
-    }
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'info', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'info', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        originalInfo('[Main] Failed to send info to renderer:', e);
-      }
-    }
-  };
-
-  console.debug = (...args: unknown[]) => {
-    const message = formatConsoleArgs(args);
-
-    // In development, also write to backend debug log file
-    if (isDevelopment) {
-      appendDevDebugLog('backend', 'debug', 'BACKEND', message, { error: originalError });
-    }
-
-    // Forward to renderer (dev-only, F2 — see console.log override above).
-    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('main-log', 'debug', message);
-      } catch (e) {
-        // If sending to renderer fails, use original console to avoid recursion
-        console.error('[Main] Failed to send debug to renderer:', e);
-      }
-    }
-  };
+  // Override console methods to forward to renderer and logger — see
+  // mainConsoleForwarding.ts (#19 step 24); re-installed on every createWindow().
+  installMainConsoleForwarding({
+    getMainWindow: () => mainWindow,
+    getLogger: () => logger,
+    isDevelopment,
+    originalLog,
+    originalError,
+    originalWarn,
+    originalInfo,
+  });
 
   // Log any renderer errors
   mainWindow.webContents.on('render-process-gone', (event, details) => {
@@ -2405,107 +2145,21 @@ async function initializeServices(): Promise<boolean> {
     getProposal: (id) => agentThreadStore.getProposal(id),
   });
 
-  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
-  // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
-  // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
-  // tools are routable.  Started here (before the RunLauncher block) so its
-  // socket path is available to the providers, the McpServerLifecycle, and the
-  // CLI manager below.  `cyboflowDb`/`cyboflowLogger` are already in scope above.
-  // `onInteractiveTurnEnd` wires the Stop-hook turn-end seam (IDEA-030):
-  // mcpQueryHandler cannot import main/src/services directly (ORCHESTRATOR
-  // LAYERING RULE), so the callback is threaded in here where
-  // `interactiveCliManager` is already narrowed to InteractiveClaudeManager
-  // (the throw-guard above at its construction site).
-  const orchSocketServer = new OrchSocketServer(
-    orchSocketEndpoint(getCyboflowSubdirectory('sockets', 'orch.sock')),
+  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link,
+  // built + started in orchSocketComposition.ts (#19 step 21). Started here
+  // (before the RunLauncher block) so its socket path is available to the
+  // providers, the McpServerLifecycle, and the CLI manager below; orchSocketReady
+  // gates the MCP subprocess on the socket actually listening.
+  const { orchSocketServer, orchSocketReady } = composeOrchSocketServer({
     cyboflowDb,
     cyboflowLogger,
-    {
-      onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId),
-      onInteractiveQuestionOpen: (runId) => interactiveCliManager.notifyQuestionOpen(runId),
-      // Global-agent proposal writer: the cyboflow_propose_action MCP tool (global
-      // scope) inserts agent_proposals rows through this store. Without it the
-      // handler fails closed (returns an error) — so it must be the SAME instance
-      // the executor + tRPC context read.
-      agentThreadStore,
-      // Custom-widget-authoring global-agent tools (cyboflow_db_schema /
-      // _widget_preview / _widget_save, docs/proposals/CUSTOM-VIEWS.md §9 row
-      // S6): the SAME `customViewsService` instance constructed above, so a
-      // saved widget draft is visible to the exact service the renderer's
-      // tRPC router reads. Absent only if this handler runs before boot
-      // wiring completes (never the case in production).
-      customViews: customViewsService ?? undefined,
-      // Global-agent scoped filesystem tools (cyboflow_fs_read / _list / _grep):
-      // the always-included roots are the registered project paths; this dep
-      // supplies the user-configured EXTRA folders on top. Absent ⇒ [] (project
-      // folders only). The orchestrator handler realpath's + scope-checks every
-      // access — this only widens the root set, never bypasses enforcement.
-      getAssistantFolderAccess: () => configManager.getAssistantFolderAccess(),
-      getAssistantExcludedProjectPaths: () => configManager.getAssistantExcludedProjectPaths(),
-      // Phase 2 §5.2 seam 1: the cyboflow_register_verify_runbook tool writes the
-      // MACHINE-LOCAL runbook record through this store. Deliberately the SAME
-      // instance the VerificationScheduler was initialized with above — the setup
-      // flow registers a draft here and the ENGINE proves that exact record on a
-      // passing setup-proof run, so the two halves of "derive → prove" must be
-      // looking at one store over one DB.
-      verifyRunbookStore,
-      // The GLOBAL visual-verify config, read LIVE per call — the same accessor
-      // the WorkflowRegistry injects into createRun. Only the `__quick__` chat
-      // sentinel consults it: its run stamp is minted on the session's first turn
-      // and has no UPDATE path, so a quick session resolves its verify posture at
-      // CALL time through this closure instead. A closure (not the resolved value)
-      // so toggling the master switch in Settings takes effect on the next tool
-      // call rather than requiring a restart.
-      getVisualVerifyConfig: () => configManager.getVisualVerifyConfig(),
-      // The sprint task-cap override, read LIVE for the same reason: the
-      // cyboflow_create_sprint_batch backstop must honor the CURRENT setting, not
-      // one frozen at launch.
-      getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
-      // Web-viewer observe tools; consent lives behind the seam (webViewerComposition.ts).
-      webViewerAgent: webViewerComposition?.webViewerAgent,
-      // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
-      // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
-      // surface so quick sessions can edit flows + variants over MCP without the
-      // handler importing the concrete registry. ensureGlobalBuiltIns is a
-      // zero-arg closure here (supplying the in-repo built-ins), matching the
-      // structural type; every other method forwards 1:1.
-      workflowConfig: {
-        getById: (id) => workflowRegistry.getById(id),
-        listByProject: (projectId) => workflowRegistry.listByProject(projectId),
-        ensureGlobalBuiltIns: () => workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows()),
-        getBaselineRotation: (id) => workflowRegistry.getBaselineRotation(id),
-        getEffectiveDefinition: (id) => workflowRegistry.getEffectiveDefinition(id),
-        updateSpec: (id, def) => workflowRegistry.updateSpec(id, def),
-        resetSpec: (id) => workflowRegistry.resetSpec(id),
-        createCustom: (params) => workflowRegistry.createCustom(params),
-        deleteWorkflow: (id) => workflowRegistry.deleteWorkflow(id),
-        listVariants: (id, opts) => workflowRegistry.listVariants(id, opts),
-        createVariantFromCurrent: (id, label, opts) =>
-          workflowRegistry.createVariantFromCurrent(id, label, opts),
-        updateVariant: (variantId, patch) => workflowRegistry.updateVariant(variantId, patch),
-        setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
-        deleteVariant: (variantId) => workflowRegistry.deleteVariant(variantId),
-        setBaselineRotation: (id, patch) => workflowRegistry.setBaselineRotation(id, patch),
-      },
-      // Ad-hoc code-review eval tool (cyboflow_run_eval): forward to the EvalWorker
-      // singleton initialized above, which owns the ONE definition of the snapshot
-      // deps (diff closure, app version, config toggles, enqueue) shared with the
-      // automatic human-review trigger — so the two mint paths can never drift.
-      // Deliberately NOT error-swallowed here (unlike the automatic trigger's
-      // snapshot()): an explicit caller must get a reason, and the MCP handler maps
-      // a throw to an ok:false reply.
-      runAdHocEval: (runId) => EvalWorker.getInstance().runAdHoc(runId),
-    },
-  );
-  // Keep the start promise so the MCP subprocess (below) can be gated on the
-  // socket actually listening — it is a pure client and dies with ECONNREFUSED if
-  // it connects before the bind completes. The dedicated .catch here keeps a bind
-  // failure from surfacing as an unhandled rejection before that gate attaches.
-  const orchSocketReady = orchSocketServer.start();
-  orchSocketReady.catch((err) => {
-    cyboflowLogger.error(
-      `[Cyboflow Orch IPC] socket server start failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    interactiveCliManager,
+    agentThreadStore,
+    customViewsService,
+    verifyRunbookStore,
+    webViewerComposition,
+    configManager,
+    workflowRegistry,
   });
 
   // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
@@ -2725,482 +2379,31 @@ async function initializeServices(): Promise<boolean> {
     },
   };
 
-  // Programmatic-run driver (execution-model seam, Stage 2). When a run's
-  // immutable `execution_model` stamp is 'programmatic', RunExecutor delegates the
-  // whole run to this collaborator: host code (the WorkflowController) walks the
-  // run's DAG, running each step as a scoped agent turn via the SAME spawn surface
-  // (substrateFacade), driving the live timeline through buildStepTransitionEvent
-  // (the same path cyboflow_report_step uses), and resolving human gates by
-  // opening a blocking review item via HumanStepManager + awaiting its resolution
-  // on reviewItemChangeEvents. Default 'orchestrated' runs never touch this.
-  const programmaticRunner = new DefaultProgrammaticRunner({
-    spawner: substrateFacade,
-    // Enables the controller's agentless visual-verify enqueue capability
-    // (enqueueTaskVerification — verification-agent redesign §5.3): absent, the
-    // step cleanly skips (fail-open) and visual verification never fires on the
-    // programmatic plane.
-    db: rawDb,
-    reporter: {
-      report: (runId, stepId, status) =>
-        void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
-    },
-    gate: buildReviewQueueHumanGate({
-      events: reviewItemChangeEvents,
-      channelFor: reviewItemProjectChannel,
-      logger: cyboflowLogger,
-    }),
-    // Per-step idea scope for programmatic prompts. The ownership projection
-    // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
-    // raw-prompt path picks up the idea its context step creates before optional
-    // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
-    runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
-    // §11 (lane-runbook-bootstrap): the files this run's bootstrap committed,
-    // rendered as a do-not-touch list on address-review. That step "fixes in
-    // place", and both files are booby-trapped for a well-meant fix — the
-    // runbook's proof is content-addressed against the committed bytes, and the
-    // rung-1 config edit is what makes the environment stand up at all.
-    bootstrapProtectedPathsProvider: (runId) => runbookBootstrapStamps.writtenPathsForRun(runId),
-    // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
-    // FULL effective agent set (project overrides + workflow agentConfigs + variant
-    // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/model/providerModel/effort. Absent EVERY override
-    // (unoverridden agent) -> undefined, so the step spawns under the run-level
-    // provider/runtime/model with no per-agent effort. Effort is returned even
-    // without a runtime override so a Claude agent can carry a reasoning-effort pin
-    // (IDEA-029), and `model` likewise so a Claude agent can carry a MODEL pin: a
-    // programmatic step turn IS the agent (a top-level spawn), so the agent
-    // overlay's `model:` frontmatter never binds on this plane and this resolver is
-    // the pin's only channel. The alias is resolved to its concrete snapshot here
-    // (mirroring the overlay writer) so the spawn receives a real model id.
-    resolveStepAgent: (runId, agentKey) => {
-      const eff = resolveRunEffectiveAgents(rawDb, runId);
-      const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort && !a.model && !a.providerModel)) return undefined;
-      // Provider-access gate for PER-AGENT runtime pins. `agentConfigs` can be
-      // written by the MCP workflow-config tools as well as the editor, so a pin
-      // naming a provider the user switched off in Settings → Integrations can
-      // reach here even though the editor hides it. Drop just the runtime pin
-      // (keeping model/effort) so the step falls back to the run-level provider,
-      // which createRun already resolved onto an ENABLED provider — same
-      // fail-soft shape as the CLAUDE_ONLY_AGENT_KEYS drop. Shared with the
-      // per-step model rail (runStepModels.ts) via stepSpawnTarget.ts.
-      const pinnedRuntime = gateRuntimePin(a.runtime, (p) => configManager.isAgentProviderEnabled(p));
-      if (a.runtime && pinnedRuntime === undefined) {
-        cyboflowLogger.warn(
-          `[resolveStepAgent] dropping ${a.runtime} pin for agent '${agentKey}' — provider disabled in Settings → Integrations`,
-        );
-      }
-      // bareModelId resolves the alias to the current concrete snapshot at the
-      // agent's DEFAULT window and strips any `[1m]` suffix — so a per-agent
-      // `opus` pin spawns `claude-opus-5-5` (default window), matching the
-      // orchestrated overlay's `model:` frontmatter semantics (modelContext.ts),
-      // NOT the 1M variant a run-level `opus` picker would select. Intentional:
-      // per-agent pins are window-agnostic and consistent across both planes.
-      const model = bareModelId(a.model, isModelUsable);
-      return {
-        ...(pinnedRuntime ? { runtime: pinnedRuntime } : {}),
-        ...(model ? { model } : {}),
-        // a.providerModel is already normalized (providerModel ?? codexModel) by
-        // effectiveAgents; codexModel mirrors it so a not-yet-migrated consumer of
-        // this return shape (there is none left in-tree, but the field stays a
-        // read-compat alias) still sees the correct value.
-        ...(a.providerModel ? { providerModel: a.providerModel, codexModel: a.providerModel } : {}),
-        ...(a.effort ? { effort: a.effort } : {}),
-      };
-    },
-    // Direct step dispatch: the role's effective prompt (same layering as above).
-    resolveStepRole: (runId, agentKey) => {
-      const systemPrompt = resolveRunEffectiveAgents(rawDb, runId).find((e) => e.agentKey === agentKey)?.systemPrompt;
-      return systemPrompt ? { systemPrompt } : undefined;
-    },
-    // Blocking-review-items checkpoint: parks a programmatic run at each step
-    // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
-    // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
-    // resumes. Reuses HumanStepManager for the park/resume/count primitives so the
-    // same aggregate-unblock invariant governs both gate decisions and findings.
-    blockingGate: new ReviewQueueBlockingItemsGate(
-      HumanStepManager.getInstance(),
-      reviewItemChangeEvents,
-      reviewItemProjectChannel,
-      cyboflowLogger,
-    ),
-    // Systemic-pause gate (usage/rate-limit park + auto-resume): see systemicPauseGateWiring.ts.
-    systemicGate: buildSystemicPauseGate({
-      events: reviewItemChangeEvents,
-      channelFor: reviewItemProjectChannel,
-      logger: cyboflowLogger,
-    }),
-    // Visual merge-gate (programmatic actuation): closes the prose-only boundary so
-    // a PROGRAMMATIC sprint parks each lane after visual-verify, awaits the async
-    // verdict the VerificationScheduler delivers, and re-dispatches implement on a
-    // FAIL (or fails the lane at the cap) — instead of integrating prematurely or
-    // leaving a FAILed lane parked. Subscribes to the scheduler's verificationEvents
-    // + reads the merge-gate's lane write. Inert for verify-disabled / non-sprint runs.
-    visualGate: new SchedulerVisualVerifyGate({
-      db: cyboflowDb,
-      events: verificationEvents,
-      channelFor: verificationChannel,
-      logger: cyboflowLogger,
-    }),
-    // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
-    // human-seam plane, folding the old Stage 3 supervisor + supervisor-chat into
-    // one token-frugal `MonitorSession` in the run's existing Chat pane. ALWAYS ON
-    // for programmatic runs (supervisor-role redesign, 2026-07-05 — the old
-    // `programmaticSupervisor` opt-in is gone): the supervisor is a Q&A partner the
-    // human can query at ANY point, and escalations surface in BOTH the chat and
-    // the review queue. A `DefaultMonitorSession` over the real on-demand query fns
-    // (monitorQuery.ts) + a HistoryReader bound to cyboflowDb; it reads the WHOLE
-    // history ONLY when it must act, and costs zero tokens during routine progress.
-    // The run's `injectEvent` (2nd factory arg, from the run context — Slice B) is
-    // owned by the session so `converse` renders both sides of an exchange into the
-    // Chat pane (the tRPC `monitor.send` seam); the runner registers the session in
-    // MonitorRegistry so the router reaches it. NOT headlessly verifiable — it
-    // makes a real Claude call.
-    monitorFactory: ((): ((
-      ctx: MonitorContext,
-      injectEvent: (event: ClaudeStreamEvent) => void,
-    ) => MonitorSession | undefined) => {
-      const structuredQuery = makeSdkStructuredQuery(claudeExecutablePath, cyboflowLogger);
-      const textQuery = makeSdkTextQuery(claudeExecutablePath, cyboflowLogger);
-      // 3rd arg = the RUN-DELIVERABLES reader (CR-6): what this run produced,
-      // folded into the gate + review-loop prompts.
-      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger, (r) => readRunDigest(cyboflowDb, r, cyboflowLogger));
-      // Also published to the module-scoped buildMonitorSession holder so the
-      // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
-      // byte-identical sessions when reviving a run's chat after an app restart.
-      const buildSession = (
-        ctx: MonitorContext,
-        injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
-      ): MonitorSession =>
-        new DefaultMonitorSession({
-          ctx,
-          history,
-          structuredQuery,
-          textQuery,
-          injectEvent,
-          // Monitor-actuation seam: the retry_step action executes through the
-          // SAME retryRunHandler chokepoint as runs.retryStep, bound lazily via
-          // the module-scoped holder (the RunExecutor does not exist yet at
-          // monitorFactory construction time — see monitorRetryStep's docblock).
-          actions: {
-            retryStep: (stepId) =>
-              monitorRetryStep
-                ? monitorRetryStep(ctx.runId, stepId)
-                : Promise.resolve({
-                    ok: false,
-                    message: 'Retry is not wired yet — try again in a moment.',
-                  }),
-            switchToOrchestrated: (reason) =>
-              monitorSwitchToOrchestrated
-                ? monitorSwitchToOrchestrated(ctx.runId, reason)
-                : Promise.resolve({
-                    ok: false,
-                    message: 'Handover is not wired yet — try again in a moment.',
-                  }),
-            // The 9 confirm-gated steering actions, all delegating to the single
-            // late-bound monitorSteeringActions holder (wired in the dep-wiring
-            // block). Each threads the session's own runId.
-            addTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.addTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            removeTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.removeTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            editTask: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.editTask(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            skipStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.skipStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            unskipStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.unskipStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            steerStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.steerStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            rewindToStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.rewindToStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            rewindLaneToStep: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.rewindLaneToStep(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            resolveReviewItem: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.resolveReviewItem(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-            fileNote: (input) =>
-              monitorSteeringActions
-                ? monitorSteeringActions.fileNote(ctx.runId, input)
-                : Promise.resolve(STEERING_NOT_WIRED),
-          },
-          logger: cyboflowLogger,
-        });
-      buildMonitorSession = buildSession;
-      return buildSession;
-    })(),
-    // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
-    // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can
-    // resolve a fanOut step's item set + drive a sprint lane per item ON THE
-    // PROGRAMMATIC PLANE. Reuses the SAME sprintLaneStore already wired below — the
-    // lane events fire on sprintLaneChannel(runId), so useSprintLanes lights up live
-    // with zero new subscription. Returns undefined when the run carries no batch_id
-    // (not a seeded sprint) ⇒ the host gets no driver ⇒ no host-driven fan-out
-    // (byte-identical to today; orchestrated sprints still drive lanes via the MCP
-    // backstop). driveLane is fail-soft — a lane-store error is swallowed + logged so
-    // a broken lane write never aborts the controller walk.
-    fanOutDriverFactory: ({ batchId }) => {
-      if (!batchId) return undefined;
-      return {
-        resolveItems: (_runId, over) =>
-          over === 'tasks'
-            ? sprintLaneStore
-                .listLanes(batchId)
-                // Crash-safe resume: skip lanes already settled (integrated/
-                // failed/blocked) so a re-entered fanOut step does not re-run
-                // completed work, flip a failed lane back to integrated, or
-                // let a BLOCKED child re-enter without its failed parent
-                // (Item 6, Codex C3 — a blocked lane never started and stays
-                // excluded until an explicit reset, e.g. resetFailedLanes,
-                // re-queues it) — mirrors the monotonic-forward guard in
-                // deriveLaneFromTaskDispatch. On a fresh run all lanes are
-                // 'queued', so every task is returned.
-                .filter(
-                  (lane) => lane.status !== 'integrated' && lane.status !== 'failed' && lane.status !== 'blocked',
-                )
-                .map((lane) => lane.taskId)
-            : [],
-        // DAG ordering (2026-06-22): expose the batch's BLOCKING edges so the
-        // controller dispatches a task only after its prerequisites integrate.
-        // Reads task_dependencies for the batch's lane task ids; returns taskId →
-        // [prerequisite taskIds]. An empty map ⇒ flat waves (no dependencies).
-        dependencies: (_runId, over) => {
-          const map = new Map<string, string[]>();
-          if (over !== 'tasks') return map;
-          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
-          if (taskIds.length === 0) return map;
-          const placeholders = taskIds.map(() => '?').join(',');
-          const rows = rawDb
-            .prepare(
-              `SELECT task_id, depends_on_task_id FROM task_dependencies
-                 WHERE kind = 'blocking' AND task_id IN (${placeholders})`,
-            )
-            .all(...taskIds) as Array<{ task_id: string; depends_on_task_id: string }>;
-          for (const row of rows) {
-            const prereqs = map.get(row.task_id) ?? [];
-            prereqs.push(row.depends_on_task_id);
-            map.set(row.task_id, prereqs);
-          }
-          return map;
-        },
-        // Same task-file rows the task editor persists are the concurrency source
-        // of truth. This deliberately does not inspect task prompt/body text.
-        expectedFiles: (_runId, over) => {
-          const map = new Map<string, string[]>();
-          if (over !== 'tasks') return map;
-          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
-          if (taskIds.length === 0) return map;
-          const placeholders = taskIds.map(() => '?').join(',');
-          const rows = rawDb
-            .prepare(`SELECT task_id, file_path FROM task_files WHERE task_id IN (${placeholders})`)
-            .all(...taskIds) as Array<{ task_id: string; file_path: string }>;
-          for (const row of rows) {
-            const files = map.get(row.task_id) ?? [];
-            files.push(row.file_path);
-            map.set(row.task_id, files);
-          }
-          return map;
-        },
-        // Commit-integrity backstop: 'integrated' means "complete AND committed
-        // in the session worktree", which inner-step verdicts alone cannot
-        // establish — a lane whose `git commit` was denied by a permission gate
-        // reported green with its changes left untracked on disk (observed live).
-        // Read the run's worktree HEAD at lane start and re-read it at lane end;
-        // the controller refuses to integrate a lane that moved HEAD nowhere and
-        // left the tree dirty. Every failure path (no worktree row, git error)
-        // degrades to "no probe" / a rethrow the controller swallows, so the
-        // backstop can only withhold a false integrate, never invent a failure.
-        beginCommitProbe: async (rid) => {
-          const row = rawDb
-            .prepare(`SELECT worktree_path FROM workflow_runs WHERE id = ?`)
-            .get(rid) as { worktree_path?: unknown } | undefined;
-          const worktreePath =
-            row && typeof row.worktree_path === 'string' && row.worktree_path.length > 0
-              ? row.worktree_path
-              : null;
-          if (worktreePath === null) return undefined;
-          const readHead = async (): Promise<string> =>
-            (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
-          // `--untracked-files=all` lists files, not collapsed directories, so a new
-          // file inside an already-untracked directory still reads as NEW dirt.
-          const readDirtyPaths = async (): Promise<string[]> =>
-            parsePorcelainPaths(
-              await runGitAsync(worktreePath, ['status', '--porcelain', '--untracked-files=all']),
-            );
-          const startHead = await readHead();
-          // Lane-start dirt (a failed sibling's leftovers, a pre-existing edit) is
-          // not this lane's uncommitted work. A failed read degrades to "unknown"
-          // (newDirtyPaths absent ⇒ every dirty path counts), never to a failure.
-          let startDirty: Set<string> | undefined;
-          try {
-            startDirty = new Set(await readDirtyPaths());
-          } catch {
-            startDirty = undefined;
-          }
-          return async () => {
-            const endHead = await readHead();
-            const dirtyPaths = await readDirtyPaths();
-            // §9 (lane-runbook-bootstrap): a RUNBOOK BOOTSTRAP commits into this
-            // same shared worktree, mid-lane. HEAD then moves for a reason that
-            // is not any lane's work — and since the only case that withholds
-            // 'integrated' is "HEAD did not move AND the tree is dirty", an
-            // advanced HEAD would let a lane that committed nothing integrate
-            // anyway. That is the exact failure this probe exists to catch, so
-            // the bootstrap's own commits are subtracted before the comparison.
-            //
-            // Fail-soft on purpose, in the direction that PRESERVES the probe: a
-            // rev-list that throws leaves headAdvanced as the plain sha
-            // comparison, which is what shipped.
-            let headAdvanced = endHead !== startHead;
-            if (headAdvanced) {
-              try {
-                const bootstrapShas = new Set(runbookBootstrapStamps.commitShasForRun(rid));
-                if (bootstrapShas.size > 0) {
-                  const between = (
-                    await runGitAsync(worktreePath, ['rev-list', `${startHead}..${endHead}`])
-                  )
-                    .split('\n')
-                    .map((line) => line.trim())
-                    .filter((line) => line.length > 0);
-                  // Compared by PREFIX in both directions: the stamp records
-                  // whatever `rev-parse HEAD` returned (full) but a hand-written
-                  // or abbreviated sha must still match.
-                  headAdvanced = between.some(
-                    (sha) =>
-                      ![...bootstrapShas].some((b) => sha.startsWith(b) || b.startsWith(sha)),
-                  );
-                }
-              } catch {
-                // Keep the plain comparison.
-              }
-            }
-            return {
-              headAdvanced,
-              dirty: dirtyPaths.length > 0,
-              dirtyPaths,
-              ...(startDirty !== undefined
-                ? { newDirtyPaths: dirtyPaths.filter((path) => !startDirty.has(path)) }
-                : {}),
-              buildSlots: await checkWorktreeBuildSlots(worktreePath), // committed lane build output at the END HEAD (tri-state)
-            };
-          };
-        },
-        // Targeted failed→running un-settle for the controller's MONITOR LANE
-        // RESCUE at the visual merge gate: that gate durably writes the lane
-        // 'failed' before the controller's awaitVerdict resolves, so a rescued
-        // lane is already settled in the store while its walk is still live.
-        // Status-guarded to 'failed' inside the store (a no-op otherwise) and
-        // fail-soft there too, so no try/catch is needed here.
-        reviveLane: ({ itemId }) => {
-          sprintLaneStore.reviveLane(batchId, itemId);
-        },
-        driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
-          try {
-            sprintLaneStore.updateLane({
-              runId: rid,
-              batchId,
-              taskId: itemId,
-              allowedStepIds,
-              ...(status !== undefined ? { status } : {}),
-              ...(currentStepId !== undefined ? { currentStepId } : {}),
-              ...(attempt !== undefined ? { attempt } : {}),
-            });
-          } catch (err) {
-            cyboflowLogger.debug('[fanOutDriver] driveLane skipped (fail-soft)', {
-              runId: rid,
-              itemId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        },
-      };
-    },
-    // Live batch_id reader (generalize-parallel-fan-out follow-up): backs the
-    // fan-out driver provider's mid-walk re-read so `ship`'s materialize-batch
-    // step (which UPDATEs workflow_runs.batch_id strictly AFTER this run's
-    // ProgrammaticRunContext is built) is honored on the SAME walk instead of a
-    // permanently-null one-shot snapshot silently degrading execute-tasks to a
-    // single agent step. Reuses the SAME WorkflowRegistry row reader RunExecutor
-    // itself uses to snapshot ctx.run at the top of execute() — just re-invoked
-    // live rather than once.
-    readRunBatchId: (runId) => workflowRegistry.getRunById(runId)?.batch_id ?? null,
-    // Sprint task-scope provider (grounding fix, 2026-06-22): resolve the
-    // `# Sprint tasks` block body for a sprint run's batch so the programmatic step
-    // prompts carry the real task set (reuses the SAME buildSeedTasksBlock helper +
-    // readers the orchestrated getPrompt path uses, so both planes emit identical
-    // scope). Without it the analyze-dependencies step agent never sees the tasks,
-    // concludes "No dependencies", and the dependents fan out concurrently and fail.
-    seedTasksProvider: (batchId) =>
-      buildSeedTasksBlock(
-        batchId,
-        { listLaneTaskIds: (b) => sprintLaneStore.listLanes(b).map((lane) => lane.taskId) },
-        ideaBodyReader,
-        cyboflowLogger,
-      ),
-    // ── Autonomous LANE TRIAGE (monitor lane rescue) ────────────────────────
-    // All three route through the late-bound `laneTriageActions` holder so they
-    // reuse the SAME TaskMutationDeps / ReviewItemRouter seams the monitor's chat
-    // actions use. Unwired, each degrades to the no-lane-triage posture.
-    laneTriageTaskReader: (runId, itemId) => laneTriageActions?.readTask(runId, itemId),
-    laneTriageAdjustTask: (runId, input) =>
-      laneTriageActions
-        ? laneTriageActions.adjustTask(runId, input)
-        : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
-    laneTriageFindingSink: (runId, input) =>
-      laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
-    // ── SUPERVISED REVIEW LOOP (monitor steering each automatic design lap) ──
-    // Same late-bound posture: unwired, BOTH reject — the host then abandons a
-    // supervisor resolve, and keeps a set-aside entry in the lap (never dropped).
-    monitorFindingSink: (runId, input) =>
-      monitorFindingSink ? monitorFindingSink(runId, input) : Promise.reject(new Error('monitor finding sink not wired yet')),
-    setAsideFindingSink: (runId, input) =>
-      setAsideFindingSink ? setAsideFindingSink(runId, input) : Promise.reject(new Error('set-aside finding sink not wired yet')),
-    // ── ESCALATION REVIEW (the supervisor's recommendation at a human gate) ──
-    // Same late-bound posture: unwired ⇒ an empty queue and a logged-only
-    // recommendation, i.e. today's card exactly.
-    escalationSinks: () => gateEscalationSinks,
-    // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
-    // closure the scheduler's §3.2 degrade gate and the health panel's badge use
-    // — there must never be a third reading of `verify_runbook_local.status`.
-    // Read LAZILY through the module holder (it is assigned inside
-    // initializeServices, like every other late-bound probe): an unset holder
-    // resolves `null`, which the posture reads as UNKNOWN and answers 'available'
-    // for, never as "this project has no runbook".
-    verifyRunbookStatus: async (projectId, modality, probePath) =>
-      verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
-    // §A6 — the posture reads the runbook-optional kill switch LIVE, like gate 3.
-    verifyLiveConfig: () => configManager.getVisualVerifyConfig(),
-    // Per-step result sink (migration 033): persist each settled step so results
-    // are queryable + crash-safe resume can skip individually-completed steps.
-    stepResultRecorder: (runId, report) =>
-      StepResultStore.tryGetInstance()?.record({
-        runId,
-        stepId: report.stepId,
-        phaseId: report.phaseId,
-        outcome: report.outcome,
-        attempts: report.attempts,
-        ...(report.error !== undefined ? { error: report.error } : {}),
-        ...(report.deliberate !== undefined ? { deliberate: report.deliberate } : {}),
-      }),
-    logger: cyboflowLogger,
+  // Programmatic-run driver (execution-model seam, Stage 2) — composed in
+  // programmaticRunnerComposition.ts (#19 step 16). The monitor-session builder
+  // it publishes is assigned to the module holder the lazy rehydrator reads.
+  const programmaticRunnerComposition = composeProgrammaticRunner({
+    substrateFacade,
+    rawDb,
+    cyboflowDb,
+    cyboflowLogger,
+    configManager,
+    workflowRegistry,
+    claudeExecutablePath,
+    sprintLaneStore,
+    runbookBootstrapStamps,
+    ideaBodyReader,
+    getMonitorRetryStep: () => monitorRetryStep,
+    getMonitorSwitchToOrchestrated: () => monitorSwitchToOrchestrated,
+    getMonitorSteeringActions: () => monitorSteeringActions,
+    getLaneTriageActions: () => laneTriageActions,
+    getMonitorFindingSink: () => monitorFindingSink,
+    getSetAsideFindingSink: () => setAsideFindingSink,
+    getGateEscalationSinks: () => gateEscalationSinks,
+    getVerifyRunbookStatus: () => verifyRunbookStatus,
   });
+  const programmaticRunner = programmaticRunnerComposition.programmaticRunner;
+  buildMonitorSession = programmaticRunnerComposition.buildMonitorSession;
 
   // Selected-finding reader (migration 034) — injected as the trailing
   // RunExecutor arg; reads through the same narrow DatabaseLike adapter the
@@ -3717,166 +2920,21 @@ async function initializeServices(): Promise<boolean> {
   // prototype/index.html for a ui-prototype/generic artifact (run subtree, else
   // the committed snapshot store) with a restrictive CSP <meta> injected.
   registerArtifactHtmlHandlers(ipcMain, services);
-  // Design Mode v1 (design-mode.md "Process isolation" + "Server lifecycle") —
-  // the token-gated loopback prototype server + its runaway-frame watchdog. The
-  // watchdog reads the main window's frame subtree, per-process metrics, and cpu
-  // count via Electron-backed seams (the service modules stay Electron-free); the
-  // manager loads the canonical interactive-prototype bytes fresh per request. The
-  // two reference each other (watchdog reads the manager's live targets; the
-  // manager start/stops the watchdog), so the watchdog closes over the
-  // module-level manager var, which is assigned on the next line.
-  const designFrameWatchdog = new DesignFrameWatchdog({
-    // Both loopback servers share this ONE watchdog instance — the Custom
-    // Views tier-3 widget server (docs/proposals/CUSTOM-VIEWS.md §5.4) is a
-    // second, process-global source of scripted frames, so its live target is
-    // concatenated onto the design-prototype server's per-run ones.
-    getTargets: () => [...(designPrototypeServerManager?.getTargets() ?? []), ...(customWidgetServerManager?.getTargets() ?? [])],
-    getFrames: () => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return [];
-      try {
-        // A killed OOPIF's WebFrameMain throws on property access — the watchdog
-        // guards each read; enumerating the subtree itself is guarded here.
-        return win.webContents.mainFrame.framesInSubtree as unknown as FrameLike[];
-      } catch {
-        return [];
-      }
-    },
-    getMetrics: () =>
-      app.getAppMetrics().map((m) => ({
-        pid: m.pid,
-        percentCPUUsage: m.cpu?.percentCPUUsage ?? 0,
-        workingSetSizeKB: m.memory?.workingSetSize ?? 0,
-      })),
-    killPid: (pid: number) => process.kill(pid, 'SIGKILL'),
-    sendToRenderer: (event) => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return;
-      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, event);
-    },
-    cpuCount: os.cpus().length,
-    logger: cyboflowLogger,
+  // Design Mode v1 prototype server + runaway-frame watchdog, the Custom Views
+  // widget server, DesignHandoffService, GateSideEffects and the design-feedback
+  // outbox — see designModeComposition.ts (#19 step 25).
+  const designMode = composeDesignMode({
+    services,
+    cyboflowDb,
+    cyboflowLogger,
+    databaseService,
+    sessionManager,
+    customViewsStore,
+    getMainWindow: () => mainWindow,
   });
-  designPrototypeServerManager = new DesignPrototypeServerManager({
-    loadHtml: (runId: string) => loadCanonicalPrototypeHtml(services, runId, 'interactive-prototype'),
-    watchdog: designFrameWatchdog,
-    onServerStopped: (runId: string) => {
-      const win = mainWindow;
-      if (!win || win.isDestroyed()) return;
-      win.webContents.send(DESIGN_PROTO_SERVER_EVENT_CHANNEL, { runId, kind: 'server-stopped' });
-    },
-    logger: cyboflowLogger,
-  });
-  registerDesignPrototypeServerHandlers(ipcMain, designPrototypeServerManager);
-  // Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
-  // §5.4) — the SAME watchdog as the prototype server above (its getTargets
-  // already concatenates both managers). loadWidget reads the store built in
-  // initializeServices(); customViewsStore is non-null by the time a widget
-  // frame can request one (it is constructed before this window-bound wiring
-  // ever runs), but the closure guards it defensively anyway.
-  customWidgetServerManager = new CustomWidgetServerManager({
-    loadWidget: (widgetId: string) => customViewsStore?.getWidget(widgetId) ?? null,
-    theme: WIDGET_THEME_TOKENS,
-    watchdog: designFrameWatchdog,
-    logger: cyboflowLogger,
-  });
-  // No ipcMain.handle registration here — customWidgetServerManager.ensure/stop
-  // are exposed as the cyboflow.customWidgetServer tRPC router (ratchet-blocked
-  // otherwise: main/src/ipc/__tests__/noNewIpcHandlers.test.ts). Wired into
-  // createContext via `customWidgetServer: customWidgetServerManager ?? undefined`
-  // below, alongside `customViews`.
-  // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
-  // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
-  // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
-  // + snapshot base dir are injected here (electron-backed) so the service module
-  // stays standalone-typecheck-safe. loadPrototypeHtml returns the RAW canonical
-  // bytes (live subtree, else committed store); the render path injects the CSP.
-  DesignHandoffService.initialize({
-    db: cyboflowDb,
-    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
-    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
-    logger: cyboflowLogger,
-  });
-  // Design/brief GATE side effects — the one place a human's "approve" at an
-  // approve-ideas / approve-design / approve-brief gate becomes durable state:
-  // the run's prototype bound to each approved idea as an `approved_designs` row
-  // (which survives the run's artifact cascade delete, unlike the artifact
-  // itself), the project's solution thoroughness stamped from the brief, and the
-  // adversarial reviewer's remaining entries logged as accepted-risk findings.
-  //
-  // A singleton for the same reason DesignHandoffService is one: three call sites
-  // reach it — the programmatic gate opener below, `resolveReviewItem` for the
-  // orchestrated plane, and runExecutor's settle — and two of those build their
-  // dependency bags in separate files. Threaded as an optional dep instead, it
-  // would compile at both and silently do nothing at one.
-  //
-  // Wired HERE (after DesignHandoffService) so it shares the SAME snapshot tree
-  // and prototype-byte reader: a flow-bound design and a Design Mode approval must
-  // be readable through one path. It initializes AFTER ReviewItemRouter /
-  // IdeaComponentRouter, whose getInstance() it captures.
-  GateSideEffects.initialize({
-    db: cyboflowDb,
-    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
-    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
-    ideaComponentRouter: IdeaComponentRouter.getInstance(),
-    reviewItemRouter: ReviewItemRouter.getInstance(),
-    // Reuses the EXISTING project-changed channel (the same one projects:update
-    // emits on) so the renderer refetches a thoroughness stamp with no new
-    // listener — and, critically, no new ipcMain.handle, which the
-    // noNewIpcHandlers ratchet would freeze.
-    emitProjectUpdated: (projectId: number) => {
-      const project = databaseService.getProject(projectId);
-      if (project) sessionManager.emit('project:updated', project);
-    },
-    logger: cyboflowLogger,
-  });
-  // Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged durable
-  // outbox") — the delivery pipeline that drives a queued design-feedback batch
-  // through guards → 'dispatching' → the SDK revision turn → 'dispatched', and
-  // re-delivers whatever a crash left in flight.
-  //
-  // Wired HERE, after registerIpcHandlers, because `dispatchTurn` goes through
-  // the Claude panel continue path (the same internals behind the
-  // 'claude-panels:continue' IPC handler), and claudePanelManager only exists
-  // once the IPC handlers are registered. The lazy require mirrors taskQueue's
-  // continueQueue — index.ts must not take a static import on ipc/claudePanel.
-  //
-  // The lifecycle guards are the service's DB-backed defaults; only the SDK turn
-  // and the clock are host-supplied.
-  designFeedbackOutbox = new DesignFeedbackOutbox({
-    db: cyboflowDb,
-    feedbackRouter: FeedbackRouter.getInstance(),
-    dispatchTurn: async ({ sessionId, prompt }): Promise<void> => {
-      const session = sessionManager.getSession(sessionId);
-      if (!session) throw new Error(`design session ${sessionId} no longer exists`);
-      const claudePanel = panelManager
-        .getPanelsForSession(sessionId)
-        .find((panel) => panel.type === 'claude');
-      if (!claudePanel) throw new Error(`design session ${sessionId} has no Claude panel to deliver the turn to`);
-      const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
-      if (!claudePanelManager) throw new Error('the Claude panel manager is not available yet');
-      const conversationHistory = sessionManager.getPanelConversationMessages(claudePanel.id);
-      // Resolves once the SDK has ACCEPTED the turn — that acceptance is exactly
-      // what the outbox records as 'dispatched'.
-      await claudePanelManager.continuePanel(
-        claudePanel.id,
-        session.worktreePath,
-        prompt,
-        conversationHistory,
-      );
-      // Echo the dispatched turn into the panel transcript, exactly as the
-      // 'claude-panels:continue' IPC path does via handlePanelContinue — without
-      // this the host-sent revision turn is invisible in the design session's
-      // chat (the "sends missing from transcript" bug class).
-      sessionManager.addPanelConversationMessage(claudePanel.id, 'user', prompt);
-    },
-    logger: cyboflowLogger,
-  });
-  // The sendDesignBatch mutation's fire-and-track poke (the design analogue of
-  // setRevisionLauncher). notifyQueued never rejects, so voiding it is safe.
-  setDesignBatchNotifier((batchId: string) => {
-    void designFeedbackOutbox?.notifyQueued(batchId);
-  });
+  designPrototypeServerManager = designMode.designPrototypeServerManager;
+  customWidgetServerManager = designMode.customWidgetServerManager;
+  designFeedbackOutbox = designMode.designFeedbackOutbox;
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   
@@ -4061,990 +3119,51 @@ app.whenReady().then(async () => {
     console.log('[Main] QuestionRouter → questionEvents bridge wired');
     console.log('[Main] QuestionRouter initialized');
 
-    // Boot recovery: any awaiting_input rows from a previous session have a dead SDK session.
-    // Split counts: `resumable` are rested in awaiting_review (nudge-resumable, NOT a
-    // force-fail); `failed` are force-failed with app_restart. Only `failed` feeds the
-    // boot-recovery force-fail aggregate below.
-    const staleQuestionsRecovered = QuestionRouter.getInstance().recoverStaleAwaitingInput();
-    if (staleQuestionsRecovered.resumable + staleQuestionsRecovered.failed > 0) {
-      console.log(
-        `[Main] Recovered ${staleQuestionsRecovered.resumable + staleQuestionsRecovered.failed} stale awaiting_input run(s) on boot ` +
-          `(${staleQuestionsRecovered.resumable} resumable, ${staleQuestionsRecovered.failed} failed)`,
-      );
-    }
+    // Boot recovery + backfills (stale awaiting_input / awaiting_review,
+    // archived-session and active-state orphans, the Sentry aggregate, the
+    // crash-safe resume re-drives, outcome/usage/stage backfills, design-handoff
+    // recovery) — see bootRecovery.ts (#19 step 20). ORDER IS LOAD-BEARING.
+    await runBootRecovery({ db, loggerLike, runQueues, runExecutor, databaseService });
 
-    // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
-    const recoveredCount = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
-    if (recoveredCount > 0) {
-      console.log(`[Main] Recovered ${recoveredCount} stale awaiting_review run(s) on boot`);
-    }
-
-    // Boot recovery: runs orphaned by an archived (dismissed) session. Left
-    // non-terminal (e.g. 'stuck' from before the dismiss-cascade existed) they
-    // keep showing in the active-runs rail. Cancel them so the rail's
-    // terminal-status filter hides them — self-healing for any dismiss that
-    // failed to cancel a hosted run. Runs BEFORE recoverActiveStateOrphans so an
-    // archived-session orphan is already 'canceled' (off the candidate SELECT) and
-    // can never be picked for orchestrated resume — which would otherwise race this
-    // sweep and spawn an SDK subprocess into a deleted worktree.
-    const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
-    if (archivedOrphanRecovery.runsCanceled > 0) {
-      console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
-    }
-
-    // Boot recovery: any running/starting rows from a previous process have no live
-    // executor — the SDK iterator and PTY are gone. Resume the resumable ones
-    // (programmatic re-walk, or a fresh SDK `--resume` turn for orchestrated runs
-    // with a live worktree + fresh Claude resume target); force-fail the rest as
-    // interrupted (app_restart).
-    const orphanRecovery = recoverActiveStateOrphans(db, runQueues);
-    if (
-      orphanRecovery.runningRecovered > 0 ||
-      orphanRecovery.startingRecovered > 0 ||
-      orphanRecovery.approvalsCanceled > 0
-    ) {
-      console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
-    }
-
-    // Report boot-recovery force-fails to Sentry as ONE aggregate event (these
-    // runs were reclassified interrupted with the synthetic 'app_restart' reason —
-    // the prior process crashed, so no per-run error object exists). Count is
-    // bucketed to keep tag cardinality low; a spike here signals frequent unclean
-    // shutdowns. Includes ALL three app_restart force-fail paths: stale
-    // awaiting_review (recoveredCount), the UNRESUMABLE active-state orphans
-    // (runningRecovered/startingRecovered exclude the resumed programmatic AND
-    // orchestrated runs, which were reset — not failed), AND the FAILED
-    // (unresumable) subset of stale awaiting_input — but NOT the resumable
-    // awaiting_input runs, which are rested in awaiting_review rather than failed.
-    const bootForceFailed =
-      recoveredCount +
-      orphanRecovery.runningRecovered +
-      orphanRecovery.startingRecovered +
-      staleQuestionsRecovered.failed;
-    if (bootForceFailed > 0) {
-      const countBucket =
-        bootForceFailed === 1 ? '1' : bootForceFailed <= 5 ? '2-5' : bootForceFailed <= 20 ? '6-20' : '20+';
-      captureSeamError(
-        'boot-recovery-force-failed',
-        new Error(`${bootForceFailed} run(s) reclassified interrupted on boot recovery (app_restart, unresumable)`),
-        { errorClass: 'app-restart', recoveryReason: 'app_restart', countBucket },
-      );
-    }
-
-    // Boot recovery: verification_requests left 'leased'/'running' by a prior
-    // process have no live scheduler worker (the in-memory AbortController + lease +
-    // detached promise died with that process), so they cannot resume — re-drain
-    // them to 'timeout'. Mirrors recoverActiveStateOrphans for the visual-verify
-    // queue; runs once on the freshly-initialized singleton before any nudge.
-    const verifyOrphans = await VerificationScheduler.getInstance().runRecovery();
-    if (verifyOrphans > 0) {
-      console.log(`[Main] Re-drained ${verifyOrphans} orphaned verification request(s) to timeout on boot`);
-    }
-
-    // Crash-safe resume (Stage 3): re-drive PROGRAMMATIC runs the previous process
-    // left mid-walk. recoverActiveStateOrphans reset them to 'starting' (NOT
-    // force-failed); re-enqueue each on its per-run queue, threading the persisted
-    // current_step_id so the WorkflowController fast-forwards past completed steps
-    // and a gate re-attaches to its still-pending review item. Fire-and-forget +
-    // per-run try/catch, mirroring runLauncher.
-    if (orphanRecovery.programmaticToResume.length > 0) {
-      console.log(`[Main] Resuming ${orphanRecovery.programmaticToResume.length} programmatic run(s) after restart`);
-      for (const { id, currentStepId, completedStepIds } of orphanRecovery.programmaticToResume) {
-        if (currentStepId) runExecutor.setPendingResumeStep(id, currentStepId);
-        if (completedStepIds.length > 0) runExecutor.setPendingCompletedSteps(id, completedStepIds);
-        const queue = runQueues.getOrCreate(id);
-        void queue.add(async () => {
-          try {
-            await runExecutor.execute(id);
-          } catch (err) {
-            loggerLike.error('[Main] programmatic resume re-drive failed', {
-              runId: id,
-              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-            });
-          }
-        });
-      }
-    }
-
-    // Crash-safe resume, ORCHESTRATED arm: re-drive single-conversation SDK runs
-    // the previous process left running/starting. recoverActiveStateOrphans reset
-    // them to 'starting' (NOT force-failed) after verifying a fresh Claude resume
-    // target + surviving worktree. setPendingResume makes execute() thread the
-    // captured external session id as `--resume` (mirrors resumeRunHandler's
-    // orchestrated arm); fire-and-forget — each is one cold SDK spawn whose turn
-    // drains to awaiting_review on its own.
-    if (orphanRecovery.orchestratedToResume.length > 0) {
-      console.log(`[Main] Resuming ${orphanRecovery.orchestratedToResume.length} orchestrated run(s) after restart`);
-      for (const { id } of orphanRecovery.orchestratedToResume) {
-        runExecutor.setPendingResume(id);
-        const queue = runQueues.getOrCreate(id);
-        void queue.add(async () => {
-          try {
-            await runExecutor.execute(id);
-          } catch (err) {
-            loggerLike.error('[Main] orchestrated resume re-drive failed', {
-              runId: id,
-              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-            });
-          }
-        });
-      }
-    }
-
-    // Boot recovery: reclassify historical app_restart force-fails as
-    // outcome='interrupted' BEFORE the generic terminal-outcome backfill, so the
-    // failed-stamp below only sees the remaining real (non-app_restart) failures.
-    // Widened guard (outcome IS NULL OR 'failed') reclaims rows an earlier boot's
-    // backfillTerminalOutcomes already stamped 'failed' — safe because the
-    // app_restart sentinel is written only by the three boot-recovery seams.
-    const interruptedBackfilled = backfillInterruptedOutcomes(db);
-    if (interruptedBackfilled > 0) {
-      console.log(`[Main] Reclassified ${interruptedBackfilled} historical app_restart run(s) as outcome='interrupted'`);
-    }
-
-    // Boot backfill: older archived sessions may still own pending review items.
-    // Dismiss them through the ReviewItemRouter chokepoint (never raw SQL),
-    // fail-soft per row so one bad item cannot block startup.
-    const archivedReviewItemBackfill = await backfillArchivedSessionReviewItems(db, loggerLike);
-    if (archivedReviewItemBackfill.itemsDismissed > 0 || archivedReviewItemBackfill.itemsFailed > 0) {
-      console.log(
-        `[Main] Backfilled archived-session review items (dismissed: ${archivedReviewItemBackfill.itemsDismissed}, failed: ${archivedReviewItemBackfill.itemsFailed})`,
-      );
-    }
-
-    // Boot recovery: stamp outcome on failed/canceled runs that never got one
-    // (kills mid-phase, pre-instrumentation rows) so the Insights success-rate
-    // stats are trustworthy. Deliberately runs AFTER the two orphan sweeps
-    // above — they transition orphans to failed/canceled, and this pass then
-    // backfills those fresh rows' outcomes in the same boot. completed+NULL
-    // rows are intentionally untouched (awaiting a close-out decision).
-    const outcomeBackfill = backfillTerminalOutcomes(db);
-    if (outcomeBackfill.failedBackfilled > 0 || outcomeBackfill.canceledBackfilled > 0) {
-      console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
-    }
-
-    // Insights Phase-2 (migration 026) self-heal. rollupRunUsage is wired only to
-    // runExecutor's terminal lifecycle hook, but ~8 other writers can put a run
-    // into a terminal status (cancel handlers, questionRouter, the trpc close-outs,
-    // the merge path, and the orphan sweeps just above) — each leaves the run's
-    // usage living ONLY in raw_events. Insights hides this behind its raw_events
-    // fallback, so the gap is invisible until that log is pruned. Sweeping the
-    // invariant here covers every writer at once, including future ones. Must run
-    // AFTER the orphan sweeps + outcome backfill so runs force-terminated on this
-    // boot are materialized in the same pass. Chained after the usage accounting
-    // v1 backfill (migration 146), NOT awaited: see runBootUsageBackfills.
-    const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
-    const replayCodexRun = (runId: string) =>
-      replayCodexRunUsage(databaseService.getDb(), runId, { notifiedBefore: processStartedAt });
-    void runBootUsageBackfills(db, { replayCodexRun }, loggerLike);
-
-    // Boot self-heal (migration 066): the derived 'In development' stage projects
-    // a task's live run associations, and the recovery sweeps above force-fail
-    // runs with raw UPDATEs (no per-task recompute). Recompute every task parked
-    // at a derived stage AFTER those sweeps so a task whose runs died with the
-    // app reverts to its entry stage instead of reading as in-development forever.
-    // Fail-soft: a sweep error must never block boot.
-    try {
-      await TaskChangeRouter.getInstance().sweepStaleDerivedStageTasks();
-    } catch (sweepErr) {
-      console.warn('[Main] stale derived-stage sweep failed (continuing boot):', sweepErr instanceof Error ? sweepErr.message : String(sweepErr));
-    }
-
-    await backfillLandedSprintCloseOuts(databaseService, loggerLike); // TASK-296, see its own doc
-    // Boot recovery (Design Mode v0): drive any design_handoffs left mid-Approve by
-    // a previous process (state intent/snapshotted/folded) forward through the SAME
-    // step functions the first-run approve uses — a crash after the body fold cannot
-    // strand the operation (design-mode.md "Approve" Recovery). Non-fatal: the sweep
-    // is itself per-row fail-soft, and any top-level error is logged, never blocks boot.
-    try {
-      const designRecovery = await recoverDesignHandoffs(DesignHandoffService.getInstance().depsBag);
-      if (designRecovery.completed > 0 || designRecovery.unresolved > 0 || designRecovery.errored > 0) {
-        console.log(
-          `[Main] Recovered design handoffs (completed: ${designRecovery.completed}, unresolved: ${designRecovery.unresolved}, errored: ${designRecovery.errored})`,
-        );
-      }
-    } catch (designErr) {
-      console.warn('[Main] design-handoff recovery failed (continuing boot):', designErr instanceof Error ? designErr.message : String(designErr));
-    }
-
-    // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
-    // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
-    // SDK run and updates DB rows, but does not yet send deny-replies on the
-    // permission socket. See approvalRouter.ts:328–337.
-    // Q1 GUARD sweep (this scope): the initializeServices-scope twin backs the
-    // lifecycle 'failed' seam; the two cannot share a closure (sibling scopes), so
-    // the cancel / cancel-and-restart dep-bags close over this local copy. Drops a
-    // torn-down run's PENDING draft entities — deleteRunCreatedEntities self-gates
-    // on plan_approved_at IS NULL + keys on run_id.
-    const deletePendingDraftsForRun = async (runId: string): Promise<void> => {
-      const r = db
-        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
-        .get(runId) as { projectId?: number } | undefined;
-      if (!r || typeof r.projectId !== 'number') return;
-      await TaskChangeRouter.getInstance().deleteRunCreatedEntities(r.projectId, runId);
-    };
-
-    setCancelAndRestartDeps({
+    // Run-control dep wiring (cancelAndRestart, cancel, session-dismiss hosted-run
+    // cancel, pause, resume, reopen, retryStep, the reviewItems run-execution
+    // probe) — see runControlDepsComposition.ts (#19 step 22). The cancel and
+    // retry bags are shared with the experiments / monitor wiring below.
+    const runControlDeps = composeRunControlDeps({
       db,
-      approvalRouter: ApprovalRouter.getInstance(),
-      questionRouter: QuestionRouter.getInstance(),
-      runQueues,
-      // Provider-neutral stop (runtime-mix plan D6): route through the SAME
-      // SubstrateDispatchFacade.abort seam runs.cancel uses below, which resolves
-      // the manager that actually spawned the run's panel. The previous
-      // defaultCliManager.stopPanel binding was Claude-only, so a codex-primary
-      // (or interactive) run's process survived the cancel half of
-      // cancel-and-restart while the row was replaced underneath it.
-      managerStop: (runId: string) => substrateFacade.abort(runId),
-      // F5: sweep the OLD run's pending drafts after it flips 'canceled'.
-      deletePendingDraftsForRun,
-      // Migration 066: the OLD run flips 'canceled' but the replacement run carries
-      // no task/batch link, so revert the old run's batch lanes + direct task off
-      // 'In development' to their entry stage (fail-soft inside the handler).
-      recomputeTasksForBatch: (batchId: string) =>
-        TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId),
-      recomputeTask: (taskId: string) =>
-        TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
-      logger: loggerLike,
-    });
-    console.log('[Main] cancelAndRestart deps wired');
-
-    // Phase 4a — git-neutral run Cancel. Stops the live agent on BOTH substrates
-    // by routing through the SubstrateDispatchFacade kill seam
-    // (substrateFacade.abort), NOT defaultCliManager.stopPanel (SDK-only — would
-    // orphan an interactive run's PTY). abort() resolves the manager that spawned
-    // the run's panel and calls killProcess on it — the SDK manager overrides
-    // killProcess to abort its query() iterator, the interactive manager inherits
-    // it to kill the PTY tree — so a single call stops whichever substrate ran.
-    // (killSession targets a run's persistent live process at close-out; abort()
-    // is still the canonical universal-cancel seam.) Reuses the SAME `db`, `runQueues`,
-    // ApprovalRouter / QuestionRouter accessors, and `loggerLike` as the
-    // cancelAndRestart wiring above. emitRunStatusChanged emits on the SAME
-    // module-level `runStatusEvents` 'changed' channel the lifecycleTransitions
-    // adapter uses, so the rail / action-bar (activeRunsStore) reacts to a cancel.
-    // The bag has NO worktree collaborator — cancel never touches git.
-    const cancelRunDepsBag = {
-      db,
-      runQueues,
-      // stopLiveRun also aborts a PROGRAMMATIC run's host-driven WorkflowController
-      // (requestProgrammaticCancel) — substrateFacade.abort alone only kills the
-      // current step, leaving the controller to spawn the next one / a gate to hang.
-      // requestProgrammaticCancel is synchronous + a no-op for orchestrated runs.
-      stopLiveRun: async (runId: string) => {
-        runExecutor.requestProgrammaticCancel(runId);
-        await substrateFacade.abort(runId);
-      },
-      clearPendingApprovalsForRun: (runId: string) =>
-        ApprovalRouter.getInstance().clearPendingForRun(runId),
-      clearPendingQuestionsForRun: (runId: string) =>
-        QuestionRouter.getInstance().clearPendingForRun(runId),
-      clearPendingHumanGatesForRun: (runId: string) =>
-        HumanStepManager.getInstance().clearPendingForRun(runId),
-      emitRunStatusChanged: (runId: string, status: 'canceled') =>
-        runStatusEvents.emit('changed', { runId, status }),
-      // Batch close-out (single-run parallel sprint): cancelling a sprint batch
-      // run flips its sprint_batches row terminal too, so the lane substrate
-      // never strands non-terminal.
-      markBatchTerminal: (batchId: string, status: 'canceled') =>
-        SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
-      // Migration 066: after the cancel + batch close-out, revert the batch's
-      // non-integrated lanes off 'In development' to their entry stage.
-      recomputeTasksForBatch: (batchId: string) =>
-        TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId),
-      // Migration 066: a DIRECTLY task-linked run (workflow_runs.task_id, no batch)
-      // reverts its task off 'In development' too. Load-bearing for session dismiss
-      // (cancelHostedRuns → cancelRunHandler), which never recomputes otherwise.
-      recomputeTask: (taskId: string) =>
-        TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
-      // Q1 GUARD: after a successful cancel, drop the run's PENDING draft entities
-      // (epics + orphan tasks it created pre-approval) so a torn-down plan leaves
-      // no orphans. Shares the single deletePendingDraftsForRun sweep defined at the
-      // cancelAndRestart wiring above (self-gated on plan_approved_at IS NULL).
-      deletePendingDraftsForRun,
-      // Visual-verify cleanup: abort in-flight captures/judges + mark the run's
-      // non-terminal verification_requests rows 'timeout'. tryGetInstance keeps it
-      // a no-op if the scheduler was never initialized; fail-soft inside the handler.
-      cancelVerificationsForRun: (runId: string) =>
-        VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
-      // TASK-057: a cancelled run must reap its detached ui-prototype http.server
-      // too. Fail-soft is handled inside cancelRunHandler.
-      reapPrototypeServers: (runId: string) =>
-        prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
-      logger: loggerLike,
-    };
-    setCancelRunDeps(cancelRunDepsBag);
-    console.log('[Main] runs.cancel deps wired');
-
-    // Session Dismiss → cancel hosted runs (consumed by sessions:delete via the
-    // services bag). Every NON-terminal run on the session goes through the SAME
-    // git-neutral cancelRunHandler as the runs.cancel mutation — settling pending
-    // approvals/questions (no orphaned review-queue items), stopping the live
-    // agent, and closing a sprint run's lane batch. Per-run fail-soft: one bad
-    // run must not block dismissing the session.
-    cancelHostedRunsImpl = async (sessionId: string): Promise<void> => {
-      const rows = db
-        .prepare(
-          `SELECT id FROM workflow_runs
-            WHERE session_id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
-        )
-        .all(sessionId) as Array<{ id: string }>;
-      for (const row of rows) {
-        try {
-          await cancelRunHandler(row.id, cancelRunDepsBag);
-        } catch (err: unknown) {
-          loggerLike.error('[Main] session dismiss: cancel of hosted run failed', {
-            sessionId,
-            runId: row.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    };
-    console.log('[Main] session-dismiss hosted-run cancel wired');
-
-    // Phase 4b — SDK-only Pause/Resume. Pause is the NON-terminal twin of Cancel:
-    // it stops the active SDK turn (via the SAME substrateFacade.abort kill seam)
-    // and parks the run in `paused`, PRESERVING claude_session_id +
-    // current_step_id. It reuses the SAME `db`, `runQueues`, ApprovalRouter /
-    // QuestionRouter accessors, and `loggerLike` as the Cancel wiring above, and
-    // emits on the SAME `runStatusEvents` 'changed' channel so the rail /
-    // action-bar (activeRunsStore) reacts. Like Cancel the bag has NO worktree
-    // collaborator — Pause never touches git. SDK-only is enforced inside the
-    // handler (it refuses a non-sdk run before any kill / DB write).
-    setPauseRunDeps({
-      db,
-      runQueues,
-      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
-      // PROGRAMMATIC pause: signal the WorkflowController walk (the handler
-      // enforces walk-first ordering, BEFORE stopLiveRun) so the interrupted
-      // step reports 'aborted' — not a clean 'ok' — and the walk stops spawning
-      // subsequent steps while the row parks in 'paused'. Synchronous; a no-op
-      // for orchestrated runs (no entry in the executor's aborts map).
-      abortProgrammaticWalk: (runId: string) => runExecutor.requestProgrammaticCancel(runId),
-      clearPendingApprovalsForRun: (runId: string) =>
-        ApprovalRouter.getInstance().clearPendingForRun(runId),
-      clearPendingQuestionsForRun: (runId: string) =>
-        QuestionRouter.getInstance().clearPendingForRun(runId),
-      emitRunStatusChanged: (runId, status) =>
-        runStatusEvents.emit('changed', { runId, status }),
-      logger: loggerLike,
-    });
-    console.log('[Main] runs.pause deps wired');
-
-    // Resume re-drives the SAME SDK conversation via the executor's --resume path.
-    // It uses the SAME module-scoped RunExecutor instance nudge uses (so the
-    // executor's pendingResume / pendingNudge maps are shared), flips the run
-    // paused -> running, and re-drives execute(runId) with the executor marked for
-    // resume (continue prompt + claude_session_id threaded as the SDK resume id).
-    // emitRunStatusChanged rides the SAME runStatusEvents 'changed' channel.
-    setResumeRunDeps({
-      db,
+      loggerLike,
       runQueues,
       runExecutor,
-      // PROGRAMMATIC resume: persisted done/skipped step ids (migration 033) so
-      // the re-driven WorkflowController skips completed steps and resumes at
-      // the interrupted one. Unused by the orchestrated --resume arm.
-      completedStepIds: (runId: string) =>
-        StepResultStore.tryGetInstance()?.completedStepIds(runId) ?? [],
-      emitRunStatusChanged: (runId, status) =>
-        runStatusEvents.emit('changed', { runId, status }),
-      logger: loggerLike,
+      substrateFacade,
+      prototypeServerReaper,
     });
-    console.log('[Main] runs.resume deps wired');
+    const { cancelRunDepsBag, retryRunDepsBag } = runControlDeps;
+    cancelHostedRunsImpl = runControlDeps.cancelHostedRunsImpl;
 
-    // Reopen revives a FAILED run (session reopen-on-timeout follow-up): flips
-    // failed -> running, clears the failure stamp, and re-drives the SAME SDK
-    // conversation via --resume with the user's text (using the SAME RunExecutor
-    // instance + pendingNudge map as nudge). Same deps shape as Resume; rides the
-    // SAME runStatusEvents 'changed' channel.
-    setReopenRunDeps({
+    // Monitor actuation (retry_step, switch_to_orchestrated + final-gate
+    // auto-handover, the steering actions incl. the rewind deps behind
+    // runs.addressReviewFindings, the autonomous action sinks, and the lazy
+    // monitor rehydrator) — wired in monitorActionsComposition.ts (#19 step 19).
+    // The late-bound holders the monitor sessions / programmatic runner read are
+    // assigned from its result.
+    const monitorActions = composeMonitorActions({
       db,
+      loggerLike,
       runQueues,
       runExecutor,
-      emitRunStatusChanged: (runId, status) =>
-        runStatusEvents.emit('changed', { runId, status }),
-      logger: loggerLike,
+      substrateFacade,
+      workflowRegistry,
+      configManager,
+      retryRunDepsBag,
+      getBuildMonitorSession: () => buildMonitorSession,
     });
-    console.log('[Main] runs.reopen deps wired');
-
-    // Retry-from-step revives a FAILED (or resting awaiting_review) PROGRAMMATIC
-    // run at a chosen/derived step via the crash-safe resume machinery — the
-    // fourth sanctioned terminal revive (stateMachine.ts rationale). Shares the
-    // SAME RunExecutor + runStatusEvents channel as resume/reopen; step_results
-    // reads ride StepResultStore; the fan-out lane reset rides SprintLaneStore so
-    // a retried fan-out step re-dispatches its failed lanes instead of skipping
-    // them as settled.
-    const retryRunDepsBag: RetryRunDeps = {
-      db,
-      runQueues,
-      runExecutor,
-      emitRunStatusChanged: (runId, status) =>
-        runStatusEvents.emit('changed', { runId, status }),
-      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
-      resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
-      reopenBatch: (batchId) => SprintLaneStore.getInstance().reopenBatch(batchId),
-      logger: loggerLike,
-    };
-    setRetryRunDeps(retryRunDepsBag);
-    console.log('[Main] runs.retryStep deps wired');
-
-    // Drained-rest race guard (reviewItems.resolve/dismiss trailing auto-resume):
-    // the trailing maybeResumeRun must never revive a run whose walk has ENDED —
-    // when the resolved gate was the run's LAST step, the walk finishes and rests
-    // the run in awaiting_review before the trailing call runs, and a resume then
-    // strands it 'running' with no live walk. The probe is the SAME
-    // hasActiveExecution the retry pre-flight consumes.
-    setReviewItemsRunProbe({
-      hasActiveExecution: (runId) => runExecutor.hasActiveExecution(runId),
-    });
-    console.log('[Main] reviewItems run-execution probe wired');
-
-    // Monitor-actuation binding (retry_step): route the monitor's validated
-    // retry action through the SAME retryRunHandler + deps bag as the tRPC
-    // mutation, mapping the discriminated result onto a chat-friendly
-    // ok/message pair the monitor injects as a follow-up turn.
-    //
-    // not_retryable fallback: a run PARKED on a live systemic pause (usage-limit
-    // item) is awaiting_review WITH an active walk, so retryRunHandler refuses
-    // it — but "retry the step" is exactly what resolving the pause item does
-    // (ReviewQueueSystemicPauseGate settles 'retry' and the walk re-runs the
-    // interrupted step without burning budget). Probe for that item and resolve
-    // it through the ReviewItemRouter chokepoint; only when no pause item exists
-    // is the refusal surfaced to the user.
-    monitorRetryStep = async (runId, stepId) => {
-      const result = await retryRunHandler(runId, stepId, retryRunDepsBag);
-      if ('delivered' in result) {
-        return { ok: true, message: `Retrying the run from step '${result.stepId}'.` };
-      }
-      if (result.reason === 'not_retryable') {
-        try {
-          const pauseItem = await HumanStepManager.getInstance().findPendingSystemicPauseItem(runId);
-          if (pauseItem) {
-            await ReviewItemRouter.getInstance().applyReviewItem(pauseItem.projectId, {
-              op: 'resolve',
-              actor: 'orchestrator',
-              reviewItemId: pauseItem.reviewItemId,
-              resolution: 'retry now (via monitor)',
-            });
-            return {
-              ok: true,
-              message: 'Resolved the usage-limit pause — the run is resuming from the interrupted step.',
-            };
-          }
-        } catch (err) {
-          loggerLike.warn('[Main] monitor retry_step pause-resolution fallback failed', {
-            runId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      const messages: Record<string, string> = {
-        not_found: 'Run not found.',
-        not_programmatic: 'Only programmatic runs support step retry.',
-        not_retryable: "The run isn't in a retryable state — it must be failed or resting.",
-        no_target_step: 'No failed step to retry — name the step id to re-run.',
-        unknown_step: `Step '${stepId ?? ''}' is not part of this workflow.`,
-        race: 'The run changed state mid-retry — try again.',
-      };
-      return { ok: false, message: messages[result.reason] ?? `Retry refused (${result.reason}).` };
-    };
-    console.log('[Main] monitor retry_step action wired');
-
-    // Monitor-actuation binding (switch_to_orchestrated): the one-way
-    // programmatic -> orchestrated handover, routed through handoverRunHandler
-    // (walk abort -> the sanctioned execution_model flip -> gate sweep ->
-    // handover-brief nudge -> orchestrated re-drive). Reuses the SAME db /
-    // runQueues / runExecutor / runStatusEvents as the retry bag; the prompt
-    // body rides WorkflowRegistry.getById + readWorkflowPromptForRow (keyed by
-    // workflow ID — names are not unique across projects), fail-soft to null so
-    // a missing prompt degrades to a brief that says so.
-    const handoverRunDepsBag: HandoverRunDeps = {
-      db,
-      runQueues,
-      runExecutor,
-      emitRunStatusChanged: (runId, status) =>
-        runStatusEvents.emit('changed', { runId, status }),
-      clearPendingGateItems: (runId) => HumanStepManager.getInstance().clearPendingForRun(runId),
-      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
-      // Handover tears down the run's monitor (same as terminal close-out's
-      // disposeMonitorResources): the orchestrated agent now owns the chat, so the
-      // composer must stop routing turns to the read-only monitor. Enforces the
-      // "orchestrated runs have no monitor" invariant the rehydrator already asserts.
-      disposeMonitor: (runId: string) => {
-        runExecutor.disposeMonitorResources(runId);
-        MonitorRegistry.getInstance().unregister(runId);
-      },
-      readWorkflowPrompt: (workflowId) => {
-        try {
-          const row = workflowRegistry.getById(workflowId);
-          return row ? readWorkflowPromptForRow(row).prompt : null;
-        } catch {
-          return null;
-        }
-      },
-      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
-      logger: loggerLike,
-    };
-    monitorSwitchToOrchestrated = async (runId, reason) => {
-      const result = await handoverRunHandler(runId, reason, handoverRunDepsBag);
-      if ('delivered' in result) {
-        return {
-          ok: true,
-          message:
-            'Handing the run over to an interactive agent — it will address your request and continue the remaining workflow steps in this chat.',
-        };
-      }
-      const messages: Record<string, string> = {
-        not_found: 'Run not found.',
-        not_programmatic: 'This run is already running as an interactive agent.',
-        not_switchable:
-          "The run isn't in a state that can be handed over — it must be running, resting, or failed.",
-        race: 'The run changed state mid-handover — try again.',
-      };
-      return { ok: false, message: messages[result.reason] ?? `Handover refused (${result.reason}).` };
-    };
-    console.log('[Main] monitor switch_to_orchestrated action wired');
-
-    // Final-gate auto-handover: chatting with a programmatic run parked at its
-    // FINAL human gate (or resting for merge) converts it to a full orchestrated
-    // agent carrying the message as the agent's first request — no manual
-    // switch_to_orchestrated ceremony. Reuses the SAME handoverRunDepsBag (via
-    // handoverRunHandler with the finalGate context), the injected step-results
-    // source, and RunExecutor.ensureMonitorInjectBridge for the transcript inject.
-    // Consulted by cyboflow.monitor.send BEFORE the monitor path (fail-soft).
-    setFinalGateHandover(
-      createFinalGateHandover({
-        db,
-        isEnabled: () => configManager.getAutoHandoverAtFinalGateEnabled(),
-        listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
-        getInjectEvent: (runId) => runExecutor.ensureMonitorInjectBridge(runId),
-        handover: (runId, reason, finalGate) =>
-          handoverRunHandler(runId, reason, handoverRunDepsBag, { finalGate }),
-        logger: loggerLike,
-      }),
-    );
-    console.log('[Main] monitor final-gate auto-handover wired');
-
-    // Monitor steering actions (the 8 non-stopping backlog/step/review edits).
-    // All route through chokepoints (TaskChangeRouter / SprintLaneStore /
-    // ReviewItemRouter) that own their OWN serialization, so none touches the
-    // run's held PQueue — they work while the walk is mid-DAG. skip/unskip/steer
-    // write the live RunDirectives the controller reads at the loop head / the
-    // SpawnStepRunner reads via its per-step guidance thunk.
-    const taskMutationDeps: TaskMutationDeps = {
-      db,
-      applyTaskChange: (projectId, change) =>
-        TaskChangeRouter.getInstance().applyChange(projectId, change),
-      applyTaskDelete: (projectId, opts) => TaskChangeRouter.getInstance().applyDelete(projectId, opts),
-      laneStore: {
-        addLane: (laneArgs) => SprintLaneStore.getInstance().addLane(laneArgs),
-        removeLane: (laneArgs) => SprintLaneStore.getInstance().removeLane(laneArgs),
-      },
-      // Migration 066: recompute the mutated task's execution stage after a
-      // mid-sprint add (→ In development) or remove (→ entry stage).
-      recomputeTask: (taskId) => TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
-      logger: loggerLike,
-    };
-
-    // Map the task-mutation handler's discriminated refusal to a chat-friendly pair.
-    const mapTaskResult = (r: TaskMutationResult): MonitorActionResult => {
-      if (r.ok) return { ok: true, message: r.message };
-      const messages: Record<TaskMutationNoOpReason, string> = {
-        not_found: 'Run not found.',
-        not_programmatic: 'Only programmatic sprint runs support backlog edits.',
-        no_batch: r.detail ?? 'This run has no active sprint batch to edit.',
-        task_not_found: `No task matching '${r.detail ?? ''}' in this run's project.`,
-        not_eligible: "The task couldn't be made sprint-eligible.",
-        already_started: 'That task has already started — too late to change it.',
-        not_in_sprint: `Task ${r.detail ?? ''} isn't in this sprint — I can only edit tasks still queued in this run's batch.`,
-        duplicate: 'That task is already in the sprint.',
-        nothing_to_change: 'Nothing to change — give a new title, body, or priority.',
-        lane_error: r.detail ? `Sprint update failed: ${r.detail}` : 'Sprint update failed unexpectedly.',
-      };
-      return { ok: false, message: messages[r.reason] };
-    };
-
-    // A run's project id (review-item + note actions are project-scoped).
-    const runProjectId = (runId: string): number | undefined => {
-      const row = db
-        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
-        .get(runId) as { projectId?: number } | undefined;
-      return typeof row?.projectId === 'number' ? row.projectId : undefined;
-    };
-
-    // Validate a stepId belongs to a programmatic run's effective workflow
-    // definition — so skip/unskip/steer give "unknown step" feedback instead of
-    // silently stashing a directive the controller will never honor. Fan-out
-    // INNER step ids (e.g. a sprint lane's 'implement' / 'code-review') count:
-    // the controller consults the skip set per inner step (driveItem's loop) and
-    // the guidance thunk keys on the synthesized inner step id, so directives on
-    // them ARE honored — only the OUTER phase steps used to pass this gate,
-    // which wrongly refused the monitor exactly the lane steps live steering
-    // targets most. (Rewind validates separately against OUTER steps only — the
-    // walk's resume machinery is outer-step-indexed.)
-    const validateRunStep = (
-      runId: string,
-      stepId: string,
-    ): { ok: true } | { ok: false; message: string } => {
-      const row = db
-        .prepare('SELECT execution_model AS executionModel FROM workflow_runs WHERE id = ?')
-        .get(runId) as { executionModel: string | null } | undefined;
-      if (!row) return { ok: false, message: 'Run not found.' };
-      if (row.executionModel !== 'programmatic')
-        return { ok: false, message: 'Only programmatic runs support step control.' };
-      // FROZEN spec, never the live workflows.spec_json — a live read validates
-      // step ids against the wrong graph for a variant run / mid-run edit
-      // (docs/CODE-PATTERNS.md "Per-run workflow definitions resolve the FROZEN spec").
-      const frozen = resolveRunFrozenSpec(db, runId);
-      const def = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
-      if (!def) return { ok: false, message: "This run's workflow definition could not be resolved." };
-      const exists = def.phases.some((p) =>
-        p.steps.some(
-          (s) => s.id === stepId || (s.fanOut?.inner.some((inner) => inner.id === stepId) ?? false),
-        ),
-      );
-      if (!exists) return { ok: false, message: `Step '${stepId}' isn't part of this workflow.` };
-      return { ok: true };
-    };
-
-    // Is `stepId` an OUTER fan-out step of the run's (FROZEN) definition? Such a
-    // step never spawns its own agent while lanes exist (the controller walks the
-    // synthesized INNER chain instead), and its durable RunDirectives guidance is
-    // never re-read — so steer_step treats it as a LIVE-ONLY broadcast to the
-    // running sprint lanes (see the steerStep binding below).
-    const isOuterFanOutStep = (runId: string, stepId: string): boolean => {
-      const frozen = resolveRunFrozenSpec(db, runId);
-      const def = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
-      return def
-        ? def.phases.some((p) => p.steps.some((s) => s.id === stepId && s.fanOut !== undefined))
-        : false;
-    };
-
-    // LIVE delivery for steer_step: when the steered step is executing RIGHT NOW,
-    // interject the guidance into the running agent turn(s) via the SDK steering
-    // queue (SubstrateDispatchFacade.injectSteering — a priority-'now' push into
-    // the turn's live prompt input; the agent folds it in at its next loop
-    // boundary). Which spawns count as "running this step":
-    //   - the run-level agent (spawnKey === runId) when workflow_runs.
-    //     current_step_id matches the steered step;
-    //   - each RUNNING sprint lane whose lane pointer (sprint_batch_tasks.
-    //     current_step_id) matches — fan-out lanes run INNER steps under spawnKey
-    //     `${runId}:${taskId}`, and `taskRef` narrows delivery to ONE lane;
-    //   - with `broadcastToLanes` (the steered id is an OUTER fan-out step, whose
-    //     lane pointers hold INNER ids that can never equal it), EVERY running
-    //     lane of the batch matches regardless of which inner step it is on.
-    // Fail-soft: any error → 0 delivered (the stored next-spawn guidance is the
-    // durable path); returns how many live agents actually accepted the push.
-    const deliverLiveGuidance = (
-      runId: string,
-      stepId: string,
-      guidance: string,
-      taskRef?: string,
-      broadcastToLanes?: boolean,
-    ): number => {
-      try {
-        const live = new Set(substrateFacade.listLiveSpawnKeys(runId));
-        if (live.size === 0) return 0;
-        const row = db
-          .prepare(
-            `SELECT current_step_id AS currentStepId, batch_id AS batchId, project_id AS projectId
-               FROM workflow_runs WHERE id = ?`,
-          )
-          .get(runId) as
-          | { currentStepId: string | null; batchId: string | null; projectId: number | null }
-          | undefined;
-        if (!row) return 0;
-        const targets: string[] = [];
-        if (row.batchId) {
-          let laneRows = broadcastToLanes
-            ? (db
-                .prepare(
-                  `SELECT task_id AS taskId FROM sprint_batch_tasks
-                     WHERE batch_id = ? AND status = 'running'`,
-                )
-                .all(row.batchId) as Array<{ taskId: string }>)
-            : (db
-                .prepare(
-                  `SELECT task_id AS taskId FROM sprint_batch_tasks
-                     WHERE batch_id = ? AND status = 'running' AND current_step_id = ?`,
-                )
-                .all(row.batchId, stepId) as Array<{ taskId: string }>);
-          if (taskRef !== undefined) {
-            // Ref-or-id resolution (mirrors taskMutationHandler.resolveTaskId):
-            // an opaque id matches directly; a display ref resolves project-scoped.
-            const resolved = db
-              .prepare('SELECT id FROM tasks WHERE id = ? OR (project_id = ? AND ref = ?)')
-              .get(taskRef, row.projectId, taskRef) as { id: string } | undefined;
-            laneRows = resolved ? laneRows.filter((lane) => lane.taskId === resolved.id) : [];
-          }
-          targets.push(...laneRows.map((lane) => `${runId}:${lane.taskId}`));
-        }
-        // The run-level (non-lane) agent — only when the operator did NOT narrow
-        // to a lane (taskRef targets lanes exclusively).
-        if (taskRef === undefined && row.currentStepId === stepId) {
-          targets.push(runId);
-        }
-        const text = `## Operator guidance (live)\n\nThe operator sent this guidance for the step you are executing RIGHT NOW — fold it into your current work:\n\n${guidance}`;
-        let delivered = 0;
-        for (const spawnKey of targets) {
-          if (live.has(spawnKey) && substrateFacade.injectSteering(spawnKey, runId, text)) {
-            delivered += 1;
-          }
-        }
-        return delivered;
-      } catch (err) {
-        loggerLike.warn('[Main] steer_step live delivery failed (fail-soft)', {
-          runId,
-          stepId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return 0;
-      }
-    };
-
-    // Rewind deps bag (monitor rewind_to_step): the SAME db / runQueues /
-    // runExecutor / runStatusEvents as the retry bag, plus the abort seam
-    // (substrateFacade.abort — pause/handover's stopLiveRun), the step_results
-    // purge primitive, the fan-out lane counters, and the pending-gate sweep.
-    // countRedispatchableLanes counts non-'integrated' lanes — exactly what a
-    // re-entered fanOut step would dispatch after resetFailedLanes re-queues the
-    // failed ones (the production driver's resolveItems filters integrated+failed;
-    // failed lanes count here because the handler resets them before re-driving).
-    const rewindRunDepsBag: RewindRunDeps = {
-      db,
-      runQueues,
-      runExecutor,
-      stopLiveRun: (runId) => substrateFacade.abort(runId),
-      emitRunStatusChanged: (runId, status) => runStatusEvents.emit('changed', { runId, status }),
-      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
-      deleteStepResults: (runId, stepIds) =>
-        StepResultStore.tryGetInstance()?.deleteForSteps(runId, stepIds) ?? 0,
-      recordStepResult: (r) => StepResultStore.tryGetInstance()?.record(r),
-      resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
-      countRedispatchableLanes: (batchId) =>
-        SprintLaneStore.getInstance()
-          .listLanes(batchId)
-          .filter((lane) => lane.status !== 'integrated').length,
-      reopenBatch: (batchId) => SprintLaneStore.getInstance().reopenBatch(batchId),
-      clearPendingGateItems: (runId) => HumanStepManager.getInstance().clearPendingForRun(runId),
-      clearPendingApprovalsForRun: (runId) => {
-        ApprovalRouter.getInstance().clearPendingForRun(runId);
-      },
-      clearPendingQuestionsForRun: (runId) => {
-        QuestionRouter.getInstance().clearPendingForRun(runId);
-      },
-      logger: loggerLike,
-    };
-    // The review queue's "Address review findings" CTA (TASK-277) is a SECOND
-    // entry point onto this SAME dep bag — rewindRunHandler(runId,
-    // 'address-review', ...), wired here rather than duplicating the bag.
-    setRewindRunDeps(rewindRunDepsBag);
-    console.log('[Main] runs.addressReviewFindings deps wired');
-
-    // Lane-rewind deps bag (monitor rewind_lane_to_step). Deliberately tiny next to
-    // the rewind bag above: a lane rewind mutates nothing durable — it records an
-    // in-memory directive and interrupts ONE lane — so it needs no queue, no
-    // step_results purge, and no batch/lane writers. `abortLaneSpawn` is the SAME
-    // facade abort the whole-run rewind uses as `stopLiveRun`, keyed here on the
-    // PER-LANE spawn key (`${runId}:${taskId}`) the fan-out driver spawns under
-    // rather than the run id, so exactly one lane's process dies.
-    const laneRewindDepsBag: LaneRewindDeps = {
-      db,
-      requestLaneRewind: (runId, itemId, stepId) => runExecutor.requestLaneRewind(runId, itemId, stepId),
-      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
-      abortLaneSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
-      logger: loggerLike,
-    };
-
-    monitorSteeringActions = {
-      addTask: (runId, input) => addTaskToRun(runId, input, taskMutationDeps).then(mapTaskResult),
-      removeTask: (runId, input) => removeTaskFromRun(runId, input, taskMutationDeps).then(mapTaskResult),
-      editTask: (runId, input) => editRunTask(runId, input, taskMutationDeps).then(mapTaskResult),
-      skipStep: async (runId, input) => {
-        const v = validateRunStep(runId, input.stepId);
-        if (!v.ok) return { ok: false, message: v.message };
-        runExecutor.addUserSkip(runId, input.stepId);
-        return {
-          ok: true,
-          message: `Step '${input.stepId}' will be skipped when the run reaches it (no effect if it has already run).`,
-        };
-      },
-      unskipStep: async (runId, input) => {
-        const v = validateRunStep(runId, input.stepId);
-        if (!v.ok) return { ok: false, message: v.message };
-        runExecutor.removeUserSkip(runId, input.stepId);
-        return { ok: true, message: `Cleared the pending skip on step '${input.stepId}'.` };
-      },
-      steerStep: async (runId, input) => {
-        const v = validateRunStep(runId, input.stepId);
-        if (!v.ok) return { ok: false, message: v.message };
-        // An OUTER fan-out step never spawns its own agent while lanes exist and
-        // its durable guidance is never re-read (the controller walks the
-        // synthesized INNER chain; SpawnStepRunner resolves guidance by the inner
-        // ids) — storing under it would be a silent no-op reported as success.
-        // Treat it as a LIVE-ONLY broadcast to the running sprint agents instead,
-        // and point the operator at the inner step ids for durable guidance.
-        if (isOuterFanOutStep(runId, input.stepId)) {
-          const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance, input.taskRef, true);
-          if (delivered > 0) {
-            return {
-              ok: true,
-              message: `Delivered your guidance live to ${delivered} running sprint agent${delivered === 1 ? '' : 's'}. (Live-only: '${input.stepId}' is a fan-out phase, so nothing is stored — steer one of its inner steps, e.g. 'implement', to store guidance for future spawns.)`,
-            };
-          }
-          return {
-            ok: false,
-            message: `No sprint agent is running right now, so there was nothing to steer live — and '${input.stepId}' is a fan-out phase whose stored guidance would never be read. Steer one of its inner steps (e.g. 'implement') to store guidance for future spawns.`,
-          };
-        }
-        // taskRef narrows to ONE sprint lane's RUNNING agent — a live-only
-        // delivery (RunDirectives.stepGuidance is keyed by stepId alone, so a
-        // stored per-lane steer would leak to every lane's next spawn of that
-        // step; refusing the store keeps the narrowing honest).
-        if (input.taskRef !== undefined) {
-          const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance, input.taskRef);
-          if (delivered > 0) {
-            return {
-              ok: true,
-              message: `Delivered your guidance live to ${input.taskRef}'s agent on step '${input.stepId}'. (Live-only: it is not stored for future spawns — steer without taskRef for that.)`,
-            };
-          }
-          return {
-            ok: false,
-            message: `${input.taskRef}'s agent isn't currently mid-flight on step '${input.stepId}', so there was nothing to steer live. Steer without taskRef to store guidance for every future spawn of the step.`,
-          };
-        }
-        // Durable path FIRST: the guidance rides RunDirectives and is composed
-        // into every FUTURE spawn of this step (including retries after a live
-        // delivery — deliberate reinforcement, not duplication).
-        runExecutor.setStepGuidance(runId, input.stepId, input.guidance);
-        // Live path: when the step is executing right now, ALSO interject the
-        // guidance mid-turn via the SDK steering queue.
-        const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance);
-        const stored = `Added your guidance to step '${input.stepId}' — it'll be included whenever that step (re)spawns.`;
-        return {
-          ok: true,
-          message:
-            delivered > 0
-              ? `${stored} Also delivered it live to ${delivered} agent${delivered === 1 ? '' : 's'} running that step right now.`
-              : `${stored} No agent is mid-flight on that step right now, so it first lands at the next spawn.`,
-        };
-      },
-      rewindToStep: async (runId, input) => {
-        const result = await rewindRunHandler(runId, input.stepId, rewindRunDepsBag);
-        if ('delivered' in result) {
-          const abortNote = result.abortedLiveWalk ? ' Stopped the in-flight work first.' : '';
-          const keptNote = result.fanOutKeptSettled
-            ? ' Already-integrated sprint work stays settled — only the surrounding steps re-run.'
-            : '';
-          return {
-            ok: true,
-            message: `Rewound the run to step '${result.stepId}' — re-running from there now.${abortNote}${keptNote}`,
-          };
-        }
-        const messages: Record<string, string> = {
-          not_found: 'Run not found.',
-          not_programmatic: 'Only programmatic runs can be rewound.',
-          not_rewindable:
-            "The run isn't in a rewindable state — it must be running, resting, failed, or paused.",
-          unknown_step: `Step '${input.stepId}' is not one of this workflow's timeline steps — rewind targets the run's own steps, not a sprint task's inner steps.`,
-          target_not_prior:
-            "That step is ahead of the run's current position — rewind only goes backward. To jump forward, skip the steps in between instead.",
-          fanout_settled:
-            'Every sprint task in this run is already integrated — nothing would re-run at that fan-out step. Rewind to an earlier step instead, or add a task first.',
-          race: 'The run changed state mid-rewind — try again.',
-        };
-        return { ok: false, message: messages[result.reason] ?? `Rewind refused (${result.reason}).` };
-      },
-      rewindLaneToStep: async (runId, input) => {
-        const result = await laneRewindHandler(runId, input, laneRewindDepsBag);
-        if ('delivered' in result) {
-          // Distinguish the two interrupt paths in the message: a killed agent turn
-          // is visible to the user (the lane's transcript stops mid-thought), while a
-          // directive that lands at the lane's next step boundary is not.
-          const stopNote = result.abortedSpawn
-            ? " Stopped that lane's current agent first."
-            : ' It takes effect as soon as the lane finishes what it is doing.';
-          const fromNote = result.fromStepId !== null ? ` (was on '${result.fromStepId}')` : '';
-          return {
-            ok: true,
-            message: `Rewound ${result.ref}'s lane to step '${result.stepId}'${fromNote} — only that lane re-runs; the rest of the sprint keeps going.${stopNote}`,
-          };
-        }
-        const laneStatusHint =
-          result.laneStatus === 'queued'
-            ? "that lane hasn't started yet, so it will run from the top of its chain anyway"
-            : result.laneStatus === 'integrated'
-              ? 'that lane already finished and integrated — re-running it needs a whole-run rewind to the fan-out step'
-              : `that lane has already settled (${result.laneStatus ?? 'unknown'}) — re-driving a settled lane needs a whole-run rewind or a retry`;
-        const messages: Record<string, string> = {
-          not_found: 'Run not found.',
-          not_programmatic: 'Only programmatic runs have sprint lanes to rewind.',
-          run_not_running:
-            "The run isn't executing right now, so there is no live lane to rewind. Use retry or the whole-run rewind to revive it first.",
-          no_fan_out: "This run has no sprint task fan-out, so there are no lanes to rewind.",
-          unknown_task: `No task matching '${input.taskRef}' in this project.`,
-          lane_not_found: `${input.taskRef} isn't one of this run's sprint lanes.`,
-          lane_not_live: `Can't rewind ${input.taskRef}'s lane — ${laneStatusHint}.`,
-          unknown_step: `'${input.stepId}' isn't one of this run's lane steps — a lane rewind targets a task's INNER steps (e.g. 'implement', 'code-review'), not the run's phase steps. Use the whole-run rewind for those.`,
-          target_not_prior: `'${input.stepId}' is ahead of where that lane is now — a lane rewind only goes backward.`,
-        };
-        return { ok: false, message: messages[result.reason] ?? `Lane rewind refused (${result.reason}).` };
-      },
-      // The two review-queue actions (resolve_review_item / file_note) live in
-      // ./monitorReviewQueueComposition.ts (issue #19 size ratchet) and reuse
-      // this block's db / run→project lookup / logger.
-      ...composeMonitorReviewQueueActions({ db, runProjectId, loggerLike }),
-    };
-    console.log('[Main] monitor steering actions wired');
-
-    // Autonomous MONITOR-ACTION sinks (lane rescue, review-loop steering, gate
-    // escalation). Built HERE, alongside the steering actions, so all of them
-    // reuse the SAME `taskMutationDeps`, review-queue chokepoint and run→project
-    // resolution those actions route through. Logic: monitorActionSinks.ts.
-    const monitorActionSinkDeps: MonitorActionSinkDeps = {
-      db,
-      runProjectId,
-      applyReviewItem: (projectId, change) =>
-        ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
-      awaitProjectWritesSettled: (projectId) => ReviewItemRouter.getInstance().awaitProjectWritesSettled(projectId),
-      taskMutations: taskMutationDeps,
-      describeTaskFailure: (result) => mapTaskResult(result).message,
-      logger: loggerLike,
-    };
-    laneTriageActions = buildLaneTriageActions(monitorActionSinkDeps);
-    monitorFindingSink = buildMonitorFindingSink(monitorActionSinkDeps);
-    setAsideFindingSink = buildSetAsideFindingSink(monitorActionSinkDeps);
-    gateEscalationSinks = buildGateEscalationSinks(monitorActionSinkDeps);
-    console.log('[Main] monitor action sinks wired');
-
-    // Lazy monitor rehydration: after an app restart the in-process
-    // MonitorRegistry is empty, and boot recovery only re-drives
-    // starting/running/awaiting_review runs (re-registering their monitors as a
-    // side effect) — a run already failed/paused/canceled/completed at boot
-    // would keep a silently dead monitor chat. On a registry miss the monitor
-    // router consults this rehydrator: it revives the session from the
-    // workflow_runs row via the SAME construction closure the run used at start
-    // (buildMonitorSession) and recreates the persisting inject bridge through
-    // RunExecutor.ensureMonitorInjectBridge so converse turns still render into
-    // the Chat pane and persist to raw_events. Refusal matrix (non-sdk,
-    // non-programmatic, missing row/worktree) lives in monitorRehydration.ts.
-    setMonitorRehydrator(
-      createMonitorRehydrator({
-        db,
-        ensureInjectBridge: (runId) => runExecutor.ensureMonitorInjectBridge(runId),
-        buildSession: (ctx, injectEvent) => {
-          if (!buildMonitorSession) {
-            // Unreachable in practice: initializeServices() assigns the holder
-            // before this wiring block runs; the router treats a throw as a miss.
-            throw new Error('buildMonitorSession not initialized before rehydrator wiring');
-          }
-          return buildMonitorSession(ctx, injectEvent);
-        },
-        logger: loggerLike,
-      }),
-    );
-    console.log('[Main] monitor lazy rehydrator wired');
+    monitorRetryStep = monitorActions.monitorRetryStep;
+    monitorSwitchToOrchestrated = monitorActions.monitorSwitchToOrchestrated;
+    monitorSteeringActions = monitorActions.monitorSteeringActions;
+    laneTriageActions = monitorActions.laneTriageActions;
+    monitorFindingSink = monitorActions.monitorFindingSink;
+    setAsideFindingSink = monitorActions.setAsideFindingSink;
+    gateEscalationSinks = monitorActions.gateEscalationSinks;
 
     setStartRunDeps({
       runLauncher,
@@ -5114,258 +3233,23 @@ app.whenReady().then(async () => {
         }
       }
     };
-    setExperimentsDeps({
-      db: experimentsDb,
+    // The setExperimentsDeps wiring lives in experimentsComposition.ts (#19 step 17).
+    composeExperimentsDeps({
+      db,
+      experimentsDb,
+      loggerLike,
+      dismissSessionFully,
+      cancelRunDepsBag,
       runLauncher,
-      // Sprint seed-task cap: the same live Settings override runs.start and the
-      // batch picker read, so an experiment arm accepts exactly what a normal
-      // sprint launch would.
-      getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
-      // settleQuickArm write barrier: refuse to rest a quick arm whose session
-      // has an agent turn mid-write (grading would snapshot a partial diff).
-      // Routed through the facade so every substrate manager is consulted.
-      hasActiveAgentTurn: (sessionId) => substrateFacade.hasTurnInFlightForSession(sessionId),
-      worktreeManager: {
-        getProjectMainBranch: (p) => worktreeManager.getProjectMainBranch(p),
-        getHeadCommit: (p) => worktreeManager.getHeadCommit(p),
-      },
-      createArmSession: async ({ projectId, baseCommittish, nameHint, quickConfig }) => {
-        const { session, runId, resolvedSubstrate } = await createQuickSessionCore(
-          {
-            taskQueue: taskQueue!,
-            sessionManager,
-            workflowRegistry,
-            getDb: () => databaseService.getDb(),
-            // A quick arm's config can pass an invalid substrate/runtime combo (the
-            // wire schema permits cross-field combos createRun rejects), which throws
-            // AFTER the worktree + session row are provisioned — sweep that orphan.
-            dismissHalfCreatedSession: dismissSessionFully,
-          },
-          quickConfig
-            ? {
-                projectId,
-                baseCommittish,
-                nameHint,
-                requestedSubstrate: quickConfig.substrate,
-                agentProvider: quickConfig.agentProvider,
-                agentRuntime: quickConfig.agentRuntime,
-                agentModel: quickConfig.model,
-                requestedAgentMode: quickConfig.permissionMode,
-              }
-            : // Pin 'sdk' explicitly: an A/B arm session is an INFRASTRUCTURE host
-              // (its worktree hosts the arm's workflow runs), not a user quick
-              // session, so its sentinel must never inherit the quick-session PTY
-              // default (quickSessionDefaultSubstrate). This keeps the arm sentinel
-              // 'sdk' exactly as before that default existed.
-              { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
-        );
-        // Stamp parity with the quick IPC handler, via the SHARED chokepoint
-        // (stampQuickSessionRuntimeConfig): the arm's permission-mode pick and
-        // the RESOLVED substrate/agent_runtime must land on the SESSION row too
-        // — chat spawns read sessions.agent_permission_mode
-        // (resolveSessionAgentPermissionMode), and the sessions:input relay
-        // branch + frontend substrate gates read sessions.substrate/
-        // agent_runtime. Without this the sub-form's substrate and permission
-        // picks silently never applied: the arm ran as an SDK session on the
-        // global permission default while its run row claimed otherwise. Infra
-        // arms (no quickConfig) keep their pre-existing NULL stamps.
-        //
-        // The runtime is derived GENERICALLY, through the same helper the quick
-        // handler's ladder ends in (resolveNonClaudeSessionRuntime): a
-        // provider-literal test here used to recognize only codex-sdk, so an
-        // omp-sdk arm stamped nothing and the shared chokepoint fell back to
-        // deriving claude-sdk from the SDK substrate — the sentinel run row said
-        // omp-sdk while sessions.agent_runtime said claude-sdk, and every chat
-        // turn in that arm dispatched to Claude. The arm wire schema carries only
-        // STORABLE runtimes, so no PTY runtime can appear here.
-        if (quickConfig) {
-          try {
-            const armSessionRuntime = resolveNonClaudeSessionRuntime(quickConfig);
-            stampQuickSessionRuntimeConfig(databaseService.getDb(), session.id, {
-              resolvedSubstrate,
-              ...(armSessionRuntime !== undefined
-                ? { sessionAgentRuntime: armSessionRuntime }
-                : {}),
-              requestedAgentMode: quickConfig.permissionMode,
-            });
-          } catch (err) {
-            // This stamp runs AFTER createQuickSessionCore's compensation window
-            // closed, so a throw here would orphan the provisioned session +
-            // worktree (the caller never learns the session id and can't sweep
-            // it). Compensate exactly like the core: best-effort full dismiss,
-            // then rethrow so startExperiment still sees the failure.
-            try {
-              await dismissSessionFully(session.id);
-            } catch (sweepErr) {
-              loggerLike.warn('[Main] experiment arm: orphan sweep after stamp failure failed', {
-                sessionId: session.id,
-                error: sweepErr instanceof Error ? sweepErr.message : String(sweepErr),
-              });
-            }
-            throw err;
-          }
-        }
-        // Seed the quick arm's chat config onto its Claude panel. A quick arm is
-        // an interactive session the user drives, but its per-turn model /
-        // reasoning-effort are read from PANEL settings at sessions:input spawn
-        // time (never from the session row) — and the arm's Claude panel is created
-        // bare (lazily, by bootstrapArmSessionPanels). Without seeding it here, the
-        // quickConfig model/effort would fall back to the SDK/CLI defaults.
-        // Mirrors the quick handler's updatePanelSettings seeding;
-        // bootstrapArmSessionPanels is idempotent so it reuses this panel.
-        // (fastMode is deliberately NOT part of the arm wire schema — the user
-        // can still toggle it per-turn in the session UI after launch.)
-        if (quickConfig && resolvedSubstrate === 'interactive') {
-          // EAGER PTY SPAWN — parity with sessions:create-quick's interactive
-          // branch: without it an interactive arm boots to a DEAD terminal (no
-          // REPL until a first ^G-composed sessions:input re-spawns one on
-          // demand; direct terminal keystrokes go nowhere). Same contracts as
-          // the quick handler: the panel is NOT registered with
-          // ClaudePanelManager (the PTY surface never uses the structured
-          // claudePanels:* IPC), the runId→panelId translation is seeded
-          // BEFORE the spawn so a relay racing the first PTY byte resolves,
-          // and startPanel is NEVER awaited (its promise resolves only when
-          // the REPL exits — awaiting would deadlock arm creation).
-          try {
-            const chatPanel = await panelManager.createPanel({
-              sessionId: session.id,
-              type: 'claude',
-              title: 'Chat',
-            });
-            if (quickConfig.model !== undefined || quickConfig.reasoningEffort !== undefined) {
-              databaseService.updatePanelSettings(chatPanel.id, {
-                ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
-                ...(quickConfig.reasoningEffort !== undefined
-                  ? { reasoningEffort: quickConfig.reasoningEffort }
-                  : {}),
-              });
-            }
-            substrateFacade.registerInteractivePanel(runId, chatPanel.id);
-            void interactiveReplManager
-              .startPanel(
-                chatPanel.id,
-                session.id,
-                session.worktreePath,
-                '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
-                session.permissionMode,
-                quickConfig.model,
-                undefined, // effort ('ultracode') — not part of the arm wire schema
-                undefined, // fastMode — not part of the arm wire schema
-                undefined, // resumeSessionId — fresh eager spawn
-                quickConfig.reasoningEffort,
-                undefined, // userAcknowledgedProviderDisabled — not a resume prompt
-                QUICK_PTY_BRIEFING, // session context, NOT a user turn
-              )
-              .catch((err: unknown) => {
-                // Fail-soft (mirrors create-quick): the arm stays usable — the
-                // first ^G-composed sessions:input bootstraps the REPL on demand.
-                loggerLike.warn('[Main] experiment arm: eager interactive REPL spawn failed', {
-                  sessionId: session.id,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-              });
-            // The REPL is live but IDLE — the briefing rides the system prompt, so
-            // this spawn starts no turn. See restInteractiveSessionIdle for why it
-            // rests at the turn-end value rather than 'running' or 'stopped'.
-            restInteractiveSessionIdle(sessionManager, session.id);
-          } catch (err) {
-            loggerLike.warn('[Main] experiment arm: interactive chat-panel seed failed', {
-              sessionId: session.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        } else if (
-          quickConfig &&
-          (quickConfig.model !== undefined || quickConfig.reasoningEffort !== undefined)
-        ) {
-          try {
-            const chatPanel = await panelManager.createPanel({
-              sessionId: session.id,
-              type: 'claude',
-              title: 'Chat',
-            });
-            // Server-side createPanel skips the frontend panels:create
-            // auto-registration (ipc/panels.ts) — but an SDK-substrate arm's
-            // chat is driven through the panel-scoped claudePanels/panels IPC,
-            // whose manager throws "Panel not registered" for an unregistered
-            // panel, and bootstrapArmSessionPanels sees this panel and skips
-            // the registering create. Register here (lazy require, mirroring
-            // ipc/panels.ts — the handler assigns the export at boot, long
-            // before any arm launch) so the arm's FIRST chat turn dispatches.
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { claudePanelManager } = require('./ipc/claudePanel') as {
-              claudePanelManager?: {
-                registerPanel(panelId: string, sessionId: string): void;
-              };
-            };
-            claudePanelManager?.registerPanel(chatPanel.id, session.id);
-            databaseService.updatePanelSettings(chatPanel.id, {
-              ...(quickConfig.model !== undefined ? { model: quickConfig.model } : {}),
-              ...(quickConfig.reasoningEffort !== undefined
-                ? { reasoningEffort: quickConfig.reasoningEffort }
-                : {}),
-            });
-          } catch (err) {
-            // Fail-soft: a seeding failure leaves the arm usable (it falls back to
-            // SDK/CLI defaults, exactly as before this seed existed) — never abort
-            // arm creation over a per-turn config pin.
-            loggerLike.warn('[Main] experiment arm: chat-panel config seed failed', {
-              sessionId: session.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-        return { sessionId: session.id, worktreePath: session.worktreePath, runId };
-      },
-      taskChangeRouter: TaskChangeRouter.getInstance(),
-      dismissSession: dismissSessionFully,
-      cancelRun: async (runId) => {
-        await cancelRunHandler(runId, cancelRunDepsBag);
-      },
-      getVariant: (variantId) => workflowRegistry.getVariantById(variantId),
-      getWorkflow: (workflowId) => {
-        const w = workflowRegistry.getById(workflowId);
-        return w ? { id: w.id, name: w.name } : null;
-      },
-      getProjectPath: (projectId) => {
-        const p = sessionManager.getProjectById(projectId);
-        return p?.path ?? null;
-      },
-      setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
-      setVariantWeight: (variantId, weight) => workflowRegistry.updateVariant(variantId, { weight }),
-      setBaselineRotation: (workflowId, patch) => workflowRegistry.setBaselineRotation(workflowId, patch),
-      adoptWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
-      // Slice C: experiments.decide resolves the blocking pairwise decision review
-      // item via experiment_comparisons.decision_review_item_id. Look up the item's
-      // project (review items are project-scoped) then route the resolve through the
-      // single ReviewItemRouter chokepoint. Fire-and-forget + fail-soft — a decide
-      // must never fail because the notification could not be resolved.
-      resolveReviewItem: (reviewItemId) => {
-        try {
-          const row = db
-            .prepare('SELECT project_id AS projectId FROM review_items WHERE id = ?')
-            .get(reviewItemId) as { projectId?: number } | undefined;
-          if (!row || typeof row.projectId !== 'number') return;
-          void ReviewItemRouter.getInstance()
-            .applyReviewItem(row.projectId, {
-              op: 'resolve',
-              actor: 'orchestrator',
-              reviewItemId,
-              resolution: 'experiment-decided',
-            })
-            .catch(() => {});
-        } catch {
-          /* fail-soft: pre-050 DB or missing item — nothing to resolve */
-        }
-      },
-      // Slice C: rerunComparison re-drives the pairwise snapshot+enqueue after
-      // deleting the stale comparison row.
-      pairwiseMaybeSnapshot: async (experimentId) => {
-        const worker = PairwiseJudgeWorker.tryGetInstance();
-        if (worker) await worker.maybeSnapshotAndEnqueue(experimentId);
-      },
+      configManager,
+      substrateFacade,
+      worktreeManager,
+      taskQueue,
+      sessionManager,
+      workflowRegistry,
+      databaseService,
+      interactiveReplManager,
     });
-    console.log('[Main] experiments deps wired');
 
     // Open-idea-session door (idea sessions plan, Stage 1). The IPC handler in
     // ipc/session.ts is thin by contract; every collaborator is assembled HERE
@@ -5424,275 +3308,37 @@ app.whenReady().then(async () => {
       });
     }
 
-    // Global-agent proposal executor (migration 071). A user-confirmed proposal
-    // executes server-side through the SAME chokepoints, stamped actor:'user' — the
-    // executor owns the CAS state machine, the launch compensation saga, and boot
-    // reconciliation of rows stranded 'executing' by a crash. Deps mirror
-    // setExperimentsDeps: the quick-session core, the run launcher, the FULL safe
-    // session-dismiss (dismissSessionFully — cancels hosted runs + removes the
-    // worktree) + git-neutral run cancel (the same compensation primitives the A/B
-    // rollback ladder uses), the TaskChangeRouter chokepoint, and the workflow registry.
-    // Reuse the SINGLE agentThreadStore built in initializeServices (same DB) — the
-    // MCP propose handler, this executor, and the tRPC context all share one store.
-    const proposalExecutorDeps: ProposalExecutorDeps = {
-      store: agentThreadStore,
-      newIdempotencyKey: () => randomUUID(),
-      // launch-run host sessions + start-quick-session mint/brief delivery: proposalExecutorQuickSessionDeps.ts.
-      ...buildProposalExecutorQuickSessionDeps({
-        createQuickSessionCore, stampQuickSessionRuntimeConfig, reportEagerSpawnFailure,
-        quickSessionCore: { taskQueue: taskQueue!, sessionManager, workflowRegistry, getDb: () => databaseService.getDb(), dismissHalfCreatedSession: dismissSessionFully },
-        newSessionName: generateQuickWorktreeBranchName,
-        sessionManager, panelManager, substrateFacade, interactiveReplManager,
-        getClaudePanelManager: () => (require('./ipc/claudePanel') as typeof import('./ipc/claudePanel')).claudePanelManager,
-        ptyBriefing: QUICK_PTY_BRIEFING, logger: loggerLike,
-      }),
-      // launch-run: workflow resolution (by id or name, custom flows included)
-      // + shape-derived seed mapping live in proposalExecutorLaunchDeps.ts.
-      ...buildProposalExecutorLaunchDeps({
-        workflowRegistry,
-        getProjectById: (projectId) => sessionManager.getProjectById(projectId),
-        runLauncher,
-      }),
-      cancelRun: async (runId) => {
-        await cancelRunHandler(runId, cancelRunDepsBag);
-      },
-      dismissSession: dismissSessionFully,
-      runExists: (runId) =>
-        experimentsDb.prepare('SELECT 1 FROM workflow_runs WHERE id = ?').get(runId) !== undefined,
-      applyTaskChange: async (projectId, change) => {
-        await TaskChangeRouter.getInstance().applyChange(projectId, change);
-      },
-      createBacklogItem: async (projectId, item) => {
-        // The SAME chokepoint every other entity create goes through, stamped
-        // actor:'user' (the human's Confirm click is the authorship). Field mapping
-        // is one-to-one with CreateBacklogItem; parentEpicId/originatingIdeaId were
-        // already resolved to opaque ids + existence-checked at propose time
-        // (mcpQueryHandler's create-backlog-items branch).
-        const { taskId } = await TaskChangeRouter.getInstance().applyChange(projectId, {
-          actor: 'user',
-          entityType: item.taskType,
-          title: item.title,
-          summary: item.summary,
-          body: item.body,
-          priority: item.priority,
-          category: item.category,
-          scope: item.scope,
-          parentEpicId: item.parentEpicId ?? null,
-          originatingIdeaId: item.originatingIdeaId ?? null,
-        });
-        const row = experimentsDb
-          .prepare(
-            `SELECT ref FROM (
-               SELECT id, ref FROM ideas
-               UNION ALL SELECT id, ref FROM epics
-               UNION ALL SELECT id, ref FROM tasks
-             ) WHERE id = ?`,
-          )
-          .get(taskId) as { ref?: unknown } | undefined;
-        return { taskId, ...(typeof row?.ref === 'string' ? { ref: row.ref } : {}) };
-      },
-      readTaskFields: (projectId, taskId) => {
-        // The item may be an idea/epic/task (all share priority + stage_id) — resolve
-        // it across the three tables the same way TaskChangeRouter's locateEntity does.
-        const row = experimentsDb
-          .prepare(
-            `SELECT priority, stage_id AS stageId FROM (
-               SELECT id, project_id, priority, stage_id FROM ideas
-               UNION ALL SELECT id, project_id, priority, stage_id FROM epics
-               UNION ALL SELECT id, project_id, priority, stage_id FROM tasks
-             ) WHERE id = ? AND project_id = ?`,
-          )
-          .get(taskId, projectId) as TaskFieldsSnapshot | undefined;
-        return row ?? null;
-      },
-      runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
-      // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
-      ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
-      // triage-findings: the ReviewItemRouter chokepoint + a live-state read.
-      ...buildProposalExecutorReviewDeps({ reviewItemRouter: ReviewItemRouter.getInstance(), db: experimentsDb }),
-      logger: loggerLike,
-    };
-    setProposalExecutorDeps(proposalExecutorDeps);
-    console.log('[Main] proposal executor deps wired');
-
-    // Boot reconciliation: finalize any proposal stranded 'executing' by a crash
-    // (verifies observable side effects; NEVER re-runs them). Fire-and-forget +
-    // fail-soft — a reconcile failure must never wedge boot.
-    void reconcileOrphanedExecutingProposals(proposalExecutorDeps).catch((err) => {
-      loggerLike.error('[Main] proposal executor boot reconcile failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    // Global-agent proposal executor (migration 071): the deps bag + the boot
+    // reconciliation of proposals stranded 'executing' — see
+    // proposalExecutorComposition.ts (#19 step 26).
+    composeProposalExecutorDeps({
+      experimentsDb,
+      loggerLike,
+      dismissSessionFully,
+      cancelRunDepsBag,
+      agentThreadStore,
+      taskQueue,
+      sessionManager,
+      workflowRegistry,
+      databaseService,
+      substrateFacade,
+      interactiveReplManager,
+      runLauncher,
     });
 
     // Design-mode-fork launch saga (QuestionRouter.launchDesignModeOnFork /
-    // designSessionLaunch.ts). A HUMAN answering the planner's approve-idea gate
-    // with "Approve → design mode" launches a Design Mode session — the SAME
-    // three-layer belt sessions:create-quick's design branch drives
-    // (ipc/session.ts ~787-1091: validateDesignIdeaLink, createQuickSessionCore
-    // with requireSdkSubstrate, the design_idea_id stamp + ui-prototype stub),
-    // replayed here since this launch has no renderer client. Compensation
-    // (dismissSessionFully) and the review-item failure report reuse the SAME
-    // primitives proposalExecutorDeps wires just above.
-    QuestionRouter.getInstance().setDesignSessionLaunchDeps({
-      validateIdeaLink: (ideaId, projectId) => {
-        const result = validateDesignIdeaLink(databaseService.getDb(), ideaId, projectId);
-        if (!result.ok) return { ok: false, error: result.error };
-        // Max-one-running-per-idea (idea sessions plan, Stage 1): the design
-        // fork is one of the doors the hard rule guards. Same rejection channel
-        // as a dead idea link — the saga reports either as "could not launch".
-        const busy = findIdeaBusyReason(databaseService.getDb(), ideaId);
-        return busy === null ? { ok: true } : { ok: false, error: busy.message };
-      },
-      createDesignSession: async ({ projectId, ideaId, nameHint }) => {
-        // Fail-closed Claude/SDK availability pre-flight — the SHARED ladder
-        // (services/claudeSdkSessionPreflight.ts) the design branch of
-        // sessions:create-quick and the open-idea-session door also run: a
-        // design session is hard-pinned to the Claude SDK substrate, so an
-        // unavailable Claude login/binary must reject BEFORE any worktree is
-        // cut, rather than let substrate resolution silently fall through. Only
-        // the wording is local — this fork's messages are terser than the IPC
-        // handler's (no "Enable Claude to start a design session." tail) and
-        // stay byte-identical to what it threw before the extraction.
-        const designPreflight = await runClaudeSdkSessionPreflights(configManager);
-        if (!designPreflight.ok) {
-          throw new Error(DESIGN_FORK_PREFLIGHT_MESSAGES[designPreflight.reason]);
-        }
-
-        const { session, runId, resolvedSubstrate } = await createQuickSessionCore(
-          {
-            taskQueue: taskQueue!,
-            sessionManager,
-            workflowRegistry,
-            getDb: () => databaseService.getDb(),
-          },
-          {
-            projectId,
-            nameHint,
-            agentProvider: 'claude',
-            agentRuntime: 'claude-sdk',
-            requestedSubstrate: 'sdk',
-            requireSdkSubstrate: true,
-          },
-        );
-        // From here down, createQuickSessionCore has ALREADY minted a real
-        // session + sentinel run + git worktree — anything that throws past
-        // this point must compensate via a full dismiss before propagating,
-        // because launchDesignSessionForFork (designSessionLaunch.ts) only
-        // records `created.sessionId` once THIS callback resolves; a throw
-        // from inside it leaves the saga's own catch block with no id to
-        // dismiss, orphaning the session/run/worktree. finishDesignSessionCreate
-        // (designSessionLaunch.ts) owns that internal compensation — see its
-        // JSDoc for why this is NOT redundant with the saga's own dismiss (the
-        // two only ever apply in mutually exclusive windows): do NOT also add
-        // a dismiss to the saga's catch for this failure mode.
-        await finishDesignSessionCreate({
-          sessionId: session.id,
-          resolvedSubstrate,
-          stampDesignIdeaId: () => {
-            const dbHandle = databaseService.getDb();
-            dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
-            // `origin_idea_id` (migration 114): a design session IS a session
-            // launched from the idea, and the sidebar nests children by that
-            // column. Lineage, not a claim — no unique index. Kept a SEPARATE
-            // statement, mirroring the sessions:create-quick design branch.
-            dbHandle.prepare(`UPDATE sessions SET origin_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
-          },
-          refreshSession: (sessionId) => {
-            sessionManager.refreshSessionFromDatabase(sessionId);
-          },
-          dismissSession: dismissSessionFully,
-          onCompensationFailure: (dismissErr) => {
-            loggerLike.warn('[Main] design-mode fork: compensating dismiss failed after mid-create error', {
-              sessionId: session.id,
-              error: dismissErr instanceof Error ? dismissErr.message : String(dismissErr),
-            });
-          },
-        });
-
-        // v0.5 re-entry stub (mirrors ipc/session.ts ~1064-1090) — fail-soft: a
-        // stub failure must never fail session creation. Deliberately called
-        // AFTER finishDesignSessionCreate rather than folded into it — this
-        // failure mode is intentionally NOT compensating.
-        try {
-          await ArtifactRouter.getInstance().apply(projectId, {
-            op: 'create',
-            runId,
-            atype: 'ui-prototype',
-            label: 'Prototype',
-            payloadJson: null,
-            sourceRef: ideaId,
-            sessionId: session.id,
-            isNew: true,
-            actor: 'orchestrator',
-          });
-        } catch (stubErr) {
-          loggerLike.warn('[Main] design-mode fork: prototype stub creation failed (non-fatal)', {
-            sessionId: session.id,
-            error: stubErr instanceof Error ? stubErr.message : String(stubErr),
-          });
-        }
-
-        return { sessionId: session.id, runId, worktreePath: session.worktreePath };
-      },
-      kickoffDesignPanel: async ({ sessionId, worktreePath }) => {
-        // Mirrors useQuickSession.ts's post-create sequence: create the Chat
-        // panel, register it with the Claude runtime, then fire the canonical
-        // design kickoff prompt as its first turn via startPanel — a FRESH
-        // panel has no running process and no claude_session_id yet, so this is
-        // the 'panels:continue' first-message branch (ipc/session.ts ~2783-2797),
-        // never continuePanel/resume.
-        const panel = await panelManager.createPanel({ sessionId, type: 'claude', title: 'Chat' });
-        const { claudePanelManager } = require('./ipc/claudePanel') as typeof import('./ipc/claudePanel');
-        if (!claudePanelManager) throw new Error('the Claude panel manager is not available yet');
-        // We just created this panel with type 'claude', so its customState IS a
-        // ClaudePanelState — but ToolPanel's `state.customState` is a union across
-        // every panel kind with no discriminant tying it to `panel.type`, so TS
-        // cannot see that. The parallel call in ipc/panels.ts:36 passes it
-        // unnarrowed only because its `require` is untyped; narrow here rather
-        // than giving up the typed import.
-        claudePanelManager.registerPanel(
-          panel.id,
-          panel.sessionId,
-          panel.type === 'claude'
-            ? (panel.state.customState as ClaudePanelState | undefined)
-            : undefined,
-        );
-
-        const kickoffPrompt = DESIGN_MODE_KICKOFF_PROMPT;
-        sessionManager.addPanelConversationMessage(panel.id, 'user', kickoffPrompt);
-        const dbSession = sessionManager.getDbSession(sessionId);
-        await claudePanelManager.startPanel(panel.id, worktreePath, kickoffPrompt, dbSession?.permission_mode);
-      },
-      dismissSession: dismissSessionFully,
-      reportLaunchFailure: ({ projectId, ideaId, runId, error }) => {
-        void ReviewItemRouter.getInstance()
-          .applyReviewItem(projectId, {
-            op: 'create',
-            actor: 'orchestrator',
-            kind: 'finding',
-            title: 'Design mode launch failed',
-            body:
-              `The approve-idea gate's design-mode fork could not launch a design session ` +
-              `for idea ${ideaId} (run ${runId}): ${error}\n\nOpen the idea's prototype from the ` +
-              `backlog and start a design session manually, or re-run the planner and pick ` +
-              `"Approve → design mode" again.`,
-            blocking: false,
-            severity: 'error',
-            entityType: 'idea',
-            entityId: ideaId,
-            runId,
-            payload: { kind: 'finding', category: 'design-mode-launch' },
-          })
-          .catch((err) => {
-            loggerLike.error('[Main] design-mode fork: failed to report launch failure', {
-              ideaId,
-              runId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          });
-      },
-    } satisfies DesignSessionLaunchDeps);
-    console.log('[Main] design-mode-fork launch deps wired');
+    // designSessionLaunch.ts) — wired in designSessionLaunchComposition.ts
+    // (#19 step 18). Compensation (dismissSessionFully) and the review-item
+    // failure report reuse the SAME primitives proposalExecutorDeps wires just above.
+    composeDesignSessionLaunchDeps({
+      loggerLike,
+      dismissSessionFully,
+      configManager,
+      taskQueue,
+      sessionManager,
+      workflowRegistry,
+      databaseService,
+    });
 
     // Boot recovery: reconcile EVERY workflow's rotation experiment against its live
     // weighted pool (migration 058). Config could have drifted while a pre-058 build
@@ -5724,193 +3370,20 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] runs.sprintLanes deps wired');
 
-    // Piece C — idle-chat nudge. Uses the SAME `db` DatabaseLike adapter +
-    // `runQueues` + `loggerLike` as the cancelAndRestart wiring above, plus the
-    // module-scoped RunExecutor built in initializeServices(). The handler
-    // re-drives runExecutor.execute(runId) with a stashed nudge so the run
-    // resumes its SDK conversation.
-    //
-    // awaitTurnStart: one-shot waiter over the facade's per-logical-turn
-    // 'spawned' fan-in (panelId === runId for flow runs). Only consumed by
-    // callers opting into `deliveredAt: 'turn-start'` (the gate-resolution
-    // paths: approve-ideas verdicts, recovery-gate answers) — the plain
-    // runs.nudge mutation keeps its await-the-drain behavior.
-    const nudgeDeps = {
+    // Live-run dep wiring (nudge + session settle, approve-ideas verdict delivery,
+    // queueInput, interruptAndSend, the live-input relay, the run user-shell, and
+    // the merge/dismiss close-out) — see runLiveDepsComposition.ts (#19 step 23).
+    runShellManager = composeRunLiveDeps({
       db,
+      loggerLike,
       runQueues,
       runExecutor,
-      logger: loggerLike,
-      awaitTurnStart: (runId: string) => {
-        let onSpawned: ((payload: unknown) => void) | null = null;
-        const started = new Promise<void>((resolveStarted) => {
-          onSpawned = (payload: unknown) => {
-            const evt = payload as { panelId?: unknown };
-            if (evt !== null && typeof evt === 'object' && evt.panelId === runId) {
-              if (onSpawned) substrateFacade.off('spawned', onSpawned);
-              resolveStarted();
-            }
-          };
-          substrateFacade.on('spawned', onSpawned);
-        });
-        return {
-          started,
-          cancel: () => {
-            if (onSpawned) substrateFacade.off('spawned', onSpawned);
-          },
-        };
-      },
-    };
-    setNudgeRunDeps(nudgeDeps);
-    // Live merge/PR gate (runs.sessionSettleState): the chatTurnInFlight half
-    // answers from the SAME facade barrier the experiment settle guard uses.
-    setSessionSettleDeps({
-      hasActiveAgentTurn: (sessionId) => substrateFacade.hasTurnInFlightForSession(sessionId),
-    });
-    console.log('[Main] runs.nudge deps wired');
-
-    // Approve-ideas verdict delivery (IDEA-009 / TASK-035B): the default
-    // ORCHESTRATED planner parks its SDK conversation at a drained REST after
-    // minting the approve-ideas gate via cyboflow_report_finding, so a submitted
-    // per-idea verdict map must be DELIVERED as the run's next turn (it cannot read
-    // review items via MCP). Wrap nudgeRunHandler with the SAME deps bag the nudge
-    // mutation uses so the resume re-drives the same warm executor; reviewItems.
-    // resolve nudges FIRST and resolves once the resumed turn STARTS (the caller
-    // passes `deliveredAt: 'turn-start'`, backed by awaitTurnStart above).
-    setResolveVerdictNudgeDeps({
-      nudge: (runId, text, opts) => nudgeRunHandler(runId, text, nudgeDeps, opts),
-    });
-    console.log('[Main] reviewItems approve-ideas verdict-delivery deps wired');
-
-    // "Always allow messaging a running flow": the composer can send while an SDK
-    // run is EXECUTING; the text is buffered on the SAME module-scoped RunExecutor
-    // and delivered as the next turn at the drained REST seam (the deliverer is
-    // wired into the RunExecutor ctor in initializeServices()). Reuse that instance
-    // so the buffer the mutation writes is the one the drain seam reads.
-    setQueueInputDeps({
-      runExecutor,
-    });
-    console.log('[Main] runs.queueInput deps wired');
-
-    // Interrupt & send (TASK-301): the SAME nudgeDeps bag (db / runQueues /
-    // runExecutor / logger) plus the facade's abort + live-spawn-key seams — the
-    // SAME ones laneRewindDepsBag (above) and rewindRunDepsBag use. Deliberately
-    // does NOT reuse `awaitTurnStart` — the live-spawn branch buffers the text via
-    // `runExecutor.queueInput` and requests the abort, then returns immediately;
-    // delivery is left entirely to the aborted turn's own drain
-    // (`drainQueuedInputAtRest`, reached once `teardownRun` observes the aborted
-    // spawn's 'drained' lifecycle transition), not to this mutation awaiting
-    // anything itself (see interruptAndSendHandler.ts's header note).
-    setInterruptAndSendDeps({
-      ...nudgeDeps,
-      abortRunSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
-      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
-    });
-    console.log('[Main] runs.interruptAndSend deps wired');
-
-    // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
-    // path into a running interactive REPL). Both methods route through the
-    // SubstrateDispatchFacade, which dispatches to the interactive manager's live
-    // PTY and NO-OPs for the SDK substrate (Q3 byte-identical). runId === panelId
-    // per the orchestrator invariant, so the facade maps directly.
-    // IDEA-030 / TASK-818: endSession is the explicit-termination seam for a
-    // persistent live process — the close-out mutations (merge / createPr /
-    // dismiss) call it BEFORE worktree removal so the interactive PTY's spawn
-    // promise resolves (and a warm SDK query() is killed). It rides the SAME
-    // RelayDeps bag (the single bag for live-session collaborators) and routes
-    // through the facade, which dispatches per substrate.
-    setRelayDeps({
-      relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
-      relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),
-      endSession: (runId) => substrateFacade.endSession(runId),
-      killSession: (runId) => substrateFacade.killSession(runId),
-      getPtyBacklog: (runId) => substrateFacade.getPtyBacklog(runId),
-    });
-    console.log('[Main] runs.relayInput/relayResize/endSession/killSession/getPtyBacklog deps wired');
-
-    // Wire the run user-shell (worktree-terminal feature): plain $SHELL PTYs in
-    // the run's worktree, keyed by terminalId, backing the run "Terminal" tabs (a
-    // run can host MULTIPLE via ＋terminal; the primary's terminalId === runId). The
-    // cwd is resolved from workflow_runs.worktree_path (flow runs have no sessions
-    // row, so they can't use the panel/session terminal stack). Raw bytes stream to
-    // the renderer on `cyboflow:shell:<terminalId>` (mirrors the agent PTY's
-    // cyboflow:pty:<runId>); input/resize/backlog/close ride tRPC (setRunShellDeps).
-    // Independent of the RunExecutor, so a shell — and any dev server it launched —
-    // SURVIVES run completion; close() reaps every terminal for a run at close-out
-    // and destroyAll() at app quit.
-    runShellManager = new RunShellManager(
-      (runId) => {
-        const row = db
-          .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
-          .get(runId) as { worktree_path: string | null } | undefined;
-        return row?.worktree_path ?? null;
-      },
-      (terminalId, chunk) => {
-        mainWindow?.webContents.send(`cyboflow:shell:${terminalId}`, chunk);
-      },
-      (file, args, options) => pty.spawn(file, args, options),
-    );
-    setRunShellDeps({
-      open: (runId, terminalId) => runShellManager!.open(runId, terminalId),
-      write: (terminalId, data) => runShellManager!.write(terminalId, data),
-      resize: (terminalId, cols, rows) => runShellManager!.resize(terminalId, cols, rows),
-      getBacklog: (terminalId) => runShellManager!.getBacklog(terminalId),
-      closeOne: (terminalId) => runShellManager!.closeOne(terminalId),
-      close: (runId) => runShellManager!.close(runId),
-    });
-    console.log('[Main] runs.shellOpen/shellInput/shellResize/shellBacklog/shellClose deps wired');
-
-    // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
-    // worktreeManager.removeWorktreeByPath takes the run's absolute nested
-    // worktree path; getProjectById resolves the project path from project_id.
-    setRunCloseoutDeps({
-      worktreeManager: {
-        getProjectMainBranch: (projectPath) => worktreeManager.getProjectMainBranch(projectPath),
-        squashAndMergeWorktreeToMain: (projectPath, worktreePath, mainBranch, commitMessage) =>
-          worktreeManager.squashAndMergeWorktreeToMain(projectPath, worktreePath, mainBranch, commitMessage),
-        mergeWorktreeToMain: (projectPath, worktreePath, mainBranch) =>
-          worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
-        removeWorktreeByPath: (projectPath, worktreePath) =>
-          worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
-        deleteBranch: (projectPath, branchName, opts) =>
-          worktreeManager.deleteBranch(projectPath, branchName, opts),
-        gitPush: (worktreePath) => worktreeManager.gitPush(worktreePath),
-        getRemoteUrlAndBranch: (worktreePath) => worktreeManager.getRemoteUrlAndBranch(worktreePath),
-      },
-      sessionManager: {
-        getProjectById: (projectId) => {
-          const p = sessionManager.getProjectById(projectId);
-          return p ? { path: p.path } : undefined;
-        },
-      },
-      // Close-out clears the run's pending approvals (settles in-memory entries
-      // + sweeps DB-only `pending` rows) so dismiss/merge/PR don't leave orphaned
-      // items in the review queue.
-      clearPendingApprovalsForRun: (runId) =>
-        ApprovalRouter.getInstance().clearPendingForRun(runId),
-      // Monitor-unify: at terminal close-out, tear down the run's on-demand monitor —
-      // its per-run inject plumbing (RunExecutor) AND its registry entry. The monitor
-      // outlives the walk (chat-at-rest), so this is the ONLY place it goes away.
-      disposeMonitorResources: (runId) => {
-        runExecutor.disposeMonitorResources(runId);
-        MonitorRegistry.getInstance().unregister(runId);
-      },
-      // TASK-057: kill the run's detached ui-prototype http.server at close-out
-      // (merge / createPr / dismiss). Fail-soft is handled inside the router.
-      reapPrototypeServers: (runId) =>
-        prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
-      // Visual-verify cleanup on the MERGE / CREATE-PR close-out path. Deliberately
-      // the SAME closure the cancel/dismiss bag above wires, so both ways a run can
-      // end reach one implementation: without it, merging left a draining
-      // verification to deliver a finding onto a closed-out run. Fail-soft inside
-      // the router; tryGetInstance keeps it a no-op when verification is disabled.
-      cancelVerificationsForRun: (runId) =>
-        VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
-      // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
-      // run's outcome and recompute the linked task's derived execution stage.
-      // getInstance() resolves the singleton initialized during service construction.
-      taskStageDeriver: TaskChangeRouter.getInstance(),
-    });
-    console.log('[Main] runs.merge/dismiss deps wired');
+      substrateFacade,
+      worktreeManager,
+      sessionManager,
+      prototypeServerReaper,
+      getMainWindow: () => mainWindow,
+    }).runShellManager;
 
     setHealthProvider(orchestratorHealth);
     console.log('[Main] health.mcpServer deps wired');
