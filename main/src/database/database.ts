@@ -2514,6 +2514,26 @@ export class DatabaseService {
     return this.db.prepare('SELECT * FROM sessions WHERE project_id = ? AND is_main_repo = 1 AND (archived = 0 OR archived IS NULL)').get(projectId) as Session | undefined;
   }
 
+  /**
+   * Narrow worktree-ownership read for the worktree registry reconciler
+   * (services/worktreeRegistry.ts): every session row for the project —
+   * archived and the hidden main-repo singleton included — that carries a
+   * worktree_path. Archived rows are deliberately kept: a row still
+   * referencing a path means the path is not an orphan.
+   */
+  getSessionWorktreeRefs(projectId: number): Array<{ id: string; worktree_path: string; in_place: number | null; is_main_repo: number | null }> {
+    return this.db
+      .prepare("SELECT id, worktree_path, in_place, is_main_repo FROM sessions WHERE project_id = ? AND worktree_path IS NOT NULL AND worktree_path != ''")
+      .all(projectId) as Array<{ id: string; worktree_path: string; in_place: number | null; is_main_repo: number | null }>;
+  }
+
+  /** Run-side twin of {@link getSessionWorktreeRefs}: workflow_runs.worktree_path for the project. */
+  getRunWorktreeRefs(projectId: number): Array<{ id: string; worktree_path: string }> {
+    return this.db
+      .prepare("SELECT id, worktree_path FROM workflow_runs WHERE project_id = ? AND worktree_path IS NOT NULL AND worktree_path != ''")
+      .all(projectId) as Array<{ id: string; worktree_path: string }>;
+  }
+
   // ---------------------------------------------------------------------------
   // NULL-tolerance audit note (IDEA-024 / TASK-743 / TASK-745):
   //   migration 009_sessions_run_id.sql adds sessions.run_id TEXT (nullable).
