@@ -108,3 +108,11 @@ describe('createSystemSnapshotProvider default marker source (production path)',
     15_000,
   );
 });
+
+describe('createSystemSnapshotProvider platform seam', () => {
+  it('forwards the injected platform so the router can gate win32 disk sizing', () => {
+    expect(build([], { platform: 'win32' }).platform).toBe('win32');
+    expect(build([], { platform: 'darwin' }).platform).toBe('darwin');
+    expect(build([]).platform).toBeUndefined();
+  });
+});
