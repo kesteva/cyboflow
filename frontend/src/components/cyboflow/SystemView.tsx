@@ -197,12 +197,13 @@ export function SystemView(): ReactElement {
     refetchIntervalMs: REFRESH_INTERVAL_MS,
   });
 
-  // Destructive worktree actions (Prune, Reap all stale): resolve → confirm → execute
-  // against the monitorReap contract, refreshing the snapshot after every attempt.
+  // Destructive worktree actions (Prune) and the toolbar's Reap all stale (one server
+  // `reap-all-stale` manifest spanning worktrees AND processes): resolve → confirm →
+  // execute against the monitorReap contract, refreshing the snapshot after every attempt.
   const worktreeReap = useWorktreeReap({ projectId, onSettled: refetch });
   const staleWorktrees = snapshot?.worktrees.filter((w) => w.tag === 'orphan' && w.prunable) ?? [];
 
-  // Destructive process actions (Kill tree / Kill all / process half of Reap all stale).
+  // Destructive process actions (Kill tree / Kill all).
   const processReap = useProcessReap({ projectId, onSettled: refetch });
   const orphanProcessRows =
     snapshot?.processes.filter((p): p is SystemActionableProcess => p.bucket === 'orphan') ?? [];
@@ -369,11 +370,7 @@ export function SystemView(): ReactElement {
                 type="button"
                 data-testid="system-reap-all-stale"
                 disabled={staleCount === 0 || worktreeReap.busy || processReap.busy}
-                onClick={() => {
-                  // One click, both halves: each resolves its own manifest and opens its own confirm.
-                  if (orphanProcessRows.length > 0) processReap.reapAllStale(orphanProcessRows);
-                  if (staleWorktrees.length > 0) worktreeReap.reapAllStale(staleWorktrees);
-                }}
+                onClick={() => worktreeReap.reapAllStale()}
                 className="ml-auto inline-flex items-center gap-1.5 rounded-button border border-status-error/40 bg-status-error/10 px-2.5 py-1 font-mono text-xs font-bold text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Reap all stale{staleCount > 0 ? ` (${staleCount})` : ''}
@@ -382,7 +379,7 @@ export function SystemView(): ReactElement {
             {snapshot !== null && (
               <SystemPortsSection ports={snapshot.ports} />
             )}
-            {snapshot !== null && <SystemOrphansSection snapshot={snapshot} />}
+            {snapshot !== null && <SystemOrphansSection snapshot={snapshot} onKillTree={processReap.handlers.onKillTree} />}
             {snapshot !== null && (
               <SystemGroupedBody
                 snapshot={snapshot}

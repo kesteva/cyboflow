@@ -57,6 +57,8 @@ export interface ManifestConfirmDialogProps {
   showDeleteBranch?: boolean;
   /** Initial state of "Also delete branch" for each fresh manifest; defaults to unchecked. */
   initialDeleteBranch?: boolean;
+  /** A confirm is in flight: Confirm and "Also delete branch" are disabled so it cannot be submitted twice. */
+  busy?: boolean;
   /** Receives the exact manifest object that was passed in. */
   onConfirm: (manifest: ManifestConfirmData, options: ManifestConfirmOptions) => void;
   onCancel: () => void;
@@ -78,6 +80,7 @@ export function ManifestConfirmDialog({
   banners,
   showDeleteBranch,
   initialDeleteBranch = false,
+  busy = false,
   onConfirm,
   onCancel,
 }: ManifestConfirmDialogProps) {
@@ -243,6 +246,7 @@ export function ManifestConfirmDialog({
               type="checkbox"
               checked={deleteBranch}
               onChange={(e) => setDeleteBranch(e.target.checked)}
+              disabled={busy}
               data-testid="manifest-delete-branch"
             />
             Also delete branch
@@ -268,9 +272,11 @@ export function ManifestConfirmDialog({
           <button
             type="button"
             onClick={() => onConfirm(manifest, { deleteBranch })}
-            className="px-4 py-2 text-sm font-medium rounded-md transition-colors bg-status-error hover:bg-status-error text-white"
+            disabled={busy}
+            aria-busy={busy}
+            className="px-4 py-2 text-sm font-medium rounded-md transition-colors bg-status-error hover:bg-status-error text-white disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {confirmText}
+            {busy ? 'Working…' : confirmText}
           </button>
         </div>
       </div>

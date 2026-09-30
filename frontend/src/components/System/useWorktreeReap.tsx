@@ -1,7 +1,6 @@
 /**
  * useWorktreeReap — the System view's worktree destructive actions
- * (per-card / ⋯-menu "Prune worktree" and the worktree half of toolbar
- * "Reap all stale"), each running the same three steps against the
+ * (per-card / ⋯-menu "Prune worktree" and toolbar "Reap all stale"), each running the same three steps against the
  * `cyboflow.monitorReap` contract:
  *
  *   resolve → the SERVER builds + stashes a manifest for the selection;
@@ -19,7 +18,7 @@
  * per-target failure/survivor in a partial result land in `error`, rendered by
  * {@link WorktreeReapError} in the view.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { AlertTriangle, ShieldAlert, X } from 'lucide-react';
 import { trpc } from '../../trpc/client';
@@ -46,6 +45,8 @@ interface PendingReap {
   title: string;
   raw: ReapManifestData;
   confirm: ManifestConfirmData;
+  /** The confirm button's label: "Prune" for a worktree action, "Reap all stale" for the toolbar. */
+  confirmText: string;
   /** True once the manifest was rebuilt for the branch choice and the user has yet to see it. */
   refreshed: boolean;
 }
@@ -89,8 +90,11 @@ export interface UseWorktreeReapArgs {
 export interface UseWorktreeReapResult {
   /** Resolve a manifest for one worktree card and open the confirm dialog. */
   prune: (worktree: SystemWorktree) => void;
-  /** Resolve a manifest for every listed (prunable, stale) worktree and open one dialog. */
-  reapAllStale: (worktrees: readonly SystemWorktree[]) => void;
+  /**
+   * Toolbar "Reap all stale": ONE server-built `reap-all-stale` manifest covering every
+   * orphan worktree AND orphan process, one dialog, one execute — never two halves.
+   */
+  reapAllStale: () => void;
   /** A resolve or execute is in flight. */
   busy: boolean;
   error: WorktreeReapFailure | null;
@@ -103,22 +107,32 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
   const [pending, setPending] = useState<PendingReap | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<WorktreeReapFailure | null>(null);
+  // Synchronous single-flight guard. `busy` state cannot stop two clicks in the same tick:
+  // both handlers close over the same `pending`, so the second would replay a consumed,
+  // single-use manifest and surface a bogus stale-manifest error.
+  const inFlightRef = useRef(false);
 
   const resolve = useCallback(
-    async (selection: ReapSelection, title: (m: ReapManifestData) => string): Promise<void> => {
-      if (projectId === null) return;
+    async (
+      selection: ReapSelection,
+      title: (m: ReapManifestData) => string,
+      confirmText: string,
+    ): Promise<void> => {
+      if (projectId === null || inFlightRef.current) return;
+      inFlightRef.current = true;
       setBusy(true);
       setError(null);
       try {
         const { manifest } = await trpc.cyboflow.monitorReap.resolve.mutate({ projectId, selection });
         if (manifest.targets.length === 0) {
-          setError({ message: 'Nothing to remove — no matching worktrees were found.', details: [] });
+          setError({ message: 'Nothing to remove — no matching targets were found.', details: [] });
           return;
         }
-        setPending({ projectId, selection, title: title(manifest), raw: manifest, confirm: toManifestConfirmData(manifest), refreshed: false });
+        setPending({ projectId, selection, title: title(manifest), raw: manifest, confirm: toManifestConfirmData(manifest), confirmText, refreshed: false });
       } catch (err: unknown) {
         setError({ message: `Could not prepare the removal: ${errorText(err)}`, details: [] });
       } finally {
+        inFlightRef.current = false;
         setBusy(false);
       }
     },
@@ -128,28 +142,25 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
   const prune = useCallback(
     (worktree: SystemWorktree): void => {
       if (!worktree.prunable) return;
-      void resolve({ kind: 'card', worktreePath: worktree.path }, () => `Prune ${basename(worktree.path)}?`);
+      void resolve({ kind: 'card', worktreePath: worktree.path }, () => `Prune ${basename(worktree.path)}?`, 'Prune');
     },
     [resolve],
   );
 
-  const reapAllStale = useCallback(
-    (worktrees: readonly SystemWorktree[]): void => {
-      const paths = worktrees.filter((w) => w.prunable).map((w) => w.path);
-      if (paths.length === 0) return;
-      void resolve(
-        { kind: 'row', worktreePaths: paths },
-        (m) => `Reap ${m.targets.length} stale worktree${m.targets.length === 1 ? '' : 's'}?`,
-      );
-    },
-    [resolve],
-  );
+  const reapAllStale = useCallback((): void => {
+    void resolve(
+      { kind: 'reap-all-stale' },
+      (m) => `Reap ${m.targets.length} stale target${m.targets.length === 1 ? '' : 's'}?`,
+      'Reap all stale',
+    );
+  }, [resolve]);
 
   const cancel = useCallback((): void => setPending(null), []);
 
   const confirm = useCallback(
     async (_shown: ManifestConfirmData, options: ManifestConfirmOptions): Promise<void> => {
-      if (pending === null) return;
+      if (pending === null || inFlightRef.current) return;
+      inFlightRef.current = true;
       setBusy(true);
       setError(null);
       try {
@@ -164,7 +175,7 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
           });
           if (manifest.targets.length === 0) {
             setPending(null);
-            setError({ message: 'Nothing to remove — no matching worktrees were found.', details: [] });
+            setError({ message: 'Nothing to remove — no matching targets were found.', details: [] });
             return;
           }
           setPending({ ...pending, raw: manifest, confirm: toManifestConfirmData(manifest), refreshed: true });
@@ -184,6 +195,7 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
         setPending(null);
         setError({ message: staleMessage(errorText(err)), details: [] });
       } finally {
+        inFlightRef.current = false;
         setBusy(false);
         onSettled?.();
       }
@@ -198,8 +210,9 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
         isOpen
         manifest={pending.confirm}
         title={pending.title}
-        confirmText="Prune"
+        confirmText={pending.confirmText}
         initialDeleteBranch={pending.raw.alsoDeleteBranch}
+        busy={busy}
         banners={
           untagged || pending.refreshed ? (
             <>

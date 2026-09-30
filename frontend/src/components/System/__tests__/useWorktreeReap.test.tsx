@@ -5,7 +5,7 @@
  * the client boundary so the calls (and their arguments) are observable.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 import type { ReapManifestData } from '../reapManifestAdapter';
@@ -93,12 +93,11 @@ const onSettled = vi.fn();
 
 function Harness({ worktrees }: { worktrees: SystemWorktree[] }) {
   const reap = useWorktreeReap({ projectId: 7, onSettled });
-  const stale = worktrees.filter((w) => w.tag === 'orphan' && w.prunable);
   return (
     <div>
       {reap.error !== null && <WorktreeReapError error={reap.error} onDismiss={reap.clearError} />}
       {reap.dialog}
-      <button type="button" data-testid="reap-all" onClick={() => reap.reapAllStale(stale)}>
+      <button type="button" data-testid="reap-all" onClick={() => reap.reapAllStale()}>
         Reap all stale
       </button>
       <SystemGroupedBody snapshot={snap(worktrees)} projectId={7} groupBy="worktree" sortBy="disk" onPruneWorktree={reap.prune} />
@@ -245,34 +244,33 @@ describe('deleteBranch', () => {
   });
 });
 
-describe('Reap all stale (worktree half)', () => {
-  it('opens ONE dialog over every stale worktree target and executes them in one call', async () => {
-    const m = manifest('reap_all', ['/wt/s1', '/wt/s2'], { kind: 'row' });
+describe('Reap all stale', () => {
+  it('resolves ONE server reap-all-stale manifest and executes it in one call', async () => {
+    const m = manifest('reap_all', ['/wt/s1', '/wt/s2'], { kind: 'reap-all-stale' });
     resolveMutate.mockResolvedValue({ manifest: m });
     executeMutate.mockResolvedValue(okExecute(m));
-    render(
-      <Harness worktrees={[wt('/wt/a'), wt('/wt/s1', { tag: 'orphan' }), wt('/wt/s2', { tag: 'orphan' })]} />,
-    );
+    render(<Harness worktrees={[wt('/wt/a'), wt('/wt/s1', { tag: 'orphan' }), wt('/wt/s2', { tag: 'orphan' })]} />);
 
     fireEvent.click(screen.getByTestId('reap-all'));
     await screen.findByTestId('manifest-confirm-dialog');
-    expect(resolveMutate).toHaveBeenCalledWith({
-      projectId: 7,
-      selection: { kind: 'row', worktreePaths: ['/wt/s1', '/wt/s2'] },
-    });
-    expect(screen.getByText('Reap 2 stale worktrees?')).toBeInTheDocument();
+    expect(resolveMutate).toHaveBeenCalledTimes(1);
+    expect(resolveMutate).toHaveBeenCalledWith({ projectId: 7, selection: { kind: 'reap-all-stale' } });
+    expect(screen.getByText('Reap 2 stale targets?')).toBeInTheDocument();
     const list = screen.getByTestId('manifest-targets');
     expect(within(list).getAllByRole('listitem')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
+    fireEvent.click(within(screen.getByTestId('manifest-confirm-dialog')).getByRole('button', { name: 'Reap all stale' }));
     await waitFor(() => expect(executeMutate).toHaveBeenCalledTimes(1));
     expect(executeMutate).toHaveBeenCalledWith({ manifestId: 'reap_all' });
   });
 
-  it('never resolves anything when no worktree is stale', () => {
+  it('shows a nothing-to-reap error when the server manifest is empty', async () => {
+    resolveMutate.mockResolvedValue({ manifest: manifest('reap_none', []) });
     render(<Harness worktrees={[wt('/wt/a')]} />);
     fireEvent.click(screen.getByTestId('reap-all'));
-    expect(resolveMutate).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('system-reap-error-message')).toHaveTextContent('Nothing to remove');
+    expect(screen.queryByTestId('manifest-confirm-dialog')).toBeNull();
+    expect(executeMutate).not.toHaveBeenCalled();
   });
 });
 
@@ -347,5 +345,84 @@ describe('error surfacing', () => {
     await screen.findByTestId('manifest-confirm-dialog');
     fireEvent.click(screen.getByRole('button', { name: 'Prune' }));
     expect(await screen.findByTestId('system-reap-error-detail')).toHaveTextContent('no result was reported');
+  });
+});
+
+describe('double-submit guard', () => {
+  function deferred<T>() {
+    let resolveFn!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolveFn = r;
+    });
+    return { promise, resolve: resolveFn };
+  }
+
+  it('two Confirm clicks in the same tick execute the single-use manifest once, with no stale error', async () => {
+    const m = manifest('reap_dbl', ['/wt/a']);
+    const gate = deferred<ReturnType<typeof okExecute>>();
+    resolveMutate.mockResolvedValue({ manifest: m });
+    executeMutate.mockReturnValue(gate.promise);
+    render(<Harness worktrees={[wt('/wt/a')]} />);
+    fireEvent.click(screen.getByTestId('wt-prune'));
+    await screen.findByTestId('manifest-confirm-dialog');
+
+    const confirmBtn = screen.getByRole('button', { name: 'Prune' });
+    // One act(): no re-render between the clicks, so only the synchronous guard can stop the second.
+    act(() => {
+      confirmBtn.click();
+      confirmBtn.click();
+    });
+    expect(executeMutate).toHaveBeenCalledTimes(1);
+    // While in flight the dialog reflects it and refuses further input.
+    expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
+    expect(screen.getByTestId('manifest-delete-branch')).toBeDisabled();
+
+    await act(async () => {
+      gate.resolve(okExecute(m));
+    });
+    await waitFor(() => expect(screen.queryByTestId('manifest-confirm-dialog')).not.toBeInTheDocument());
+    expect(executeMutate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('system-reap-error')).not.toBeInTheDocument();
+  });
+
+  it('two Confirm clicks during the deleteBranch re-resolve resolve once and execute nothing', async () => {
+    const first = manifest('reap_r1', ['/wt/a']);
+    const second = manifest('reap_r2', ['/wt/a'], { alsoDeleteBranch: true });
+    const gate = deferred<{ manifest: ReapManifestData }>();
+    resolveMutate.mockResolvedValueOnce({ manifest: first }).mockReturnValueOnce(gate.promise);
+    render(<Harness worktrees={[wt('/wt/a')]} />);
+    fireEvent.click(screen.getByTestId('wt-prune'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    fireEvent.click(screen.getByTestId('manifest-delete-branch'));
+
+    const confirmBtn = screen.getByRole('button', { name: 'Prune' });
+    act(() => {
+      confirmBtn.click();
+      confirmBtn.click();
+    });
+    expect(resolveMutate).toHaveBeenCalledTimes(2); // initial + ONE re-resolve
+    await act(async () => {
+      gate.resolve({ manifest: second });
+    });
+    expect(await screen.findByTestId('prune-refreshed-notice')).toBeInTheDocument();
+    expect(executeMutate).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('system-reap-error')).not.toBeInTheDocument();
+  });
+
+  it('two toolbar clicks in the same tick resolve once', async () => {
+    const m = manifest('reap_tb', ['/wt/a'], { kind: 'reap-all-stale' });
+    const gate = deferred<{ manifest: ReapManifestData }>();
+    resolveMutate.mockReturnValue(gate.promise);
+    render(<Harness worktrees={[wt('/wt/a')]} />);
+    const btn = screen.getByTestId('reap-all');
+    act(() => {
+      btn.click();
+      btn.click();
+    });
+    expect(resolveMutate).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      gate.resolve({ manifest: m });
+    });
+    await screen.findByTestId('manifest-confirm-dialog');
   });
 });

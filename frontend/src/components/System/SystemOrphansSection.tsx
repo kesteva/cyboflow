@@ -11,9 +11,11 @@
  * and not attributed to a live worktree render in the shared {@link SuspectedTier}
  * beneath the confirmed orphans, never interleaved with them.
  *
- * Inventory only: destructive reclaim (Prune / Kill tree / Reap all stale) is wired
- * onto this list by a later epic, so this section renders no button of any kind —
- * not a disabled one, not a placeholder.
+ * Each orphaned / suspected process row offers Kill tree when the view passes an
+ * `onKillTree` handler (it opens the confirm dialog on a server-resolved manifest).
+ * Without a handler the section stays pure inventory — no button, no placeholder.
+ * Worktree rows never carry a control here: pruning lives on the worktree cards and
+ * the toolbar's Reap all stale.
  */
 import { AlertTriangle, Cpu, Folder } from 'lucide-react';
 import type { ReactElement, ReactNode } from 'react';
@@ -26,6 +28,7 @@ import {
   basename,
   formatElapsed,
   processName,
+  type SystemActionableProcess,
   type SystemProcess,
   type SystemWorktree,
 } from './SystemGroupedBody';
@@ -35,6 +38,8 @@ type ManagedProcess = Exclude<SystemProcess, { bucket: 'foreign' }>;
 const CARD = 'border-t border-status-warning/40 bg-status-warning/5 px-3.5 py-3';
 const BADGE = 'eyebrow inline-flex items-center rounded-button border px-1.5 py-0.5 text-[10px] font-medium';
 const BADGE_WARN = `${BADGE} border-status-warning/40 bg-status-warning/10 text-status-warning`;
+const BUTTON_DANGER =
+  'inline-flex items-center rounded-button border border-status-error/50 bg-status-error/10 px-2 py-1 font-mono text-[11px] text-status-error transition-colors hover:bg-status-error/20';
 
 function formatPercent(value: number | null): string {
   return value === null ? '—' : `${value.toFixed(1)}%`;
@@ -65,7 +70,7 @@ function Stat({ label, children }: { label: string; children: ReactNode }): Reac
   );
 }
 
-/** One orphan card: kind tile, title row, owner line, stats — inventory only, no controls. */
+/** One orphan card: kind tile, title row, owner line, stats, and an optional action slot. */
 function OrphanCard({
   testId,
   attrs,
@@ -74,6 +79,7 @@ function OrphanCard({
   nameTitle,
   badge,
   owner,
+  actions,
   children,
 }: {
   testId: string;
@@ -83,6 +89,7 @@ function OrphanCard({
   nameTitle: string;
   badge: string;
   owner: string;
+  actions?: ReactNode;
   children: ReactNode;
 }): ReactElement {
   return (
@@ -104,6 +111,7 @@ function OrphanCard({
           </div>
           <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-text-secondary">{children}</div>
         </div>
+        {actions !== undefined && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
       </div>
     </div>
   );
@@ -128,7 +136,13 @@ function WorktreeRow({ worktree }: { worktree: SystemWorktree }): ReactElement {
   );
 }
 
-function ProcessRow({ process }: { process: ManagedProcess }): ReactElement {
+function ProcessRow({
+  process,
+  onKillTree,
+}: {
+  process: ManagedProcess;
+  onKillTree?: (process: SystemActionableProcess) => void;
+}): ReactElement {
   const owner =
     process.worktreePath === null
       ? 'No owning worktree'
@@ -142,6 +156,18 @@ function ProcessRow({ process }: { process: ManagedProcess }): ReactElement {
       nameTitle={process.command}
       badge={process.bucket === 'suspected' ? 'Suspected' : 'Orphan'}
       owner={owner}
+      actions={
+        onKillTree === undefined ? undefined : (
+          <button
+            type="button"
+            data-testid={`orphan-kill-tree-${process.pid}`}
+            className={BUTTON_DANGER}
+            onClick={() => onKillTree(process)}
+          >
+            Kill tree
+          </button>
+        )
+      }
     >
       <Stat label="pid">{process.pid}</Stat>
       <Stat label="cpu">{formatPercent(process.pcpu)}</Stat>
@@ -177,9 +203,11 @@ function SubgroupHeader({
 
 export interface SystemOrphansSectionProps {
   snapshot: SystemSnapshotData;
+  /** Kill one orphaned / suspected process's tree. Omit for a read-only inventory. */
+  onKillTree?: (process: SystemActionableProcess) => void;
 }
 
-export function SystemOrphansSection({ snapshot }: SystemOrphansSectionProps): ReactElement {
+export function SystemOrphansSection({ snapshot, onKillTree }: SystemOrphansSectionProps): ReactElement {
   const staleWorktrees = snapshot.worktrees.filter((w) => w.tag === 'orphan');
   const liveWorktreePaths = new Set(snapshot.worktrees.filter((w) => w.tag !== 'orphan').map((w) => w.path));
   const orphanProcesses = snapshot.processes.filter(
@@ -242,12 +270,12 @@ export function SystemOrphansSection({ snapshot }: SystemOrphansSectionProps): R
           ) : (
             <>
               {orphanProcesses.map((p) => (
-                <ProcessRow key={`pid-${p.pid}`} process={p} />
+                <ProcessRow key={`pid-${p.pid}`} process={p} onKillTree={onKillTree} />
               ))}
               {suspectedProcesses.length > 0 && (
                 <SuspectedTier>
                   {suspectedProcesses.map((p) => (
-                    <ProcessRow key={`pid-${p.pid}`} process={p} />
+                    <ProcessRow key={`pid-${p.pid}`} process={p} onKillTree={onKillTree} />
                   ))}
                 </SuspectedTier>
               )}

@@ -17,7 +17,7 @@ vi.mock('../../../trpc/client', () => ({
 vi.mock('../../../hooks/useOcclusion', () => ({ useOcclusion: () => undefined }));
 vi.mock('../../../utils/systemNavigation', () => ({ openSystemRun: vi.fn(), openSystemSession: vi.fn() }));
 
-import { SystemGroupedBody, type SystemActionableProcess, type SystemProcess } from '../SystemGroupedBody';
+import { SystemGroupedBody, type SystemProcess } from '../SystemGroupedBody';
 import { useProcessReap } from '../useProcessReap';
 import type { ReapManifestData } from '../reapManifestAdapter';
 
@@ -100,12 +100,8 @@ function dialogButton(name: string): HTMLElement {
 
 function Harness({ snapshot, groupBy }: { snapshot: SystemSnapshotData; groupBy: 'worktree' | 'process-type' }) {
   const reap = useProcessReap({ projectId: 7, onSettled });
-  const orphans = snapshot.processes.filter((p): p is SystemActionableProcess => p.bucket === 'orphan');
   return (
     <div>
-      <button type="button" data-testid="reap-all" onClick={() => reap.reapAllStale(orphans)}>
-        reap
-      </button>
       {reap.overlay}
       <SystemGroupedBody
         snapshot={snapshot}
@@ -232,46 +228,6 @@ describe('Kill all', () => {
     fireEvent.click(screen.getByTestId('type-kill-all-claude-cli'));
     await screen.findByTestId('untagged-process-warning');
     expect(dialogButton('Kill anyway')).toBeInTheDocument();
-  });
-});
-
-describe('Reap all stale (process half)', () => {
-  it('covers every orphaned process in one manifest / dialog / execute round trip', async () => {
-    const orphanPids = [31, 32, 33];
-    const orphanTargets = orphanPids.map((pid) => procTarget(pid, true, 2, 'orphan'));
-    resolveSpy.mockResolvedValue({ manifest: manifest('reap_stale', orphanTargets) });
-    executeSpy.mockResolvedValue({
-      manifestId: 'reap_stale',
-      alsoDeleteBranch: false,
-      results: orphanPids.map((pid) => ({ targetId: `process:${pid}`, kind: 'killed' as const })),
-      errors: [],
-    });
-    const snapshot = snap([
-      proc(31, { bucket: 'orphan' }),
-      proc(32, { bucket: 'orphan' }),
-      proc(33, { bucket: 'orphan' }),
-      proc(40),
-      proc(41, { bucket: 'suspected', owner: null }),
-    ]);
-    render(<Harness snapshot={snapshot} groupBy="worktree" />);
-    fireEvent.click(screen.getByTestId('reap-all'));
-    await screen.findByTestId('manifest-confirm-dialog');
-    expect(resolveSpy).toHaveBeenCalledTimes(1);
-    // Only orphan-bucket pids are asked for — never owned or suspected ones.
-    expect(resolveSpy).toHaveBeenCalledWith({ projectId: 7, selection: { kind: 'row', pids: [31, 32, 33] } });
-    // A process-only manifest frees no disk: the subtitle must not claim "0 B".
-    expect(screen.getByTestId('manifest-confirm-subtitle')).toHaveTextContent('3 targets');
-    expect(screen.getByTestId('manifest-confirm-subtitle')).not.toHaveTextContent('disk');
-    fireEvent.click(dialogButton('Reap all stale'));
-    await screen.findByTestId('reap-summary');
-    expect(executeSpy).toHaveBeenCalledTimes(1);
-    expect(executeSpy).toHaveBeenCalledWith({ manifestId: 'reap_stale' });
-  });
-
-  it('does nothing when there are no orphaned processes', () => {
-    render(<Harness snapshot={snap([proc(40)])} groupBy="worktree" />);
-    fireEvent.click(screen.getByTestId('reap-all'));
-    expect(resolveSpy).not.toHaveBeenCalled();
   });
 });
 

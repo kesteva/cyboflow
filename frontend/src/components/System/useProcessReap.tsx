@@ -5,9 +5,9 @@
  *   Kill tree (row, both groupings)  → `row` selection → KillProcessConfirmDialog
  *   Kill all processes (worktree card) → `row` selection of the card's pids
  *   Kill all (N) (process type)        → `kill-all-of-type` selection
- *   Reap all stale (toolbar, process half) → `row` selection of every orphan-bucket
- *                                         pid, in ONE manifest / dialog / execute
- *                                         (the worktree half is useWorktreeReap)
+ *
+ * Toolbar "Reap all stale" is NOT here: it spans worktrees and processes in ONE server
+ * `reap-all-stale` manifest, so it lives in useWorktreeReap (one dialog, one execute).
  *
  * The dialog renders the manifest `monitorReap.resolve` returned, and confirming
  * executes THAT manifest by its server-minted id — the client never fabricates a
@@ -16,7 +16,7 @@
  *
  * These manifests hold processes only, so no branch-delete choice is offered.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
@@ -32,9 +32,7 @@ interface PendingReap {
   manifest: ReapManifestData;
   title: string;
   scope: 'single' | 'batch';
-  /** `kill` may open the harder untagged-process dialog; `reap` (reap-all-stale) never does. */
-  mode: 'kill' | 'reap';
-  /** The action's own label for the confirm button ("Kill tree", "Kill all", "Reap all stale"). */
+  /** The action's own label for the confirm button ("Kill tree", "Kill all"). */
   confirmText: string;
 }
 
@@ -49,8 +47,6 @@ interface ReapFeedback {
 export interface UseProcessReapResult {
   /** Wire onto `SystemGroupedBody` (`onKillTree` / `onKillAll`). */
   handlers: Required<Pick<SystemActionHandlers, 'onKillTree' | 'onKillAll'>>;
-  /** Toolbar "Reap all stale", process half: one manifest of every listed orphan process. */
-  reapAllStale: (orphans: readonly SystemActionableProcess[]) => void;
   /** True while a resolve or execute call is in flight. */
   busy: boolean;
   /** Confirm dialogs plus the visible per-target error / result strip. Render once. */
@@ -73,10 +69,13 @@ export function useProcessReap(args: {
   const [pending, setPending] = useState<PendingReap | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<ReapFeedback | null>(null);
+  // Synchronous single-flight guard: `busy` state cannot stop two same-tick clicks that close over the same `pending`.
+  const inFlightRef = useRef(false);
 
   const resolve = useCallback(
     async (selection: Selection, meta: Omit<PendingReap, 'manifest'>): Promise<void> => {
-      if (projectId === null) return;
+      if (projectId === null || inFlightRef.current) return;
+      inFlightRef.current = true;
       setFeedback(null);
       setBusy(true);
       try {
@@ -89,6 +88,7 @@ export function useProcessReap(args: {
       } catch (err) {
         setFeedback({ error: `Could not prepare ${meta.title.toLowerCase()}: ${messageOf(err)}`, failures: [], summary: null });
       } finally {
+        inFlightRef.current = false;
         setBusy(false);
       }
     },
@@ -99,7 +99,7 @@ export function useProcessReap(args: {
     (process: SystemActionableProcess): void => {
       void resolve(
         { kind: 'row', pids: [process.pid] },
-        { title: 'Kill process tree', scope: 'single', mode: 'kill', confirmText: 'Kill tree' },
+        { title: 'Kill process tree', scope: 'single', confirmText: 'Kill tree' },
       );
     },
     [resolve],
@@ -109,7 +109,7 @@ export function useProcessReap(args: {
     (processes: SystemActionableProcess[], scope: { kind: 'worktree' | 'type'; label: string }): void => {
       if (processes.length === 0) return;
       const title = `Kill all ${scope.label} processes`;
-      const meta = { title, scope: 'batch' as const, mode: 'kill' as const, confirmText: 'Kill all' };
+      const meta = { title, scope: 'batch' as const, confirmText: 'Kill all' };
       const type = processes[0].processType;
       if (scope.kind === 'type' && processes.every((p) => p.processType === type)) {
         void resolve({ kind: 'kill-all-of-type', processType: type }, meta);
@@ -120,22 +120,11 @@ export function useProcessReap(args: {
     [resolve],
   );
 
-  const reapAllStale = useCallback(
-    (orphans: readonly SystemActionableProcess[]): void => {
-      const pids = orphans.filter((p) => p.bucket === 'orphan').map((p) => p.pid);
-      if (pids.length === 0) return;
-      void resolve(
-        { kind: 'row', pids },
-        { title: 'Reap stale processes', scope: 'batch', mode: 'reap', confirmText: 'Reap all stale' },
-      );
-    },
-    [resolve],
-  );
-
   const cancel = useCallback((): void => setPending(null), []);
 
   const confirm = useCallback(async (): Promise<void> => {
-    if (pending === null) return;
+    if (pending === null || inFlightRef.current) return;
+    inFlightRef.current = true;
     const { manifest } = pending;
     setPending(null);
     setBusy(true);
@@ -156,6 +145,7 @@ export function useProcessReap(args: {
     } catch (err) {
       setFeedback({ error: messageOf(err), failures: [], summary: null });
     } finally {
+      inFlightRef.current = false;
       setBusy(false);
       onSettled?.();
     }
@@ -169,7 +159,7 @@ export function useProcessReap(args: {
     const data = hasWorktree ? base : { ...base, reclaimableBytes: null };
     const choice = chooseKillDialog(pending.manifest, pending.scope);
     const common = { isOpen: true, manifest: data, title: pending.title, onCancel: cancel };
-    if (pending.mode === 'kill' && choice.dialog === 'kill-process') {
+    if (choice.dialog === 'kill-process') {
       dialog = (
         <KillProcessConfirmDialog
           {...common}
@@ -244,5 +234,5 @@ export function useProcessReap(args: {
     </>
   );
 
-  return { handlers: { onKillTree, onKillAll }, reapAllStale, busy, overlay };
+  return { handlers: { onKillTree, onKillAll }, busy, overlay };
 }

@@ -4,8 +4,8 @@
  * of any kind (kill / reclaim / delete) exists in the section's DOM subtree.
  */
 import '@testing-library/jest-dom';
-import { render, screen, within } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, within, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 import { SystemOrphansSection } from '../SystemOrphansSection';
 import type { SystemProcess, SystemWorktree } from '../SystemGroupedBody';
@@ -155,7 +155,20 @@ describe('SystemOrphansSection', () => {
     expect(screen.getByTestId('orphan-processes-summary')).toHaveTextContent('2 orphaned');
   });
 
-  it('renders no control of any kind inside the section', () => {
+  it('gives each orphan/suspected process row a Kill tree only when a handler is passed, and never a worktree row', () => {
+    const onKillTree = vi.fn();
+    const { container } = render(<SystemOrphansSection snapshot={fixture} onKillTree={onKillTree} />);
+    const buttons = controlsIn(container);
+    const procRows = screen.getAllByTestId('orphan-proc-row');
+    expect(buttons).toHaveLength(procRows.length);
+    for (const row of procRows) expect(within(row).getByRole('button', { name: 'Kill tree' })).toBeInTheDocument();
+    for (const row of screen.getAllByTestId('orphan-wt-row')) expect(within(row).queryByRole('button')).toBeNull();
+    fireEvent.click(buttons[0]);
+    expect(onKillTree).toHaveBeenCalledTimes(1);
+    expect(onKillTree.mock.calls[0][0]).toMatchObject({ pid: expect.any(Number) });
+  });
+
+  it('renders no control of any kind inside the section without a handler', () => {
     const { container } = render(<SystemOrphansSection snapshot={fixture} />);
     expect(controlsIn(container)).toEqual([]);
     expect(screen.queryByRole('button')).not.toBeInTheDocument();

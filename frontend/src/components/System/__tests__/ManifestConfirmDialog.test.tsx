@@ -212,3 +212,21 @@ describe('KillProcessConfirmDialog', () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ManifestConfirmDialog busy', () => {
+  it('disables Confirm and the branch checkbox while busy, and never confirms', () => {
+    const { onConfirm } = setup({ busy: true });
+    const confirm = screen.getByRole('button', { name: 'Working…' });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByTestId('manifest-delete-branch')).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('is enabled by default', () => {
+    setup();
+    expect(screen.getByRole('button', { name: 'Reap' })).toBeEnabled();
+    expect(screen.getByTestId('manifest-delete-branch')).toBeEnabled();
+  });
+});

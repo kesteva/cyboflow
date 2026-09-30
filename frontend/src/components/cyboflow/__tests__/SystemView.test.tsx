@@ -7,15 +7,23 @@
  * contract is exercised in isolation.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 
-const { useSystemSnapshotSpy, getAllSpy, navState } = vi.hoisted(() => ({
+const { useSystemSnapshotSpy, getAllSpy, navState, resolveSpy, executeSpy } = vi.hoisted(() => ({
   useSystemSnapshotSpy: vi.fn(),
   getAllSpy: vi.fn(),
   navState: { activeProjectId: 1 as number | null },
+  resolveSpy: vi.fn(),
+  executeSpy: vi.fn(),
 }));
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: { cyboflow: { monitorReap: { resolve: { mutate: resolveSpy }, execute: { mutate: executeSpy } } } },
+}));
+vi.mock('../../../hooks/useOcclusion', () => ({ useOcclusion: () => undefined }));
+vi.mock('../../../utils/systemNavigation', () => ({ openSystemRun: vi.fn(), openSystemSession: vi.fn() }));
 
 vi.mock('../../../hooks/useSystemSnapshot', () => ({ useSystemSnapshot: useSystemSnapshotSpy }));
 vi.mock('../../../utils/api', () => ({ API: { projects: { getAll: getAllSpy } } }));
@@ -70,6 +78,8 @@ beforeEach(() => {
   useSystemSnapshotSpy.mockReset();
   getAllSpy.mockReset();
   refetchSpy.mockReset();
+  resolveSpy.mockReset();
+  executeSpy.mockReset();
   navState.activeProjectId = 1;
   getAllSpy.mockResolvedValue({ success: true, data: [{ id: 1, name: 'proj' }] });
 });
@@ -282,5 +292,111 @@ describe('SystemView process destructive wiring', () => {
     mockSnapshot(snap([wt('/a', measured(MB))], { processes: [owned] }));
     render(<SystemView />);
     expect(screen.getByTestId('system-reap-all-stale')).toBeDisabled();
+  });
+});
+
+describe('SystemView orphan reaping (actual view)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  const orphanProc = {
+    bucket: 'orphan',
+    processType: 'claude-cli',
+    command: 'claude --resume 12',
+    worktreePath: null,
+    pid: 12,
+    ppid: 1,
+    pcpu: 1,
+    pmem: 1,
+    etimeSeconds: 60,
+    owner: null,
+    instanceId: 'dead',
+  } as unknown as SystemSnapshotData['processes'][number];
+
+  const procTarget = {
+    kind: 'process' as const,
+    pid: 12,
+    processType: 'claude-cli' as const,
+    bucket: 'orphan' as const,
+    command: 'claude --resume 12',
+    worktreePath: null,
+    sessionId: null,
+    runId: null,
+    taggedAsCyboflow: true,
+    descendantPidCount: 1,
+  };
+  const wtTarget = {
+    kind: 'worktree' as const,
+    path: '/stale',
+    branch: 'b',
+    tag: 'orphan' as const,
+    sessionId: null,
+    runId: null,
+    reclaimableBytes: MB,
+    dirty: false,
+    dirtyFileCount: 0,
+    aheadOfMain: 0,
+  };
+  const manifestOf = (id: string, targets: unknown[]) => ({
+    id,
+    kind: 'row',
+    snapshotGeneratedAt: 1,
+    builtAt: 1,
+    targets,
+    reclaimableBytes: MB,
+    unmeasuredTargetCount: 0,
+    dirtyFileCount: 0,
+    dirtyCountUnknownTargetCount: 0,
+    aheadOfMainCount: 0,
+    descendantPidCount: 1,
+    alsoDeleteBranch: false,
+  });
+
+  it('an orphan process row in the Orphans section has a Kill tree that opens the kill confirm and executes its manifest', async () => {
+    mockSnapshot(snap([wt('/a', measured(MB))], { processes: [orphanProc] }));
+    resolveSpy.mockResolvedValue({ manifest: manifestOf('reap_kill', [procTarget]) });
+    executeSpy.mockResolvedValue({
+      manifestId: 'reap_kill',
+      alsoDeleteBranch: false,
+      results: [{ targetId: 'process:12', kind: 'killed' }],
+      errors: [],
+    });
+    render(<SystemView />);
+
+    const orphans = screen.getByTestId('system-orphans');
+    fireEvent.click(within(orphans).getByTestId('orphan-kill-tree-12'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    expect(resolveSpy).toHaveBeenCalledWith({ projectId: 1, selection: { kind: 'row', pids: [12] } });
+
+    fireEvent.click(within(screen.getByTestId('manifest-confirm-dialog')).getByRole('button', { name: 'Kill tree' }));
+    await waitFor(() => expect(executeSpy).toHaveBeenCalledWith({ manifestId: 'reap_kill' }));
+  });
+
+  it('Reap all stale with orphan worktrees AND processes opens exactly one dialog over one reap-all-stale manifest', async () => {
+    mockSnapshot(snap([wt('/a', measured(MB)), wt('/stale', measured(MB), 'orphan')], { processes: [orphanProc] }));
+    resolveSpy.mockResolvedValue({ manifest: manifestOf('reap_all', [wtTarget, procTarget]) });
+    executeSpy.mockResolvedValue({
+      manifestId: 'reap_all',
+      alsoDeleteBranch: false,
+      results: [
+        { targetId: 'worktree:/stale', kind: 'pruned' },
+        { targetId: 'process:12', kind: 'killed' },
+      ],
+      errors: [],
+    });
+    render(<SystemView />);
+
+    fireEvent.click(screen.getByTestId('system-reap-all-stale'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    // One click → one resolve of the server's own selection, one dialog holding both kinds.
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
+    expect(resolveSpy).toHaveBeenCalledWith({ projectId: 1, selection: { kind: 'reap-all-stale' } });
+    expect(screen.getAllByTestId('manifest-confirm-dialog')).toHaveLength(1);
+    expect(within(screen.getByTestId('manifest-targets')).getAllByRole('listitem')).toHaveLength(2);
+
+    fireEvent.click(within(screen.getByTestId('manifest-confirm-dialog')).getByRole('button', { name: 'Reap all stale' }));
+    await waitFor(() => expect(executeSpy).toHaveBeenCalledTimes(1));
+    expect(executeSpy).toHaveBeenCalledWith({ manifestId: 'reap_all' });
   });
 });
