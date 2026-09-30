@@ -235,6 +235,14 @@ describe('foreign entries are unkillable by construction', () => {
     }
   });
 
+  it('display figures are formatted for the view, not raw numbers stringified', () => {
+    // FOREIGN_UNRELATED is proc(201): pcpu 2.5, pmem 0.4, etime 120s.
+    const f = foreign.find((x) => x.pidLabel === '201');
+    expect(f?.display).toEqual({ cpu: '2.5%', mem: '0.4%', elapsed: '2m' });
+    const long = classify([proc(202, 'x', { pcpu: null, pmem: null, etimeSeconds: 388920 })], live, truth)[0];
+    expect(long.bucket === 'foreign' && long.display).toEqual({ cpu: null, mem: null, elapsed: '4d' });
+  });
+
   it('has no number-typed field anywhere (compile-time), while the other buckets keep theirs', () => {
     expectTypeOf<NumericKeys<ForeignProcess>>().toEqualTypeOf<never>();
     expectTypeOf<NumericKeys<OrphanProcess>>().not.toEqualTypeOf<never>();

@@ -67,6 +67,50 @@ const PROCESS: SystemProcessEntry = {
   owner: { kind: 'cli', panelId: 'p', sessionId: 's1' },
 };
 
+describe('cyboflow.system.snapshot — nested worktree disk usage', () => {
+  const entry = (path: string, tag: WorktreeMonitorRegistryEntry['tag'] = 'orphan'): WorktreeMonitorRegistryEntry =>
+    tag === 'is_main_repo'
+      ? { path, branch: 'main', tag, prunable: false }
+      : { path, branch: 'b', tag: 'orphan', prunable: true };
+  const measured = (bytes: number) => ({ status: 'measured' as const, bytes, measuredAt: 1 });
+  const providerFor = (sizes: Record<string, ReturnType<typeof measured> | { status: 'measuring' }>): SystemSnapshotProvider => ({
+    loadWorktrees: async () => [
+      entry('/repo', 'is_main_repo'),
+      entry('/repo/worktrees/a'),
+      entry('/repo/worktrees/b'),
+      entry('/elsewhere/c'),
+    ],
+    getDiskUsage: (p) => sizes[p] ?? { status: 'queued' },
+    loadProcesses: async () => [],
+    orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
+    probePort: async (port, label) => ({ port, label, inUse: false }),
+  });
+
+  it('subtracts the worktrees nested under a checkout so their bytes are counted once', async () => {
+    setSystemProvider(
+      providerFor({
+        '/repo': measured(1000),
+        '/repo/worktrees/a': measured(300),
+        '/repo/worktrees/b': measured(200),
+        '/elsewhere/c': measured(50),
+      }),
+    );
+    const snap = await caller().snapshot({ projectId: 1 });
+    const bytes = Object.fromEntries(
+      snap.worktrees.map((w) => [w.path, w.usage.status === 'measured' ? w.usage.bytes : w.usage.status]),
+    );
+    expect(bytes).toEqual({ '/repo': 500, '/repo/worktrees/a': 300, '/repo/worktrees/b': 200, '/elsewhere/c': 50 });
+  });
+
+  it('keeps the parent measuring — never inflated — while a nested worktree is unmeasured', async () => {
+    setSystemProvider(
+      providerFor({ '/repo': measured(1000), '/repo/worktrees/a': measured(300), '/repo/worktrees/b': { status: 'measuring' } }),
+    );
+    const snap = await caller().snapshot({ projectId: 1 });
+    expect(snap.worktrees.find((w) => w.path === '/repo')?.usage).toEqual({ status: 'measuring' });
+  });
+});
+
 describe('cyboflow.system.snapshot — delegation', () => {
   it('composes process + worktree/disk + ports/sockets data in one call', async () => {
     const probe = vi.fn(async (port: number, label: string) => ({ port, label, inUse: port === 9223 }));

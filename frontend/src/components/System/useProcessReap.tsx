@@ -53,6 +53,8 @@ export interface UseProcessReapResult {
   busy: boolean;
   /** Confirm dialogs plus the visible per-target error / result strip. Render once. */
   overlay: ReactElement;
+  /** Drop the last result / error strip (a later, unrelated reap makes it stale). */
+  clearFeedback: () => void;
 }
 
 function messageOf(err: unknown): string {
@@ -219,6 +221,8 @@ export function useProcessReap(args: {
     }
   }
 
+  const clearFeedback = useCallback((): void => setFeedback(null), []);
+
   const overlay = (
     <>
       {dialog}
@@ -259,5 +263,5 @@ export function useProcessReap(args: {
     </>
   );
 
-  return { handlers: { onKillTree, onKillAll }, busy, overlay };
+  return { handlers: { onKillTree, onKillAll }, busy, overlay, clearFeedback };
 }

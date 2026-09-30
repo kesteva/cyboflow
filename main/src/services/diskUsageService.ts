@@ -23,10 +23,17 @@
  * its old number.
  */
 import { execFile } from 'node:child_process';
+import { isAbsolute, relative } from 'node:path';
 import { promisify } from 'node:util';
 import type { LoggerLike } from '../orchestrator/types';
 
 const execFileAsync = promisify(execFile);
+
+/** True when `child` is strictly inside directory `parent`. */
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
 
 /** How long a measured size stays authoritative before the next request re-queues it. */
 export const DISK_USAGE_TTL_MS = 5 * 60 * 1000;
@@ -134,11 +141,17 @@ export class DiskUsageService {
     return { status: 'queued' };
   }
 
-  /** Expire a path's cached entry immediately (e.g. after the worktree was removed). Does not queue a re-measure. */
+  /**
+   * Expire a path's cached entry immediately (e.g. after the worktree was removed). Does not queue
+   * a re-measure. Cached ANCESTORS expire too: a worktree nested under the project checkout (the
+   * default `<project>/worktrees/<name>` layout) is part of that checkout's `du`, so removing it
+   * changes the checkout's size.
+   */
   invalidate(path: string): void {
-    this.cache.delete(path);
-    this.failedAt.delete(path);
-    if (this.inflight?.path === path) this.inflight.stale = true;
+    const affects = (cached: string): boolean => cached === path || isInside(cached, path);
+    for (const key of [...this.cache.keys()]) if (affects(key)) this.cache.delete(key);
+    for (const key of [...this.failedAt.keys()]) if (affects(key)) this.failedAt.delete(key);
+    if (this.inflight && affects(this.inflight.path)) this.inflight.stale = true;
   }
 
   /** Measure a path ahead of every TTL-driven backlog entry, discarding any cached value. */

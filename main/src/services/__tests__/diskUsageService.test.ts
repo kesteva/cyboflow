@@ -135,6 +135,20 @@ describe('DiskUsageService', () => {
     expect(fake.calls).toEqual(['/wt/a', '/wt/a']);
   });
 
+  it('invalidate(path) also expires a cached ANCESTOR (a nested worktree is part of its checkout\'s du) but not siblings', async () => {
+    const { svc, fake } = makeService();
+    for (const p of ['/repo', '/repo/worktrees/a', '/elsewhere']) {
+      svc.getUsage(p);
+      await flush();
+      await fake.settle(p, 1024);
+    }
+    svc.invalidate('/repo/worktrees/a');
+    expect(svc.getUsage('/repo').status).toBe('queued'); // ancestor re-measures
+    expect(svc.getUsage('/repo/worktrees/a').status).toBe('queued');
+    expect(svc.getUsage('/elsewhere').status).toBe('measured'); // unrelated path keeps its value
+    expect(svc.getUsage('/repo/worktrees/b')).toEqual({ status: 'queued' }); // never-measured sibling: untouched by invalidate
+  });
+
   it('a result that lands after invalidate() is discarded', async () => {
     const { svc, fake } = makeService();
     svc.getUsage('/wt/a');

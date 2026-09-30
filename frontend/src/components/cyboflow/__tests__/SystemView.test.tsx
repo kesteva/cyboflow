@@ -399,4 +399,34 @@ describe('SystemView orphan reaping (actual view)', () => {
     await waitFor(() => expect(executeSpy).toHaveBeenCalledTimes(1));
     expect(executeSpy).toHaveBeenCalledWith({ manifestId: 'reap_all' });
   });
+  it('a later worktree reap clears the previous process reap\'s "Reaped N target" strip', async () => {
+    mockSnapshot(snap([wt('/a', measured(MB)), wt('/stale', measured(MB), 'orphan')], { processes: [orphanProc] }));
+    resolveSpy
+      .mockResolvedValueOnce({ manifest: manifestOf('reap_kill', [procTarget]) })
+      .mockResolvedValueOnce({ manifest: manifestOf('reap_wt', [wtTarget]) });
+    executeSpy
+      .mockResolvedValueOnce({
+        manifestId: 'reap_kill',
+        alsoDeleteBranch: false,
+        results: [{ targetId: 'process:12', kind: 'killed' }],
+        errors: [],
+      })
+      .mockResolvedValueOnce({
+        manifestId: 'reap_wt',
+        alsoDeleteBranch: false,
+        results: [{ targetId: 'worktree:/stale', kind: 'failed', message: 'locked' }],
+        errors: [{ targetId: 'worktree:/stale', message: 'locked' }],
+      });
+    render(<SystemView />);
+
+    fireEvent.click(within(screen.getByTestId('system-orphans')).getByTestId('orphan-kill-tree-12'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    fireEvent.click(within(screen.getByTestId('manifest-confirm-dialog')).getByRole('button', { name: 'Kill tree' }));
+    expect(await screen.findByTestId('reap-summary')).toHaveTextContent('Reaped 1 target');
+
+    fireEvent.click(screen.getByTestId('system-reap-all-stale'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    // The prior success strip must not linger next to the new attempt's outcome.
+    await waitFor(() => expect(screen.queryByTestId('reap-summary')).not.toBeInTheDocument());
+  });
 });

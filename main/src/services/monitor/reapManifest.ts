@@ -31,6 +31,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { GitStatus } from '../../types/session';
+import type { WorktreeGitProbe } from './probeWorktreeGit';
 import type {
   SystemProcessEntry,
   SystemProcessType,
@@ -86,8 +87,14 @@ export class ReapManifestError extends Error {
 export interface ReapManifestDeps {
   /** A `du` of exactly this path that started after the call (DiskUsageService.measureFresh). */
   measureFresh(path: string): Promise<number | null>;
-  /** GitStatusManager cache read (`peekCachedStatus`) — never spawns git. */
+  /** GitStatusManager cache read (`peekCachedStatus`) — never spawns git. Fallback when the probe is absent/unreadable. */
   peekGitStatus(sessionId: string): { status: GitStatus } | null;
+  /**
+   * One direct git read of the path, preferred over the cache: an orphan worktree has
+   * no session so the cache can never hold it, and a session's cached entry can be
+   * stale. Absent or null (unreadable) → fall back to the cache, then to unknown.
+   */
+  probeWorktreeGit?(worktreePath: string): Promise<WorktreeGitProbe | null>;
   /** How many descendants a pid has. */
   countDescendants(pid: number): Promise<number>;
   now?: () => number;
@@ -122,10 +129,18 @@ function ownerIds(p: KillableProcess): { sessionId: string | null; runId: string
   return { sessionId: null, runId: null };
 }
 
-function gitAnnotation(
+async function gitAnnotation(
   sessionId: string | null,
+  worktreePath: string,
   deps: ReapManifestDeps,
-): Pick<ReapWorktreeTarget, 'dirty' | 'dirtyFileCount' | 'aheadOfMain'> {
+): Promise<Pick<ReapWorktreeTarget, 'dirty' | 'dirtyFileCount' | 'aheadOfMain'>> {
+  // A fresh read first: the session cache is refreshed on its own schedule (and holds
+  // nothing for an orphan), so a stale "clean" there would silently drop the
+  // uncommitted-work warning from the very dialog that gates the destructive action.
+  const probed = deps.probeWorktreeGit ? await deps.probeWorktreeGit(worktreePath) : null;
+  if (probed) {
+    return { dirty: probed.dirty, dirtyFileCount: probed.dirtyFileCount, aheadOfMain: probed.aheadOfMain };
+  }
   const cached = sessionId === null ? null : deps.peekGitStatus(sessionId);
   if (!cached) return { dirty: null, dirtyFileCount: null, aheadOfMain: null };
   const s = cached.status;
@@ -263,7 +278,7 @@ export async function buildReapManifest<K extends ReapManifestKind>(
           sessionId,
           runId: w.runId ?? null,
           reclaimableBytes: await deps.measureFresh(w.path),
-          ...gitAnnotation(sessionId, deps),
+          ...(await gitAnnotation(sessionId, w.path, deps)),
         };
       }),
     ),

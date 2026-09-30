@@ -189,6 +189,7 @@ import { buildSystemSnapshot, setSystemProvider } from './orchestrator/trpc/rout
 import { setMonitorReapProvider } from './orchestrator/trpc/routers/monitorReap';
 import { MonitorReapService } from './services/monitor/monitorReapService';
 import { countDescendantPids } from './services/monitor/reapManifest';
+import { probeWorktreeGit } from './services/monitor/probeWorktreeGit';
 import { ReapExecutorImpl } from './services/monitor/reapExecutor';
 import { createWorktreePruner } from './services/monitor/worktreePruner';
 import { createSystemSnapshotProvider } from './services/systemSnapshotProvider';
@@ -5972,6 +5973,7 @@ app.whenReady().then(async () => {
           manifestDeps: {
             measureFresh: (p) => diskUsageService.measureFresh(p),
             peekGitStatus: (sessionId) => gitStatusManager.peekCachedStatus(sessionId),
+            probeWorktreeGit,
             countDescendants: countDescendantPids,
           },
           // Process kills, then broker reaping, then worktree removal (owner rows untouched).

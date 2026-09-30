@@ -181,6 +181,22 @@ function selfLooksCyboflow(p: MarkedProcess, truth: WorktreeTruth): boolean {
   return false;
 }
 
+/** `12.3%` — the same shape the view formats for non-foreign rows; null stays null. */
+function formatPercentDisplay(value: number | null): string | null {
+  return value === null ? null : `${value.toFixed(1)}%`;
+}
+
+/** `45s` / `12m` / `3h 4m` / `5d` — the same shape the view formats for non-foreign rows. */
+function formatElapsedDisplay(seconds: number | null): string | null {
+  if (seconds === null) return null;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 /**
  * Classify every row. Order of evidence, strongest first:
  *  1. A spawn marker: another live instance → foreign; an instance CONFIRMED dead
@@ -226,9 +242,9 @@ export function classify(
     readOnly: true,
     pidLabel: String(p.pid),
     display: {
-      cpu: p.pcpu === null ? null : String(p.pcpu),
-      mem: p.pmem === null ? null : String(p.pmem),
-      elapsed: p.etimeSeconds === null ? null : String(p.etimeSeconds),
+      cpu: formatPercentDisplay(p.pcpu),
+      mem: formatPercentDisplay(p.pmem),
+      elapsed: formatElapsedDisplay(p.etimeSeconds),
     },
     foreignInstanceId,
   });

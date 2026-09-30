@@ -208,6 +208,13 @@ export function SystemView(): ReactElement {
   const orphanProcessRows =
     snapshot?.processes.filter((p): p is SystemActionableProcess => p.bucket === 'orphan') ?? [];
   const staleCount = staleWorktrees.length + orphanProcessRows.length;
+  // A new worktree reap makes the previous process reap's result strip stale: it would sit
+  // next to the new outcome ("Reaped 1 target." above a fresh error) and mislead.
+  const { busy: worktreeReapBusy } = worktreeReap;
+  const { clearFeedback: clearProcessFeedback } = processReap;
+  useEffect(() => {
+    if (worktreeReapBusy) clearProcessFeedback();
+  }, [worktreeReapBusy, clearProcessFeedback]);
 
   // Ticks once a second so "Updated Ns ago" advances between the 2.5s polls.
   const [now, setNow] = useState<number>(() => Date.now());

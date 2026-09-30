@@ -25,6 +25,7 @@
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/* — only structural types and portProbe.ts.
  */
+import path from 'node:path';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import { probePort, type PortProbeResult } from '../../portProbe';
@@ -103,6 +104,33 @@ function startingSnapshot(): SystemSnapshot {
   };
 }
 
+function isNestedPath(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * `du` of a checkout counts every worktree nested under it — cyboflow's default
+ * layout puts them in `<project>/worktrees/`, so the main repo would otherwise report
+ * (and the Disk tile total double-count) all of them. Subtract the outermost nested
+ * entries' measured sizes; while any of those is still unmeasured the parent stays
+ * `measuring` rather than showing an inflated figure.
+ */
+function excludeNestedWorktreeUsage(worktrees: SystemWorktreeEntry[]): SystemWorktreeEntry[] {
+  return worktrees.map((entry) => {
+    if (entry.usage.status !== 'measured') return entry;
+    const inside = worktrees.filter((o) => o !== entry && isNestedPath(entry.path, o.path));
+    const outermost = inside.filter((o) => !inside.some((p) => p !== o && isNestedPath(p.path, o.path)));
+    if (outermost.length === 0) return entry;
+    let nestedBytes = 0;
+    for (const o of outermost) {
+      if (o.usage.status !== 'measured') return { ...entry, usage: { status: 'measuring' as const } };
+      nestedBytes += o.usage.bytes;
+    }
+    return { ...entry, usage: { ...entry.usage, bytes: Math.max(0, entry.usage.bytes - nestedBytes) } };
+  });
+}
+
 /** Assemble the aggregated snapshot from a provider (also what `monitorReap` resolves manifests against). */
 export async function buildSystemSnapshot(provider: SystemSnapshotProvider, projectId: number): Promise<SystemSnapshot> {
   const probe = provider.probePort ?? ((port: number, label: string) => probePort(port, label));
@@ -113,13 +141,15 @@ export async function buildSystemSnapshot(provider: SystemSnapshotProvider, proj
     probe(DEV_RENDERER_PROBE_PORT, DEV_RENDERER_LABEL),
     probe(CDP_PROBE_PORT, CDP_LABEL),
   ]);
-  const worktrees: SystemWorktreeEntry[] = registry.map((entry) => ({
-    ...entry,
-    // Unsupported: never touch the disk service, so no `du` is queued.
-    usage: diskSizing.supported
-      ? provider.getDiskUsage(entry.path)
-      : { status: 'unsupported' as const, reason: diskSizing.reason },
-  }));
+  const worktrees: SystemWorktreeEntry[] = excludeNestedWorktreeUsage(
+    registry.map((entry) => ({
+      ...entry,
+      // Unsupported: never touch the disk service, so no `du` is queued.
+      usage: diskSizing.supported
+        ? provider.getDiskUsage(entry.path)
+        : { status: 'unsupported' as const, reason: diskSizing.reason },
+    })),
+  );
   return {
     status: 'ready',
     generatedAt: Date.now(),

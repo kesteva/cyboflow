@@ -220,6 +220,42 @@ describe('buildReapManifest', () => {
     expect(peekGitStatus).toHaveBeenCalledTimes(1);
   });
 
+  it('an orphan worktree with no session cache entry is annotated from a direct git probe', async () => {
+    const probeWorktreeGit = vi.fn(async (p: string) =>
+      p === '/wt/orphan-a' ? { dirty: true, dirtyFileCount: 4, aheadOfMain: 2 } : null,
+    );
+    const m = await buildReapManifest('reap-all-stale', {}, snapshot, makeDeps({ probeWorktreeGit }));
+    const a = m.targets.find((t) => t.kind === 'worktree' && t.path === '/wt/orphan-a');
+    expect(a).toMatchObject({ dirty: true, dirtyFileCount: 4, aheadOfMain: 2 });
+    // An unreadable path stays unknown (null), never a confident clean.
+    const b = m.targets.find((t) => t.kind === 'worktree' && t.path === '/wt/orphan-b');
+    expect(b).toMatchObject({ dirty: null, dirtyFileCount: null, aheadOfMain: null });
+    expect(m.dirtyFileCount).toBe(4);
+    expect(m.aheadOfMainCount).toBe(2);
+    expect(m.dirtyCountUnknownTargetCount).toBe(1);
+  });
+
+  it('a fresh probe beats a stale cached "clean"; an unreadable path falls back to the cache', async () => {
+    const staleClean = () => ({ status: { state: 'clean', filesChanged: 0 } as GitStatus });
+    const probed = await buildReapManifest(
+      'row',
+      { worktreePaths: ['/wt/session'] },
+      snapshot,
+      makeDeps({
+        peekGitStatus: staleClean,
+        probeWorktreeGit: async () => ({ dirty: true, dirtyFileCount: 2, aheadOfMain: 0 }),
+      }),
+    );
+    expect(probed.targets[0]).toMatchObject({ dirty: true, dirtyFileCount: 2 });
+    const fallback = await buildReapManifest(
+      'row',
+      { worktreePaths: ['/wt/session'] },
+      snapshot,
+      makeDeps({ peekGitStatus: staleClean, probeWorktreeGit: async () => null }),
+    );
+    expect(fallback.targets[0]).toMatchObject({ dirty: false, dirtyFileCount: 0 });
+  });
+
   it('untracked-only work is dirty with an unavailable count, never a confident zero', async () => {
     // GitStatusManager sets hasUntrackedFiles but its filesChanged excludes untracked files.
     const peekGitStatus = () => ({
