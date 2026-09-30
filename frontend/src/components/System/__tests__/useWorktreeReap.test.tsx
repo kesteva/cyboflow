@@ -91,8 +91,8 @@ function okExecute(m: ReapManifestData) {
 
 const onSettled = vi.fn();
 
-function Harness({ worktrees }: { worktrees: SystemWorktree[] }) {
-  const reap = useWorktreeReap({ projectId: 7, onSettled });
+function Harness({ worktrees, projectId = 7 }: { worktrees: SystemWorktree[]; projectId?: number }) {
+  const reap = useWorktreeReap({ projectId, onSettled });
   return (
     <div>
       {reap.error !== null && <WorktreeReapError error={reap.error} onDismiss={reap.clearError} />}
@@ -424,5 +424,31 @@ describe('double-submit guard', () => {
       gate.resolve({ manifest: m });
     });
     await screen.findByTestId('manifest-confirm-dialog');
+  });
+});
+
+describe('project switch', () => {
+  it('a resolve still in flight when the project switches never opens a dialog afterwards', async () => {
+    let release!: (v: { manifest: ReapManifestData }) => void;
+    resolveMutate.mockReturnValue(new Promise((r) => { release = r; }));
+    const { rerender } = render(<Harness worktrees={[wt('/wt/a')]} projectId={7} />);
+    fireEvent.click(screen.getByTestId('wt-prune'));
+    await waitFor(() => expect(resolveMutate).toHaveBeenCalledTimes(1));
+    rerender(<Harness worktrees={[wt('/wt/a')]} projectId={8} />);
+    await act(async () => {
+      release({ manifest: manifest('reap_A', ['/wt/a']) });
+    });
+    expect(screen.queryByTestId('manifest-confirm-dialog')).toBeNull();
+    expect(executeMutate).not.toHaveBeenCalled();
+  });
+
+  it('an already-open dialog closes on a project switch and execute is never called', async () => {
+    resolveMutate.mockResolvedValue({ manifest: manifest('reap_A', ['/wt/a']) });
+    const { rerender } = render(<Harness worktrees={[wt('/wt/a')]} projectId={7} />);
+    fireEvent.click(screen.getByTestId('wt-prune'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    rerender(<Harness worktrees={[wt('/wt/a')]} projectId={8} />);
+    expect(screen.queryByTestId('manifest-confirm-dialog')).toBeNull();
+    expect(executeMutate).not.toHaveBeenCalled();
   });
 });

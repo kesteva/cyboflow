@@ -16,7 +16,7 @@
  *
  * These manifests hold processes only, so no branch-delete choice is offered.
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
@@ -29,6 +29,8 @@ import { chooseKillDialog, summarizeExecution, type ReapFailure } from './proces
 type Selection = Parameters<typeof trpc.cyboflow.monitorReap.resolve.mutate>[0]['selection'];
 
 interface PendingReap {
+  /** The project this manifest was resolved for — a dialog never outlives a project switch. */
+  projectId: number;
   manifest: ReapManifestData;
   title: string;
   scope: 'single' | 'batch';
@@ -71,25 +73,41 @@ export function useProcessReap(args: {
   const [feedback, setFeedback] = useState<ReapFeedback | null>(null);
   // Synchronous single-flight guard: `busy` state cannot stop two same-tick clicks that close over the same `pending`.
   const inFlightRef = useRef(false);
+  // Request generation: bumped on every resolve/confirm and on every project change, so a response
+  // that settles after either is dropped instead of opening a dialog / feedback for the wrong project.
+  const genRef = useRef(0);
+
+  useEffect(() => {
+    genRef.current += 1;
+    inFlightRef.current = false;
+    setPending(null);
+    setFeedback(null);
+    setBusy(false);
+  }, [projectId]);
 
   const resolve = useCallback(
-    async (selection: Selection, meta: Omit<PendingReap, 'manifest'>): Promise<void> => {
+    async (selection: Selection, meta: Omit<PendingReap, 'manifest' | 'projectId'>): Promise<void> => {
       if (projectId === null || inFlightRef.current) return;
       inFlightRef.current = true;
+      const gen = ++genRef.current;
       setFeedback(null);
       setBusy(true);
       try {
         const { manifest } = await trpc.cyboflow.monitorReap.resolve.mutate({ projectId, selection });
+        if (gen !== genRef.current) return; // project switched (or a newer request began): stale response
         if (manifest.targets.length === 0) {
           setFeedback({ error: null, failures: [], summary: 'Nothing to reap — no matching targets.' });
           return;
         }
-        setPending({ ...meta, manifest });
+        setPending({ ...meta, projectId, manifest });
       } catch (err) {
+        if (gen !== genRef.current) return;
         setFeedback({ error: `Could not prepare ${meta.title.toLowerCase()}: ${messageOf(err)}`, failures: [], summary: null });
       } finally {
-        inFlightRef.current = false;
-        setBusy(false);
+        if (gen === genRef.current) {
+          inFlightRef.current = false;
+          setBusy(false);
+        }
       }
     },
     [projectId],
@@ -123,8 +141,10 @@ export function useProcessReap(args: {
   const cancel = useCallback((): void => setPending(null), []);
 
   const confirm = useCallback(async (): Promise<void> => {
-    if (pending === null || inFlightRef.current) return;
+    // Never run a manifest resolved for another project.
+    if (pending === null || pending.projectId !== projectId || inFlightRef.current) return;
     inFlightRef.current = true;
+    const gen = ++genRef.current;
     const { manifest } = pending;
     setPending(null);
     setBusy(true);
@@ -132,6 +152,7 @@ export function useProcessReap(args: {
     try {
       // Execute the manifest the dialog rendered, by its server-minted id.
       const response = await trpc.cyboflow.monitorReap.execute.mutate({ manifestId: manifest.id });
+      if (gen !== genRef.current) return; // project switched mid-execute: its result is not this view's
       const outcome = summarizeExecution(manifest, response);
       const done = outcome.killed + outcome.pruned;
       setFeedback({
@@ -143,16 +164,20 @@ export function useProcessReap(args: {
             : null,
       });
     } catch (err) {
+      if (gen !== genRef.current) return;
       setFeedback({ error: messageOf(err), failures: [], summary: null });
     } finally {
-      inFlightRef.current = false;
-      setBusy(false);
+      if (gen === genRef.current) {
+        inFlightRef.current = false;
+        setBusy(false);
+      }
       onSettled?.();
     }
-  }, [pending, onSettled]);
+  }, [pending, projectId, onSettled]);
 
   let dialog: ReactElement | null = null;
-  if (pending !== null) {
+  // Render-time guard: on the render right after a project switch, before the reset effect runs.
+  if (pending !== null && pending.projectId === projectId) {
     const base = toManifestConfirmData(pending.manifest);
     // A manifest with no worktree target frees no disk: state nothing rather than "0 B".
     const hasWorktree = pending.manifest.targets.some((t) => t.kind === 'worktree');

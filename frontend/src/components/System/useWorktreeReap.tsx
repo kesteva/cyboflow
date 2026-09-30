@@ -18,7 +18,7 @@
  * per-target failure/survivor in a partial result land in `error`, rendered by
  * {@link WorktreeReapError} in the view.
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { AlertTriangle, ShieldAlert, X } from 'lucide-react';
 import { trpc } from '../../trpc/client';
@@ -111,6 +111,17 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
   // both handlers close over the same `pending`, so the second would replay a consumed,
   // single-use manifest and surface a bogus stale-manifest error.
   const inFlightRef = useRef(false);
+  // Request generation: bumped on every resolve/confirm and on every project change, so a response
+  // that settles after either is dropped rather than opening a dialog / error for the wrong project.
+  const genRef = useRef(0);
+
+  useEffect(() => {
+    genRef.current += 1;
+    inFlightRef.current = false;
+    setPending(null);
+    setError(null);
+    setBusy(false);
+  }, [projectId]);
 
   const resolve = useCallback(
     async (
@@ -120,20 +131,25 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
     ): Promise<void> => {
       if (projectId === null || inFlightRef.current) return;
       inFlightRef.current = true;
+      const gen = ++genRef.current;
       setBusy(true);
       setError(null);
       try {
         const { manifest } = await trpc.cyboflow.monitorReap.resolve.mutate({ projectId, selection });
+        if (gen !== genRef.current) return;
         if (manifest.targets.length === 0) {
           setError({ message: 'Nothing to remove — no matching targets were found.', details: [] });
           return;
         }
         setPending({ projectId, selection, title: title(manifest), raw: manifest, confirm: toManifestConfirmData(manifest), confirmText, refreshed: false });
       } catch (err: unknown) {
+        if (gen !== genRef.current) return;
         setError({ message: `Could not prepare the removal: ${errorText(err)}`, details: [] });
       } finally {
-        inFlightRef.current = false;
-        setBusy(false);
+        if (gen === genRef.current) {
+          inFlightRef.current = false;
+          setBusy(false);
+        }
       }
     },
     [projectId],
@@ -159,8 +175,10 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
 
   const confirm = useCallback(
     async (_shown: ManifestConfirmData, options: ManifestConfirmOptions): Promise<void> => {
-      if (pending === null || inFlightRef.current) return;
+      // Never run a manifest resolved for another project.
+      if (pending === null || pending.projectId !== projectId || inFlightRef.current) return;
       inFlightRef.current = true;
+      const gen = ++genRef.current;
       setBusy(true);
       setError(null);
       try {
@@ -173,6 +191,7 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
             selection: pending.selection,
             alsoDeleteBranch: options.deleteBranch,
           });
+          if (gen !== genRef.current) return;
           if (manifest.targets.length === 0) {
             setPending(null);
             setError({ message: 'Nothing to remove — no matching targets were found.', details: [] });
@@ -183,6 +202,7 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
         }
         const toRun = pending.raw;
         const out = await trpc.cyboflow.monitorReap.execute.mutate({ manifestId: toRun.id });
+        if (gen !== genRef.current) return; // project switched mid-execute: its result is not this view's
         setPending(null);
         const problems = executionProblems(toRun, out);
         if (problems.length > 0) {
@@ -192,20 +212,24 @@ export function useWorktreeReap({ projectId, onSettled }: UseWorktreeReapArgs): 
           });
         }
       } catch (err: unknown) {
+        if (gen !== genRef.current) return;
         setPending(null);
         setError({ message: staleMessage(errorText(err)), details: [] });
       } finally {
-        inFlightRef.current = false;
-        setBusy(false);
+        if (gen === genRef.current) {
+          inFlightRef.current = false;
+          setBusy(false);
+        }
         onSettled?.();
       }
     },
-    [pending, onSettled],
+    [pending, projectId, onSettled],
   );
 
   const untagged = pending?.raw.targets.some((t) => t.kind === 'process' && !t.taggedAsCyboflow) ?? false;
+  // Render-time guard: on the render right after a project switch, before the reset effect runs.
   const dialog: ReactNode =
-    pending === null ? null : (
+    pending === null || pending.projectId !== projectId ? null : (
       <ManifestConfirmDialog
         isOpen
         manifest={pending.confirm}

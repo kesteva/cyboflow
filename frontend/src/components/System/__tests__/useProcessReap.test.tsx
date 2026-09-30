@@ -5,7 +5,7 @@
  * a user clicks and asserts what the server was asked to resolve/execute.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 
@@ -98,8 +98,16 @@ function dialogButton(name: string): HTMLElement {
   return within(screen.getByTestId('manifest-confirm-dialog')).getByRole('button', { name });
 }
 
-function Harness({ snapshot, groupBy }: { snapshot: SystemSnapshotData; groupBy: 'worktree' | 'process-type' }) {
-  const reap = useProcessReap({ projectId: 7, onSettled });
+function Harness({
+  snapshot,
+  groupBy,
+  projectId = 7,
+}: {
+  snapshot: SystemSnapshotData;
+  groupBy: 'worktree' | 'process-type';
+  projectId?: number;
+}) {
+  const reap = useProcessReap({ projectId, onSettled });
   return (
     <div>
       {reap.overlay}
@@ -298,5 +306,48 @@ describe('negative control', () => {
     expect(screen.queryByTestId('kill-tree-11')).toBeNull();
     expect(screen.queryByTestId('wt-kill-all')).toBeNull();
     expect(resolveSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('project switch', () => {
+  it('a resolve still in flight when the project switches never opens a dialog afterwards', async () => {
+    let release!: (v: { manifest: ReapManifestData }) => void;
+    resolveSpy.mockReturnValue(new Promise((r) => { release = r; }));
+    const { rerender } = render(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={7} />);
+    fireEvent.click(screen.getByTestId('kill-tree-11'));
+    await waitFor(() => expect(resolveSpy).toHaveBeenCalledTimes(1));
+    rerender(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={8} />);
+    await act(async () => {
+      release({ manifest: manifest('reap_A', [procTarget(11)]) });
+    });
+    expect(screen.queryByTestId('manifest-confirm-dialog')).toBeNull();
+    expect(screen.queryByTestId('reap-errors')).toBeNull();
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it('an already-open dialog closes on a project switch and execute is never called', async () => {
+    resolveSpy.mockResolvedValue({ manifest: manifest('reap_A', [procTarget(11)]) });
+    const { rerender } = render(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={7} />);
+    fireEvent.click(screen.getByTestId('kill-tree-11'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    rerender(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={8} />);
+    expect(screen.queryByTestId('manifest-confirm-dialog')).toBeNull();
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it('after a switch the new project can resolve and confirm its own manifest', async () => {
+    resolveSpy.mockResolvedValue({ manifest: manifest('reap_A', [procTarget(11)]) });
+    executeSpy.mockResolvedValue({ manifestId: 'reap_B', alsoDeleteBranch: false, results: [{ targetId: 'process:11', kind: 'killed' }], errors: [] });
+    const { rerender } = render(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={7} />);
+    fireEvent.click(screen.getByTestId('kill-tree-11'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    rerender(<Harness snapshot={snap([proc(11)])} groupBy="worktree" projectId={8} />);
+    resolveSpy.mockResolvedValue({ manifest: manifest('reap_B', [procTarget(11)]) });
+    fireEvent.click(screen.getByTestId('kill-tree-11'));
+    await screen.findByTestId('manifest-confirm-dialog');
+    expect(resolveSpy).toHaveBeenLastCalledWith({ projectId: 8, selection: { kind: 'row', pids: [11] } });
+    fireEvent.click(dialogButton('Kill tree'));
+    await screen.findByTestId('reap-summary');
+    expect(executeSpy).toHaveBeenCalledWith({ manifestId: 'reap_B' });
   });
 });
