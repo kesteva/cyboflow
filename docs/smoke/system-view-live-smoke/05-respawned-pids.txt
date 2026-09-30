@@ -1,0 +1,4 @@
+37384     1 sh -c cd /private/tmp/cf-smoke261/repo/worktrees/proc && sleep 600 & sleep 600 & wait
+37386 37384 sh -c cd /private/tmp/cf-smoke261/repo/worktrees/proc && sleep 600 & sleep 600 & wait
+37387 37384 sleep 600
+37388 37386 sleep 600

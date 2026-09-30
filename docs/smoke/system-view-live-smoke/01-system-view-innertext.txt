@@ -1,0 +1,301 @@
+SYSTEM · LIVE PROCESS & WORKTREE MONITOR
+System
+Updated 1s ago
+AUTO-REFRESH · 2.5S
+Refresh
+PROJECT
+smoke261
+WORKTREES
+5
+PROCESSES
+825
+DISK USED
+12.3 MB
+5 worktrees measured
+ORPHANS
+4
+4 wt · 0 proc
+By worktree
+By process type
+SORT
+Disk
+CPU
+Memory
+Owner
+Reap all stale (4)
+PORTS & SOCKETS
+:4521
+dev renderer
+FREE
+:9223
+CDP
+FREE
+orch.sock
+1 client · 0 runs bound
+listening state not reported
+ORPHANS — RECLAIM
+4 wt · 0 proc
+No live session or run owns these — this is the reap backlog.
+STALE WORKTREES
+4 stale · 12 MB on disk
+WORKTREE
+/private/tmp/cf-smoke261/repo/worktrees/ahead
+ORPHAN
+No owning session or run
+BRANCH
+smoke-ahead
+DISK
+3 MB
+WORKTREE
+/private/tmp/cf-smoke261/repo/worktrees/clean
+ORPHAN
+No owning session or run
+BRANCH
+smoke-clean
+DISK
+3 MB
+WORKTREE
+/private/tmp/cf-smoke261/repo/worktrees/dirty
+ORPHAN
+No owning session or run
+BRANCH
+smoke-dirty
+DISK
+3 MB
+WORKTREE
+/private/tmp/cf-smoke261/repo/worktrees/proc
+ORPHAN
+No owning session or run
+BRANCH
+smoke-proc
+DISK
+3 MB
+ORPHANED PROCESSES
+0 orphaned
+SUSPECTED
+cyboflow-shaped, no spawn marker — unverified, kill with care
+PROCESS
+cd
+SUSPECTED
+No owning worktree
+PID
+32221
+CPU
+0.0%
+MEM
+0.0%
+UP
+16s
+Kill tree
+PROCESS
+cd
+SUSPECTED
+No owning worktree
+PID
+32223
+CPU
+0.0%
+MEM
+0.0%
+UP
+16s
+Kill tree
+PROCESS
+sleep
+SUSPECTED
+No owning worktree
+PID
+32224
+CPU
+0.0%
+MEM
+0.0%
+UP
+16s
+Kill tree
+PROCESS
+sleep
+SUSPECTED
+No owning worktree
+PID
+32225
+CPU
+0.0%
+MEM
+0.0%
+UP
+16s
+Kill tree
+ACTIVE WORKTREES
+1 owned · 0 processes
+WORKTREE
+repo
+MAIN REPO
+branch main
+disk 260 KB
+Your real checkout — it can never be pruned
+Kill all processes
+Prune worktree
+Unattributed processes
+Not resolved to any listed worktree
+PROCESS
+DETAIL
+CPU
+MEM
+UP
+SUSPECTED
+cyboflow-shaped, no spawn marker — unverified, kill with care
+PROCESS
+cd
+OTHER
+pid 32221
+0.0%
+0.0%
+16s
+SUSPECTED
+Kill tree
+PROCESS
+cd
+OTHER
+pid 32223
+0.0%
+0.0%
+16s
+SUSPECTED
+Kill tree
+PROCESS
+sleep
+OTHER
+pid 32224
+0.0%
+0.0%
+16s
+SUSPECTED
+Kill tree
+PROCESS
+sleep
+OTHER
+pid 32225
+0.0%
+0.0%
+16s
+SUSPECTED
+Kill tree
+PROCESS
+Cyboflow
+OTHER
+27479
+48.7%
+1.2%
+17h 7m
+FOREIGN · READ-ONLY
+PROCESS
+Cyboflow
+OTHER
+87427
+19.0%
+0.4%
+9h 23m
+FOREIGN · READ-ONLY
+PROCESS
+Codex
+OTHER
+12398
+3.9%
+1.2%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+Google
+OTHER
+23273
+3.4%
+0.3%
+8h 40m
+FOREIGN · READ-ONLY
+PROCESS
+Google
+OTHER
+23918
+3.3%
+0.3%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+Electron
+OTHER
+31465
+2.8%
+2.5%
+3m
+FOREIGN · READ-ONLY
+PROCESS
+WindowServer
+OTHER
+431
+1.6%
+0.2%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+claude
+OTHER
+30546
+1.5%
+1.6%
+5m
+FOREIGN · READ-ONLY
+PROCESS
+Cyboflow
+OTHER
+27474
+1.5%
+0.2%
+17h 7m
+FOREIGN · READ-ONLY
+PROCESS
+Codex
+OTHER
+12060
+1.3%
+0.2%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+claude
+OTHER
+24300
+1.1%
+0.9%
+8h 38m
+FOREIGN · READ-ONLY
+PROCESS
+com.apple.AppleUserHIDDrivers
+OTHER
+602
+1.1%
+0.0%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+DeviceHub
+OTHER
+89738
+0.9%
+0.4%
+9h 20m
+FOREIGN · READ-ONLY
+PROCESS
+searchpartyd
+OTHER
+606
+0.9%
+0.1%
+4d
+FOREIGN · READ-ONLY
+PROCESS
+iOS
+OTHER
+25517
+0.6%
+[... truncated: remaining lines are ~760 FOREIGN read-only process rows from this machine ...]

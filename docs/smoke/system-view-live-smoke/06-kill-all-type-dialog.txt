@@ -1,0 +1,23 @@
+Kill all Other processes
+
+4 targets
+
+This process is not tagged as cyboflow's — killing it may affect other software
+cd
+pid 37384
+3 descendant PIDs
+cd
+pid 37386
+1 descendant PID
+sleep
+pid 37387
+0 descendant PIDs
+sleep
+pid 37388
+0 descendant PIDs
+
+This cannot be undone
+
+Esc to cancel
+Cancel
+Kill anyway

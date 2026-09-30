@@ -1,0 +1,22 @@
+Reap 3 stale targets?
+
+3 targets · 6 MB disk reclaimable
+
+1 target has uncommitted changes. Pruning discards them permanently — nothing is stashed.
+clean
+/private/tmp/cf-smoke261/repo/worktrees/clean
+3 MB disk
+locked
+/private/tmp/cf-smoke261/repo/worktrees/locked
+1 dirty file
+12 KB disk
+proc
+/private/tmp/cf-smoke261/repo/worktrees/proc
+3 MB disk
+Also delete branch
+
+This cannot be undone
+
+Esc to cancel
+Cancel
+Reap all stale
