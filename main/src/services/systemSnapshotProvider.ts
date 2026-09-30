@@ -47,9 +47,11 @@ export interface SystemSnapshotProviderDeps {
   getSelfInstanceId?: () => string;
   /**
    * Reads the spawn marker off scanned rows' environments. Defaults to the real
-   * reader ({@link createSpawnMarkerReader}: one `ps -E` spawn on darwin,
-   * `/proc/<pid>/environ` on linux, none on win32). Rows it cannot read carry no
-   * marker, so they can never reach `orphan`.
+   * reader ({@link createSpawnMarkerReader}): linux reads `/proc/<pid>/environ`
+   * and starts no process. darwin/win32: no environment reader. `ps -E` cannot
+   * tell arguments from environment entries, and it would need a second scan.
+   * Rows there carry no marker, so they classify no higher than `suspected` and
+   * are never sweep-eligible.
    */
   readMarkers?: (rows: readonly SnapshottedProcess[]) => Promise<Map<number, SpawnMarkerObservation>>;
 }

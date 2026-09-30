@@ -84,7 +84,7 @@ describe('createSystemSnapshotProvider.loadProcesses', () => {
 describe('createSystemSnapshotProvider default marker source (production path)', () => {
   // No `readMarkers` injected: the provider must read the real environment of a
   // real child stamped by stampSpawnMarker, or a marked orphan is undetectable.
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(process.platform !== 'linux')(
     'classifies a real child stamped with a dead instance as an orphan',
     async () => {
       const worktree = '/tmp/cyboflow-marker-test wt';

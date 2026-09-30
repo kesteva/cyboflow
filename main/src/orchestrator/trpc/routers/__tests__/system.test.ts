@@ -4,8 +4,9 @@
  * zero ps/du" guarantee against the real services with counting seams, and the
  * standalone-typecheck import invariant.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import * as childProcess from 'node:child_process';
 import { join } from 'node:path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
@@ -16,6 +17,13 @@ import { DiskUsageService } from '../../../../services/diskUsageService';
 import type { ProcessSnapshotRow } from '../../../../services/processTable';
 import type { WorktreeMonitorRegistryEntry } from '../worktreeMonitor';
 import type { SystemProcessEntry } from '../../../systemTypes';
+import { createSpawnMarkerReader } from '../../../../services/processSnapshot/spawnMarkerReader';
+
+// Passthrough wrappers so the AC-5 test can count every subprocess the provider starts.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, execFile: vi.fn(actual.execFile), spawn: vi.fn(actual.spawn) };
+});
 
 const caller = () => appRouter.createCaller(createContext()).cyboflow.system;
 
@@ -108,8 +116,11 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
       },
       runShellManager: { listOwnedShells: () => [] },
     });
+    const realReadMarkers = createSpawnMarkerReader();
+    const readMarkers = vi.fn((rows: readonly { pid: number }[]) => realReadMarkers(rows));
     const provider = createSystemSnapshotProvider({
       processSnapshot,
+      readMarkers,
       worktrees: {
         loadRegistry: async (): Promise<WorktreeMonitorRegistryEntry[]> => [
           { ...WORKTREE, path: '/wt/a' },
@@ -122,25 +133,37 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
       getSelfInstanceId: () => 'self',
       probePort: async (port: number, label: string) => ({ port, label, inUse: false }),
     });
-    return { provider, listProcesses, runDu };
+    return { provider, listProcesses, runDu, readMarkers };
   }
 
-  it('mounted but never called: the ps and du seams stay at zero', async () => {
-    const { provider, listProcesses, runDu } = build();
+  beforeEach(() => {
+    vi.mocked(childProcess.execFile).mockClear();
+    vi.mocked(childProcess.spawn).mockClear();
+  });
+
+  it('mounted but never called: the ps, du and marker seams stay at zero', async () => {
+    const { provider, listProcesses, runDu, readMarkers } = build();
     setSystemProvider(provider);
     await new Promise((r) => setTimeout(r, 20));
     expect(listProcesses).not.toHaveBeenCalled();
     expect(runDu).not.toHaveBeenCalled();
+    expect(readMarkers).not.toHaveBeenCalled();
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+    expect(childProcess.spawn).not.toHaveBeenCalled();
   });
 
   it('one snapshot() runs ps once and du at most once per worktree path', async () => {
-    const { provider, listProcesses, runDu } = build();
+    const { provider, listProcesses, runDu, readMarkers } = build();
     setSystemProvider(provider);
 
     const snap = await caller().snapshot({ projectId: 1 });
     await vi.waitFor(() => expect(runDu).toHaveBeenCalledTimes(2));
 
     expect(listProcesses).toHaveBeenCalledTimes(1);
+    expect(readMarkers.mock.calls.length).toBeLessThanOrEqual(1);
+    // Marker reading starts no subprocess: exactly one ps scan in total (the injected list seam).
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+    expect(childProcess.spawn).not.toHaveBeenCalled();
     const measured = runDu.mock.calls.map((c) => (c as unknown[])[0]).sort();
     expect(measured).toEqual(['/wt/a', '/wt/b']);
     // First read is queued/measuring — never a bare number.
