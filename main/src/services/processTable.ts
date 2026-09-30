@@ -137,3 +137,89 @@ export function collectProcessTree(rootPids: number[], procs: ProcessRow[]): Set
   }
   return result;
 }
+
+/**
+ * Parse one `ps` `etime=` field into seconds. macOS emits exactly three shapes:
+ * `mm:ss`, `hh:mm:ss`, and `dd-hh:mm:ss` (the `dd-` prefix appears only once
+ * elapsed time crosses 24h). Returns null for anything that does not match one
+ * of those shapes — an unparseable age is never guessed at.
+ */
+export function parseEtime(raw: string): number | null {
+  const s = raw.trim();
+  const dayMatch = /^(\d+)-(.+)$/.exec(s);
+  const days = dayMatch ? Number.parseInt(dayMatch[1], 10) : 0;
+  const rest = dayMatch ? dayMatch[2] : s;
+
+  const parts = rest.split(':');
+  // dd- form must carry hh:mm:ss (3 fields); the bare form is mm:ss or hh:mm:ss.
+  if (dayMatch && parts.length !== 3) return null;
+  if (!dayMatch && parts.length !== 2 && parts.length !== 3) return null;
+  if (parts.some((p) => !/^\d{1,2}$/.test(p))) return null;
+
+  const nums = parts.map((p) => Number.parseInt(p, 10));
+  const [hours, minutes, seconds] =
+    nums.length === 3 ? nums : [0, nums[0], nums[1]];
+  // Defensive: a genuine ps etime field never carries an out-of-range mm/ss.
+  if (minutes >= 60 || seconds >= 60) return null;
+
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+}
+
+/** One row of the six-column process snapshot (`pid,ppid,pcpu,pmem,etime,command`). */
+export interface ProcessSnapshotRow {
+  pid: number;
+  ppid: number;
+  /** CPU percent; null when `ps` printed `-` or a non-numeric value. Never 0/NaN as a stand-in. */
+  pcpu: number | null;
+  /** Memory percent; null when `ps` printed `-` or a non-numeric value. */
+  pmem: number | null;
+  /** Elapsed seconds; null when the etime token is present but unparseable. */
+  etimeSeconds: number | null;
+  command: string;
+}
+
+/** A `ps` percentage column: a plain decimal, or `-` for kernel processes. */
+function parsePercentToken(token: string): { ok: boolean; value: number | null } {
+  if (token === '-') return { ok: true, value: null };
+  if (!/^\d+(?:\.\d+)?$/.test(token)) return { ok: false, value: null };
+  const value = Number.parseFloat(token);
+  return { ok: true, value: Number.isFinite(value) ? value : null };
+}
+
+/**
+ * Parse `ps -axo pid=,ppid=,pcpu=,pmem=,etime=,command=` output into rows.
+ *
+ * Defensive like the other parsers: unparseable lines are skipped, and an
+ * unparseable numeric field becomes `null` (never 0/NaN). It also defends
+ * against the macOS `ps: <keyword>: keyword not found` gotcha (an unknown -o
+ * keyword still exits 0 and silently drops its column, shifting every later
+ * field left): a shifted line puts a non-numeric token in the pcpu/pmem slot or
+ * a command word in the etime slot, and such a row is SKIPPED rather than
+ * mis-parsed. An etime token that merely looks like a time (digits, `:`, `-`
+ * only) but fails {@link parseEtime} keeps the row with `etimeSeconds: null`.
+ */
+export function parsePsOutputWithCpuMem(stdout: string): ProcessSnapshotRow[] {
+  const rows: ProcessSnapshotRow[] = [];
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.replace(/^\s+/, '');
+    if (line.length === 0) continue;
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const ppid = Number.parseInt(match[2], 10);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const pcpu = parsePercentToken(match[3]);
+    const pmem = parsePercentToken(match[4]);
+    if (!pcpu.ok || !pmem.ok) continue;
+    if (!/^[\d:.-]+$/.test(match[5])) continue;
+    rows.push({
+      pid,
+      ppid,
+      pcpu: pcpu.value,
+      pmem: pmem.value,
+      etimeSeconds: parseEtime(match[5]),
+      command: match[6],
+    });
+  }
+  return rows;
+}
