@@ -101,7 +101,7 @@ describe('AbstractCliManager.listOwnedProcesses', () => {
     mgr.register(makeFakePty(4321), 'panel-1', 'sess-1', '/wt/one');
 
     expect(mgr.listOwnedProcesses()).toEqual([
-      { pid: 4321, panelId: 'panel-1', sessionId: 'sess-1', worktreePath: '/wt/one' },
+      { pid: 4321, provider: 'claude', panelId: 'panel-1', sessionId: 'sess-1', worktreePath: '/wt/one' },
     ]);
   });
 

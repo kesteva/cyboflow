@@ -34,6 +34,8 @@ interface CliProcess {
 /** One live panel process, as exposed to the process snapshot service. */
 export interface OwnedCliProcess {
   pid: number;
+  /** Vendor behind the owning manager — lets the classifier tell Claude from Codex. */
+  provider: AgentProvider;
   panelId: string;
   sessionId: string;
   worktreePath: string;
@@ -447,6 +449,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       if (entry.exited || !Number.isInteger(pid) || pid <= 0) continue;
       owned.push({
         pid,
+        provider: this.getAgentProvider(),
         panelId: entry.panelId,
         sessionId: entry.sessionId,
         worktreePath: entry.worktreePath,
