@@ -98,6 +98,8 @@ export interface UnifiedChatViewProps {
   liveTail?: ReactNode;
   /** Host-owned content appended inside the scrollable transcript. */
   transcriptEndSlot?: ReactNode;
+  /** Host-owned content prepended inside the scrollable transcript (above the first message). */
+  transcriptStartSlot?: ReactNode;
 
   // -- meta strip ----------------------------------------------------------
   folderLabel: string | null;
@@ -159,6 +161,7 @@ export function UnifiedChatView({
   isWaitingForResponse = false,
   liveTail,
   transcriptEndSlot,
+  transcriptStartSlot,
   folderLabel,
   folderTitle,
   branchName,
@@ -438,6 +441,7 @@ export function UnifiedChatView({
               isWaitingForResponse={isWaitingForResponse}
               liveTail={liveTail}
               transcriptEndSlot={transcriptEndSlot}
+              transcriptStartSlot={transcriptStartSlot}
               collapsedMessages={collapsedMessages}
               onToggleMessageCollapse={toggleMessageCollapse}
               expandedTools={expandedTools}

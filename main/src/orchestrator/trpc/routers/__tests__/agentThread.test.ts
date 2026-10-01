@@ -124,10 +124,16 @@ function makeService(): AgentThreadServiceLike & {
 function makeMockDb(
   rows: { id: number; threadId: string; payloadJson: string; createdAt: string }[],
 ): DatabaseLike {
+  // Mirrors the listing's two reads: the COUNT/MAX(id) stats probe (get) and
+  // the incremental `id > ?` fetch (all).
+  const forThread = (threadId: unknown) => rows.filter((r) => r.threadId === threadId);
   const stmt: PreparedStatement = {
     run: () => ({ changes: 0, lastInsertRowid: 0 }),
-    get: () => undefined,
-    all: (...params: unknown[]) => rows.filter((r) => r.threadId === (params[0] as string)),
+    get: (...params: unknown[]) => {
+      const mine = forThread(params[0]);
+      return { n: mine.length, maxId: mine.length === 0 ? null : Math.max(...mine.map((r) => r.id)) };
+    },
+    all: (...params: unknown[]) => forThread(params[0]).filter((r) => r.id > ((params[1] as number | undefined) ?? 0)),
   };
   return { prepare: () => stmt, transaction: <T>(fn: (...a: unknown[]) => T) => fn };
 }
@@ -294,9 +300,30 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     ]);
     const caller = appRouter.createCaller(createContext({ db }));
     const result = await caller.cyboflow.agentThread.listMessages({ threadId: 'thread-1' });
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('m1');
-    expect(result[0].segments[0]).toEqual({ type: 'text', content: 'hello' });
+    expect(result.totalCount).toBe(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].id).toBe('m1');
+    expect(result.messages[0].segments[0]).toEqual({ type: 'text', content: 'hello' });
+  });
+
+  it('listMessages windows by newest `limit` or absolute `fromIndex`', async () => {
+    const text = (id: number) => ({
+      id,
+      threadId: 'thread-1',
+      createdAt: `2026-01-01T00:00:0${id}Z`,
+      payloadJson: JSON.stringify({
+        type: 'assistant',
+        message: { id: `m${id}`, model: 'claude-opus-4', role: 'assistant', content: [{ type: 'text', text: `t${id}` }] },
+      }),
+    });
+    const db = makeMockDb([text(1), text(2), text(3)]);
+    const caller = appRouter.createCaller(createContext({ db }));
+    const result = await caller.cyboflow.agentThread.listMessages({ threadId: 'thread-1', limit: 2 });
+    expect(result.totalCount).toBe(3);
+    expect(result.startIndex).toBe(1);
+    expect(result.messages.map((m) => m.id)).toEqual(['m2', 'm3']);
+    const from = await caller.cyboflow.agentThread.listMessages({ threadId: 'thread-1', fromIndex: 2 });
+    expect(from.messages.map((m) => m.id)).toEqual(['m3']);
   });
 });
 

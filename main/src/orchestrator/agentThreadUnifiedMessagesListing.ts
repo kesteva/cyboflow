@@ -4,7 +4,9 @@
  * (tool_use folded together with its matching tool_result), exactly like the
  * run + quick-session paths.
  *
- * Exports `selectAgentThreadUnifiedMessages(db, threadId, logger?)` so the tRPC
+ * Exports `selectAgentThreadUnifiedMessages(db, threadId, logger?)` (the full
+ * history) and `selectAgentThreadMessagesPage(db, threadId, window, logger?)`
+ * (a newest-`limit` or from-`fromIndex` window + the total) so the tRPC
  * `cyboflow.agentThread.listMessages` procedure has a testable, framework-free
  * implementation.
  *
@@ -30,7 +32,22 @@
  * the call site adapts `verbose` to the logger's `debug` channel, matching the
  * adaptation in `runUnifiedMessagesListing.ts` / `runEventBridge.ts`.
  *
- * Ordering: created_at ASC, id ASC (tiebreaker) — same as the run path.
+ * Ordering: insertion order (id ASC). Rows are append-only and `created_at` is
+ * the column DEFAULT (CURRENT_TIMESTAMP) at insert, so id order IS the
+ * created_at order the run path sorts by.
+ *
+ * INCREMENTAL PROJECTION CACHE. The global thread is long-lived and only ever
+ * appended to (agentThreadDbStore is the sole writer; nothing deletes rows short
+ * of an agent_threads cascade). Re-reading and re-projecting the WHOLE thread on
+ * every call blocked the main thread for 1s+ on a ~50k-event thread — and the
+ * rail calls this on every mount (e.g. leaving a session for home after a
+ * dismiss) and on every live-tail tick. So the projection state (narrower +
+ * MessageProjection + the projected messages) is kept per (db, threadId) and each
+ * call folds in only rows with id > the last one consumed. This is sound because
+ * MessageProjection already updates earlier messages IN PLACE (tool_result →
+ * tool_call status/result, coalesced assistant segments) — exactly what a full
+ * re-projection would produce. A shrunk thread (count/max id below what was
+ * consumed) drops the cached state and rebuilds from scratch.
  */
 import {
   agentStreamEventToClaudeStreamEvent,
@@ -47,9 +64,127 @@ import type { DatabaseLike, LoggerLike } from './types';
 
 interface DbThreadEventRow {
   id: number;
-  threadId: string;
   payloadJson: string;
   createdAt: string;
+}
+
+interface ThreadProjectionState {
+  narrower: TypedEventNarrowing;
+  projection: MessageProjection;
+  messages: UnifiedMessage[];
+  /** Highest agent_thread_events.id folded in so far (0 = none). */
+  lastRowId: number;
+  /** Number of rows folded in so far — the shrink/drift guard. */
+  rowCount: number;
+}
+
+/**
+ * Per-DatabaseLike, per-thread projection state. Keyed on the adapter object so
+ * independent databases (tests, a swapped handle) never share state; the
+ * production tRPC context passes one stable adapter for the app's lifetime.
+ * The loggers threaded into a state are the ones passed when it was built.
+ */
+const projectionCache = new WeakMap<DatabaseLike, Map<string, ThreadProjectionState>>();
+
+function newState(threadId: string, logger?: LoggerLike): ThreadProjectionState {
+  // Thread the logger into BOTH pipeline stages. LoggerLike has no `verbose`
+  // method (TypedEventNarrowing expects one), so adapt verbose -> debug; the
+  // logger's own `warn` satisfies MessageProjection's Pick<ILogger, 'warn'>.
+  const narrowingLogger = logger ? { verbose: (m: string) => logger.debug(m) } : undefined;
+  const projectionLogger = logger ? { warn: (m: string) => logger.warn(m) } : undefined;
+  return {
+    narrower: new TypedEventNarrowing(narrowingLogger),
+    projection: new MessageProjection(threadId, projectionLogger),
+    messages: [],
+    lastRowId: 0,
+    rowCount: 0,
+  };
+}
+
+/** Fold one persisted row into the state (mutates it). */
+function foldRow(state: ThreadProjectionState, row: DbThreadEventRow): void {
+  state.lastRowId = row.id;
+  state.rowCount += 1;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(row.payloadJson);
+  } catch {
+    // Unparseable persisted payload — skip (defensive; the sink writes valid JSON).
+    return;
+  }
+  const event = isAgentStreamEvent(raw) ? agentStreamEventToClaudeStreamEvent(raw) : state.narrower.narrow(raw);
+  const projected = state.projection.project(event);
+  if (projected !== null) {
+    // Overwrite the MessageProjection-generated timestamp with the persisted one.
+    // The shallow copy keeps `segments`/`metadata` shared with the projection's
+    // own record, so later in-place updates (see MessageProjection's CONTRACT)
+    // still land on this cached message.
+    state.messages.push({ ...projected, timestamp: new Date(row.createdAt).toISOString() });
+  }
+}
+
+/**
+ * Bring the cached projection for `threadId` up to date and return it.
+ * Reads only rows newer than the last one folded in.
+ */
+function refreshThreadProjection(db: DatabaseLike, threadId: string, logger?: LoggerLike): ThreadProjectionState {
+  let perDb = projectionCache.get(db);
+  if (!perDb) {
+    perDb = new Map();
+    projectionCache.set(db, perDb);
+  }
+
+  const stats = db
+    .prepare('SELECT COUNT(*) AS n, MAX(id) AS maxId FROM agent_thread_events WHERE thread_id = ?')
+    .get(threadId) as { n: number; maxId: number | null } | undefined;
+  const total = stats?.n ?? 0;
+  const maxId = stats?.maxId ?? 0;
+
+  let state = perDb.get(threadId);
+  if (state && (maxId < state.lastRowId || total < state.rowCount)) {
+    // The thread shrank underneath us (rows removed / handle swapped) — rebuild.
+    state = undefined;
+  }
+  if (!state) {
+    state = newState(threadId, logger);
+    perDb.set(threadId, state);
+  }
+  if (maxId === state.lastRowId && total === state.rowCount) return state;
+
+  const rows = db
+    .prepare(
+      `SELECT
+         ate.id           AS id,
+         ate.payload_json AS payloadJson,
+         ate.created_at   AS createdAt
+       FROM agent_thread_events ate
+       WHERE ate.thread_id = ? AND ate.id > ?
+       ORDER BY ate.id ASC`,
+    )
+    .all(threadId, state.lastRowId) as DbThreadEventRow[];
+  for (const row of rows) foldRow(state, row);
+
+  if (state.rowCount !== total) {
+    // A row landed BELOW the consumed watermark (never expected for an
+    // AUTOINCREMENT append-only table) — fall back to one full rebuild so the
+    // result can never silently miss an event.
+    const rebuilt = newState(threadId, logger);
+    const all = db
+      .prepare(
+        `SELECT
+           ate.id           AS id,
+           ate.payload_json AS payloadJson,
+           ate.created_at   AS createdAt
+         FROM agent_thread_events ate
+         WHERE ate.thread_id = ?
+         ORDER BY ate.id ASC`,
+      )
+      .all(threadId) as DbThreadEventRow[];
+    for (const row of all) foldRow(rebuilt, row);
+    perDb.set(threadId, rebuilt);
+    return rebuilt;
+  }
+  return state;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,8 +195,8 @@ interface DbThreadEventRow {
  * Return the reconstructed chat history for `threadId` as correlated
  * `UnifiedMessage[]`, oldest-first.
  *
- * Reads ALL `agent_thread_events` rows for the thread (every event_type — the
- * projection pipeline itself decides what renders) and folds them through
+ * Folds ALL `agent_thread_events` rows for the thread (every event_type — the
+ * projection pipeline itself decides what renders) through
  * `TypedEventNarrowing` + `MessageProjection`. Events that project to `null`
  * (e.g. user/tool_result rows, stream_event deltas, unknown variants) are
  * absorbed into projection state and filtered out of the result, while their
@@ -76,55 +211,55 @@ interface DbThreadEventRow {
  * @param logger   - Optional structured logger; threaded into the projection
  *                   pipeline so warnings/verbose diagnostics are not silently
  *                   dropped.
- * @returns UnifiedMessage[] sorted by created_at ASC, id ASC.
+ * @returns UnifiedMessage[] in insertion order (a fresh array; the message
+ *          objects are shared with the cache — treat them as read-only).
  */
 export function selectAgentThreadUnifiedMessages(
   db: DatabaseLike,
   threadId: string,
   logger?: LoggerLike,
 ): UnifiedMessage[] {
-  const rows = db
-    .prepare(
-      `SELECT
-         ate.id           AS id,
-         ate.payload_json AS payloadJson,
-         ate.thread_id    AS threadId,
-         ate.created_at   AS createdAt
-       FROM agent_thread_events ate
-       WHERE ate.thread_id = ?
-       ORDER BY ate.created_at ASC, ate.id ASC`,
-    )
-    .all(threadId) as DbThreadEventRow[];
+  return refreshThreadProjection(db, threadId, logger).messages.slice();
+}
 
-  // Thread the logger into BOTH pipeline stages. LoggerLike has no `verbose`
-  // method (TypedEventNarrowing expects one), so adapt verbose -> debug; the
-  // logger's own `warn` satisfies MessageProjection's Pick<ILogger, 'warn'>.
-  const narrowingLogger = logger ? { verbose: (m: string) => logger.debug(m) } : undefined;
-  const projectionLogger = logger ? { warn: (m: string) => logger.warn(m) } : undefined;
+/** One window of the agent thread plus where it starts in the full history. */
+export interface AgentThreadMessagesPage {
+  messages: UnifiedMessage[];
+  /** Index of `messages[0]` in the thread's full projected history. */
+  startIndex: number;
+  /** Total projected messages in the thread. */
+  totalCount: number;
+}
 
-  const narrower = new TypedEventNarrowing(narrowingLogger);
-  const projection = new MessageProjection(threadId, projectionLogger);
+/** Which slice of the history to return; omitted = the whole history. */
+export interface AgentThreadMessagesWindow {
+  /** The newest `limit` messages. */
+  limit?: number;
+  /**
+   * Every message from this absolute index onward — wins over `limit`. The
+   * rail anchors its window with it so a live refetch GROWS the window rather
+   * than sliding it (projected messages only ever append, so indices are stable).
+   */
+  fromIndex?: number;
+}
 
-  const result: UnifiedMessage[] = [];
-
-  for (const row of rows) {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(row.payloadJson);
-    } catch {
-      // Unparseable persisted payload — skip (defensive; the sink writes valid JSON).
-      continue;
-    }
-
-    const event = isAgentStreamEvent(raw)
-      ? agentStreamEventToClaudeStreamEvent(raw)
-      : narrower.narrow(raw);
-    const projected = projection.project(event);
-    if (projected !== null) {
-      // Overwrite the MessageProjection-generated timestamp with the persisted one.
-      result.push({ ...projected, timestamp: new Date(row.createdAt).toISOString() });
-    }
+/**
+ * A window of the projected history for `threadId` (oldest-first) plus the
+ * thread's total message count, so the rail can render a bounded transcript
+ * and offer "load earlier".
+ */
+export function selectAgentThreadMessagesPage(
+  db: DatabaseLike,
+  threadId: string,
+  window: AgentThreadMessagesWindow = {},
+  logger?: LoggerLike,
+): AgentThreadMessagesPage {
+  const all = refreshThreadProjection(db, threadId, logger).messages;
+  let startIndex = 0;
+  if (window.fromIndex !== undefined) {
+    startIndex = Math.min(Math.max(0, window.fromIndex), all.length);
+  } else if (window.limit !== undefined) {
+    startIndex = Math.max(0, all.length - window.limit);
   }
-
-  return result;
+  return { messages: all.slice(startIndex), startIndex, totalCount: all.length };
 }
