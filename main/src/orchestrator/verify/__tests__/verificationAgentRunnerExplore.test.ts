@@ -1003,6 +1003,9 @@ describe('VerificationAgentRunner.run — explore binds ONLY the record\'s lever
     'VERIFY_MODALITY',
     'VERIFY_PEEKABOO_BIN',
     'VERIFY_PORT',
+    // Spawn marker (utils/spawnMarker.ts) — stamped on every spawn env.
+    'CYBOFLOW_INSTANCE',
+    'CYBOFLOW_WORKTREE',
   ]);
 
   it('binds portEnv / dataDirEnv to the leased values, and nothing of the record\'s build/serve', async () => {

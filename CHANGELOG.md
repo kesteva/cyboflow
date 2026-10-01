@@ -6,6 +6,50 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-30
+
+### Added
+
+- **Native web viewer.** Sessions can open web pages in in-app tabs next to the terminal. Links
+  in chat, URLs printed by a CLI (`$BROWSER`), and clickable URLs in terminals all open there. A
+  tab has an editable address bar, and `+` opens a blank one. Tabs persist per session and
+  suspend when hidden. Agents can observe and drive a tab through MCP tools once you grant
+  consent; grants can be revoked, and every action is audited. A URL you type yourself marks the
+  tab as human-touched. Kill switch: the `webViewer` config block.
+- **Human tasks on the Queue.** Backlog tasks assigned to a human show in their own band on the
+  Queue, with Complete, Verify and Help actions. Finishing the task closes its review item.
+- **Stop for the global assistant.** A Stop control aborts the assistant's in-flight turn and
+  stays correct across reloads. Flow runs and the assistant rail now interrupt and send the same
+  way.
+- **Private build directory per sprint lane slot.** Each concurrency slot gets its own
+  git-excluded build directory, passed to every agent runtime through the lane's environment. A
+  lane whose commits contain slot output is refused.
+- **Nonce marker for web verification.** Explore-mode web requests inject a harness nonce marker
+  into the snapshot's entry HTML and attest it, so a pass proves it saw the build under test.
+- **Time to final human gate.** Runs record when they reach their last human gate, and
+  experiment arms show that time instead of the end time.
+
+### Changed
+
+- **Bundled Codex CLI upgraded 0.156.1 → 0.159.2** (`@openai/codex`). The server only offers
+  `gpt-6.1-sol` to 0.159+ clients, so it now appears in the Codex model picker. The app-server
+  protocol change is additive (gateway OAuth methods, new error codes, item timestamps).
+- The runtime-mix Sol tier now targets `gpt-6.1-sol` (was `gpt-6-sol`): Opus- and Fable-tier
+  steps on mixed runs go there. Mixed runs launched after this fork a new spec revision.
+- The quick session tab strip is always shown, and its home tab reads **Summary**.
+- Sprint fan-out inner steps resolve their own models.
+
+### Fixed
+
+- Review findings are delivered by chat to a run that was handed over or parked, and concurrent
+  Address clicks can no longer race.
+- A parked flow run refuses a queued message straight away, and a run parked with no gate to
+  answer records why it is stuck.
+- The PreToolUse approval gate stands aside when the session is in auto mode.
+- **Mark complete** reports the task moves that actually happened.
+- A non-Claude `providerModel` of `auto` or empty counts as unpinned.
+- The verify driver confirms which page it attached to before driving it.
+
 ## [0.4.6] — 2026-09-28
 
 ### Added

@@ -110,6 +110,13 @@ describe('QuickSessionCenterPane — artifact tabs', () => {
     expect(screen.getByTestId('mock-quick-session-canvas')).toBeInTheDocument();
   });
 
+  it('shows the tab strip even with only the home tab, labelled Summary, with the new-tab "+"', () => {
+    renderPane();
+    expect(screen.getByTestId('center-pane-tab-strip')).toBeInTheDocument();
+    expect(screen.getByTestId('center-pane-tab-flow')).toHaveTextContent('Summary');
+    expect(screen.getByTestId('center-pane-new-web-tab')).toBeInTheDocument();
+  });
+
   it('a null chatRunId (sentinel not yet minted) never crashes — canvas still renders', () => {
     // sessionKey (String(session.id)) does not depend on chatRunId at all now
     // that the artifact list is session-scoped, but this still guards against a

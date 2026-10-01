@@ -42,7 +42,7 @@ const STAMPED_MODULES = [
  * Files that mention pty.spawn but only as an injected spawner for an enumerated
  * manager, which stamps the env itself before invoking it.
  */
-const SPAWNER_INJECTION_ONLY = new Set(['index.ts']); // wires RunShellManager's ShellSpawner
+const SPAWNER_INJECTION_ONLY = new Set(['runLiveDepsComposition.ts']); // wires RunShellManager's ShellSpawner
 
 /** Interactive PTY managers stamped via AbstractCliManager.spawnPtyProcess. */
 const INHERITING_MODULES = [

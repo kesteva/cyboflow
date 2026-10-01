@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useContext, useRef, useEffect, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Folder } from 'lucide-react';
@@ -8,6 +8,8 @@ import { TerminalPanelProps } from '../../types/panelComponents';
 import { renderLog, devLog } from '../../utils/console';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { hasCwdString } from '../../../../shared/types/panels';
+import { WebLinkContext } from '../../contexts/WebLinkContext';
+import { attachTerminalLinks } from '../../utils/terminalLinks';
 import '@xterm/xterm/css/xterm.css';
 
 // Type for terminal state restoration
@@ -24,6 +26,9 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const openWebLink = useContext(WebLinkContext);
+  const openWebLinkRef = useRef(openWebLink);
+  openWebLinkRef.current = openWebLink;
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   
@@ -100,6 +105,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
 
         fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
+        attachTerminalLinks(terminal, () => openWebLinkRef.current);
         console.log('[TerminalPanel] FitAddon loaded');
 
         // FIX: Additional check before DOM manipulation

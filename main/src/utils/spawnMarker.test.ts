@@ -13,6 +13,7 @@ import {
   stampSpawnMarker,
   _resetInstanceIdForTesting,
 } from './spawnMarker';
+import { INHERITED_RUN_ENV_KEYS, stripInheritedRunEnv } from './inheritedRunEnv';
 
 describe('spawnMarker', () => {
   beforeEach(() => {
@@ -78,10 +79,15 @@ describe('spawnMarker', () => {
     expect(() => stampSpawnMarker({}, '/wt')).not.toThrow();
   });
 
-  it("index.ts's boot env strip list includes CYBOFLOW_INSTANCE", () => {
+  it("the boot env strip list (utils/inheritedRunEnv.ts) includes CYBOFLOW_INSTANCE", () => {
+    expect(INHERITED_RUN_ENV_KEYS).toContain('CYBOFLOW_INSTANCE');
+    const env: NodeJS.ProcessEnv = { CYBOFLOW_INSTANCE: 'hosting-instance', PATH: '/bin' };
+    stripInheritedRunEnv(env);
+    expect(env).toEqual({ PATH: '/bin' });
+  });
+
+  it('index.ts runs the boot env strip over process.env', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf8');
-    const block = src.match(/for \(const key of \[([\s\S]*?)\]\) \{\s*delete process\.env\[key\];/);
-    expect(block).not.toBeNull();
-    expect(block![1]).toContain("'CYBOFLOW_INSTANCE'");
+    expect(src).toMatch(/^stripInheritedRunEnv\(process\.env\);$/m);
   });
 });

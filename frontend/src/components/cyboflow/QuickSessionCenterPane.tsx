@@ -55,6 +55,7 @@ import { useWebViewerBridge } from '../../hooks/useWebViewerBridge';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { openBlankWebTab } from '../../utils/openWebLink';
+import { WebLinkProvider } from '../../contexts/WebLinkContext';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
@@ -132,13 +133,8 @@ export function QuickSessionCenterPane({
   );
 
   // A quick session has no workflow, so relabel the shared pinned home (Flow) tab
-  // to the session's name — it hosts the resting canvas, not a "Flow" graph.
-  const homeLabel = session.name || 'Session';
-  const stripTabs = pane.tabs.map((t) => (t.id === FLOW_TAB_ID ? { ...t, label: homeLabel } : t));
-
-  // Progressive disclosure: no strip until a second (file) tab exists, so a
-  // resting quick session is visually unchanged from before.
-  const showStrip = pane.tabs.length > 1;
+  // — it hosts the resting canvas (the session summary), not a "Flow" graph.
+  const stripTabs = pane.tabs.map((t) => (t.id === FLOW_TAB_ID ? { ...t, label: 'Summary' } : t));
 
   // Native web viewer: relay chords swallowed by a focused view, turn page
   // popups into tabs, and follow main's teardown. See useWebViewerBridge.
@@ -243,24 +239,26 @@ export function QuickSessionCenterPane({
 
   return (
     <div className="flex h-full flex-col overflow-hidden" data-testid="quick-session-center-pane">
-      {showStrip && (
-        <CenterPaneTabStrip
-          tabs={stripTabs}
-          activeTabId={pane.activeTabId}
-          onTabClick={(id) => focusTab(sessionKey, id)}
-          onTabClose={(id) => closeTab(sessionKey, id)}
-          onNewWebTab={() => openBlankWebTab(sessionKey)}
-        />
-      )}
+      {/* Always shown: the "+" is how a web tab is opened here. */}
+      <CenterPaneTabStrip
+        tabs={stripTabs}
+        activeTabId={pane.activeTabId}
+        onTabClick={(id) => focusTab(sessionKey, id)}
+        onTabClose={(id) => closeTab(sessionKey, id)}
+        onNewWebTab={() => openBlankWebTab(sessionKey)}
+      />
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
-      <TerminalDock
-        open={pane.terminalOpen}
-        onToggle={() => toggleTerminal(sessionKey)}
-        storageKey="cyboflow.quickSessionDock.height"
-        defaultOpenHeight={420}
-      >
-        {dockContent}
-      </TerminalDock>
+      {/* Terminal links open as web tabs in this session. */}
+      <WebLinkProvider sessionKey={sessionKey}>
+        <TerminalDock
+          open={pane.terminalOpen}
+          onToggle={() => toggleTerminal(sessionKey)}
+          storageKey="cyboflow.quickSessionDock.height"
+          defaultOpenHeight={420}
+        >
+          {dockContent}
+        </TerminalDock>
+      </WebLinkProvider>
     </div>
   );
 }

@@ -2,8 +2,9 @@
  * monitorReviewQueueComposition — the monitor's two REVIEW-QUEUE steering
  * actions (`resolve_review_item` / `file_note`), extracted verbatim from the
  * `monitorSteeringActions` holder built in index.ts's tRPC dep-wiring block
- * (GitHub issue #19, the god-file size ratchet). index.ts spreads the returned
- * pair into that holder next to the eight task/step-steering actions, so the
+ * (GitHub issue #19, the god-file size ratchet). monitorActionsComposition.ts
+ * (where that holder is now built, #19 step 19) spreads the returned pair into
+ * it next to the eight task/step-steering actions, so the
  * monitor's `MonitorSteeringActions` surface is unchanged.
  *
  * A SIBLING of index.ts on purpose (like verifyComposition.ts /

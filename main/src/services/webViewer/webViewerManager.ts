@@ -852,11 +852,17 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
   }
 
   /**
-   * Install the partition's network observers, once. Observational listeners
-   * only (`onSendHeaders` / `onCompleted` / `onErrorOccurred`) — no blocking
-   * `onBeforeRequest`, so telemetry never adds a round trip to a request. A
-   * session holds ONE listener per webRequest event, which is safe here because
-   * these partitions belong to the viewer alone.
+   * Install the partition's network observers, once. A session holds ONE
+   * listener per webRequest event, which is safe here because these partitions
+   * belong to the viewer alone.
+   *
+   * The start half is `onBeforeRequest`, answered immediately — NEVER
+   * `onSendHeaders`. Electron 44 builds a webRequest event's `uploadData` by
+   * cloning a Blob body's data pipe, and at send-headers time that pipe can
+   * already be disconnected (a page posting a Blob while it navigates away): the
+   * clone dereferences null and takes the WHOLE app down (Sentry
+   * CYBOFLOW-APP-2Q, a claude.ai sign-in page). The cost is one main-thread hop
+   * per request.
    */
   private instrumentPartition(partition: string, ses: Electron.Session): void {
     if (this.instrumented.has(partition)) return;
@@ -872,7 +878,10 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
         return null;
       }
     };
-    ses.webRequest.onSendHeaders((d) => t.requestStarted(partition, { id: d.id, timestamp: d.timestamp }));
+    ses.webRequest.onBeforeRequest((d, callback) => {
+      t.requestStarted(partition, { id: d.id, timestamp: d.timestamp });
+      callback({});
+    });
     ses.webRequest.onCompleted((d) =>
       t.requestFinished(partition, {
         id: d.id,
