@@ -46,7 +46,7 @@
  * call folds in only rows with id > the last one consumed. This is sound because
  * MessageProjection already updates earlier messages IN PLACE (tool_result →
  * tool_call status/result, coalesced assistant segments) — exactly what a full
- * re-projection would produce. A shrunk thread (count/max id below what was
+ * re-projection would produce. A shrunk thread (max id below what was
  * consumed) drops the cached state and rebuilds from scratch.
  */
 import {
@@ -74,8 +74,6 @@ interface ThreadProjectionState {
   messages: UnifiedMessage[];
   /** Highest agent_thread_events.id folded in so far (0 = none). */
   lastRowId: number;
-  /** Number of rows folded in so far — the shrink/drift guard. */
-  rowCount: number;
 }
 
 /**
@@ -97,14 +95,12 @@ function newState(threadId: string, logger?: LoggerLike): ThreadProjectionState 
     projection: new MessageProjection(threadId, projectionLogger),
     messages: [],
     lastRowId: 0,
-    rowCount: 0,
   };
 }
 
 /** Fold one persisted row into the state (mutates it). */
 function foldRow(state: ThreadProjectionState, row: DbThreadEventRow): void {
   state.lastRowId = row.id;
-  state.rowCount += 1;
   let raw: unknown;
   try {
     raw = JSON.parse(row.payloadJson);
@@ -134,22 +130,26 @@ function refreshThreadProjection(db: DatabaseLike, threadId: string, logger?: Lo
     projectionCache.set(db, perDb);
   }
 
-  const stats = db
-    .prepare('SELECT COUNT(*) AS n, MAX(id) AS maxId FROM agent_thread_events WHERE thread_id = ?')
-    .get(threadId) as { n: number; maxId: number | null } | undefined;
-  const total = stats?.n ?? 0;
-  const maxId = stats?.maxId ?? 0;
+  // MAX(id) is a single seek on idx_agent_thread_events_thread — cheap enough
+  // to run on every call (a COUNT(*) here walked the whole ~50k-entry index
+  // range, ~70ms whenever those pages were out of the page cache).
+  const maxRow = db
+    .prepare('SELECT MAX(id) AS maxId FROM agent_thread_events WHERE thread_id = ?')
+    .get(threadId) as { maxId: number | null } | undefined;
+  const maxId = maxRow?.maxId ?? 0;
 
   let state = perDb.get(threadId);
-  if (state && (maxId < state.lastRowId || total < state.rowCount)) {
-    // The thread shrank underneath us (rows removed / handle swapped) — rebuild.
+  if (state && maxId < state.lastRowId) {
+    // The thread shrank underneath us (its rows were removed — the
+    // agent_threads cascade — or the handle was swapped) — rebuild. Rows are
+    // AUTOINCREMENT and append-only, so nothing can land BELOW the watermark.
     state = undefined;
   }
   if (!state) {
     state = newState(threadId, logger);
     perDb.set(threadId, state);
   }
-  if (maxId === state.lastRowId && total === state.rowCount) return state;
+  if (maxId === state.lastRowId) return state;
 
   const rows = db
     .prepare(
@@ -163,27 +163,6 @@ function refreshThreadProjection(db: DatabaseLike, threadId: string, logger?: Lo
     )
     .all(threadId, state.lastRowId) as DbThreadEventRow[];
   for (const row of rows) foldRow(state, row);
-
-  if (state.rowCount !== total) {
-    // A row landed BELOW the consumed watermark (never expected for an
-    // AUTOINCREMENT append-only table) — fall back to one full rebuild so the
-    // result can never silently miss an event.
-    const rebuilt = newState(threadId, logger);
-    const all = db
-      .prepare(
-        `SELECT
-           ate.id           AS id,
-           ate.payload_json AS payloadJson,
-           ate.created_at   AS createdAt
-         FROM agent_thread_events ate
-         WHERE ate.thread_id = ?
-         ORDER BY ate.id ASC`,
-      )
-      .all(threadId) as DbThreadEventRow[];
-    for (const row of all) foldRow(rebuilt, row);
-    perDb.set(threadId, rebuilt);
-    return rebuilt;
-  }
   return state;
 }
 

@@ -124,14 +124,14 @@ function makeService(): AgentThreadServiceLike & {
 function makeMockDb(
   rows: { id: number; threadId: string; payloadJson: string; createdAt: string }[],
 ): DatabaseLike {
-  // Mirrors the listing's two reads: the COUNT/MAX(id) stats probe (get) and
-  // the incremental `id > ?` fetch (all).
+  // Mirrors the listing's two reads: the MAX(id) probe (get) and the
+  // incremental `id > ?` fetch (all).
   const forThread = (threadId: unknown) => rows.filter((r) => r.threadId === threadId);
   const stmt: PreparedStatement = {
     run: () => ({ changes: 0, lastInsertRowid: 0 }),
     get: (...params: unknown[]) => {
       const mine = forThread(params[0]);
-      return { n: mine.length, maxId: mine.length === 0 ? null : Math.max(...mine.map((r) => r.id)) };
+      return { maxId: mine.length === 0 ? null : Math.max(...mine.map((r) => r.id)) };
     },
     all: (...params: unknown[]) => forThread(params[0]).filter((r) => r.id > ((params[1] as number | undefined) ?? 0)),
   };
