@@ -123,6 +123,9 @@ describe('makeCodexEvalJudgeQuery', () => {
     });
     const client = clients[0];
     if (!client) throw new Error('fake client was not created');
+    // The user's Codex plugins stay off (an OAuth plugin keychain-prompts at thread/start).
+    const thread = client.requests.find((request) => request.method === 'thread/start');
+    expect(thread?.params).toMatchObject({ config: { features: { plugins: false } } });
     const turn = client.requests.find((request) => request.method === 'turn/start');
     expect(turn?.params).toMatchObject({
       model: 'gpt-5.4',

@@ -846,6 +846,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
 
     const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(opts.standardServiceTier).toBe(true);
+    expect(opts.disableUserCodexPlugins).toBe(true);
   });
 
   it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {

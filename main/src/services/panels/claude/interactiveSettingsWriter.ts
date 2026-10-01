@@ -243,8 +243,12 @@ export function clearHookNodePathCache(): void {
 }
 
 /**
- * The registered command for a hook script. On POSIX a BARE PATH works: it is
- * execed via /bin/sh, which needs only the execute bit plus the node shebang.
+ * The registered command for a hook script. On POSIX the script path is run
+ * through /bin/sh, which needs only the execute bit plus the node shebang. The
+ * path is single-quoted whenever it holds anything beyond shell-safe characters
+ * — the Dev variant installs to `/Applications/Cyboflow Dev.app`, and an
+ * unquoted space splits the command, so every hook (the PreToolUse gate
+ * included, which then fails open) dies with "No such file or directory".
  *
  * On Windows the command runs under cmd.exe, where a bare `.js` path resolves
  * through the file association, which may not be node at all. Naming a bare
@@ -258,7 +262,10 @@ export function hookCommand(
   platform: NodeJS.Platform = process.platform,
   nodePath?: string,
 ): string {
-  if (platform !== 'win32') return hookScriptPath;
+  if (platform !== 'win32') {
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(hookScriptPath)) return hookScriptPath;
+    return `'${hookScriptPath.replace(/'/g, `'\\''`)}'`;
+  }
   return `"${nodePath ?? hookNodePath()}" "${hookScriptPath}"`;
 }
 
@@ -419,7 +426,9 @@ export class InteractiveSettingsWriter {
     if (group.matcher !== '*') return false;
     if (!Array.isArray(group.hooks)) return false;
     return group.hooks.some(
-      (h) => h.type === 'command' && (h.command === hookScriptPath || h.command.endsWith(HOOK_FILENAME)),
+      (h) =>
+        h.type === 'command' &&
+        (h.command === hookScriptPath || h.command.replace(/['"]$/, '').endsWith(HOOK_FILENAME)),
     );
   }
 

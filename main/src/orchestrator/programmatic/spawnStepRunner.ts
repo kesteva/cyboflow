@@ -565,6 +565,7 @@ export class SpawnStepRunner implements StepRunner {
         prompt,
         hidePromptFromTranscript: true,
         standardServiceTier: true,
+        disableUserCodexPlugins: true,
         agentInvocationStepId: step.id,
         // When the CONTROLLER owns the visual-verification enqueue (the agentless
         // visual-verify step), NO step turn may fire the request itself — the

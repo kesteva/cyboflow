@@ -257,6 +257,11 @@ export function buildCodexAppServerThreadConfiguration(
       // hermetic assistant deploys none). Omitted when empty, so a role-less
       // spawn's configuration is byte-identical to before.
       ...(agentRoles && Object.keys(agentRoles).length > 0 ? { agents: agentRoles } : {}),
+      // Workflow spawns only (see ClaudeSpawnerOptions.disableUserCodexPlugins):
+      // the user's installed plugins would otherwise ride onto every lane, and a
+      // plugin's OAuth MCP server makes each lane's thread/start block on its own
+      // macOS keychain prompt. Same documented key the isolation branch uses.
+      ...(options.disableUserCodexPlugins ? { features: { plugins: false } } : {}),
     },
     ...(model ? { model } : {}),
     ...instructions,

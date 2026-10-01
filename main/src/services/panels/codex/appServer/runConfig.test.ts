@@ -174,6 +174,26 @@ describe('Codex app-server run configuration', () => {
       .not.toHaveProperty('serviceTier');
   });
 
+  it('switches the user\'s Codex plugins off on start AND resume only when the spawn asks for it', () => {
+    // A plugin's OAuth MCP server (e.g. Cloudflare's `cloudflare-api`) makes
+    // thread/start block on a macOS keychain prompt — one per parallel lane.
+    const base = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    };
+    const hermetic = { ...base, disableUserCodexPlugins: true };
+
+    expect(buildCodexAppServerThreadStartParams('run-1', hermetic, runtimeConfig).config?.features)
+      .toEqual({ plugins: false });
+    expect(buildCodexAppServerThreadResumeParams('run-1', 'thread-1', hermetic, runtimeConfig).config?.features)
+      .toEqual({ plugins: false });
+    expect(buildCodexAppServerThreadStartParams('run-1', base, runtimeConfig).config).not.toHaveProperty('features');
+    expect(buildCodexAppServerThreadResumeParams('run-1', 'thread-1', base, runtimeConfig).config)
+      .not.toHaveProperty('features');
+  });
+
   it('keeps workflow turns in normal execution mode while resolving the model', () => {
     const base = {
       panelId: 'run-1',
