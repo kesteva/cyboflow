@@ -216,7 +216,8 @@ export function composeDesignMode(deps: DesignModeCompositionDeps): DesignModeCo
   // Wired HERE, after registerIpcHandlers, because `dispatchTurn` goes through
   // ClaudePanelManager.continuePanel, and claudePanelManager only exists once
   // the IPC handlers are registered. The lazy require mirrors taskQueue's
-  // continueQueue — index.ts must not take a static import on ipc/claudePanel.
+  // session-creation processor — index.ts must not take a static import on
+  // ipc/claudePanel.
   //
   // The lifecycle guards are the service's DB-backed defaults; only the SDK turn
   // and the clock are host-supplied.

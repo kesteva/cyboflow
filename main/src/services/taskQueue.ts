@@ -85,20 +85,8 @@ interface CreateSessionJob {
   };
 }
 
-interface ContinueSessionJob {
-  sessionId: string;
-  prompt: string;
-}
-
-interface SendInputJob {
-  sessionId: string;
-  input: string;
-}
-
 export class TaskQueue {
   private sessionQueue: SimpleQueue<CreateSessionJob>;
-  private inputQueue: SimpleQueue<SendInputJob>;
-  private continueQueue: SimpleQueue<ContinueSessionJob>;
 
   constructor(private options: TaskQueueOptions) {
     console.log('[TaskQueue] Initializing task queue...');
@@ -112,8 +100,6 @@ export class TaskQueue {
     console.log('[TaskQueue] Using SimpleQueue for Electron environment');
 
     this.sessionQueue = new SimpleQueue<CreateSessionJob>('session-creation', sessionConcurrency);
-    this.inputQueue = new SimpleQueue<SendInputJob>('session-input', 10);
-    this.continueQueue = new SimpleQueue<ContinueSessionJob>('session-continue', 10);
 
     // Add event handlers for debugging
     this.sessionQueue.on('active', (...args: unknown[]) => {
@@ -373,61 +359,6 @@ export class TaskQueue {
         throw error;
       }
     });
-
-    this.inputQueue.process(10, async (job) => {
-      const { sessionId, input } = job.data;
-
-      // Find the Claude panel for this session
-      const { panelManager } = require('./panelManager');
-      const existingPanels = panelManager.getPanelsForSession(sessionId);
-      const claudePanel = existingPanels.find((p: ToolPanel) => p.type === 'claude');
-
-      if (!claudePanel) {
-        throw new Error(`No Claude panel found for session ${sessionId}`);
-      }
-
-      // Use the claude panel manager instead of the legacy session-based approach
-      const { claudePanelManager } = require('../ipc/claudePanel');
-
-      if (!claudePanelManager) {
-        throw new Error('Claude panel manager not available');
-      }
-
-      claudePanelManager.sendInputToPanel(claudePanel.id, input);
-    });
-
-    this.continueQueue.process(10, async (job) => {
-      const { sessionId, prompt } = job.data;
-      const { sessionManager } = this.options;
-
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        throw new Error(`Session ${sessionId} not found`);
-      }
-
-      // Find the Claude panel for this session
-      const { panelManager } = require('./panelManager');
-      const existingPanels = panelManager.getPanelsForSession(sessionId);
-      const claudePanel = existingPanels.find((p: ToolPanel) => p.type === 'claude');
-
-      if (!claudePanel) {
-        throw new Error(`No Claude panel found for session ${sessionId}`);
-      }
-
-      // Use the claude panel manager instead of the legacy session-based approach
-      const { claudePanelManager } = require('../ipc/claudePanel');
-
-      if (!claudePanelManager) {
-        throw new Error('Claude panel manager not available');
-      }
-
-      // Get conversation history using panel-based method for Claude data
-      const conversationHistory = sessionManager.getPanelConversationMessages ?
-        await sessionManager.getPanelConversationMessages(claudePanel.id) :
-        await sessionManager.getConversationMessages(sessionId);
-
-      await claudePanelManager.continuePanel(claudePanel.id, session.worktreePath, prompt, conversationHistory);
-    });
   }
 
   async createSession(data: CreateSessionJob): Promise<{ id: string; data: CreateSessionJob; status: string }> {
@@ -501,47 +432,6 @@ export class TaskQueue {
     return Promise.all(jobs);
   }
 
-  async sendInput(sessionId: string, input: string): Promise<{ id: string; data: SendInputJob; status: string }> {
-    return this.inputQueue.add({ sessionId, input });
-  }
-
-  async continueSession(sessionId: string, prompt: string): Promise<{ id: string; data: ContinueSessionJob; status: string }> {
-    return this.continueQueue.add({ sessionId, prompt });
-  }
-
-  private async ensureUniqueSessionName(baseName: string, index?: number): Promise<string> {
-    const { sessionManager } = this.options;
-    const db = sessionManager.db;
-
-    let candidateName = baseName;
-
-    // Add index suffix if provided (for multiple sessions)
-    if (index !== undefined) {
-      candidateName = `${baseName}-${index + 1}`;
-    }
-
-    // Check for existing sessions with this name (including archived)
-    let counter = 1;
-    let uniqueName = candidateName;
-
-    while (true) {
-      // Check both active and archived sessions
-      if (!db.checkSessionNameExists(uniqueName)) {
-        break;
-      }
-
-      // If we already have an index, increment after the index
-      if (index !== undefined) {
-        uniqueName = `${baseName}-${index + 1}-${counter}`;
-      } else {
-        uniqueName = `${baseName}-${counter}`;
-      }
-      counter++;
-    }
-
-    return uniqueName;
-  }
-
   private async ensureUniqueNames(baseSessionName: string, baseWorktreeName: string, project: Project, index?: number): Promise<{ sessionName: string; worktreeName: string }> {
     const { sessionManager } = this.options;
     const db = sessionManager.db;
@@ -603,7 +493,5 @@ export class TaskQueue {
 
   async close() {
     await this.sessionQueue.close();
-    await this.inputQueue.close();
-    await this.continueQueue.close();
   }
 }
