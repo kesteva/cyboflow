@@ -41,7 +41,7 @@ export function NotificationSettings({ settings, onUpdateSettings }: Notificatio
     if (Notification.permission === 'granted') {
       new Notification('Cyboflow', {
         body: 'This is a test notification! 🎉',
-        icon: '/favicon.ico',
+        icon: './favicon.ico',
       });
     } else {
       alert('Please enable notifications first');

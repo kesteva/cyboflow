@@ -85,9 +85,9 @@ export function useNotifications() {
       if (hasPermission) {
         new Notification(title, {
           body,
-          icon: icon || '/favicon.ico',
-          badge: '/favicon.ico',
-          tag: 'claude-code-commander',
+          icon: icon || './favicon.ico',
+          badge: './favicon.ico',
+          tag: 'cyboflow',
           requireInteraction: false,
         });
 

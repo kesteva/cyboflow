@@ -112,8 +112,8 @@ export function useStuckNotifications(): void {
             body: reason
               ? `Run ${runId.slice(0, 8)} is stuck: ${stuckReasonText(reason)}`
               : `Run ${runId.slice(0, 8)} is stuck`,
-            icon: '/favicon.ico',
-            badge: '/favicon.ico',
+            icon: './favicon.ico',
+            badge: './favicon.ico',
             requireInteraction: false,
           });
         }).catch((err: unknown) => {
