@@ -17,7 +17,7 @@ git log e611db8afc1bdaccf031c038a89bae8c18908056 --pretty=fuller
 
 ## License
 
-Cyboflow is MIT-licensed, inheriting Crystal's pre-Nimbalyst MIT posture. See [/LICENSE](/LICENSE) for the canonical text. License compatibility notes for inherited dependencies are tracked in [/docs/crystal-legacy/LICENSE-COMPATIBILITY.md](/docs/crystal-legacy/LICENSE-COMPATIBILITY.md).
+Cyboflow is MIT-licensed, inheriting Crystal's pre-Nimbalyst MIT posture. See [/LICENSE](/LICENSE) for the canonical text. What the packaged app bundles, and under which terms, is listed in [/docs/packaging/THIRD-PARTY-LICENSES.md](/docs/packaging/THIRD-PARTY-LICENSES.md).
 
 ## Do not merge from Nimbalyst
 
@@ -29,19 +29,11 @@ Crystal was deprecated in early 2026 and replaced by a new product called Nimbal
 
 ## What Cyboflow inherits from Crystal
 
-Crystal `0.3.5` provides six of Cyboflow's eight required primitives in production-tested form:
-
-1. **PTY management** — pseudo-terminal lifecycle for Claude Code sessions
-2. **Git worktrees** — create, mount, and tear down isolated worktrees per run
-3. **SQLite persistence** — `better-sqlite3`-backed run and session history
-4. **macOS packaging** — Electron Builder configuration, DMG signing, notarization pipeline
-5. **Permission bridge** — the IPC channel that Claude Code uses to request human approval
-6. **Zombie-process detection** — reaping orphaned child processes on app restart
-
-Cyboflow adds:
-
-7. **Cross-workflow review queue** — aggregates approval requests from all concurrent runs into one keyboard-driven UI
-8. **CyboflowMcpServer outbound bridge** — typed stream parser and MCP server exposing the `cyboflow_*` tools the built-in flows use to write the backlog
+Cyboflow forked Crystal for its Electron shell, PTY management, git-worktree handling,
+SQLite persistence, and orphaned-process reaping. Most other subsystems have since been
+rebuilt or replaced: the orchestrator and entity model, the cross-workflow review queue,
+the SDK `canUseTool` approval path, the `cyboflow_*` MCP server, macOS/Windows packaging and
+signing, and the R2 update channel. `docs/ARCHITECTURE.md` describes what exists today.
 
 ## Author
 
