@@ -20,17 +20,15 @@
  * 2. Spacing (./tokens/spacing.css)
  *    - Base spacing scale
  *    - Component-specific spacing
- *    - Layout dimensions
  * 
  * 3. Typography (./tokens/typography.css)
  *    - Font families, sizes, weights
- *    - Line heights, letter spacing
+ *    - Line heights
  *    - Component-specific typography
  * 
  * 4. Effects (./tokens/effects.css)
  *    - Border radius values
  *    - Box shadows
- *    - Transitions and animations
- *    - Z-index scale
- *    - Opacity values
+ *    - Transition durations
+ *    - Component z-index layers
  */
