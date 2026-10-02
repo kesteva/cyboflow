@@ -87,13 +87,12 @@ to a canonical example — read those for the actual implementation.
 ### `frontend/src/utils/migrateLocalStorageKey`
 
 - **Path:** `frontend/src/utils/migrateLocalStorageKey.ts`
-- **Use it for:** One-shot localStorage key rename (e.g. crystal-→cyboflow-). Reads legacy key,
-  copies value to new key, deletes legacy key, returns value. Idempotent.
+- **Use it for:** One-shot localStorage key rename. Reads legacy key, copies value to new key,
+  deletes legacy key, returns value. Idempotent. It currently has no production callers (every
+  past rename has aged out); it is kept as the sanctioned tool for the next rename.
 - **Call contract:** Invoke inside `useEffect(..., [])` or a `useState(() => ...)` initializer —
   never inside a closure that runs on every render or log call.
-- **Canonical example:** `frontend/src/App.tsx:60` (mount-time call).
-- **Anti-pattern:** `frontend/src/utils/console.ts:9–12` calls it inside `isVerboseEnabled()`,
-  which fires on every `devLog.*` invocation — redundant localStorage reads per log line.
+- **Canonical example:** the contract is pinned in `frontend/src/utils/migrateLocalStorageKey.test.ts`.
 
 ### `main/src/utils/commitFooter`
 

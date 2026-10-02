@@ -20,7 +20,7 @@ import { Logger } from './utils/logger';
 import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory, appIconBasename } from './utils/cyboflowDirectory';
+import { getCyboflowSubdirectory, getCyboflowDirectory, appIconBasename } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
 import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
@@ -666,30 +666,9 @@ process.on('warning', (warning: Error & { code?: string; detail?: string }) => {
   }
 });
 
-// Parse command-line arguments for custom Cyboflow directory
-const args = process.argv.slice(2);
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-
-  // Support --cyboflow-dir=/path, --cyboflow-dir /path (canonical) and --crystal-dir (deprecated alias)
-  if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
-    const flagName = arg.startsWith('--cyboflow-dir=') ? '--cyboflow-dir=' : '--crystal-dir=';
-    const dir = arg.substring(flagName.length);
-    setCyboflowDirectory(dir);
-    console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-    if (flagName === '--crystal-dir=') {
-      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
-    }
-  } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < args.length) {
-    const dir = args[i + 1];
-    setCyboflowDirectory(dir);
-    console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-    if (arg === '--crystal-dir') {
-      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
-    }
-    i++;
-  }
-}
+// The data directory (--cyboflow-dir flag / CYBOFLOW_DIR / per-kind default) is resolved
+// by getCyboflowDirectory(); log it once so the backend debug log shows which one is in use.
+console.log(`[Main] Using Cyboflow directory: ${getCyboflowDirectory()}`);
 
 // Install Devtron in development
 if (isDevelopment) {

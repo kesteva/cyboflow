@@ -9,7 +9,6 @@ import { ChevronLeft, ChevronRight, History } from 'lucide-react';
 import { RichOutputView } from '../ai/RichOutputView';
 import { PromptNavigation } from './PromptNavigation';
 import { cn } from '../../../utils/cn';
-import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
 import { RichOutputSettings } from '../ai/AbstractAIPanel';
 import { MessageTransformer } from '../ai/transformers/MessageTransformer';
 import { ClaudeMessageTransformer } from '../ai/transformers/ClaudeMessageTransformer';
@@ -44,11 +43,13 @@ export const RichOutputWithSidebar: React.FC<RichOutputWithSidebarProps> = React
   // Create panel-specific localStorage keys
   const sidebarCollapsedKey = `cyboflow-sidebar-collapsed-${id}`;
 
-  // Load collapsed state from localStorage (keyed by panel ID), with legacy key migration
+  // Load collapsed state from localStorage (keyed by panel ID)
   const [isCollapsed, setIsCollapsed] = useState(() => {
-    const legacyKey = `crystal-sidebar-collapsed-${id}`;
-    const stored = migrateLocalStorageKey(legacyKey, sidebarCollapsedKey);
-    return stored === 'true';
+    try {
+      return localStorage.getItem(sidebarCollapsedKey) === 'true';
+    } catch {
+      return false;
+    }
   });
 
   const richOutputRef = useRef<{ scrollToPrompt: (promptIndex: number) => void }>(null);

@@ -25,7 +25,6 @@ import { useNavigationStore } from './stores/navigationStore';
 import { useLayoutStore } from './stores/layoutStore';
 import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts';
 import { useKeyboardShortcutsHydration } from './hooks/useKeyboardShortcutsHydration';
-import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -145,11 +144,6 @@ function App() {
   const guidedShell = useOnboardingStore((s) => onboardingGuidedShell(s));
   // Sidebar navigation during the in-shell guided steps parks the tour.
   useEffect(() => installGuidedNavPause(), []);
-
-  // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
-  useEffect(() => {
-    migrateLocalStorageKey('crystal-sidebar-width', 'cyboflow-sidebar-width');
-  }, []);
 
   const { width: sidebarWidth, startResize } = useResizable({
     defaultWidth: 500,  // Increased to show git status labels without truncation

@@ -306,11 +306,14 @@ describe('layout persistence', () => {
     expect(localStorage.getItem('cyboflow-backlog-layout')).toBe('list');
   });
 
-  it('migrates the legacy crystal-backlog-layout key (mount-only)', () => {
-    localStorage.setItem('crystal-backlog-layout', 'list');
+  it('reads a persisted list layout', () => {
+    localStorage.setItem('cyboflow-backlog-layout', 'list');
     expect(readPersistedLayout()).toBe('list');
-    expect(localStorage.getItem('cyboflow-backlog-layout')).toBe('list');
-    expect(localStorage.getItem('crystal-backlog-layout')).toBeNull();
+  });
+
+  it('falls back to kanban for an invalid persisted value', () => {
+    localStorage.setItem('cyboflow-backlog-layout', 'bogus');
+    expect(readPersistedLayout()).toBe('kanban');
   });
 });
 

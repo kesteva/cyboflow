@@ -116,17 +116,6 @@ describe('cyboflowDirectory', () => {
     delete process.env.CYBOFLOW_DIR;
   });
 
-  it('getCyboflowDirectory() does NOT read CRYSTAL_DIR', async () => {
-    process.env.CRYSTAL_DIR = '/legacy/crystal/path';
-    setPackaged(true);
-    stubBuildInfoVariant('stable');
-    const { getCyboflowDirectory } = await import('./cyboflowDirectory');
-    const dir = getCyboflowDirectory();
-    // Should resolve to the production .cyboflow dir, not the legacy .crystal path
-    expect(dir).toBe(join(homedir(), '.cyboflow'));
-    delete process.env.CRYSTAL_DIR;
-  });
-
   it('getCyboflowDirectory() respects programmatic override via setCyboflowDirectory', async () => {
     const { getCyboflowDirectory, setCyboflowDirectory } = await import('./cyboflowDirectory');
     setCyboflowDirectory('/programmatic/override');
@@ -145,7 +134,7 @@ describe('cyboflowDirectory', () => {
       process.argv = originalArgv;
     });
 
-    it('resolves the flag on first call, before index.ts arg parsing runs (space form)', async () => {
+    it('resolves the flag on first call, without index.ts arg parsing (space form)', async () => {
       process.argv = ['electron', '.', '--remote-debugging-port=9223', '--cyboflow-dir', '/flag/dir'];
       const { getCyboflowDirectory } = await import('./cyboflowDirectory');
       // No setCyboflowDirectory call — simulates an import-time consumer like
@@ -153,8 +142,8 @@ describe('cyboflowDirectory', () => {
       expect(getCyboflowDirectory()).toBe('/flag/dir');
     });
 
-    it('supports the = form and the deprecated --crystal-dir alias, last occurrence winning', async () => {
-      process.argv = ['electron', '.', '--crystal-dir=/legacy/dir', '--cyboflow-dir=/newer/dir'];
+    it('supports the = form, last occurrence winning', async () => {
+      process.argv = ['electron', '.', '--cyboflow-dir=/older/dir', '--cyboflow-dir=/newer/dir'];
       const { getCyboflowDirectory } = await import('./cyboflowDirectory');
       expect(getCyboflowDirectory()).toBe('/newer/dir');
     });

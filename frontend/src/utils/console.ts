@@ -3,12 +3,14 @@
  * Reduces console.log calls in production builds
  */
 
-import { migrateLocalStorageKey } from './migrateLocalStorageKey';
-
 const isDevelopment = process.env.NODE_ENV === 'development';
 const isVerboseEnabled = () => {
-  const value = migrateLocalStorageKey('crystal.verboseLogging', 'cyboflow.verboseLogging');
-  return value === 'true';
+  try {
+    return localStorage.getItem('cyboflow.verboseLogging') === 'true';
+  } catch {
+    // localStorage can throw (blocked storage) — logging must never throw
+    return false;
+  }
 };
 
 export const devLog = {
