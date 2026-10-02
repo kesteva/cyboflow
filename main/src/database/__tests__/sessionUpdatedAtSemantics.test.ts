@@ -85,12 +85,6 @@ describe('presentation-only writes do not bump sessions.updated_at', () => {
     expect(order.map((r) => r.id)).toEqual(['s2', 's3', 's1']);
   });
 
-  it('updateSessionDisplayOrder does not touch updated_at', () => {
-    createSession('s1');
-    db.updateSessionDisplayOrder('s1', 7);
-    expect(updatedAt('s1')).toBe(SEEDED_UPDATED_AT);
-  });
-
   it('markSessionAsViewed stamps last_viewed_at only and still reads as viewed', () => {
     createSession('s1');
     db.markSessionAsViewed('s1');

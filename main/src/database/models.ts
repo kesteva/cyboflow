@@ -256,20 +256,6 @@ export interface CreateExecutionDiffData {
   commit_message?: string;
 }
 
-export interface CreatePanelExecutionDiffData {
-  panel_id: string;
-  prompt_marker_id?: number;
-  execution_sequence: number;
-  git_diff?: string;
-  files_changed?: string[];
-  stats_additions?: number;
-  stats_deletions?: number;
-  stats_files_changed?: number;
-  before_commit_hash?: string;
-  after_commit_hash?: string;
-  commit_message?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Native entity backlog row interfaces (migration 015_entity_model_rebuild.sql).
 //

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
-import type { Project, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
+import type { Project, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
@@ -272,26 +272,6 @@ export class DatabaseService {
     });
     
     return transaction();
-  }
-
-  /**
-   * Execute an async function within a database transaction with automatic rollback on error
-   * @param fn Async function to execute within the transaction
-   * @returns Promise with result of the function
-   * @throws Error if transaction fails
-   */
-  private async transactionAsync<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(() => {
-        fn().then(resolve).catch(reject);
-      });
-      
-      try {
-        transaction();
-      } catch (error) {
-        reject(error);
-      }
-    });
   }
 
   /**
@@ -1671,10 +1651,6 @@ export class DatabaseService {
     return this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Project | undefined;
   }
 
-  getProjectByPath(path: string): Project | undefined {
-    return this.db.prepare('SELECT * FROM projects WHERE path = ?').get(path) as Project | undefined;
-  }
-
   /**
    * Look up a session by its exact worktree_path. Used by the boot-injected
    * permission-trust resolver (main/src/index.ts →
@@ -1844,13 +1820,6 @@ export class DatabaseService {
 
   getAllSessionsIncludingArchived(): Session[] {
     return this.db.prepare('SELECT * FROM sessions WHERE (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY created_at DESC').all() as Session[];
-  }
-
-  getArchivedSessions(projectId?: number): Session[] {
-    if (projectId !== undefined) {
-      return this.db.prepare('SELECT * FROM sessions WHERE project_id = ? AND archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY updated_at DESC').all(projectId) as Session[];
-    }
-    return this.db.prepare('SELECT * FROM sessions WHERE archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY updated_at DESC').all() as Session[];
   }
 
   getMainRepoSession(projectId: number): Session | undefined {
@@ -2081,11 +2050,6 @@ export class DatabaseService {
     return result.changes > 0;
   }
 
-  restoreSession(id: string): boolean {
-    const result = this.db.prepare('UPDATE sessions SET archived = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
   // Session output operations
   addSessionOutput(sessionId: string, type: 'stdout' | 'stderr' | 'system' | 'json' | 'error', data: string): void {
     this.db.prepare(`
@@ -2132,23 +2096,6 @@ export class DatabaseService {
     `).all(panelId) as SessionOutput[];
   }
 
-  getRecentSessionOutputs(sessionId: string, since?: Date): SessionOutput[] {
-    if (since) {
-      return this.db.prepare(`
-        SELECT * FROM session_outputs 
-        WHERE session_id = ? AND timestamp > ? 
-        ORDER BY timestamp ASC
-      `).all(sessionId, since.toISOString()) as SessionOutput[];
-    } else {
-      return this.getSessionOutputs(sessionId);
-    }
-  }
-
-  clearSessionOutputs(sessionId: string): void {
-    this.db.prepare('DELETE FROM session_outputs WHERE session_id = ?').run(sessionId);
-    this.invalidateSessionTokenUsageCache(sessionId);
-  }
-
   // Claude panel output operations - use panel_id for Claude-specific data
   addPanelOutput(panelId: string, type: 'stdout' | 'stderr' | 'system' | 'json' | 'error', data: string): void {
     // Get the session_id from the panel
@@ -2180,28 +2127,6 @@ export class DatabaseService {
       WHERE panel_id = ? 
       ORDER BY timestamp ASC, id ASC
     `).all(panelId) as SessionOutput[];
-  }
-
-  getRecentPanelOutputs(panelId: string, since?: Date): SessionOutput[] {
-    if (since) {
-      return this.db.prepare(`
-        SELECT * FROM session_outputs 
-        WHERE panel_id = ? AND timestamp > ? 
-        ORDER BY timestamp ASC
-      `).all(panelId, since.toISOString()) as SessionOutput[];
-    } else {
-      return this.getPanelOutputs(panelId);
-    }
-  }
-
-  clearPanelOutputs(panelId: string): void {
-    // Panel outputs carry the owning session_id too (see addPanelOutput), so
-    // they count towards that session's getSessionTokenUsage cache.
-    const panel = this.getPanel(panelId);
-    this.db.prepare('DELETE FROM session_outputs WHERE panel_id = ?').run(panelId);
-    if (panel) {
-      this.invalidateSessionTokenUsageCache(panel.sessionId);
-    }
   }
 
   // Conversation message operations
@@ -2260,10 +2185,6 @@ export class DatabaseService {
     return result.changes === 1;
   }
 
-  clearConversationMessages(sessionId: string): void {
-    this.db.prepare('DELETE FROM conversation_messages WHERE session_id = ?').run(sessionId);
-  }
-
   // Claude panel conversation message operations - use panel_id for Claude-specific data
   addPanelConversationMessage(panelId: string, messageType: 'user' | 'assistant', content: string): void {
     // Get the session_id from the panel
@@ -2292,10 +2213,6 @@ export class DatabaseService {
       WHERE panel_id = ? 
       ORDER BY timestamp ASC
     `).all(panelId) as ConversationMessage[];
-  }
-
-  clearPanelConversationMessages(panelId: string): void {
-    this.db.prepare('DELETE FROM conversation_messages WHERE panel_id = ?').run(panelId);
   }
 
   // Cleanup operations
@@ -2400,14 +2317,6 @@ export class DatabaseService {
     `).all(panelId) as PromptMarker[];
     
     return markers;
-  }
-
-  updatePromptMarkerLine(id: number, outputLine: number): void {
-    this.db.prepare(`
-      UPDATE prompt_markers 
-      SET output_line = ? 
-      WHERE id = ?
-    `).run(outputLine, id);
   }
 
   updatePromptMarkerCompletion(sessionId: string, timestamp?: string): void {
@@ -2596,65 +2505,6 @@ export class DatabaseService {
       commit_message: row.commit_message,
       timestamp: row.timestamp
     };
-  }
-
-  // Claude panel execution diff operations - use panel_id for Claude-specific data
-  createPanelExecutionDiff(data: CreatePanelExecutionDiffData): ExecutionDiff {
-    const result = this.db.prepare(`
-      INSERT INTO execution_diffs (
-        panel_id, prompt_marker_id, execution_sequence, git_diff, 
-        files_changed, stats_additions, stats_deletions, stats_files_changed,
-        before_commit_hash, after_commit_hash, commit_message
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      data.panel_id,
-      data.prompt_marker_id || null,
-      data.execution_sequence,
-      data.git_diff || null,
-      data.files_changed ? JSON.stringify(data.files_changed) : null,
-      data.stats_additions || 0,
-      data.stats_deletions || 0,
-      data.stats_files_changed || 0,
-      data.before_commit_hash || null,
-      data.after_commit_hash || null,
-      data.commit_message || null
-    );
-
-    const diff = this.db.prepare('SELECT * FROM execution_diffs WHERE id = ?').get(result.lastInsertRowid) as ExecutionDiffRow | undefined;
-    if (!diff) {
-      throw new Error('Failed to retrieve created panel execution diff');
-    }
-    return this.convertDbExecutionDiff(diff);
-  }
-
-  getNextPanelExecutionSequence(panelId: string): number {
-    const result = this.db.prepare(`
-      SELECT MAX(execution_sequence) as max_seq 
-      FROM execution_diffs 
-      WHERE panel_id = ?
-    `).get(panelId) as { max_seq: number | null } | undefined;
-    
-    return (result?.max_seq || 0) + 1;
-  }
-
-  // Display order operations
-  updateProjectDisplayOrder(projectId: number, displayOrder: number): void {
-    this.db.prepare(`
-      UPDATE projects 
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP 
-      WHERE id = ?
-    `).run(displayOrder, projectId);
-  }
-
-  updateSessionDisplayOrder(sessionId: string, displayOrder: number): void {
-    // No updated_at bump: display_order is presentation metadata, and
-    // updated_at doubles as the last-activity clock (see markSessionAsViewed).
-    this.db.prepare(`
-      UPDATE sessions
-      SET display_order = ?
-      WHERE id = ?
-    `).run(displayOrder, sessionId);
   }
 
   reorderProjects(projectOrders: Array<{ id: number; displayOrder: number }>): void {
@@ -3107,94 +2957,6 @@ export class DatabaseService {
       SET settings = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(JSON.stringify(mergedSettings), panelId);
-  }
-
-  /**
-   * Set panel settings (replaces all existing settings)
-   */
-  setPanelSettings(panelId: string, settings: Record<string, unknown>): void {
-    const settingsWithTimestamp = {
-      ...settings,
-      updatedAt: new Date().toISOString()
-    };
-
-    this.db.prepare(`
-      UPDATE tool_panels
-      SET settings = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(JSON.stringify(settingsWithTimestamp), panelId);
-  }
-
-  // ========== LEGACY CLAUDE PANEL SETTINGS (for backward compatibility) ==========
-  // These will be deprecated but are kept for migration purposes
-
-  createClaudePanelSettings(panelId: string, settings: {
-    model?: string;
-    commit_mode?: boolean;
-    system_prompt?: string;
-    max_tokens?: number;
-    temperature?: number;
-  }): void {
-    // Use the new unified settings storage
-    this.updatePanelSettings(panelId, {
-      model: settings.model || 'auto',
-      commitMode: settings.commit_mode || false,
-      systemPrompt: settings.system_prompt || null,
-      maxTokens: settings.max_tokens || 4096,
-      temperature: settings.temperature || 0.7
-    });
-  }
-
-  getClaudePanelSettings(panelId: string): {
-    panel_id: string;
-    model: string;
-    commit_mode: boolean;
-    system_prompt: string | null;
-    max_tokens: number;
-    temperature: number;
-    created_at: string;
-    updated_at: string;
-  } | null {
-    const settings = this.getPanelSettings(panelId);
-    
-    if (!settings || Object.keys(settings).length === 0) {
-      return null;
-    }
-
-    // Convert from new format to old format for compatibility
-    const s = settings as Record<string, unknown>;
-    return {
-      panel_id: panelId,
-      model: (typeof s.model === 'string' ? s.model : null) || 'auto',
-      commit_mode: (typeof s.commitMode === 'boolean' ? s.commitMode : null) || false,
-      system_prompt: (typeof s.systemPrompt === 'string' ? s.systemPrompt : null) || null,
-      max_tokens: (typeof s.maxTokens === 'number' ? s.maxTokens : null) || 4096,
-      temperature: (typeof s.temperature === 'number' ? s.temperature : null) || 0.7,
-      created_at: (typeof s.createdAt === 'string' ? s.createdAt : null) || new Date().toISOString(),
-      updated_at: (typeof s.updatedAt === 'string' ? s.updatedAt : null) || new Date().toISOString()
-    };
-  }
-
-  updateClaudePanelSettings(panelId: string, settings: {
-    model?: string;
-    commit_mode?: boolean;
-    system_prompt?: string;
-    max_tokens?: number;
-    temperature?: number;
-  }): void {
-    const updateObj: Record<string, unknown> = {};
-    
-    if (settings.model !== undefined) updateObj.model = settings.model;
-    if (settings.commit_mode !== undefined) updateObj.commitMode = settings.commit_mode;
-    if (settings.system_prompt !== undefined) updateObj.systemPrompt = settings.system_prompt;
-    if (settings.max_tokens !== undefined) updateObj.maxTokens = settings.max_tokens;
-    if (settings.temperature !== undefined) updateObj.temperature = settings.temperature;
-    
-    this.updatePanelSettings(panelId, updateObj);
-  }
-
-  deleteClaudePanelSettings(panelId: string): void {
-    this.db.prepare('DELETE FROM claude_panel_settings WHERE panel_id = ?').run(panelId);
   }
 
   // Session statistics methods
