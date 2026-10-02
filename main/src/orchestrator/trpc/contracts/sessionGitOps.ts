@@ -50,10 +50,8 @@ export interface SessionGitDiffStats {
 
 /**
  * Structural mirror of GitDiffManager's `GitDiffResult` (source of truth:
- * main/src/services/gitDiffManager.ts). The renderer's legacy wire twin is
- * frontend/src/types/diff.ts `GitDiffResult`, which declares the Seam B
- * fields below as OPTIONAL — CombinedDiffView, its only consumer, never reads
- * them; the Diff-tab panels take this shape via tRPC inference instead.
+ * main/src/services/gitDiffManager.ts). The renderer's Diff-tab panels take
+ * this shape via tRPC inference.
  *
  * `resolvedBase` and `worktree` are Seam B (TASK-212) additions, both
  * REQUIRED — a loud exhaustive tripwire rather than an optional field an
@@ -76,33 +74,9 @@ export interface SessionGitDiffResult {
 }
 
 /**
- * One row of `getExecutions`. Synthesized from the session's commit history
- * (index-derived ids, 1-based; id 0 is the synthetic "Uncommitted changes"
- * row), NOT a database entity — the renderer's twin is
- * frontend/src/types/diff.ts `ExecutionDiff`.
- */
-export interface SessionExecutionRow {
-  id: number;
-  session_id: string;
-  execution_sequence: number;
-  after_commit_hash: string;
-  commit_message: string;
-  timestamp: string;
-  stats_additions: number;
-  stats_deletions: number;
-  stats_files_changed: number;
-  author: string;
-  comparison_branch: string;
-  history_source: 'remote' | 'local' | 'branch';
-  history_limit_reached: boolean;
-}
-
-/**
- * One row of `getLastCommits`. Shaped LIKE an execution row but not identical
- * to {@link SessionExecutionRow}: it carries `commit_hash` (not
- * `after_commit_hash`) and its `timestamp` is WorktreeManager's raw commit date
- * (`string | Date`), passed through unconverted exactly as the legacy handler
- * did.
+ * One row of `getLastCommits`. Its `timestamp` is WorktreeManager's raw commit
+ * date (`string | Date`), passed through unconverted exactly as the legacy
+ * handler did.
  */
 export interface SessionLastCommitRow {
   id: number;
@@ -170,15 +144,6 @@ export type MergeToMainResult =
     };
 
 export interface SessionGitOpsLike {
-  /**
-   * Mirrors legacy `sessions:get-executions`. The session's commit history as
-   * renderer-facing execution rows, newest first, with a synthetic id-0 row
-   * prepended when the worktree has uncommitted changes.
-   */
-  getExecutions(request: {
-    sessionId: string;
-  }): Promise<{ success: true; data: SessionExecutionRow[] } | SessionGitError>;
-
   /**
    * Mirrors legacy `sessions:get-execution-diff`. `executionId` is the 1-based
    * execution row id as a STRING (the legacy wire type — it is parseInt'd

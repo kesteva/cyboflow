@@ -31,7 +31,6 @@ const emptyWorktree = { entries: [], groups: [], committedUnavailable: true };
 
 function makeFakeOps(): FakeOps {
   return {
-    getExecutions: vi.fn().mockResolvedValue({ success: true, data: [] }),
     getExecutionDiff: vi.fn().mockResolvedValue({
       success: true,
       data: {
@@ -111,11 +110,11 @@ describe('cyboflow.sessionGit', () => {
   // (a) Delegation + envelope passthrough for a representative subset.
   // -------------------------------------------------------------------------
   describe('(a) delegates to ctx.sessionGitOps and returns its envelope untouched', () => {
-    it('getExecutions', async () => {
+    it('getLastCommits', async () => {
       const sessionGitOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      const result = await caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' });
-      expect(sessionGitOps.getExecutions).toHaveBeenCalledWith({ sessionId: 's1' });
+      const result = await caller.cyboflow.sessionGit.getLastCommits({ sessionId: 's1', count: 5 });
+      expect(sessionGitOps.getLastCommits).toHaveBeenCalledWith({ sessionId: 's1', count: 5 });
       expect(result).toEqual({ success: true, data: [] });
     });
 
@@ -302,9 +301,9 @@ describe('cyboflow.sessionGit', () => {
 
     it('a plain failure envelope also passes through untouched', async () => {
       const sessionGitOps = makeFakeOps();
-      sessionGitOps.getExecutions.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
+      sessionGitOps.getGitCommands.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      const result = await caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' });
+      const result = await caller.cyboflow.sessionGit.getGitCommands({ sessionId: 's1' });
       expect(result).toEqual({ success: false, error: 'Session or worktree path not found' });
     });
   });
@@ -313,11 +312,11 @@ describe('cyboflow.sessionGit', () => {
   // (b) zod rejection of malformed input, never delegated.
   // -------------------------------------------------------------------------
   describe('(b) rejects malformed input before it reaches sessionGitOps', () => {
-    it('getExecutions rejects an empty sessionId (min length 1)', async () => {
+    it('getGitCommands rejects an empty sessionId (min length 1)', async () => {
       const sessionGitOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
-      await expect(caller.cyboflow.sessionGit.getExecutions({ sessionId: '' })).rejects.toSatisfy(isBadRequest);
-      expect(sessionGitOps.getExecutions).not.toHaveBeenCalled();
+      await expect(caller.cyboflow.sessionGit.getGitCommands({ sessionId: '' })).rejects.toSatisfy(isBadRequest);
+      expect(sessionGitOps.getGitCommands).not.toHaveBeenCalled();
     });
 
     it('commit rejects an empty message (min length 1)', async () => {
@@ -361,9 +360,9 @@ describe('cyboflow.sessionGit', () => {
   // (c) Missing ctx.sessionGitOps → PRECONDITION_FAILED.
   // -------------------------------------------------------------------------
   describe('(c) missing ctx.sessionGitOps → PRECONDITION_FAILED', () => {
-    it('getExecutions', async () => {
+    it('getGitCommands', async () => {
       const caller = appRouter.createCaller(createContext());
-      await expect(caller.cyboflow.sessionGit.getExecutions({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
+      await expect(caller.cyboflow.sessionGit.getGitCommands({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
 
     it('squashAndRebaseToMain', async () => {

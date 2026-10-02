@@ -839,7 +839,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
     getConfiguredClaudePath: () => configManager.getConfig()?.claudeExecutablePath,
     log: (message) => logger.info(message),
   });
-  const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager });
+  const workspaceFileOps = createFileOps({ sessionManager, databaseService });
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,

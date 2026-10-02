@@ -13,9 +13,8 @@
  * The tests drive the REAL ops with `runGitCapture` stubbed, so they assert
  * the argv that would actually be spawned rather than a reconstructed string.
  *
- * The other ops migrated off shell strings in the same change are covered
- * here too, since each carries renderer-supplied data into a git invocation:
- * `git:revert` (commit hash), `file:readAtRevision` (revision), `git:restore`.
+ * `git:restore`, the other op migrated off shell strings in the same change, is
+ * covered here too.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -32,7 +31,6 @@ vi.mock('../../utils/runGit', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../utils/runGit')>();
   return {
     ...actual,
-    runGitAsync: vi.fn(async () => ''),
     runGitCapture: vi.fn(async (cwd: string, args: string[]) => {
       gitCalls.push({ cwd, args });
       if (gitResult.value instanceof Error) throw gitResult.value;
@@ -58,7 +56,6 @@ beforeEach(() => {
   ops = createFileOps({
     sessionManager: { getSession: vi.fn(() => session) },
     databaseService: { getProject: vi.fn(() => ({ id: 1, path: PROJECT_PATH })) },
-    gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
   } as unknown as AppServices);
 });
 
@@ -203,39 +200,8 @@ describe('git:execute-project — error reporting', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The sibling ops migrated off shell strings in the same change.
+// The sibling op migrated off shell strings in the same change.
 // ---------------------------------------------------------------------------
-
-describe('git:revert — argv form, option-shaped hash rejected', () => {
-  it('places our flag first, then END_OF_OPTIONS, then the hash', async () => {
-    const res = await ops.gitRevert({ sessionId: 's1', commitHash: 'abc1234' });
-    expect(res.success).toBe(true);
-    expect(gitCalls).toEqual([
-      { cwd: WORKTREE_PATH, args: ['revert', '--no-edit', '--end-of-options', 'abc1234'] },
-    ]);
-  });
-
-  it('rejects an option-shaped commit hash', async () => {
-    const res = await ops.gitRevert({
-      sessionId: 's1',
-      commitHash: '--upload-pack=touch /tmp/pwned',
-    });
-    expect(res.success).toBe(false);
-    expect(gitCalls).toEqual([]);
-  });
-
-  it('keeps a shell-metacharacter hash as one inert argv element', async () => {
-    // Previously interpolated into `git revert ${hash} --no-edit` as a shell
-    // string, so this was command substitution.
-    await ops.gitRevert({ sessionId: 's1', commitHash: '$(touch /tmp/pwned)' });
-    expect(gitCalls[0].args).toEqual([
-      'revert',
-      '--no-edit',
-      '--end-of-options',
-      '$(touch /tmp/pwned)',
-    ]);
-  });
-});
 
 describe('git:restore — argv form', () => {
   it('runs reset --hard HEAD then clean -fd', async () => {
@@ -245,39 +211,5 @@ describe('git:restore — argv form', () => {
       { cwd: WORKTREE_PATH, args: ['reset', '--hard', 'HEAD'] },
       { cwd: WORKTREE_PATH, args: ['clean', '-fd'] },
     ]);
-  });
-});
-
-describe('file:readAtRevision — argv form, revision validated', () => {
-  it('builds a single <rev>:<path> spec behind END_OF_OPTIONS', async () => {
-    gitResult.value = { stdout: 'file contents\n', stderr: '' };
-    const res = await ops.readAtRevision({ sessionId: 's1', filePath: 'src/a.ts', revision: 'HEAD~2' });
-    expect(res).toMatchObject({ success: true, content: 'file contents\n' });
-    expect(gitCalls).toEqual([
-      { cwd: WORKTREE_PATH, args: ['show', '--end-of-options', 'HEAD~2:src/a.ts'] },
-    ]);
-  });
-
-  it('defaults the revision to HEAD', async () => {
-    await ops.readAtRevision({ sessionId: 's1', filePath: 'a.ts' });
-    expect(gitCalls[0].args).toEqual(['show', '--end-of-options', 'HEAD:a.ts']);
-  });
-
-  it('rejects an option-shaped revision', async () => {
-    const res = await ops.readAtRevision({ sessionId: 's1', filePath: 'a.ts', revision: '--output=/tmp/pwned' });
-    expect(res.success).toBe(false);
-    expect(gitCalls).toEqual([]);
-  });
-
-  it('rejects a revision containing ":" — git splits on the FIRST colon', async () => {
-    // `HEAD:../../etc/passwd` + ':a.ts' would re-aim the path half of the spec.
-    const res = await ops.readAtRevision({
-      sessionId: 's1',
-      filePath: 'a.ts',
-      revision: 'HEAD:../../etc/passwd',
-    });
-    expect(res.success).toBe(false);
-    expect(!res.success && res.error).toMatch(/must not contain/);
-    expect(gitCalls).toEqual([]);
   });
 });

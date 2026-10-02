@@ -1,15 +1,14 @@
 /**
  * Realpath containment for the PROJECT-scoped file ops in
  * main/src/ipc/fileOps.ts, plus the "validate the path you actually use" property
- * for the write paths.
+ * for the write path.
  *
  * The project-scoped ops (`readProject`, `writeProject`) used to guard only
  * LEXICALLY — reject `..` and absolute paths, then `path.join`. That stops
  * `../../etc/passwd` and nothing else: a symlink committed inside the project
  * (`docs/out -> /Users/me/.ssh`) is a perfectly ordinary relative path
- * lexically, and the handler would read or write straight through it. The
- * session-scoped ops already resolved symlinks before checking; these tests
- * pin that the project ones now do too.
+ * lexically, and the handler would read or write straight through it. These
+ * tests pin that they now resolve symlinks before checking.
  *
  * Every escape case is built as a REAL symlink in a real tmpdir — a mocked fs
  * would only prove the guard's own arithmetic, not that it survives contact with
@@ -52,7 +51,6 @@ beforeEach(async () => {
   ops = createFileOps({
     sessionManager: { getSession: vi.fn(() => session) },
     databaseService: { getProject: vi.fn(() => ({ id: 1, path: projectPath })) },
-    gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices);
 });
@@ -154,17 +152,17 @@ describe('file:write-project — realpath containment', () => {
   });
 });
 
-describe('file:write (session-scoped) — writes the path it validated', () => {
+describe('file:write-project — writes the path it validated', () => {
   // POSIX-only fixture: the leaf FILE link has no unprivileged win32 stand-in.
   it.skipIf(fileSymlinksNeedPrivilege)(
     'does not re-follow the leaf symlink at write time',
     async () => {
     // The guard resolved the leaf and accepted it; writing to the LEXICAL path
     // instead would re-traverse the link. Point a link at a sibling INSIDE the
-    // worktree: the write must land on the resolved target, once.
+    // project: the write must land on the resolved target, once.
     fs.writeFileSync(path.join(projectPath, 'target.txt'), 'old\n');
     fs.symlinkSync(path.join(projectPath, 'target.txt'), path.join(projectPath, 'alias.txt'));
-    const res = await ops.write({ sessionId: 's1', filePath: 'alias.txt', content: 'new\n' });
+    const res = await ops.writeProject({ projectId: 1, filePath: 'alias.txt', content: 'new\n' });
     expect(res.success).toBe(true);
     expect(fs.readFileSync(path.join(projectPath, 'target.txt'), 'utf-8')).toBe('new\n');
     // The alias is still a symlink — the write went THROUGH the resolved path,
@@ -172,38 +170,6 @@ describe('file:write (session-scoped) — writes the path it validated', () => {
     expect(fs.lstatSync(path.join(projectPath, 'alias.txt')).isSymbolicLink()).toBe(true);
     },
   );
-
-  // POSIX-only fixture: a DANGLING FILE symlink has no unprivileged win32
-  // stand-in (a dangling junction can only name a directory).
-  it.skipIf(fileSymlinksNeedPrivilege)(
-    'REJECTS a dangling symlink escaping the worktree',
-    async () => {
-    const wouldBeCreated = path.join(outsidePath, 'wt-planted.txt');
-    fs.symlinkSync(wouldBeCreated, path.join(projectPath, 'wt-dangling.txt'));
-    const res = await ops.write({ sessionId: 's1', filePath: 'wt-dangling.txt', content: 'PWNED\n' });
-    expect(res.success).toBe(false);
-    expect(fs.existsSync(wouldBeCreated)).toBe(false);
-    },
-  );
-});
-
-describe('file:list — realpath containment', () => {
-  it('lists an ordinary directory with paths relative to the worktree', async () => {
-    fs.mkdirSync(path.join(projectPath, 'src'));
-    fs.writeFileSync(path.join(projectPath, 'src', 'a.ts'), '');
-    const res = await ops.list({ sessionId: 's1', path: 'src' });
-    expect(res.success).toBe(true);
-    // Relative paths come back in the platform's native separators
-    // (path.relative), so build the expectation the same way.
-    expect(res.success && res.files.map((f) => f.path)).toEqual([path.join('src', 'a.ts')]);
-  });
-
-  it('REJECTS listing through a symlinked directory that escapes the worktree', async () => {
-    createDirSymlink(outsidePath, path.join(projectPath, 'escape'));
-    const res = await ops.list({ sessionId: 's1', path: 'escape' });
-    expect(res.success).toBe(false);
-    expect((res as { files?: unknown }).files).toBeUndefined();
-  });
 });
 
 describe('file:search — the pattern cannot walk the glob root out of the project', () => {
@@ -218,7 +184,8 @@ describe('file:search — the pattern cannot walk the glob root out of the proje
     fs.writeFileSync(path.join(projectPath, 'src', 'findme.ts'), '');
     const res = await ops.search({ projectId: 1, pattern: 'findme' });
     expect(res.success).toBe(true);
-    // Match against native separators (see the file:list note above).
+    // Relative paths come back in the platform's native separators
+    // (path.relative), so build the expectation the same way.
     expect(res.success && res.files.some((f) => f.path === path.join('src', 'findme.ts'))).toBe(true);
   });
 });

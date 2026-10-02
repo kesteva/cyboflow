@@ -38,7 +38,6 @@ import type {
   MergeToMainResult,
   PullPushGitError,
   RebaseFromMainGitError,
-  SessionExecutionRow,
   SessionGitDiffResult,
   SessionGitError,
   SessionLastCommitRow,
@@ -60,12 +59,6 @@ function requireOps<T>(ops: T | undefined): T {
 const sessionInput = z.object({ sessionId: z.string().min(1) });
 
 export const sessionGitRouter = router({
-  getExecutions: protectedProcedure
-    .input(sessionInput)
-    .query(async ({ ctx, input }): Promise<{ success: true; data: SessionExecutionRow[] } | SessionGitError> => {
-      return requireOps(ctx.sessionGitOps).getExecutions(input);
-    }),
-
   getExecutionDiff: protectedProcedure
     .input(z.object({ sessionId: z.string().min(1), executionId: z.string().min(1) }))
     .query(async ({ ctx, input }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError> => {

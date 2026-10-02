@@ -929,64 +929,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
-  const getExecutions = async ({ sessionId }: OpsInput<'getExecutions'>): Promise<OpsResult<'getExecutions'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      const { commits, comparisonBranch, historySource, limitReached } = await getSessionCommitHistory(session, 50);
-
-      // Transform git commits to execution format expected by frontend
-      const executions = commits.map((commit, index) => ({
-        id: index + 1, // 1-based index for commits
-        session_id: sessionId,
-        execution_sequence: index + 1,
-        after_commit_hash: commit.hash,
-        commit_message: commit.message,
-        timestamp: commit.date.toISOString(),
-        stats_additions: commit.stats.additions,
-        stats_deletions: commit.stats.deletions,
-        stats_files_changed: commit.stats.filesChanged,
-        author: commit.author,
-        comparison_branch: comparisonBranch,
-        history_source: historySource,
-        history_limit_reached: limitReached
-      }));
-
-      // Check for uncommitted changes
-      const hasUncommittedChanges = await gitDiffManager.hasChanges(session.worktreePath);
-      if (hasUncommittedChanges) {
-        // Get stats for uncommitted changes
-        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
-        
-        // Add uncommitted changes as execution with id 0
-        executions.unshift({
-          id: 0,
-          session_id: sessionId,
-          execution_sequence: 0,
-          after_commit_hash: 'UNCOMMITTED',
-          commit_message: 'Uncommitted changes',
-          timestamp: new Date().toISOString(),
-          stats_additions: uncommittedDiff.stats.additions,
-          stats_deletions: uncommittedDiff.stats.deletions,
-          stats_files_changed: uncommittedDiff.stats.filesChanged,
-          author: 'You',
-          comparison_branch: comparisonBranch,
-          history_source: historySource,
-          history_limit_reached: limitReached
-        });
-      }
-
-      return { success: true, data: executions };
-    } catch (error) {
-      console.error('Failed to get executions:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get executions';
-      return { success: false, error: errorMessage };
-    }
-  };
-
   const getExecutionDiff = async ({ sessionId, executionId }: OpsInput<'getExecutionDiff'>): Promise<OpsResult<'getExecutionDiff'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -2598,7 +2540,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   return {
-    getExecutions,
     getExecutionDiff,
     commit,
     diff,
