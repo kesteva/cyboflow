@@ -145,7 +145,7 @@ import { RunShellManager } from './services/runShellManager';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { isAgentProviderAllowed, setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
-import { runQuitDrain } from './services/quitDrain';
+import { runQuitDrain, consoleQuitDrainLogger } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
@@ -3722,11 +3722,11 @@ app.on('before-quit', (event) => {
       quitDrainState = 'drained';
       app.quit();
     },
-    // console, not `logger` — the teardown closes the logger as its last step.
-    logger: {
-      info: (message) => console.log(message),
-      warn: (message, error) => (error === undefined ? console.warn(message) : console.warn(message, error)),
-    },
+    // Backstop for a post-will-quit hang (see QUIT_EXIT_WATCHDOG_MS): the drain
+    // deadline bounds OUR teardown, not what Electron does after the re-issued
+    // quit. If the process is still here by then, nothing graceful is left.
+    forceExit: () => app.exit(0),
+    logger: consoleQuitDrainLogger,
   });
 });
 

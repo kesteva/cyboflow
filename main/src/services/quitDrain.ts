@@ -45,6 +45,36 @@ interface QuitDrainLogger {
 }
 
 /**
+ * The logger the quit path should use: `console`, not the file Logger — the
+ * teardown closes the Logger as its last step, and index.ts's console
+ * overrides already route to it while it is open.
+ */
+export const consoleQuitDrainLogger: QuitDrainLogger = {
+  info: (message) => console.log(message),
+  warn: (message, error) => (error === undefined ? console.warn(message) : console.warn(message, error)),
+};
+
+/**
+ * How long the process may take to actually exit AFTER `finish` has re-issued
+ * the quit before `forceExit` is called.
+ *
+ * QUIT_DRAIN_TIMEOUT_MS bounds only our own teardown. Once the quit is
+ * re-issued, Electron still has to run `will-quit` → `quit` → browser shutdown
+ * → `node::FreeEnvironment`, and none of that is under our control. During the
+ * #19 index.ts split a build was observed, for about forty minutes and 9/9
+ * reproducibly, logging `will-quit` and then never exiting — a zombie the user
+ * had to force-quit. It then stopped reproducing (20/20 clean, with and without
+ * CPU load) and the mechanism was never identified. The watchdog is the
+ * mechanism-independent backstop: whatever is wedged, the process ends.
+ *
+ * The budget sits above the @sentry/electron `will-quit` handler, which in a
+ * packaged build preventDefaults the quit, flushes the session (bounded at 2s),
+ * and then calls `app.exit()` itself — forcing the exit before that completes
+ * would lose the session end for every quit.
+ */
+export const QUIT_EXIT_WATCHDOG_MS = 5_000;
+
+/**
  * Run `drain` to completion (or to `timeoutMs`, whichever comes first), then call
  * `finish` exactly once.
  *
@@ -55,15 +85,25 @@ interface QuitDrainLogger {
  *
  * Never throws: a failure inside `drain` is logged and swallowed, exactly as the
  * inline teardown it replaces did.
+ *
+ * When `forceExit` is given, a one-shot watchdog is armed right after `finish`
+ * (see QUIT_EXIT_WATCHDOG_MS): if the process is still alive `exitWatchdogMs`
+ * later, `forceExit` is called. On a healthy quit the process is gone long
+ * before then and the timer dies with it. Deliberately NOT unref'd, for the same
+ * reason as the deadline below — in the wedged state it may be the only thing
+ * that gets the process out.
  */
 export async function runQuitDrain(opts: {
   drain: () => Promise<void>;
   finish: () => void;
+  forceExit?: () => void;
   timeoutMs?: number;
+  exitWatchdogMs?: number;
   logger?: QuitDrainLogger;
 }): Promise<void> {
-  const { drain, finish, logger } = opts;
+  const { drain, finish, forceExit, logger } = opts;
   const timeoutMs = opts.timeoutMs ?? QUIT_DRAIN_TIMEOUT_MS;
+  const exitWatchdogMs = opts.exitWatchdogMs ?? QUIT_EXIT_WATCHDOG_MS;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
@@ -99,4 +139,13 @@ export async function runQuitDrain(opts: {
   }
 
   finish();
+
+  if (forceExit) {
+    setTimeout(() => {
+      logger?.warn?.(
+        `[QuitDrain] process still alive ${exitWatchdogMs}ms after the drained quit was re-issued; forcing exit`,
+      );
+      forceExit();
+    }, exitWatchdogMs);
+  }
 }
