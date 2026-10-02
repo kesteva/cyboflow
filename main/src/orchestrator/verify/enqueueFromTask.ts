@@ -8,11 +8,10 @@
  *
  * This mirrors `mcpQueryHandler.handleRequestVerification` (the dual-format enqueue)
  * for a request that ALWAYS carries a task, minus the socket plumbing:
- *   - read the run's IMMUTABLE verify stamps (verify_enabled / verify_type /
- *     verify_chain) + project id defensively; disabled/missing ⇒ a fail-open SKIP;
- *   - resolve the chain = FALLBACK_CHAINS[type] ∩ the stamped chain (an empty
- *     intersection still enqueues — the scheduler treats an empty chain as a SKIP,
- *     never a fabricated fail — exactly like the MCP handler);
+ *   - read the run's IMMUTABLE verify stamps (verify_enabled / verify_type) +
+ *     project id defensively; disabled/missing ⇒ a fail-open SKIP;
+ *   - enqueue with an empty request chain — exactly like the MCP handler, the
+ *     scheduler dispatches a flow run's request off the RUN's engine stamp;
  *   - capture the snapshot sha at enqueue time (§5.5); a capture failure falls back
  *     to a null sha and STILL enqueues (the provisioner's dirty-worktree bucket);
  *   - FORCE the lane identity: the controller's `laneTaskRef` is authoritative for
@@ -35,7 +34,6 @@ import { taskDerivesEnvironment } from './bootstrapEligibility';
 import { probeProjectSurface, withInferredApp } from './projectSurfaceProbe';
 import {
   deriveLegacyInputFromTask,
-  FALLBACK_CHAINS,
   isVerificationType,
   resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
@@ -43,7 +41,6 @@ import type {
   VerificationModality,
   VerificationTaskV1,
   VerificationType,
-  VisualBackendId,
 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry } from '../../../../shared/types/verifyRunbook';
 import type { DatabaseLike, LoggerLike } from '../types';
@@ -854,20 +851,6 @@ export async function prepareVerificationEnqueue(args: {
   };
 }
 
-/** Parse the stamped `verify_chain` JSON into a `VisualBackendId[]` (mirrors mcpQueryHandler). Fail-soft → []. */
-function parseStampedChain(v: unknown): VisualBackendId[] {
-  if (typeof v !== 'string' || v.length === 0) return [];
-  try {
-    const parsed: unknown = JSON.parse(v);
-    if (Array.isArray(parsed)) {
-      return parsed.filter((x): x is VisualBackendId => typeof x === 'string');
-    }
-    return [];
-  } catch {
-    return [];
-  }
-}
-
 export interface EnqueueTaskVerificationOptions {
   db: DatabaseLike;
   runId: string;
@@ -989,24 +972,22 @@ export async function enqueueTaskVerification(
   // pre-055 DB lacking the columns degrades to a disabled posture (skipped).
   let enabled = false;
   let stampedType: VerificationType | null = null;
-  let stampedChain: VisualBackendId[] = [];
   let projectId = Number.NaN;
   try {
     const row = db
       .prepare(
         `SELECT project_id AS projectId, verify_enabled AS verifyEnabled,
-                verify_type AS verifyType, verify_chain AS verifyChain
+                verify_type AS verifyType
            FROM workflow_runs WHERE id = ?`,
       )
       .get(runId) as
-      | { projectId?: unknown; verifyEnabled?: unknown; verifyType?: unknown; verifyChain?: unknown }
+      | { projectId?: unknown; verifyEnabled?: unknown; verifyType?: unknown }
       | undefined;
     // Distinct from the off switch below (F8): a missing run row is an anomaly
     // the controller should surface, not a deliberate 'verification-disabled'.
     if (!row) return { outcome: 'skipped', reason: 'no-run-row' };
     enabled = row.verifyEnabled === 1 || row.verifyEnabled === true;
     stampedType = isVerificationType(row.verifyType) ? row.verifyType : null;
-    stampedChain = parseStampedChain(row.verifyChain);
     projectId = typeof row.projectId === 'number' ? row.projectId : Number(row.projectId);
   } catch (err) {
     logger?.warn('[enqueueTaskVerification] verify-stamp read failed (fail-open skip)', {
@@ -1022,9 +1003,6 @@ export async function enqueueTaskVerification(
   }
 
   const type: VerificationType = stampedType;
-  // Effective chain = FALLBACK_CHAINS[type] ∩ the stamped (host-available) chain,
-  // in FALLBACK_CHAINS order. An empty intersection still enqueues (scheduler SKIP).
-  const chain = FALLBACK_CHAINS[type].filter((backend) => stampedChain.includes(backend));
 
   // (3) FORCE lane identity: laneTaskRef is authoritative for gate attribution, so
   // it overrides task.taskRef AND drives the derived legacy input — both persisted
@@ -1284,7 +1262,7 @@ export async function enqueueTaskVerification(
       projectId,
       type,
       input,
-      chain,
+      chain: [],
       task,
       snapshotSha,
       enqueueKey,

@@ -16,10 +16,7 @@ import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   VerificationScheduler,
 } from '../../verify/verificationScheduler';
-import {
-  SHIPPED_VERIFY_BACKENDS,
-  resolveVisualVerification,
-} from '../../visualVerificationResolver';
+import { resolveVisualVerification } from '../../visualVerificationResolver';
 import { loadVerifyConfig } from '../../verifyConfigLoader';
 import {
   laneEnqueueKeyFor,
@@ -37,7 +34,6 @@ import {
   isVerifyRunbookModality,
 } from '../../../../../shared/types/verifyRunbook';
 import {
-  FALLBACK_CHAINS,
   deriveLegacyInputFromTask,
   isVerificationType,
   parseVerificationTaskV1,
@@ -49,7 +45,6 @@ import type {
   VerificationTaskV1,
   VerificationType,
   VerifyChainEntry,
-  VisualBackendId,
 } from '../../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../../eval/snapshotRunForEval';
 import { SprintLaneStore } from '../../sprintLaneStore';
@@ -366,17 +361,15 @@ export class VerifyToolHandlers {
     // pre-036 DB lacking the columns degrades to a disabled posture (skipped).
     let enabled = false;
     let stampedType: VerificationType | null = null;
-    let stampedChain: VisualBackendId[] = [];
     try {
       const row = this.db
         .prepare(
-          `SELECT verify_enabled AS verifyEnabled, verify_type AS verifyType, verify_chain AS verifyChain
+          `SELECT verify_enabled AS verifyEnabled, verify_type AS verifyType
              FROM workflow_runs WHERE id = ?`,
         )
-        .get(msg.runId) as { verifyEnabled?: unknown; verifyType?: unknown; verifyChain?: unknown } | undefined;
+        .get(msg.runId) as { verifyEnabled?: unknown; verifyType?: unknown } | undefined;
       enabled = row?.verifyEnabled === 1 || row?.verifyEnabled === true;
       stampedType = isVerificationType(row?.verifyType) ? row.verifyType : null;
-      stampedChain = this.parseStampedChain(row?.verifyChain);
     } catch {
       // Pre-migration-036 DB (no verify columns) — keep the disabled default.
       enabled = false;
@@ -391,13 +384,12 @@ export class VerifyToolHandlers {
     // This honors the EXISTING enablement ladder rather than adding a setting:
     // the same `resolveVisualVerification` `createRun` calls, fed the same global
     // rung and the same project rung — just read at call time. The chain it
-    // returns is used VERBATIM (not intersected) further down; that resolved
+    // returns is written VERBATIM onto the request further down; that resolved
     // chain is what the scheduler's request-level dispatch key reads.
     let quickResolvedChain: VerifyChainEntry[] | null = null;
     if (isQuickRun && this.deps.getVisualVerifyConfig !== undefined) {
       const globalConfig = this.deps.getVisualVerifyConfig();
-      // PROJECT RUNG, WORKTREE-FIRST — matching the runtime resolution order in
-      // verifyConfigLoader's resolveDeliverableContext. A quick session editing
+      // PROJECT RUNG, WORKTREE-FIRST. A quick session editing
       // its own `.cyboflow/verify.json` must see that edit take effect without
       // merging first; reading the project checkout instead would make the
       // session's own config change inert, which is precisely the case this
@@ -420,11 +412,6 @@ export class VerifyToolHandlers {
         projectConfigDefaultType: projectVerifyConfig?.defaultType ?? null,
         globalDefaultType: globalConfig.defaultType,
         deliverable: null,
-        availableBackends: SHIPPED_VERIFY_BACKENDS,
-        // MUST be passed, exactly as createRun does (workflowRegistry.ts:1422).
-        // Omitting it defaults to the AGENT engine, which would mint an agent
-        // posture on a host explicitly rolled back to the legacy waterfall.
-        legacyEngine: process.env.CYBOFLOW_VERIFY_LEGACY === '1',
       });
       enabled = resolved.enabled;
       stampedType = resolved.type;
@@ -456,30 +443,13 @@ export class VerifyToolHandlers {
     // re-guard since the field flows in untrusted across the socket.)
     const effectiveType: VerificationType = isVerificationType(msg.typeOverride) ? msg.typeOverride : stampedType;
 
-    // Effective chain = FALLBACK_CHAINS[effectiveType] ∩ the run's stamped chain
-    // (the host-available set the resolver already filtered). The intersection is
-    // why typeOverride can only NARROW — it can never reach a backend the host lacks.
-    // Order follows FALLBACK_CHAINS (easy→hard). An empty intersection still enqueues
-    // (the scheduler treats an empty chain as a SKIP, never a fabricated fail).
-    //
-    // QUICK RUNS write their CALL-TIME-RESOLVED chain VERBATIM instead. This is
-    // what makes the feature reachable at all: `VerificationScheduler.processRow`
-    // decides the engine via `isAgentEngineRequest`, whose first rung is the
-    // request's own `chain_json`. Intersecting here would erase the resolved
-    // `['agent']` selector ('agent' is not a VisualBackendId, so it survives no
-    // intersection), the row would fall to the legacy waterfall, select no
-    // candidate, and terminate `skipped: 'no usable backend'` behind a
-    // healthy-looking `{ requestId }` reply.
-    //
-    // FLOW RUNS ARE UNCHANGED — byte-for-byte. `quickResolvedChain` is null for
-    // every non-quick run, and an agent-stamped flow run's intersection already
-    // evaluates to `[]` today (parseStampedChain narrows to VisualBackendId[],
-    // which drops 'agent'), so its dispatch still resolves off the run stamp
-    // exactly as before.
-    const chain =
-      quickResolvedChain !== null
-        ? [...quickResolvedChain]
-        : FALLBACK_CHAINS[effectiveType].filter((backend) => stampedChain.includes(backend));
+    // The request's own engine chain. QUICK RUNS write their CALL-TIME-RESOLVED
+    // chain VERBATIM: `VerificationScheduler.processRow` decides the engine via
+    // `isAgentEngineRequest`, whose first rung is the request's own `chain_json`,
+    // and a quick run's stamp cannot carry a posture resolved after it was minted.
+    // Flow runs write `[]` — their engine is the immutable run stamp, the second
+    // rung.
+    const chain: VerifyChainEntry[] = quickResolvedChain !== null ? [...quickResolvedChain] : [];
 
     // DUAL-FORMAT CONTRACT (redesign §5.2): when `task` is present it is
     // authoritative for the deliverable. Strictly validate it FIRST — an invalid
@@ -503,7 +473,7 @@ export class VerifyToolHandlers {
     if (task) {
       // taskRef precedence: task.taskRef ?? the wire task_ref arg (§5.2 "written
       // identically into both columns"). deriveLegacyInputFromTask applies exactly
-      // this precedence; the legacy per-field url/htmlPath/baselineKey/viewports
+      // this precedence; the legacy per-field url/htmlPath/viewports
       // wire args are superseded by the task (task is authoritative).
       const wireTaskRef = typeof msg.taskRef === 'string' && msg.taskRef.length > 0 ? msg.taskRef : undefined;
       input = deriveLegacyInputFromTask(task, wireTaskRef);
@@ -525,7 +495,6 @@ export class VerifyToolHandlers {
       input = { intent: msg.intent };
       if (typeof msg.url === 'string') input.url = msg.url;
       if (typeof msg.htmlPath === 'string') input.htmlPath = msg.htmlPath;
-      if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
       // taskRef threads the lane attribution into deliverable_json so the async
       // merge-gate verdict can be driven onto the right lane (multi-lane batches).
       // When the agent OMITS it, best-effort default it from the lane context WHEN
@@ -1430,20 +1399,6 @@ export class VerifyToolHandlers {
       return SprintLaneStore.getInstance().listLanes(batchId);
     } catch {
       return null;
-    }
-  }
-
-  /** Parse the run's stamped verify_chain JSON into a VisualBackendId[]; [] on null/malformed. */
-  private parseStampedChain(v: unknown): VisualBackendId[] {
-    if (typeof v !== 'string' || v.length === 0) return [];
-    try {
-      const parsed: unknown = JSON.parse(v);
-      if (Array.isArray(parsed)) {
-        return parsed.filter((x): x is VisualBackendId => typeof x === 'string');
-      }
-      return [];
-    } catch {
-      return [];
     }
   }
 

@@ -7,8 +7,8 @@
  * columns, keys idempotency on runId:ref:attempt, and returns enqueued/skipped.
  *
  * The DB is a minimal in-memory pair of tables (workflow_runs + the migration-078
- * verification_requests) — the only rows this seam reads/writes; the scheduler's
- * backends/judge are empty/fake (nothing is drained during the test).
+ * verification_requests) — the only rows this seam reads/writes; nothing is
+ * drained during the test.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import Database from 'better-sqlite3';
@@ -30,21 +30,9 @@ import { VerifyRunbookStore } from '../runbookStore';
 import { checkRunbookPin } from '../verificationAgentRunner';
 import { parseVerificationTaskV1, taskJsonHasInferredApp, VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import type { MobileAppSpec, VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
+import type { MobileAppSpec, VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import type { ProvenRunbookRevision } from '../verificationScheduler';
-
-const fakeJudge: VlmJudge = {
-  judge: async () => ({
-    status: 'pass',
-    confidence: 1,
-    issues: [],
-    feedback: '',
-    judgedFileNames: [],
-    baselineUsed: false,
-    model: 'fake',
-  }),
-};
 
 /**
  * Built by OVERRIDING the shipped defaults rather than by re-listing the shape:
@@ -177,8 +165,6 @@ function initScheduler(
 ): void {
   VerificationScheduler.initialize({
     db: dbAdapter(db),
-    backends: {},
-    judge: fakeJudge,
     artifactsDirResolver: () => '/tmp/a',
     config: baseConfig,
     ...(runbookStore ? { runbookStore } : {}),
@@ -339,8 +325,9 @@ describe('enqueueTaskVerification', () => {
     expect(row.enqueue_key).toBe('run-1:TASK-007:2');
     // A real git worktree → a real 40-hex snapshot sha.
     expect(row.snapshot_sha).toMatch(/^[0-9a-f]{40}$/);
-    // Chain = FALLBACK_CHAINS[type] ∩ stamped chain, in FALLBACK order.
-    expect(JSON.parse(row.chain_json as string)).toEqual(['capturePage', 'peekaboo']);
+    // A flow run's request carries no engine chain of its own — dispatch keys on
+    // the run stamp.
+    expect(JSON.parse(row.chain_json as string)).toEqual([]);
     expect(row.verify_type).toBe('static-render-snapshot');
   });
 

@@ -82,7 +82,7 @@ import type {
 } from '../../../shared/types/visualVerification';
 import { resolveSubstrate } from './substrateResolver';
 import { resolveExecutionModel } from './executionModelResolver';
-import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from './visualVerificationResolver';
+import { resolveVisualVerification } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
 import {
@@ -2047,16 +2047,13 @@ export class WorkflowRegistry {
     // Resolve the layered visual-verification posture (migration 055 — the
     // third immutable run-stamp sibling to substrate / execution_model). Decides
     // whether this run participates in visual verification, which TYPE of check,
-    // and the live easy→hard backend chain. The global enablement + default-type
+    // and the engine chain (`['agent']`). The global enablement + default-type
     // rungs come from the injected config's getVisualVerifyConfig(); the per-run
     // launch override (opts.requestedVerify*) and the project-config rungs
     // (opts.projectVerifyConfig — the parsed .cyboflow/verify.json the async
     // RunLauncher loaded ONCE and threaded in, since createRun is sync) sit above
-    // the global rung, and the deliverable feeds the rung-C inference. The
-    // host-available backends are the build's SHIPPED_VERIFY_BACKENDS (the
-    // backends registered in the scheduler at boot — capturePage + playwright so
-    // far) so the stamped chain can list every shipped rung; the per-backend
-    // runtime healthCheck at drain is the second gate. When no config is injected
+    // the global rung, and the deliverable feeds the rung-C inference. When no
+    // config is injected
     // (test fixtures) every rung is unset and the run floors to the DISABLED posture.
     // Like substrate, this is stamped ONCE at INSERT and is immutable for the run
     // lifetime — there is no UPDATE path (a long run can't change posture
@@ -2080,12 +2077,6 @@ export class WorkflowRegistry {
       projectConfigDefaultType: projectVerifyConfig?.defaultType ?? null,
       globalDefaultType: visualVerifyConfig?.defaultType ?? null,
       deliverable: opts?.verifyDeliverable ?? null,
-      availableBackends: SHIPPED_VERIFY_BACKENDS,
-      // Engine selector (redesign §5.8): the verification-AGENT engine is the
-      // default; `CYBOFLOW_VERIFY_LEGACY=1` opts a NEW run back onto the legacy
-      // capture/judge chain. Read once here at the (immutable) stamp — a pre-existing
-      // run keeps whatever chain it was stamped with.
-      legacyEngine: process.env.CYBOFLOW_VERIFY_LEGACY === '1',
     });
     const verifyEnabled = verify.enabled ? 1 : 0;
     const verifyType = verify.type;

@@ -1,12 +1,11 @@
 /**
  * Unit tests for visualVerificationResolver — the single resolution point for a
- * run's layered visual-verification posture (enabled? + type + live chain).
+ * run's layered visual-verification posture (enabled? + type + engine chain).
  *
  * Mirrors the substrateResolver / executionModelResolver test discipline: the
  * enablement override ladder (per-run > project > global > false floor), the
- * type override ladder with fail-soft fall-through to the floor, the chain
- * intersection against the host-available backends (MVP = only 'capturePage'),
- * and the disabled short-circuit. No real env / config is read — every input is
+ * type override ladder with fail-soft fall-through to the floor, the `['agent']`
+ * engine stamp, and the disabled short-circuit. No real env / config is read — every input is
  * passed explicitly.
  */
 import { describe, it, expect } from 'vitest';
@@ -14,9 +13,7 @@ import {
   resolveVisualVerification,
   inferTypeFromDeliverable,
   DEFAULT_VERIFICATION_TYPE,
-  MVP_AVAILABLE_BACKENDS,
 } from '../visualVerificationResolver';
-import { FALLBACK_CHAINS } from '../../../../shared/types/visualVerification';
 import type { VerificationRequestInput } from '../../../../shared/types/visualVerification';
 
 describe('resolveVisualVerification — disabled posture (zero-behavior-change floor)', () => {
@@ -146,8 +143,6 @@ describe('resolveVisualVerification — type override ladder (only when enabled)
       requestedType: 'responsive-multi-viewport',
       projectConfigDefaultType: 'interactive-web-behavior',
       globalDefaultType: 'native-desktop',
-      // Widen availability so the chain is non-empty and the type is exercised.
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('responsive-multi-viewport');
   });
@@ -157,7 +152,6 @@ describe('resolveVisualVerification — type override ladder (only when enabled)
       globalDefaultEnabled: true,
       projectConfigDefaultType: 'interactive-web-behavior',
       globalDefaultType: 'native-desktop',
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('interactive-web-behavior');
   });
@@ -243,7 +237,6 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
     const r = resolveVisualVerification({
       globalDefaultEnabled: true,
       deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('interactive-web-behavior');
   });
@@ -261,7 +254,6 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
       globalDefaultEnabled: true,
       deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
       globalDefaultType: 'responsive-multi-viewport',
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('interactive-web-behavior');
   });
@@ -271,7 +263,6 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
       globalDefaultEnabled: true,
       requestedType: 'responsive-multi-viewport',
       deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('responsive-multi-viewport');
   });
@@ -281,7 +272,6 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
       globalDefaultEnabled: true,
       projectConfigDefaultType: 'responsive-multi-viewport',
       deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.type).toBe('responsive-multi-viewport');
   });
@@ -305,14 +295,11 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
 });
 
 describe('resolveVisualVerification — default AGENT engine stamp (redesign §5.8)', () => {
-  it("stamps the single-member ['agent'] chain for an enabled run by default", () => {
-    // The production default: no legacyEngine flag => the verification-AGENT engine.
-    // The chain is the engine selector, NOT a host-capability intersection —
-    // availableBackends is inert here.
+  it("stamps the single-member ['agent'] chain for an enabled run", () => {
+    // The chain is the engine selector, NOT a host-capability intersection.
     const r = resolveVisualVerification({
       globalDefaultEnabled: true,
       globalDefaultType: 'static-render-snapshot',
-      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
     });
     expect(r.enabled).toBe(true);
     expect(r.type).toBe('static-render-snapshot');
@@ -320,16 +307,12 @@ describe('resolveVisualVerification — default AGENT engine stamp (redesign §5
   });
 
   it("stamps ['agent'] regardless of type (interactive/native/mobile never collapse to [])", () => {
-    // In the legacy engine an interactive/native type could intersect to an empty
-    // chain; the agent engine builds/serves/drives itself, so the stamp is always
+    // The agent engine builds/serves/drives itself, so the stamp is always
     // ['agent'] and the type still rides along.
     for (const type of [
       'interactive-web-behavior',
       'native-desktop',
       'responsive-multi-viewport',
-      // The mobile tier the title has always claimed to cover: under the legacy
-      // engine `mobile-flow` intersects to ['maestro'], which the MVP does not
-      // have, so it was exactly the type most at risk of collapsing to [].
       'mobile-flow',
     ] as const) {
       const r = resolveVisualVerification({ globalDefaultEnabled: true, globalDefaultType: type });
@@ -338,67 +321,11 @@ describe('resolveVisualVerification — default AGENT engine stamp (redesign §5
     }
   });
 
-  it('a disabled run stamps no chain even under the agent engine', () => {
+  it('a disabled run stamps no chain', () => {
     expect(resolveVisualVerification({ globalDefaultEnabled: false })).toEqual({
       enabled: false,
       type: null,
       chain: [],
     });
-  });
-});
-
-describe('resolveVisualVerification — legacy chain intersection (CYBOFLOW_VERIFY_LEGACY)', () => {
-  it("defaults to MVP availability (only 'capturePage') and collapses a render chain to it", () => {
-    expect(MVP_AVAILABLE_BACKENDS).toEqual(['capturePage']);
-    const r = resolveVisualVerification({
-      globalDefaultEnabled: true,
-      globalDefaultType: 'static-render-snapshot',
-      legacyEngine: true,
-    });
-    expect(r.chain).toEqual(['capturePage']);
-  });
-
-  it('yields an EMPTY chain for a type whose backends are all unavailable in the MVP', () => {
-    // interactive-web-behavior chain is ['playwright','peekaboo'] — neither is in
-    // the MVP available set, so the intersection is empty (scheduler will SKIP).
-    const r = resolveVisualVerification({
-      globalDefaultEnabled: true,
-      globalDefaultType: 'interactive-web-behavior',
-      legacyEngine: true,
-    });
-    expect(r.enabled).toBe(true);
-    expect(r.type).toBe('interactive-web-behavior');
-    expect(r.chain).toEqual([]);
-  });
-
-  it('native-desktop collapses to [] in the MVP (only peekaboo can do it)', () => {
-    const r = resolveVisualVerification({
-      globalDefaultEnabled: true,
-      globalDefaultType: 'native-desktop',
-      legacyEngine: true,
-    });
-    expect(r.chain).toEqual([]);
-  });
-
-  it('preserves the easy→hard FALLBACK_CHAINS order through the intersection', () => {
-    const r = resolveVisualVerification({
-      globalDefaultEnabled: true,
-      globalDefaultType: 'static-render-snapshot',
-      availableBackends: ['peekaboo', 'capturePage', 'playwright'], // deliberately out of order
-      legacyEngine: true,
-    });
-    // Order must follow FALLBACK_CHAINS, NOT the availableBackends input order.
-    expect(r.chain).toEqual(FALLBACK_CHAINS['static-render-snapshot']);
-    expect(r.chain).toEqual(['capturePage', 'playwright', 'peekaboo']);
-  });
-
-  it('intersects to exactly the available subset (drops absent backends)', () => {
-    const r = resolveVisualVerification({
-      globalDefaultEnabled: true,
-      globalDefaultType: 'static-render-snapshot',
-      availableBackends: ['capturePage', 'peekaboo'], // playwright absent
-      legacyEngine: true,
-    });
-    expect(r.chain).toEqual(['capturePage', 'peekaboo']);
   });
 });

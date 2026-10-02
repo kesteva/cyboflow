@@ -2,10 +2,9 @@
  * verifyComposition — the visual-verification composition root, extracted
  * from index.ts's initializeServices() (GitHub issue #19, the god-file split,
  * step 4). It assembles the VerificationScheduler singleton and everything it
- * is injected with: the capture backends, the capped VLM judge, the dev/static
- * server managers + their context resolvers, the verification-agent runner,
- * the machine-local runbook store + status resolver, the host probes the
- * health panel reads, and the lane runbook bootstrap. The body is index.ts's
+ * is injected with: the verification-agent runner, the native-screen grant
+ * probe, the mobile tier, the machine-local runbook store + status resolver,
+ * the host probes the health panel reads, and the lane runbook bootstrap. The body is index.ts's
  * verbatim, apart from: the four outputs index.ts still consumes are RETURNED
  * instead of assigned to module-scope holders, `rawDb` became
  * `databaseService.getDb()` (the same connection), and the compiled driver-CLI
@@ -60,8 +59,6 @@ import {
 } from './services/visualVerify/verifyDriftProbes';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
-import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
-import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PlaywrightInstaller } from './services/visualVerify/playwrightInstaller';
 import {
   makeAccessibilityRequester,
@@ -70,25 +67,17 @@ import {
   makeScreenRecordingSettingsOpener,
 } from './services/visualVerify/hostProbeAdapters';
 import { composeMobileVerification } from './services/visualVerify/mobileComposition';
-import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { resolvePeekabooExecutable } from './services/visualVerify/peekabooExecutablePath';
-import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { PeekabooGrantProbe } from './services/visualVerify/peekabooGrantProbe';
 import { DEFAULT_VERIFY_CLAUDE_MODEL } from './orchestrator/verify/verifyDefaultModel';
 import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
 import { isAgentProvider } from '../../shared/types/agentRuntime';
-import { DevServerManager } from './services/visualVerify/devServerManager';
-import { StaticServerManager } from './services/visualVerify/staticServerManager';
-import { comparePngFiles } from './services/visualVerify/pixelDiff';
-import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
-import type { DeliverableVerifyConfig, VerdictV1, VlmJudge } from '../../shared/types/visualVerification';
 import * as fs from 'fs';
 import { runGitAsync } from './utils/runGit';
 import type { ConfigManager } from './services/configManager';
 import type { DatabaseService } from './database/database';
-import type { FsBaselineStore } from './services/visualVerify/baselineStore';
 import type { LoggerLike, DatabaseLike } from './orchestrator/types';
 
 export interface VerifyCompositionDeps {
@@ -96,8 +85,6 @@ export interface VerifyCompositionDeps {
   cyboflowLogger: LoggerLike;
   cyboflowDb: DatabaseLike;
   databaseService: Pick<DatabaseService, 'getProject' | 'getDb'>;
-  /** The SAME store the ArtifactRouter's acceptBaseline hook writes through. */
-  fsBaselineStore: FsBaselineStore;
   /** resolveClaudeExecutablePath()'s answer — undefined when no bundled CLI resolved. */
   claudeExecutablePath: string | undefined;
   /**
@@ -126,30 +113,22 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     cyboflowLogger,
     cyboflowDb,
     databaseService,
-    fsBaselineStore,
     claudeExecutablePath,
     driverCliPath: verifyDriverCliPath,
   } = deps;
 
   // VerificationScheduler — the main-process singleton that owns the DB-backed
   // verification_requests queue, the ResourceLeasePool (over the shared `mutex`),
-  // and the waterfall drain loop (migration 055 / layered visual verification).
-  // Lane agents fire-and-continue via the mcp-request-verification handler (P6),
-  // which reaches this singleton through getInstance() to enqueue + nudge.
-  //
-  // P7 wires the Rung-0 backend (CapturePageBackend — offscreen BrowserWindow →
-  // capturePage → PNG) and the real Rung-4 VlmJudge (a stateless Claude vision
-  // call). Rungs 1-3 (playwright/peekaboo/maestro) land in later layers and are
-  // simply absent from the registry until then. P8a wires the ADVISORY verdict
-  // delivery: createVerdictDelivery enriches the SAME 'screenshots' artifact with
-  // the verdict block (via ArtifactRouter) on every judged outcome and raises ONE
-  // non-blocking 'visual-regression' finding (via ReviewItemRouter) only on FAIL /
-  // low_confidence (PASS raises none); the merge-gate loopback is a later layer.
-  // The artifactsDir resolver matches the screenshots auto-mint subtree
-  // (CYBOFLOW_DIR/artifacts/runs/<runId>). The resolved visualVerify config
-  // supplies the confidence threshold + port/sim pools. Standalone-typecheck
-  // invariant: the scheduler imports no electron/service code — the verdict
-  // delivery hook (which calls the electron-free routers) is INJECTED here.
+  // and the drain loop that deploys the verification agent per request
+  // (migration 055 / the verification-agent engine). Lane agents fire-and-continue
+  // via the mcp-request-verification handler, which reaches this singleton through
+  // getInstance() to enqueue + nudge. createVerdictDelivery enriches the run's
+  // 'screenshots' artifact (via ArtifactRouter) on every outcome and raises ONE
+  // non-blocking finding (via ReviewItemRouter) on FAIL / low_confidence. The
+  // artifactsDir resolver matches the screenshots auto-mint subtree
+  // (CYBOFLOW_DIR/artifacts/runs/<runId>). Standalone-typecheck invariant: the
+  // scheduler imports no electron/service code — the verdict delivery hook (which
+  // calls the electron-free routers) is INJECTED here.
   const visualVerifyConfig = configManager.getVisualVerifyConfig();
   // ------------------------------------------------------------------------
   // The §8 MOBILE tier's host objects — built ONCE, darwin-gated, here.
@@ -179,188 +158,14 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // durable `approve --always` — and then only as an explicit opt-in.
     signedBuild: app.isPackaged,
   });
-  const realVlmJudge: VlmJudge = new VlmJudgeImpl({
-    confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
-    logger: cyboflowLogger,
-  });
-  // Per-run judge-call cap (bounds 2026 Agent-SDK vision billing). LEGACY-ENGINE
-  // ONLY (redesign §5.8): the scheduler calls the judge per request only on the
-  // capture-backend + VLM waterfall (a pre-upgrade run's legacy `verify_chain`
-  // stamp, or CYBOFLOW_VERIFY_LEGACY); this decorator counts calls per run and,
-  // beyond maxPerRunJudgeCalls, returns a low_confidence verdict (a human
-  // review_item) instead of spending another vision call — never a fabricated
-  // pass/fail. The default v1 engine's verification-AGENT deployment never
-  // calls VlmJudge and is capped separately by the PERSISTED per-project
-  // verification budget shared with this engine (visual_verify_budget_calls /
-  // judge_calls_used, below).
-  const judgeCallsByRun = new Map<string, number>();
-  const cappedVlmJudge: VlmJudge = {
-    judge: async (judgeArgs, signal) => {
-      // The scheduler's judge args carry no runId; the artifactsDir is
-      // ...artifacts/runs/<runId>, so derive the run scope from its last segment.
-      const runId = path.basename(judgeArgs.artifactsDir);
-      const used = judgeCallsByRun.get(runId) ?? 0;
-      if (used >= visualVerifyConfig.maxPerRunJudgeCalls) {
-        const exhausted: VerdictV1 = {
-          status: 'low_confidence',
-          confidence: 0,
-          issues: [],
-          feedback: `per-run visual-judge budget exhausted (${visualVerifyConfig.maxPerRunJudgeCalls} calls); needs human visual review`,
-          judgedFileNames: judgeArgs.fileNames,
-          baselineUsed: !!judgeArgs.baselinePath,
-          model: 'capped',
-        };
-        return exhausted;
-      }
-      judgeCallsByRun.set(runId, used + 1);
-      return realVlmJudge.judge(judgeArgs, signal);
-    },
-  };
-  // S2 — the scheduler-owned dev-server runner. DevServerManager (a service that
-  // imports node:child_process) is the concrete spawner; the scheduler knows only
-  // the narrow DevServerProvider interface. The context resolver closure does the
-  // DB path lookup (project + run worktree) and delegates the fs work to the pure
-  // resolveDeliverableContext helper (worktree-first verify.json load + honest
-  // deliverable match) so the scheduler stays fs/electron/service-free (standalone-
-  // typecheck invariant) — mirrors the ArtifactRouter artifactCommitDir +
-  // artifactsDir resolver closures above. It returns the checkout cwd the winning
-  // verify.json was loaded from (the worktree when the branch owns the recipe, the
-  // project root on fallback) + the matching deliverable recipe whose `start` the
-  // runner runs on the leased port.
-  const devServerManager = new DevServerManager({ logger: cyboflowLogger });
-  const devServerContextResolver = async (args: {
-    runId: string;
-    projectId: number;
-    input: { url?: string; htmlPath?: string };
-  }): Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null> => {
-    try {
-      const project = databaseService.getProject(args.projectId);
-      if (!project?.path) return null;
-      // WORKTREE-FIRST (locked decision #1): the build/start commands run in the
-      // run's WORKTREE, so a deliverable recipe added/edited by the very branch under
-      // verification must be read from the worktree checkout — the project ROOT
-      // checkout is only the fallback (quick runs / sessions without a worktree /
-      // pre-branch projects). resolveDeliverableContext loads worktree verify.json
-      // first, falls back to the project root, returns the matching cwd, and matches
-      // the deliverable HONESTLY (no `?? startable[0]` binding — a non-match returns
-      // null so the request captures its own url/htmlPath unchanged).
-      const row = cyboflowDb
-        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
-        .get(args.runId) as { worktree_path: string | null } | undefined;
-      return await resolveDeliverableContext(
-        {
-          worktreePath: row?.worktree_path ?? null,
-          projectPath: project.path,
-          input: args.input,
-        },
-        cyboflowLogger,
-      );
-    } catch (err) {
-      cyboflowLogger?.warn('[VerificationScheduler] dev-server context resolve failed', {
-        runId: args.runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  };
-  // S9 — the scheduler-owned STATIC file server (the file:// ES-module-block fix).
-  // A request that targets a BUILT html file (no running url, no verify.json `start`)
-  // was previously loaded over `file://` by the rung-0 CapturePageBackend; Chromium
-  // treats `file://` as an opaque origin and CORS-blocks every `<script
-  // type="module">`, so bundler output silently rendered a blank styled shell — no
-  // error, no signal, just an empty page a human had to notice by eye. StaticServerManager
-  // (a service that imports node:http/node:crypto) is the concrete spawner; the
-  // scheduler knows only the narrow StaticServerProvider interface (mirrors the S2
-  // DevServerProvider split immediately above). The token-prefixed URL space IS the
-  // authorization boundary (see StaticServerManager's header) — binding a loopback
-  // port alone grants zero access control, so every request must present the
-  // unguessable per-spawn token as its first path segment. There is deliberately NO
-  // lease (unlike the S2 dev-server pool): the OS assigns an ephemeral port
-  // (127.0.0.1:0), so static captures stay fully parallel — the `verify:port` pool
-  // exists solely to interpolate `${PORT}` into a user's own `start` command, which a
-  // static file server has no need of.
-  //
-  // staticHtmlContextResolver mirrors devServerContextResolver's shape exactly: it
-  // does the DB path lookup (project path + the run's worktree_path, same SELECT)
-  // and delegates ALL fs work to the pure resolveStaticHtmlContext helper (worktree-
-  // first htmlPath resolution + the explicit-staticRoot containment check), so the
-  // scheduler stays fs/electron/service-free (standalone-typecheck invariant). A
-  // thrown error (or a null resolution — html not found in either checkout) fail-
-  // softs to null; the scheduler then captures the request's raw htmlPath unchanged
-  // (pre-S9 behavior, never a fabricated request FAIL).
-  const staticServerManager = new StaticServerManager({ logger: cyboflowLogger });
-  const staticHtmlContextResolver = async (args: {
-    runId: string;
-    projectId: number;
-    htmlPath: string;
-    staticRoot?: string;
-  }): Promise<{ absoluteHtmlPath: string; staticRoot: string } | null> => {
-    try {
-      const project = databaseService.getProject(args.projectId);
-      if (!project?.path) return null;
-      const row = cyboflowDb
-        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
-        .get(args.runId) as { worktree_path: string | null } | undefined;
-      return await resolveStaticHtmlContext(
-        {
-          worktreePath: row?.worktree_path ?? null,
-          projectPath: project.path,
-          htmlPath: args.htmlPath,
-          staticRoot: args.staticRoot,
-        },
-        cyboflowLogger,
-      );
-    } catch (err) {
-      cyboflowLogger?.warn('[VerificationScheduler] static html context resolve failed', {
-        runId: args.runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  };
-  // S3 — Rung-1 PlaywrightBackend (interactive-web + multi-viewport + the
-  // deterministic-first a11y/assertion gate). It drives a REAL headless browser via
-  // the `playwright` LIBRARY in a fresh BrowserContext per capture (NOT the MCP
-  // server — its single shared profile cannot serve N concurrent lanes). chromium is
-  // LAZY-installed on first use (PlaywrightInstaller; idempotent + memoized), NOT
-  // bundled in the app package. It is registered unconditionally — and that is SAFE
-  // even though `playwright` is a ROOT devDependency electron-builder prunes when
-  // packaging: the backend + installer load the library LAZILY (`await
-  // import('playwright')`, never an eager top-level require), so an absent MODULE
-  // soft-fails (healthCheck/ensureChromium → false, capture → ok:false) exactly like
-  // an absent chromium BINARY — never a MODULE_NOT_FOUND boot crash. When chromium is
-  // unavailable + the install fails, healthCheck() returns false and capture()
-  // soft-fails (ok:false) so the request falls forward / is SKIPPED per
-  // never-silently-pass — a missing browser binary must never wedge a sprint. The
-  // backend sets CaptureResult.deterministicVerdict on an unambiguous nav/interaction
-  // FAIL or an all-pass explicit-assertions PASS; the scheduler then SKIPS the paid
-  // VLM (decision #3). It takes a verify:port lease ONLY when the deliverable
-  // declares a dev-server `start` (the scheduler then owns + leases the dev server,
-  // S2); a pre-existing static url needs no lease.
-  const playwrightBackend = new PlaywrightBackend({ logger: cyboflowLogger });
-  // S4 — Rung-2 PeekabooBackend (native-desktop). It is the ONLY backend that can
-  // see cyboflow's OWN renderer: it SCREENSHOTS the already-running app via the
-  // `peekaboo` CLI (DefaultPeekabooClient shells out behind the injected
-  // PeekabooClient seam) instead of bootstrapping a renderer that needs the
-  // preload-injected electronTRPC (capturePage / playwright both fail identically
-  // on cyboflow's own window). It is registered unconditionally; the runtime
-  // healthCheck() is the gate — it probes the `peekaboo` binary on PATH AND the two
-  // required macOS TCC grants (Screen Recording + Accessibility) on the host
-  // binary, returning false (⇒ resolver/scheduler drops peekaboo ⇒ SKIPPED) when
-  // the binary is absent or a grant is declined. A missing TCC grant must NEVER
-  // wedge a sprint (the recurring SPRINT-031..039 gotcha) — every error path
-  // soft-fails (capture ⇒ ok:false fall-forward), never throws/hangs. requiredLease
-  // ALWAYS returns the count-1 verify:screen lease (one display/focus/input), so
-  // the scheduler (Peekaboo's sole client) serializes all native-desktop captures
-  // app-wide through the shared mutex. dev builds run under the 'Electron' app
-  // owner; the packaged app owner is 'Cyboflow' (the backend's default appTarget).
-  // The BUNDLED peekaboo, not whatever is on PATH. macOS TCC grants attach to
+  // The `peekaboo` binary the native-screen modality probes and drives — the
+  // BUNDLED peekaboo, not whatever is on PATH. macOS TCC grants attach to
   // a binary, and an npx-resolved one sits under a content-hashed cache path
   // that moves on every version bump — silently revoking both grants and
   // reporting them as declined. See peekabooExecutablePath.ts.
   //
-  // ONE path, resolved ONCE, handed to BOTH sides. The capability gate (this
-  // backend, via nativeCaptureProbe / unsupportedModalityDetail below) and the
+  // ONE path, resolved ONCE, handed to BOTH sides. The capability gate (the
+  // grant probe, via nativeCaptureProbe / unsupportedModalityDetail below) and the
   // deployed driver (VerificationAgentRunner's `peekabooBin`, exported as
   // VERIFY_PEEKABOO_BIN) must measure the SAME binary. They agreed by accident
   // while both defaulted to the bare PATH name; pointing only the gate at the
@@ -372,63 +177,19 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     isPackaged: app.isPackaged,
     ...(process.resourcesPath ? { resourcesPath: process.resourcesPath } : {}),
   });
-  const peekabooBackend = new PeekabooBackend({
-    logger: cyboflowLogger,
-    executablePath: verifyPeekabooPath,
-  });
-  // The native-screen grant probe — ONE instance shared by the scheduler's
-  // native-screen gate, the runner's preflight and the §6 health panel, so the
-  // three can never disagree about this host's screen capability.
+  // The native-screen grant probe (peekabooGrantProbe.ts): the binary runs AND
+  // both macOS TCC grants (Screen Recording + Accessibility) are held. ONE
+  // instance shared by the scheduler's native-screen gate, the runner's preflight
+  // and the §6 health panel, so the three can never disagree about this host. A
+  // missing grant must NEVER wedge a sprint: the probe never throws, and the gate
+  // skips (never fails) when it reports false.
   const peekabooGrantProbe = new PeekabooGrantProbe({
     logger: cyboflowLogger,
     executablePath: verifyPeekabooPath,
   });
-  // S5 — the golden-baseline SSIM pre-diff resolver. When a request carries a
-  // baselineKey, this closure resolves the accepted baseline PNG per captured
-  // viewport (FsBaselineStore) and compares it (comparePngFiles → nativeImage decode,
-  // zero-dep pixel/SSIM). It returns the MIN score across viewports + the first
-  // resolved baseline path; the scheduler owns the match gate (>= threshold ⇒ cheap
-  // PASS, no VLM). It does ALL fs + image-decode work so the scheduler stays
-  // fs/electron/service-free (standalone-typecheck invariant). null ⇒ no baselineKey
-  // resolved / no accepted baseline ⇒ intent-only judging (pre-S5 behavior).
-  const baselinePreDiff = async (args: {
-    projectId: number;
-    runId: string;
-    input: { baselineKey?: string };
-    artifactsDir: string;
-    fileNames: string[];
-  }): Promise<{ baselinePath?: string; ssimScore: number; match: boolean } | null> => {
-    const key = args.input.baselineKey;
-    if (!key || key.trim().length === 0) return null;
-    const project = databaseService.getProject(args.projectId);
-    if (!project?.path) return null;
-    const projectRoot = project.path;
-    let minScore = 1;
-    let firstBaselinePath: string | undefined;
-    let compared = 0;
-    for (const fileName of args.fileNames) {
-      const stem = path.basename(fileName).replace(/\.png$/i, '');
-      const baselinePath = await fsBaselineStore.read(projectRoot, key, stem);
-      if (!baselinePath) continue; // no accepted baseline for this viewport — skip it
-      if (!firstBaselinePath) firstBaselinePath = baselinePath;
-      const capturedPath = path.join(args.artifactsDir, path.basename(fileName));
-      const score = comparePngFiles(capturedPath, baselinePath);
-      if (score < minScore) minScore = score;
-      compared += 1;
-    }
-    // No captured viewport had an accepted baseline — nothing to compare.
-    if (compared === 0) return null;
-    return {
-      ...(firstBaselinePath ? { baselinePath: firstBaselinePath } : {}),
-      ssimScore: minScore,
-      // The scheduler re-derives the authoritative match against its own threshold;
-      // this is a hint only.
-      match: false,
-    };
-  };
   // Verification-AGENT engine (redesign §5.4). The runner deploys the workflow-
-  // defined 'visual-verify' agent per request; the scheduler routes a run stamped
-  // verify_chain=['agent'] to it (default engine) instead of the capture backends.
+  // defined 'visual-verify' agent per request; the scheduler routes every request
+  // of a run stamped verify_chain=['agent'] to it.
   // The SDK boundary, the Claude-namespace agent/model resolvers, the node +
   // compiled-driver paths, and a real port-free probe are wired HERE so the runner
   // itself stays SDK/electron-free. (The driver-CLI path itself is INJECTED — see
@@ -837,43 +598,23 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
 
   VerificationScheduler.initialize({
     db: cyboflowDb,
-    backends: {
-      capturePage: new CapturePageBackend(),
-      playwright: playwrightBackend,
-      peekaboo: peekabooBackend,
-    },
-    judge: cappedVlmJudge,
     artifactsDirResolver: verifyArtifactsDirResolver,
     logger: cyboflowLogger,
     config: visualVerifyConfig,
     // Re-read per call, for the settings a user expects to take effect without
     // relaunching the app — see `liveConfig` on the scheduler's deps.
     liveConfig: () => configManager.getVisualVerifyConfig(),
-    // P8a — advisory verdict delivery through the existing router chokepoints
-    // (artifact enrich on every judged outcome + a FAIL/low-confidence finding).
+    // Verdict delivery through the existing router chokepoints (artifact enrich on
+    // every judged outcome + a FAIL/low-confidence finding).
     onVerdict: createVerdictDelivery({
       db: cyboflowDb,
       logger: cyboflowLogger,
       artifactsDirResolver: verifyArtifactsDirResolver,
     }),
-    // S2 — scheduler-owned dev server per verify.json build/start/readyWhen/${PORT}.
-    devServerProvider: devServerManager,
-    devServerContextResolver,
-    // S9 — scheduler-owned static file server for a built htmlPath (file:// CORS fix).
-    staticServerProvider: staticServerManager,
-    staticHtmlContextResolver,
-    // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM (§5.10: the
-    // baseline feature itself is retired; this closure now always resolves
-    // null — see baselineStore.ts / pixelDiff.ts). The per-project
-    // VERIFICATION budget + judge_calls_used telemetry (migration 056;
-    // generalized §5.8 to also cover an agent deployment on the default v1
-    // engine, not just a legacy VLM call) is enforced inside the scheduler off
-    // its injected db (isProjectBudgetExhausted); the per-RUN, LEGACY-ONLY
-    // vision-call cap stays the cappedVlmJudge decorator above.
-    baselinePreDiff,
-    // Verification-AGENT engine (redesign §5.4): a run stamped verify_chain=['agent']
-    // routes to this runner instead of the capture backends above; the port probe
-    // decides release-vs-quarantine at agent teardown.
+    // The per-project VERIFICATION budget + judge_calls_used telemetry (migration
+    // 056; one count per agent deployment) is enforced inside the scheduler off its
+    // injected db (isProjectBudgetExhausted). The port probe decides
+    // release-vs-quarantine at agent teardown.
     agentRunner: verificationAgentRunner,
     portFreeProbe: verifyPortFreeProbe,
     // Phase 0 honest failures (docs/proposals/verification-setup-flow.md §3):

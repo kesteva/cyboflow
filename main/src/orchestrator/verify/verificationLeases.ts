@@ -1,6 +1,6 @@
 /**
  * The scheduler's scarce-resource vocabulary: lease NAMES (screen, agent slots,
- * ports, simulators, the per-batch worktree-sync mutex), the ResourceLeasePool
+ * ports, the per-batch worktree-sync mutex), the ResourceLeasePool
  * that emulates N-slot pools over the shared count-1 `mutex`, and the
  * abort-bounded `raceWithAbort` the drain wraps every collaborator call in.
  * Extracted verbatim from verificationScheduler.ts (issue #19 step 5); that file
@@ -16,14 +16,14 @@ import type { LoggerLike } from '../types';
 // ---------------------------------------------------------------------------
 // Lease names
 //
-// The ResourceLeasePool emulates N ports / N simulators by holding N DISTINCT
+// The ResourceLeasePool emulates N ports / N agent slots by holding N DISTINCT
 // named count-1 leases over the shared `mutex` and probing for a free one. A
 // single-display capture is one count-1 lease ('verify:screen'). Reusing the SAME
 // `mutex` singleton is why 'verify:screen' composes app-wide with the
 // PanelManager / WorktreeManager holders that already lock named resources there.
 // ---------------------------------------------------------------------------
 
-/** The single-display capture lease (Peekaboo / native-desktop). Count-1. */
+/** The single-display capture lease (the native-screen modality). Count-1. */
 export const VERIFY_SCREEN_LEASE = 'verify:screen';
 
 /**
@@ -67,21 +67,14 @@ export function verifyPortLease(port: number): string {
   return `verify:port:${port}`;
 }
 
-/** Build the per-simulator lease name for one device udid. */
-export function verifySimLease(udid: string): string {
-  return `verify:sim:${udid}`;
-}
-
 /**
  * Build the batch worktree-sync mutex name for one sprint batch (L4 / locked
- * decision #5). Acquired AFTER the dev-server/port lease and BEFORE backend
- * capture for any verification operating on a batched run; a count-1
- * serialization point per batchId over the SAME shared `mutex` as the
- * port/screen leases. It prevents a verification reading a half-committed shared
- * sprint worktree: while this is held, the next capture on the same batchId
- * WAITS (it does not start while another lane's verification is mid-capture).
- * A non-batch run (null/empty batch_id) acquires nothing — single-run captures
- * are byte-identical to before this layer.
+ * decision #5). Acquired AFTER the slot/port leases and BEFORE the deployment
+ * for any verification operating on a batched run; a count-1 serialization point
+ * per batchId over the SAME shared `mutex` as the port/screen leases. It prevents
+ * a verification reading a half-committed shared sprint worktree: while this is
+ * held, the next verification on the same batchId WAITS. A non-batch run
+ * (null/empty batch_id) acquires nothing.
  */
 export function sprintVerifyBatchLease(batchId: string): string {
   return `sprint-verify-${batchId}`;
@@ -98,13 +91,13 @@ export interface LeaseHandle {
   release(): void;
 }
 
-/** A lease that needs NO scarce resource (rung 0 / rung 1 sans dev server / judge). */
+/** A lease that needs NO scarce resource. */
 const NO_LEASE: LeaseHandle = { name: null, release: () => {} };
 
 /**
  * ResourceLeasePool — built OVER the shared count-1 `mutex` (utils/mutex.ts). It
  * does NOT add a second locking primitive; it composes the existing one. A
- * "logical" pool of N ports / N sims is emulated as N distinct count-1 leases:
+ * "logical" pool of N ports / N agent slots is emulated as N distinct count-1 leases:
  * tryAcquireOneOf() probes the candidate names in order and grabs the first whose
  * mutex slot is free (mutex.isLocked === false), returning a LeaseHandle that
  * releases exactly that name.
@@ -216,22 +209,20 @@ export class ResourceLeasePool {
 // Abort-bounded await (R1 #1a — the scheduler must NEVER hang on a collaborator
 // that ignores its abort signal)
 //
-// The per-request deadline `.abort()`s the shared controller, but a backend/judge
-// that does not honour the signal (e.g. an offscreen renderer wedged on a GPU
-// stall) may never settle its capture promise. Awaiting that promise raw would
-// hang runChosen forever → drain()'s Promise.allSettled never resolves → `draining`
-// stays true → every future request across all runs strands 'queued'. raceWithAbort
-// closes that hole at the SCHEDULER: it rejects with a distinguishable AbortRaceError
-// THE MOMENT the signal aborts, even if the underlying promise never settles. The
-// orphaned promise is intentionally DETACHED (its eventual settle/reject is logged,
-// not awaited). The backend-side cleanup (CapturePageBackend destroys its window on
-// abort) is the complementary fix that prevents a leaked wedged window; this race is
-// the hard guarantee that the loop itself can never wedge.
+// The per-request deadline `.abort()`s the shared controller, but a collaborator
+// that does not honour the signal may never settle its promise. Awaiting that
+// promise raw would hang the request's work forever → drain()'s Promise.allSettled
+// never resolves → `draining` stays true → every future request across all runs
+// strands 'queued'. raceWithAbort closes that hole at the SCHEDULER: it rejects
+// with a distinguishable AbortRaceError THE MOMENT the signal aborts, even if the
+// underlying promise never settles. The orphaned promise is intentionally DETACHED
+// (its eventual settle/reject is logged, not awaited) — the hard guarantee that
+// the loop itself can never wedge.
 // ---------------------------------------------------------------------------
 
 /**
  * The distinguishable rejection raceWithAbort throws when the signal aborts before
- * the raced promise settles. runChosen's catch keys timeout-vs-failed off
+ * the raced promise settles. Callers key timeout-vs-failed off
  * `signal.aborted` (not this identity), but the named class keeps the abort path
  * greppable in logs + assertable in tests.
  */

@@ -2,15 +2,16 @@
  * VerificationScheduler — verification-AGENT dispatch (redesign §5.4/§5.7/§5.8).
  *
  * Focus: a run stamped verify_chain=['agent'] routes its requests to the injected
- * VerificationAgentRunner (NOT the capture-backend waterfall), the runner's mapped
- * verdict + report are persisted in the terminal write (report_json), a LEGACY stamp
- * still selects backends, and the agent deadline is honored via the existing
+ * VerificationAgentRunner, the runner's mapped
+ * verdict + report are persisted in the terminal write (report_json), a request
+ * not on the agent engine is terminalized skipped, and the agent deadline is honored via the existing
  * per-request abort machinery.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import type { ExploreStaleProofFinding } from '../runbookBootstrapPreflight';
 import {
+  RETIRED_ENGINE_SKIP_REASON,
   VerificationScheduler,
   ResourceLeasePool,
   DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
@@ -37,12 +38,8 @@ import type {
   VerificationAgentRunResult,
 } from '../verificationAgentRunner';
 import type {
-  CaptureResult,
   ResolvedVisualVerifyConfig,
   VerificationTaskV1,
-  VisualBackend,
-  VisualBackendId,
-  VlmJudge,
   VerdictV1,
 } from '../../../../../shared/types/visualVerification';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
@@ -148,10 +145,7 @@ function seedRun(
 const CONFIG: ResolvedVisualVerifyConfig = {
   enabled: true,
   defaultType: 'static-render-snapshot',
-  vlmConfidenceThreshold: 0.7,
-  maxPerRunJudgeCalls: 4,
   devServerPorts: [29260, 29262],
-  simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
   mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
@@ -182,18 +176,6 @@ const PASS_VERDICT: VerdictV1 = {
   model: 'claude-x',
 };
 
-const fakeJudge: VlmJudge = { judge: async () => PASS_VERDICT };
-
-function fakeBackend(capture: ReturnType<typeof vi.fn>): VisualBackend {
-  return {
-    id: 'capturePage' as VisualBackendId,
-    rung: 0,
-    requiredLease: () => null,
-    healthCheck: async () => true,
-    capture: capture as unknown as VisualBackend['capture'],
-  };
-}
-
 async function flushDrain(): Promise<void> {
   for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
 }
@@ -212,7 +194,7 @@ afterEach(() => {
 });
 
 describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
-  it('routes an agent-stamped run to the runner, persists report_json + a passed verdict, never touches backends', async () => {
+  it('routes an agent-stamped run to the runner, persists report_json + a passed verdict', async () => {
     seedRun(db, 'run-agent', JSON.stringify(['agent']));
 
     const report = {
@@ -234,8 +216,6 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     };
     const run = vi.fn(async (_req: VerificationAgentRequest) => runResult);
     const agentRunner: VerificationAgentRunnerLike = { run };
-
-    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
     const verdicts: Array<{ status: string }> = [];
     const onVerdict: OnVerdict = (args) => {
       verdicts.push({ status: args.status });
@@ -243,8 +223,6 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(captureSpy) },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -277,7 +255,6 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
 
     // The runner was deployed; the backend was NOT.
     expect(run).toHaveBeenCalledTimes(1);
-    expect(captureSpy).not.toHaveBeenCalled();
 
     // The runner received the composed task + snapshot sha + a leased port (serve implies a server).
     const req = run.mock.calls[0][0];
@@ -299,7 +276,7 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     expect(verdicts).toEqual([{ status: 'passed' }]);
   });
 
-  it('leaves the LEGACY-stamped run on the backend path (runner untouched)', async () => {
+  it('terminalizes a LEGACY-stamped run as skipped (retired capture engine), runner untouched', async () => {
     seedRun(db, 'run-legacy', JSON.stringify(['capturePage']));
 
     const run = vi.fn(async (_req: VerificationAgentRequest): Promise<VerificationAgentRunResult> => ({
@@ -307,15 +284,14 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
       fileNames: [],
       deployed: true,
     }));
-    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
+    const verdicts: string[] = [];
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(captureSpy) },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict: (args) => void verdicts.push(args.status),
       agentRunner: { run },
     });
 
@@ -328,18 +304,20 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     });
     await flushDrain();
 
-    expect(captureSpy).toHaveBeenCalledTimes(1);
     expect(run).not.toHaveBeenCalled();
-    const row = db.prepare('SELECT status FROM verification_requests LIMIT 1').get() as { status: string };
-    expect(row.status).toBe('passed');
+    const row = db
+      .prepare('SELECT status, error_message FROM verification_requests LIMIT 1')
+      .get() as { status: string; error_message: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.error_message).toBe(RETIRED_ENGINE_SKIP_REASON);
+    // Settled through delivery, so a lane parked on it is driven off awaiting-verify.
+    expect(verdicts).toEqual(['skipped']);
   });
 
   it("skips (fail-open) an agent-stamped run when no runner is configured", async () => {
     seedRun(db, 'run-agent-2', JSON.stringify(['agent']));
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -367,8 +345,6 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     );
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       // Kill switch ON ⇒ legacy: the tiny injected deadline applies unfloored
       // (an explore row would be floored at exploreDeadlineFloorMs — pinned
@@ -432,8 +408,6 @@ describe('VerificationScheduler — the agent deadline floor (F2)', () => {
     );
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       // F2 is the pinned/legacy floor; the kill switch keeps this unpinned row
       // out of explore, whose own floor is asserted in the §A1 suite below.
@@ -459,146 +433,6 @@ describe('VerificationScheduler — the agent deadline floor (F2)', () => {
   });
 });
 
-describe('VerificationScheduler — legacy kill-switch boot terminalization (§5.8)', () => {
-  /** Insert a row directly at `status`, attributed to `runId`, for boot-recovery tests. */
-  function insertRow(
-    dbX: Database.Database,
-    opts: { id: string; runId: string; status: 'queued' | 'leased' | 'running'; taskRef?: string },
-  ): void {
-    dbX
-      .prepare(
-        `INSERT INTO verification_requests
-           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
-         VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, '[]', 0, CURRENT_TIMESTAMP)`,
-      )
-      .run(
-        opts.id,
-        opts.runId,
-        opts.status,
-        JSON.stringify({ intent: 'x', ...(opts.taskRef ? { taskRef: opts.taskRef } : {}) }),
-      );
-  }
-
-  it('flag SET: terminalizes queued/leased/running agent-stamped rows as skipped + delivers, legacy-stamped rows untouched', async () => {
-    seedRun(db, 'run-agent', JSON.stringify(['agent']));
-    seedRun(db, 'run-legacy', JSON.stringify(['capturePage']));
-
-    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued', taskRef: 'TASK-1' });
-    insertRow(db, { id: 'vr_a_leased', runId: 'run-agent', status: 'leased' });
-    insertRow(db, { id: 'vr_a_running', runId: 'run-agent', status: 'running' });
-    insertRow(db, { id: 'vr_l_queued', runId: 'run-legacy', status: 'queued' });
-
-    const verdicts: Array<{ requestId: string; status: string }> = [];
-    const onVerdict: OnVerdict = (a) => void verdicts.push({ requestId: a.requestId, status: a.status });
-
-    const scheduler = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
-      artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
-      leasePool: new ResourceLeasePool(new Mutex()),
-      onVerdict,
-      legacyKillSwitch: () => true,
-    });
-
-    const n = await scheduler.runRecovery();
-    expect(n).toBe(3); // the three agent-stamped rows
-
-    const agentRows = db
-      .prepare(`SELECT id, status, error_message AS error FROM verification_requests WHERE run_id = 'run-agent' ORDER BY id`)
-      .all() as Array<{ id: string; status: string; error: string | null }>;
-    for (const row of agentRows) {
-      expect(row.status).toBe('skipped');
-      expect(row.error).toContain('agent engine disabled');
-      expect(row.error).toContain('CYBOFLOW_VERIFY_LEGACY');
-    }
-
-    // legacy-stamped row is completely untouched by the kill switch — still queued
-    // (the pre-existing recovery only terminalizes leased/running orphans + stale
-    // queued rows past the age ceiling; a fresh queued row is left queued either way).
-    const legacyRow = db
-      .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_l_queued'`)
-      .get() as { status: string };
-    expect(legacyRow.status).toBe('queued');
-
-    // The lane advanced through the normal delivery path (non-blocking finding raised).
-    expect(verdicts.sort((a, b) => a.requestId.localeCompare(b.requestId))).toEqual(
-      [
-        { requestId: 'vr_a_leased', status: 'skipped' },
-        { requestId: 'vr_a_queued', status: 'skipped' },
-        { requestId: 'vr_a_running', status: 'skipped' },
-      ].sort((a, b) => a.requestId.localeCompare(b.requestId)),
-    );
-  });
-
-  it('flag UNSET (default posture): byte-identical recovery — agent rows keep their pre-existing fate, not the kill-switch reason', async () => {
-    seedRun(db, 'run-agent', JSON.stringify(['agent']));
-    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued' });
-    insertRow(db, { id: 'vr_a_leased', runId: 'run-agent', status: 'leased' });
-
-    const verdicts: string[] = [];
-    const onVerdict: OnVerdict = (a) => void verdicts.push(a.status);
-
-    const scheduler = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
-      artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
-      leasePool: new ResourceLeasePool(new Mutex()),
-      onVerdict,
-      legacyKillSwitch: () => false,
-    });
-
-    const n = await scheduler.runRecovery();
-    // Only the pre-existing orphan sweep fires (the leased row → timeout); the
-    // fresh queued row is untouched (not over the age ceiling).
-    expect(n).toBe(1);
-
-    const leased = db
-      .prepare(`SELECT status, error_message AS error FROM verification_requests WHERE id = 'vr_a_leased'`)
-      .get() as { status: string; error: string | null };
-    expect(leased.status).toBe('timeout');
-    expect(leased.error).toBe('orphaned by process restart');
-    expect(leased.error).not.toContain('CYBOFLOW_VERIFY_LEGACY');
-
-    const queued = db
-      .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_a_queued'`)
-      .get() as { status: string };
-    expect(queued.status).toBe('queued');
-    expect(verdicts).toEqual(['timeout']);
-  });
-
-  it('defaults to reading process.env.CYBOFLOW_VERIFY_LEGACY when no legacyKillSwitch dep is injected', async () => {
-    seedRun(db, 'run-agent', JSON.stringify(['agent']));
-    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued' });
-
-    const prior = process.env.CYBOFLOW_VERIFY_LEGACY;
-    process.env.CYBOFLOW_VERIFY_LEGACY = '1';
-    try {
-      const scheduler = VerificationScheduler.initialize({
-        db: dbAdapter(db),
-        backends: {},
-        judge: fakeJudge,
-        artifactsDirResolver: () => '/artifacts',
-        config: CONFIG,
-        leasePool: new ResourceLeasePool(new Mutex()),
-        // no legacyKillSwitch injected — must fall back to process.env
-      });
-      const n = await scheduler.runRecovery();
-      expect(n).toBe(1);
-      const row = db
-        .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_a_queued'`)
-        .get() as { status: string };
-      expect(row.status).toBe('skipped');
-    } finally {
-      if (prior === undefined) delete process.env.CYBOFLOW_VERIFY_LEGACY;
-      else process.env.CYBOFLOW_VERIFY_LEGACY = prior;
-    }
-  });
-});
-
 // ---------------------------------------------------------------------------
 // isAgentEngineRequest — the REQUEST-level dispatch key (b5f25edb, "let quick
 // sessions queue visual verifications over MCP").
@@ -608,21 +442,18 @@ describe('VerificationScheduler — legacy kill-switch boot terminalization (§5
 // writes the resolved chain verbatim onto the REQUEST row instead. The
 // scheduler must therefore consult the request's own chain_json FIRST and only
 // fall back to the run stamp when the request carries none — every dispatch
-// site (drain, the legacy-kill-switch boot sweep, queued-age expiry
-// provenance) goes through this one method, so these cases are written against
-// each of those three call sites rather than only the drain path.
+// site (drain, queued-age expiry provenance) goes through this one method, so
+// these cases are written against each of those call sites rather than only the
+// drain path.
 // ---------------------------------------------------------------------------
 describe('VerificationScheduler — isAgentEngineRequest request-level dispatch key (quick sessions)', () => {
   it("a request whose OWN chain_json is '[\"agent\"]' dispatches to the agent engine even though its RUN is not agent-stamped (the __quick__ case)", async () => {
     // verify_chain NULL — a quick-session run never gets the frozen stamp at all.
     seedRun(db, 'run-quick', null);
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
-    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(captureSpy) },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -637,32 +468,25 @@ describe('VerificationScheduler — isAgentEngineRequest request-level dispatch 
     });
     await flushDrain();
 
-    // Without this rung the row would fall to the legacy waterfall, select no
-    // candidate off an empty/foreign backend list, and terminate
-    // skipped:'no usable backend' behind a healthy-looking reply — the whole
-    // feature would be dead on arrival.
+    // Without this rung the row would fall to the retired-engine skip behind a
+    // healthy-looking reply — the whole feature would be dead on arrival.
     expect(run).toHaveBeenCalledTimes(1);
-    expect(captureSpy).not.toHaveBeenCalled();
     expect(requestRow(db).status).toBe('passed');
   });
 
   it("REGRESSION: an agent-STAMPED run whose request persists chain_json '[]' (every flow run today) still dispatches to the agent engine via the run-stamp fallback", async () => {
     seedRun(db, 'run-flow', JSON.stringify(['agent']));
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
-    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(captureSpy) },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
       agentRunner: runner,
     });
-    // The FALLBACK_CHAINS ∩ VisualBackendId[] intersection a flow run's MCP
-    // handler computes for an 'agent'-stamped run is always empty — 'agent' is
-    // not a VisualBackendId, so it never survives the intersection.
+    // A flow run's MCP handler writes an empty request chain — its engine is
+    // the run stamp.
     scheduler.enqueue({
       runId: 'run-flow',
       projectId: 1,
@@ -673,43 +497,13 @@ describe('VerificationScheduler — isAgentEngineRequest request-level dispatch 
     await flushDrain();
 
     expect(run).toHaveBeenCalledTimes(1);
-    expect(captureSpy).not.toHaveBeenCalled();
-    expect(requestRow(db).status).toBe('passed');
-  });
-
-  it('a legacy-stamped run with a legacy request chain still runs the capture/VLM waterfall, unchanged', async () => {
-    seedRun(db, 'run-legacy-2', JSON.stringify(['capturePage']));
-    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
-    const captureSpy = vi.fn(async () => ({ ok: true, fileNames: ['x.png'] }) satisfies CaptureResult);
-
-    const scheduler = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(captureSpy) },
-      judge: fakeJudge,
-      artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
-      leasePool: new ResourceLeasePool(new Mutex()),
-      agentRunner: runner,
-    });
-    scheduler.enqueue({
-      runId: 'run-legacy-2',
-      projectId: 1,
-      type: 'static-render-snapshot',
-      input: { intent: 'x' },
-      chain: ['capturePage'],
-    });
-    await flushDrain();
-
-    expect(captureSpy).toHaveBeenCalledTimes(1);
-    expect(run).not.toHaveBeenCalled();
     expect(requestRow(db).status).toBe('passed');
   });
 
   /**
    * Insert a request row directly at `status` with an explicit `chain_json`,
-   * for the boot-sweep / queued-age cases below — mirrors the file's own
-   * `insertRow` idiom (§5.8 boot-terminalization describe above) but exposes
-   * `chainJson` and `enqueuedAt` since those are exactly what these cases vary.
+   * for the queued-age case below — exposes `chainJson` and `enqueuedAt` since
+   * those are exactly what it varies.
    */
   function insertQuickStyleRow(
     dbX: Database.Database,
@@ -737,46 +531,6 @@ describe('VerificationScheduler — isAgentEngineRequest request-level dispatch 
       );
   }
 
-  it("the CYBOFLOW_VERIFY_LEGACY boot sweep terminalizes a QUEUED quick-style request (chain_json '[\"agent\"]', run NOT agent-stamped) with the same 'agent engine disabled' provenance a flow run gets", async () => {
-    // The run stamp alone says "not agent" — only the request's own chain_json
-    // carries the quick session's resolved posture. Without isAgentEngineRequest
-    // reading the request row, this row would never match the sweep's
-    // isAgentStampedRun(row.run_id) check and would be stranded queued forever.
-    seedRun(db, 'run-quick-2', null);
-    insertQuickStyleRow(db, {
-      id: 'vr_quick_queued',
-      runId: 'run-quick-2',
-      status: 'queued',
-      chainJson: JSON.stringify(['agent']),
-    });
-
-    const verdicts: Array<{ requestId: string; status: string; captureOrigin?: string }> = [];
-    const onVerdict: OnVerdict = (a) =>
-      void verdicts.push({ requestId: a.requestId, status: a.status, captureOrigin: a.captureOrigin });
-
-    const scheduler = VerificationScheduler.initialize({
-      db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
-      artifactsDirResolver: () => '/artifacts',
-      config: CONFIG,
-      leasePool: new ResourceLeasePool(new Mutex()),
-      onVerdict,
-      legacyKillSwitch: () => true,
-    });
-
-    const n = await scheduler.runRecovery();
-    expect(n).toBe(1);
-
-    const row = db
-      .prepare(`SELECT status, error_message AS error FROM verification_requests WHERE id = 'vr_quick_queued'`)
-      .get() as { status: string; error: string | null };
-    expect(row.status).toBe('skipped');
-    expect(row.error).toContain('agent engine disabled');
-    expect(row.error).toContain('CYBOFLOW_VERIFY_LEGACY');
-    expect(verdicts).toEqual([{ requestId: 'vr_quick_queued', status: 'skipped', captureOrigin: 'agent' }]);
-  });
-
   it("expireOverAgeQueued stamps captureOrigin 'agent' for an over-age quick-style row (chain_json '[\"agent\"]', run NOT agent-stamped)", async () => {
     seedRun(db, 'run-quick-3', null);
     let clock = 50_000_000;
@@ -795,8 +549,6 @@ describe('VerificationScheduler — isAgentEngineRequest request-level dispatch 
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: { ...CONFIG, queuedAgeCeilingMs: 5_000 },
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -892,8 +644,6 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -934,8 +684,6 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -969,8 +717,6 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: { ...CONFIG, mobileDeadlineFloorMs: 900_000 },
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -1007,8 +753,6 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -1047,8 +791,6 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
 
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -1081,8 +823,6 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook, kill 
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       // Every row below pins the pre-explore §3.2 contract, which is exactly
       // what the kill switch restores (runbook-optional-verification.md §A1).
@@ -1326,8 +1066,6 @@ describe('VerificationScheduler — §3.6 budget accounting', () => {
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -1483,8 +1221,6 @@ describe('VerificationScheduler — §3.1 classification + §3.4 capability feed
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -1859,8 +1595,6 @@ describe('VerificationScheduler.enqueue — modality + setup_proof stamping', ()
   function initBare(): VerificationScheduler {
     return VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2008,8 +1742,6 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
     const { runner, run } = stubRunner(result);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2262,8 +1994,6 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
     const { runner, run } = stubRunner(PASS_RESULT);
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2324,8 +2054,6 @@ describe('VerificationScheduler — §5.2 seam 3 pin threading + mismatch classi
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2360,8 +2088,6 @@ describe('VerificationScheduler — §5.2 seam 3 pin threading + mismatch classi
     });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2399,8 +2125,6 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: KILL_SWITCH_CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2432,8 +2156,6 @@ describe('VerificationScheduler — §3.2 degrade gate with an ASYNC runbook pro
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2462,8 +2184,6 @@ describe('VerificationScheduler — resolveProvenRunbook (the ENQUEUE-side resol
   function schedulerWith(store?: VerifyRunbookStore): VerificationScheduler {
     return VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2538,8 +2258,6 @@ describe('VerificationScheduler — awaitTerminal (§5.2 seam 2)', () => {
   function bareScheduler(): VerificationScheduler {
     return VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2637,8 +2355,6 @@ describe('VerificationScheduler — the bootstrap toggle is read live', () => {
     const attempts: string[] = [];
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: { capturePage: fakeBackend(vi.fn(async () => ({ ok: true, fileNames: [] }) satisfies CaptureResult)) },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: { ...CONFIG, autoBootstrapRunbook: false },
       liveConfig: () => ({ ...CONFIG, autoBootstrapRunbook: enabled }),
@@ -2720,10 +2436,6 @@ describe('VerificationScheduler — which bootstrap MODE the decision dispatches
     const staleProof: ExploreStaleProofFinding[] = [];
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(own),
-      backends: {
-        capturePage: fakeBackend(vi.fn(async () => ({ ok: true, fileNames: [] }) satisfies CaptureResult)),
-      },
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: { ...CONFIG, autoBootstrapRunbook: enabled, requireProvenRunbook: !explore },
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2854,8 +2566,6 @@ describe('VerificationScheduler — §A1 explore through the drain', () => {
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG, // requireProvenRunbook: false; runbookStatus defaults to 'absent'
       leasePool: new ResourceLeasePool(new Mutex()),
@@ -2886,8 +2596,6 @@ describe('VerificationScheduler — §A1 explore through the drain', () => {
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG, // the boot snapshot says OFF
       liveConfig: () => KILL_SWITCH_CONFIG,
@@ -2928,8 +2636,6 @@ describe('VerificationScheduler — §A3 wrong-environment re-dispatch, end to e
     const verdicts: string[] = [];
     const scheduler = VerificationScheduler.initialize({
       db: dbAdapter(db),
-      backends: {},
-      judge: fakeJudge,
       artifactsDirResolver: () => '/artifacts',
       config: CONFIG,
       leasePool: new ResourceLeasePool(new Mutex()),

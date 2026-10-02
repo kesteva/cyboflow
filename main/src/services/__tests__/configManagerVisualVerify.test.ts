@@ -96,10 +96,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     const cfg = mgr.getVisualVerifyConfig();
     expect(cfg.enabled).toBe(false);
     expect(cfg.defaultType).toBe('static-render-snapshot');
-    expect(cfg.vlmConfidenceThreshold).toBe(0.7);
-    expect(cfg.maxPerRunJudgeCalls).toBe(4);
     expect(cfg.devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
-    expect(cfg.simulatorDevices).toEqual([]);
     expect(cfg.agentSlots).toBe(2);
     // F9: autoBootstrapRunbook floors to ON — without it, every project except
     // one that already hand-authored a runbook stays permanently unverifiable.
@@ -110,17 +107,15 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     await mgr.initialize();
     await mgr.updateConfig({
-      visualVerify: { enabled: true, maxPerRunJudgeCalls: 2 },
+      visualVerify: { enabled: true, queuedAgeCeilingMs: 120_000 },
     });
 
     const cfg = mgr.getVisualVerifyConfig();
     expect(cfg.enabled).toBe(true);
-    expect(cfg.maxPerRunJudgeCalls).toBe(2);
+    expect(cfg.queuedAgeCeilingMs).toBe(120_000);
     // Unset members keep their defaults.
     expect(cfg.defaultType).toBe('static-render-snapshot');
-    expect(cfg.vlmConfidenceThreshold).toBe(0.7);
     expect(cfg.devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
-    expect(cfg.simulatorDevices).toEqual([]);
     expect(cfg.agentSlots).toBe(2);
     // Enabling verification does not change the bootstrap: they are separate
     // decisions, and F9 floors the second one ON independently of the first.
@@ -148,10 +143,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       visualVerify: {
         enabled: true,
         defaultType: 'interactive-web-behavior',
-        vlmConfidenceThreshold: 0.9,
-        maxPerRunJudgeCalls: 8,
         devServerPorts: [1234, 5678],
-        simulatorDevices: ['udid-A'],
       },
     });
 
@@ -160,10 +152,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     expect(reloaded.getVisualVerifyConfig()).toEqual({
       enabled: true,
       defaultType: 'interactive-web-behavior',
-      vlmConfidenceThreshold: 0.9,
-      maxPerRunJudgeCalls: 8,
       devServerPorts: [1234, 5678],
-      simulatorDevices: ['udid-A'],
       // Not overridden above → floored to the mobile-tier defaults
       // (mobile-verification-tier.md §8). Asserted INSIDE this exact-shape
       // expectation on purpose: a knob added to the resolved type but never
@@ -243,10 +232,8 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     const cfg = mgr.getVisualVerifyConfig();
     cfg.devServerPorts.push(9999);
-    cfg.simulatorDevices.push('leak');
     // Defaults are untouched; a second read is pristine.
     expect(mgr.getVisualVerifyConfig().devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
-    expect(mgr.getVisualVerifyConfig().simulatorDevices).toEqual([]);
     expect(VISUAL_VERIFY_DEFAULTS.devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
   });
 });

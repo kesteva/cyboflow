@@ -57,28 +57,6 @@ export type ArtifactCommitDirResolver = (projectId: number) => string | null;
  */
 export type RunArtifactsDirResolver = (runId: string) => string | null;
 
-/**
- * S5 — the injected committer for the Accept-as-baseline op. The fs-copy (run
- * artifacts → .cyboflow/artifacts/baselines/<key>/<viewport>.png) + the `git add` +
- * `git commit` are CONCRETE service work (electron/child_process/fs) that MUST NOT
- * live in this orchestrator/* module (standalone-typecheck invariant). It is wired
- * at index.ts as a closure over the FsBaselineStore + the project root + a git
- * committer — exactly like `resolveCommitDir`. The router only resolves the
- * PASS-verdict artifact + its fileNames + project here, then delegates the copy +
- * commit. Returns the baselineKey actually written. Absent (unit tests) ⇒ the op is
- * a no-op that throws `not_found` so a caller learns it was not wired.
- */
-export interface AcceptBaselineArgs {
-  projectId: number;
-  /** The run whose committed/PASS screenshots become the baseline. */
-  runId: string;
-  /** The baseline key the PNGs are filed under (default = the deliverable/artifact key). */
-  baselineKey: string;
-  /** The captured PNG basenames (relative to the run artifacts dir) to accept. */
-  fileNames: string[];
-}
-
-export type BaselineAcceptor = (args: AcceptBaselineArgs) => Promise<{ baselineKey: string }>;
 import {
   ARTIFACT_RENDER_MODE,
   isPerEntityArtifact,
@@ -124,18 +102,7 @@ export type ArtifactErrorCode =
    * missing / not a regular file / a symlink escape / over the size ceiling.
    * A BAD-REQUEST-domain code the MCP report tool surfaces to the producing agent.
    */
-  | 'invalid_payload'
-  /**
-   * S5 server-side accept-baseline gate (trust-boundary fix): the screenshots
-   * artifact exists but does NOT authorize accepting the requested fileNames as
-   * a baseline — no verdict, a non-'pass' verdict, a baselineKey mismatch, or a
-   * requested fileName outside the judged/captured set. Kept distinct from
-   * 'invalid_atype' (malformed REQUEST shape) because this is a well-formed
-   * request the DATA doesn't authorize — callers that branch on the code (the
-   * tRPC + MCP surfaces) can tell "fix your request" apart from "this run's
-   * verdict doesn't clear the bar yet".
-   */
-  | 'not_verified';
+  | 'invalid_payload';
 
 export class ArtifactError extends Error {
   constructor(
@@ -197,31 +164,14 @@ export interface ArtifactCommit {
 }
 
 /**
- * S5 — Accept-as-baseline: copy the run's PASS-verdict screenshot PNGs into the
- * git-tracked golden-baselines tree (.cyboflow/artifacts/baselines/<key>/<viewport>
- * .png at project root) and stage+commit them. A GIT action through THIS chokepoint
- * (so accept is auditable like every other artifact write), delegating the fs-copy +
- * git work to the injected BaselineAcceptor (the router itself imports no fs/git).
- * `fileNames` are the judged PASS PNG basenames; `baselineKey` defaults to the
- * deliverable/artifact key on the calling side.
- */
-export interface ArtifactAcceptBaseline {
-  op: 'accept-baseline';
-  runId: string;
-  baselineKey: string;
-  fileNames: string[];
-  actor: ArtifactActor;
-}
-
-/**
  * ATOMIC screenshots-payload merge (verification-agent redesign §5.9). A verdict
  * delivery AND the auto-mint safety-net scan both enrich the SAME run-scoped
  * 'screenshots' artifact; a read-then-`create` sequence outside the router is a
  * lost-update race (two deliveries read the same payload; the second write drops
  * the first's reports entry). This op reads → validates → merges → writes ALL
  * inside ONE per-project queue task (concurrency-1, so no interleave) via
- * {@link mergeScreenshotsPayload}. Not part of the `apply` union — like
- * accept-baseline it has its own method (`mergeScreenshots`).
+ * {@link mergeScreenshotsPayload}. Not part of the `apply` union — it has its
+ * own method (`mergeScreenshots`).
  *
  * Only the SUPPLIED members merge in (latest-wins for verdict/captureOrigin/
  * diagnostics; fileNames union; a single `report` upserted by (taskRef,
@@ -312,8 +262,7 @@ export function mergeScreenshotsPayload(
 export type ArtifactChange =
   | ArtifactCreate
   | ArtifactUpdate
-  | ArtifactCommit
-  | ArtifactAcceptBaseline;
+  | ArtifactCommit;
 
 /** DB row shape (snake_case, numeric flags). */
 export interface ArtifactDbRow {
@@ -381,7 +330,6 @@ export class ArtifactRouter {
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
     private readonly resolveCommitDir?: ArtifactCommitDirResolver,
-    private readonly acceptBaseline?: BaselineAcceptor,
     private readonly resolveRunArtifactsDir?: RunArtifactsDirResolver,
   ) {}
 
@@ -389,14 +337,12 @@ export class ArtifactRouter {
     db: DatabaseLike,
     logger?: LoggerLike,
     resolveCommitDir?: ArtifactCommitDirResolver,
-    acceptBaseline?: BaselineAcceptor,
     resolveRunArtifactsDir?: RunArtifactsDirResolver,
   ): ArtifactRouter {
     ArtifactRouter.instance = new ArtifactRouter(
       db,
       logger,
       resolveCommitDir,
-      acceptBaseline,
       resolveRunArtifactsDir,
     );
     return ArtifactRouter.instance;
@@ -438,25 +384,6 @@ export class ArtifactRouter {
       if (change.op === 'update') return this.runUpdate(projectId, change);
       return this.runCommit(projectId, change);
     }) as Promise<{ artifactId: string; event: { id: number; seq: number } }>;
-  }
-
-  /**
-   * S5 — Accept the run's PASS-verdict screenshots as the golden baseline. A GIT
-   * action through this chokepoint (serialized on the same per-project queue as
-   * every other artifact write), validating the run belongs to `projectId` and that
-   * a 'screenshots' artifact exists, then delegating the fs-copy + git commit to the
-   * injected BaselineAcceptor (the router imports no fs/git itself — standalone-
-   * typecheck invariant). Returns the baselineKey actually written. Throws
-   * `not_found` when no acceptor is wired (unit tests) or no screenshots artifact /
-   * run exists.
-   */
-  async acceptAsBaseline(
-    projectId: number,
-    change: ArtifactAcceptBaseline,
-  ): Promise<{ baselineKey: string }> {
-    return this.getProjectQueue(projectId).add(() =>
-      this.runAcceptBaseline(projectId, change),
-    ) as Promise<{ baselineKey: string }>;
   }
 
   /**
@@ -1059,154 +986,6 @@ export class ArtifactRouter {
     }
 
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
-  }
-
-  /**
-   * S5 — run the Accept-as-baseline GIT action. Validates the run belongs to
-   * `projectId` and that a 'screenshots' artifact exists for it, THEN re-derives +
-   * enforces the same invariant the renderer's Accept button gates on client-side
-   * (the tRPC mutation is the real trust boundary — a client-supplied fileNames /
-   * baselineKey must never be trusted verbatim):
-   *   - the artifact's payload must carry a verdict with `status === 'pass'`,
-   *   - `change.baselineKey` must equal `verdict.baselineKey` (no filing PASS PNGs
-   *     from one deliverable under another's baseline namespace),
-   *   - every requested fileName must be present in BOTH `verdict.judgedFileNames`
-   *     (the PNGs the VLM actually judged) AND the artifact's captured
-   *     `payload.fileNames` (the PNGs that actually exist on disk for this run).
-   * Only once all of that holds does it record ONE audit entity_event under the
-   * artifact and delegate the fs-copy (run artifacts → baselines tree) +
-   * `git add`/`git commit` to the injected BaselineAcceptor (the router imports no
-   * fs/git). The copy/commit runs OUTSIDE any DB txn (it is filesystem + git work).
-   * Throws `not_found` when no acceptor is wired or no screenshots artifact / run
-   * exists; `invalid_atype` (BAD REQUEST domain) when fileNames is empty;
-   * `not_verified` when the artifact's verdict doesn't authorize the request.
-   */
-  private async runAcceptBaseline(
-    projectId: number,
-    change: ArtifactAcceptBaseline,
-  ): Promise<{ baselineKey: string }> {
-    if (!this.acceptBaseline) {
-      throw new ArtifactError(
-        'not_found',
-        'accept-baseline is not wired (no BaselineAcceptor injected)',
-      );
-    }
-    if (change.fileNames.length === 0) {
-      throw new ArtifactError('invalid_atype', 'accept-baseline requires at least one fileName');
-    }
-    this.assertRun(change.runId);
-    // Resolve the run's TRUE project + assert it matches (no cross-project accept).
-    const run = this.db
-      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
-      .get(change.runId) as { projectId: number } | undefined;
-    if (!run) throw new ArtifactError('run_not_found', `run ${change.runId} not found`);
-    if (run.projectId !== projectId) {
-      throw new ArtifactError(
-        'wrong_project',
-        `run ${change.runId} belongs to project ${run.projectId}, not ${projectId}`,
-      );
-    }
-    // You only accept what was verified: a 'screenshots' artifact must exist for
-    // the run. DB-row-first, then the committed snapshot manifest fallback — a
-    // committed screenshots artifact has NO DB row (deleted on commit under the
-    // IDEA-039 lifecycle), only an on-disk snapshot.
-    let shotsId: string | null = null;
-    let shotsPayloadJson: string | null = null;
-    const shotsRow = this.db
-      .prepare("SELECT id, payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'screenshots'")
-      .get(change.runId) as { id: string; payloadJson: string | null } | undefined;
-    if (shotsRow) {
-      shotsId = shotsRow.id;
-      shotsPayloadJson = shotsRow.payloadJson;
-    } else {
-      const storeDir = this.resolveCommitDir?.(projectId) ?? null;
-      const m = storeDir ? await loadCommittedSnapshot(storeDir, change.runId, 'screenshots') : null;
-      if (m) {
-        shotsId = m.id;
-        shotsPayloadJson = m.payloadJson == null ? null : JSON.stringify(m.payloadJson);
-      }
-    }
-    if (!shotsId) {
-      throw new ArtifactError('not_found', `no screenshots artifact for run ${change.runId}`);
-    }
-
-    // Server-side re-derivation of the client's Accept-button invariant (see
-    // ArtifactTabRenderer's VerdictBanner canAccept): a PASS verdict, a matching
-    // baselineKey, and every requested fileName inside BOTH the judged set and the
-    // artifact's captured set. Parsed defensively — malformed/absent JSON reads as
-    // "no verdict" rather than throwing, since a corrupt payload must never be
-    // mistaken for an authorizing one.
-    let payload: ScreenshotsArtifactPayload = {};
-    if (shotsPayloadJson) {
-      try {
-        payload = JSON.parse(shotsPayloadJson) as ScreenshotsArtifactPayload;
-      } catch {
-        payload = {};
-      }
-    }
-    const verdict = payload.verdict;
-    if (!verdict || verdict.status !== 'pass') {
-      throw new ArtifactError(
-        'not_verified',
-        `accept-baseline requires a PASS verdict on the screenshots artifact for run ${change.runId}`,
-      );
-    }
-    if (!verdict.baselineKey || verdict.baselineKey !== change.baselineKey) {
-      throw new ArtifactError(
-        'not_verified',
-        `accept-baseline baselineKey mismatch: request baselineKey '${change.baselineKey}' does not match verdict baselineKey '${verdict.baselineKey ?? ''}'`,
-      );
-    }
-    const judgedFileNames = new Set(
-      Array.isArray(verdict.judgedFileNames) ? verdict.judgedFileNames : [],
-    );
-    const capturedFileNames = new Set(
-      Array.isArray(payload.fileNames) ? payload.fileNames : [],
-    );
-    for (const name of change.fileNames) {
-      if (!judgedFileNames.has(name)) {
-        throw new ArtifactError(
-          'not_verified',
-          `accept-baseline fileName '${name}' was not judged by the verdict for run ${change.runId}`,
-        );
-      }
-      if (!capturedFileNames.has(name)) {
-        throw new ArtifactError(
-          'not_verified',
-          `accept-baseline fileName '${name}' was not captured for run ${change.runId}`,
-        );
-      }
-    }
-
-    // Delegate the fs-copy + git commit (injected service work, never imported here).
-    const result = await this.acceptBaseline({
-      projectId,
-      runId: change.runId,
-      baselineKey: change.baselineKey,
-      fileNames: change.fileNames,
-    });
-
-    // Audit: record ONE accept-baseline event under the screenshots artifact so the
-    // accept is visible in the entity_events log like every other artifact write.
-    const now = new Date().toISOString();
-    this.insertEvent(
-      shotsId,
-      'accepted-baseline',
-      change.actor,
-      change.runId,
-      [{ field: 'baselineKey', from: null, to: result.baselineKey }],
-      now,
-    );
-    // The DB row may be gone (committed screenshots → snapshot-only); emit the
-    // snapshot-shaped artifact in that case so the event carries a non-null shape.
-    let emitted = this.readById(shotsId);
-    if (!emitted) {
-      const storeDir = this.resolveCommitDir?.(projectId) ?? null;
-      const m = storeDir ? await loadCommittedSnapshot(storeDir, change.runId, 'screenshots') : null;
-      if (m) emitted = snapshotManifestToArtifact(m);
-    }
-    this.emitChange(projectId, change.runId, shotsId, 'screenshots', 'updated', emitted);
-    return { baselineKey: result.baselineKey };
   }
 
   /**

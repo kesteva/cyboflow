@@ -827,23 +827,17 @@ export class ConfigManager extends EventEmitter {
    * VISUAL_VERIFY_DEFAULTS applied for any member the persisted config omits.
    * Mirrors getArtifactCommitDir's floor-on-read contract for a nested block: the
    * stored shape stays partial (so config.json is never rewritten with defaults),
-   * while callers (resolver, scheduler, judge) get a complete, typed config.
+   * while callers (resolver, scheduler, agent engine) get a complete, typed config.
    */
   getVisualVerifyConfig(): ResolvedVisualVerifyConfig {
     const vv = this.config.visualVerify;
     return {
       enabled: vv?.enabled ?? VISUAL_VERIFY_DEFAULTS.enabled,
       defaultType: vv?.defaultType ?? VISUAL_VERIFY_DEFAULTS.defaultType,
-      vlmConfidenceThreshold:
-        vv?.vlmConfidenceThreshold ?? VISUAL_VERIFY_DEFAULTS.vlmConfidenceThreshold,
-      maxPerRunJudgeCalls: vv?.maxPerRunJudgeCalls ?? VISUAL_VERIFY_DEFAULTS.maxPerRunJudgeCalls,
       devServerPorts:
         vv?.devServerPorts && vv.devServerPorts.length > 0
           ? [...vv.devServerPorts]
           : [...VISUAL_VERIFY_DEFAULTS.devServerPorts],
-      simulatorDevices: vv?.simulatorDevices
-        ? [...vv.simulatorDevices]
-        : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
       // The four `mobile` iOS-Simulator knobs. Floored here and NOWHERE ELSE:
       // the scheduler reads this resolved block (and only this block), so a knob
       // Settings persists but this method omits never reaches the tier at all —

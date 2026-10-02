@@ -2061,12 +2061,12 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
     expect(art!.step_origin).toBe('Ship · visual-verify');
   });
 
-  it('R7: PRESERVES an existing verdict block (with baselineKey) across a re-mint (banner survives a step transition)', async () => {
+  it('R7: PRESERVES an existing verdict block across a re-mint (banner survives a step transition)', async () => {
     // Regression (fails on pre-R7 code): the verdict-delivery hook enriched the
     // screenshots artifact with `{ fileNames, verdict }`; the next step 'running'
     // transition fires this safety-net scan, which re-mints from the PNGs on disk.
     // Before the fix it wrote plain `{ fileNames }` and ArtifactRouter's wholesale
-    // payload replace ERASED the verdict (banner + Accept button data vanished). It
+    // payload replace ERASED the verdict (the banner vanished). It
     // must now merge: fresh fileNames + the preserved verdict block.
     const db = buildDb();
     const adapter = dbAdapter(db);
@@ -2090,7 +2090,6 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
           judgedFileNames: ['home.png'],
           baselineUsed: false,
           model: 'fake',
-          baselineKey: 'landing-page',
         },
       }),
       actor: 'orchestrator',
@@ -2104,15 +2103,15 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
     expect(art).toBeDefined();
     const payload = JSON.parse(art!.payload_json!) as {
       fileNames: string[];
-      verdict?: { status: string; baselineKey?: string };
+      verdict?: { status: string; feedback?: string };
     };
     // fileNames are UNIONED (§5.9 atomic merge): the stored 'home.png' first, then
     // the newly-seen 'detail.png' — the scan never shrinks the set, and the router
     // reads+merges the stored payload inside its queue (no read-then-create race) …
     expect(payload.fileNames).toEqual(['home.png', 'detail.png']);
-    // … and the verdict block (banner + Accept button's baselineKey) SURVIVES.
+    // … and the verdict block (the banner) SURVIVES.
     expect(payload.verdict?.status).toBe('pass');
-    expect(payload.verdict?.baselineKey).toBe('landing-page');
+    expect(payload.verdict?.feedback).toBe('looks right');
   });
 
   it('R7: a scan with no pre-existing verdict writes a byte-identical { fileNames } payload (no regression)', async () => {

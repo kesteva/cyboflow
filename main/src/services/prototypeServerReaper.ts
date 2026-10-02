@@ -11,11 +11,6 @@
  * (merge / createPr / dismiss / cancel), boot (orphans from a prior session), and
  * app quit.
  *
- * This is NOT the visual-verification static server (StaticServerManager) — that
- * one is an IN-PROCESS tokenized node server owned by the main process and torn
- * down by its own release(); it never spawns a `python3 -m http.server` child and
- * is left untouched here.
- *
  * Matching strategy (deliberate): we do NOT `pkill -f <regex>` with the raw
  * artifacts path — an absolute path can contain regex metacharacters and would
  * mis-escape. Instead we list processes via `ps -axo pid=,command=` and do plain

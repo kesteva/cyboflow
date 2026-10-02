@@ -44,7 +44,6 @@ import type {
   ResolvedVisualVerifyConfig,
   VerificationType,
   VerdictV1,
-  VlmJudge,
 } from '../../../../../shared/types/visualVerification';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
@@ -125,12 +124,9 @@ function seedRun(db: Database.Database, runId: string): void {
 const CONFIG: ResolvedVisualVerifyConfig = {
   enabled: true,
   defaultType: 'static-render-snapshot',
-  vlmConfidenceThreshold: 0.7,
-  maxPerRunJudgeCalls: 4,
   // Four ports so the port pool can never be the thing that limits concurrency
   // in these tests — the agent-slot pool is what is under test.
   devServerPorts: [29260, 29262, 29264, 29266],
-  simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
   mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
@@ -152,8 +148,6 @@ const PASS_VERDICT: VerdictV1 = {
   baselineUsed: false,
   model: 'claude-x',
 };
-
-const fakeJudge: VlmJudge = { judge: async () => PASS_VERDICT };
 
 const PASS_RESULT: VerificationAgentRunResult = {
   status: 'passed',
@@ -226,8 +220,6 @@ function initScheduler(
 ): VerificationScheduler {
   return VerificationScheduler.initialize({
     db: dbAdapter(db),
-    backends: {},
-    judge: fakeJudge,
     artifactsDirResolver: () => '/artifacts',
     config: CONFIG,
     leasePool: new ResourceLeasePool(mutex),

@@ -7,7 +7,7 @@
  * DRIVES, and JUDGES a composed `VerificationTaskV1` itself, returning a
  * structured `VerificationReportV1`.
  *
- * Electron-free by construction (mirrors the backends / vlmJudge): every
+ * Electron-free by construction: every
  * side-effecting collaborator is INJECTED — the SDK boundary (`query`), the
  * effective-agent + model resolvers, snapshot provisioning, git checks, fs
  * probes, and the driver-teardown seams all have real defaults but are faked in

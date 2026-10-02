@@ -173,7 +173,7 @@ function parseRawTaskObject(taskJson: string | null): Record<string, unknown> | 
 export interface AgentEngineDeps {
   db: DatabaseLike;
   logger?: LoggerLike;
-  /** The scheduler's resolved config (agentSlots, simulatorDevices). */
+  /** The scheduler's resolved config (agentSlots, devServerPorts). */
   config: ResolvedVisualVerifyConfig;
   /**
    * The scheduler's LIVE config reader (runbook-optional-verification.md §A1,
@@ -914,7 +914,7 @@ export class AgentEngine {
 
   /**
    * The DETACHED agent-deployment work for a row already leased + 'running'. Acquires
-   * the same batch worktree-sync mutex the legacy path uses, enforces the per-run
+   * the batch worktree-sync mutex, enforces the per-run
    * agent-deployment budget (reusing the judge-call counter), deploys the runner
    * under the per-request deadline via the EXISTING raceWithAbort machinery, and
    * persists the mapped verdict + `report_json` in one terminal write. Releases the
@@ -1029,8 +1029,8 @@ export class AgentEngine {
         return;
       }
 
-      // The batch worktree-sync mutex (blocking) — serialize per batch exactly as the
-      // legacy path. Released in the SAME finally as the other leases.
+      // The batch worktree-sync mutex (blocking) — serialize per batch. Released in the
+      // SAME finally as the other leases.
       batchLease = await this.acquireBatchMutex(row.run_id);
       if (controller.signal.aborted) {
         await this.delivery.markTerminalAndDeliver(
@@ -1135,8 +1135,7 @@ export class AgentEngine {
         this.logger,
       );
 
-      // §3.6 BUDGET ORDERING CHANGE (was: a pre-deploy increment mirroring the
-      // VLM path). The counter is now bumped AFTER the runner returns and ONLY
+      // §3.6 BUDGET ORDERING CHANGE (was: a pre-deploy increment). The counter is now bumped AFTER the runner returns and ONLY
       // when a session was actually deployed, because the §3.5 preflight
       // deliberately returns without deploying — charging it would spend a
       // project's lifetime budget on requests that never cost a token, and on a

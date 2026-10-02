@@ -41,8 +41,7 @@ import { ShellDetector } from '../../../../utils/shellDetector';
 
 // ---------------------------------------------------------------------------
 // Fake browser/context/page — the "playwright-like object" injected in place
-// of a real browser. The cast to `Browser` is confined to this test seam
-// (mirrors playwrightBackend.test.ts's fakeBrowser).
+// of a real browser. The cast to `Browser` is confined to this test seam.
 // ---------------------------------------------------------------------------
 
 interface FakeCalls {
@@ -1150,7 +1149,7 @@ describe('runDriverCommand — native-screenshot', () => {
     expect(deps.connectOverCDP).not.toHaveBeenCalled();
   });
 
-  it('passes an --app target through in peekabooBackend\'s own flag order', async () => {
+  it('passes an --app target through in `peekaboo image`\'s flag order', async () => {
     const calls = freshCalls();
     const deps = makeDeps(calls);
     await runDriverCommand(['native-screenshot', 'app', '--app', 'Cyboflow'], NATIVE_ENV, deps);

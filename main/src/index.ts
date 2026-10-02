@@ -153,8 +153,6 @@ import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
 import { DatabaseBackupService } from './services/databaseBackupService';
 import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
-import { FsBaselineStore } from './services/visualVerify/baselineStore';
-import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
@@ -236,7 +234,6 @@ import { getDevDebugLogPath, appendDevDebugLog, flushDevDebugLogs } from './util
 import type { DevLogLevel } from './utils/devDebugLog';
 import { installMainConsoleForwarding } from './mainConsoleForwarding';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 import { composeVerification } from './verifyComposition';
@@ -1908,15 +1905,6 @@ async function initializeServices(): Promise<boolean> {
   // a closure over configManager + databaseService so the router stays free of
   // ConfigManager/service imports (standalone-typecheck invariant). Fail-soft:
   // any lookup error returns null → the snapshot is skipped, never the commit.
-  // S5 — the Accept-as-baseline committer (4th ArtifactRouter arg). The router stays
-  // fs/git-free (standalone-typecheck invariant); this closure does the concrete fs
-  // work via the FsBaselineStore (copy run-artifact PNGs into the git-tracked
-  // .cyboflow/artifacts/baselines/<key>/<viewport>.png tree at the project ROOT) and
-  // stages + commits them with `git`. It is the ONLY layer allowed to import the
-  // electron-backed cyboflowDirectory util + child_process. Mirrors the
-  // resolveCommitDir closure: a closure over databaseService + the run-artifacts-dir
-  // resolver. Returns the baselineKey actually written.
-  const fsBaselineStore = new FsBaselineStore();
   ArtifactRouter.initialize(
     cyboflowDb,
     cyboflowLogger,
@@ -1929,44 +1917,7 @@ async function initializeServices(): Promise<boolean> {
         return null;
       }
     },
-    async ({ projectId, runId, baselineKey, fileNames }) => {
-      const project = databaseService.getProject(projectId);
-      if (!project?.path) {
-        throw new Error(`accept-baseline: project ${projectId} has no path`);
-      }
-      const projectRoot = project.path;
-      const artifactsDir = getCyboflowSubdirectory('artifacts', 'runs', runId);
-      const written: string[] = [];
-      for (const fileName of fileNames) {
-        const stem = path.basename(fileName).replace(/\.png$/i, '');
-        const source = path.join(artifactsDir, path.basename(fileName));
-        // The viewport stem of the captured PNG IS its baseline viewport stem.
-        const dest = await fsBaselineStore.write(projectRoot, baselineKey, stem, source);
-        written.push(dest);
-      }
-      // Stage + commit the baselines tree (only the baselines paths we wrote). Run in
-      // the project ROOT (baselines are durable at root, not the run worktree).
-      if (written.length > 0) {
-        try {
-          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe', windowsHide: true });
-          execFileSync(
-            resolveGitCommand(),
-            ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
-            { cwd: projectRoot, stdio: 'pipe', windowsHide: true },
-          );
-        } catch (err) {
-          // A git failure (no repo / nothing changed) is logged but does not undo the
-          // on-disk copy — the bytes are written; the human can commit manually.
-          cyboflowLogger?.warn('[acceptBaseline] git commit failed (fail-soft)', {
-            projectId,
-            baselineKey,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      return { baselineKey };
-    },
-    // 5th arg (IDEA-039) — the run's on-disk artifacts subtree resolver. Source of
+    // 4th arg (IDEA-039) — the run's on-disk artifacts subtree resolver. Source of
     // committed bytes on snapshot AND the tree reapForRun removes on merge /
     // create-PR close-out. A closure over the electron-backed getCyboflowSubdirectory
     // (the router is electron-free, so the path is injected). Mirrors the
@@ -1992,9 +1943,9 @@ async function initializeServices(): Promise<boolean> {
         'app.asar.unpacked/main/dist/main/src/orchestrator/verify/driver/driverCli.js',
       )
     : path.join(__dirname, 'orchestrator', 'verify', 'driver', 'driverCli.js');
-  // VerificationScheduler + everything it is injected with (backends, capped VLM
-  // judge, dev/static servers, the verification-agent runner, the runbook store +
-  // status resolver, the host probes, the lane runbook bootstrap) — composed in
+  // VerificationScheduler + everything it is injected with (the verification-agent
+  // runner, the runbook store + status resolver, the host probes, the lane runbook
+  // bootstrap) — composed in
   // verifyComposition.ts (issue #19 step 4). Order is load-bearing: the routers
   // above must exist (verdict delivery + bootstrap write through them) and
   // VerificationScheduler.initialize() must precede the OrchSocketServer below.
@@ -2003,7 +1954,6 @@ async function initializeServices(): Promise<boolean> {
     cyboflowLogger,
     cyboflowDb,
     databaseService,
-    fsBaselineStore,
     claudeExecutablePath,
     driverCliPath: verifyDriverCliPath,
   });

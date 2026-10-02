@@ -3,10 +3,11 @@
  * verification_requests queue, the ResourceLeasePool (built over the shared
  * `mutex`), and the waterfall drain loop (see docs/proposals/visual-verification-design.md
  * §4 + "The collision story"). It is the producer-side scheduler for the layered
- * visual-verification MVP: lane agents fire a request (INSERT 'queued' + nudge),
- * never block; this scheduler drains them on ITS OWN setImmediate loop, leases the
- * scarce resources a chosen backend needs, captures + judges, then writes a
- * terminal verdict.
+ * visual verification: lane agents fire a request (INSERT 'queued' + nudge),
+ * never block; this scheduler drains them on ITS OWN setImmediate loop and hands
+ * each to the verification-AGENT engine (AgentEngine), which leases the scarce
+ * resources it needs, deploys the verification agent, then writes a terminal
+ * verdict.
  *
  * Singleton lifecycle mirrors SprintLaneStore / TaskChangeRouter (initialize /
  * getInstance / _resetForTesting). Pass `logger` at initialize time from
@@ -15,12 +16,12 @@
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', 'fs', or any concrete service in main/src/services/*. The DB
- * is injected as the narrow DatabaseLike, the logger as LoggerLike, the backends
- * as a VerificationBackendRegistry, the judge as a VlmJudge, and the artifacts-dir
- * resolver as a plain function — all renderer-safe shared types or primitives.
+ * is injected as the narrow DatabaseLike, the logger as LoggerLike, the agent
+ * runner as a VerificationAgentRunnerLike, and the artifacts-dir resolver as a
+ * plain function — all renderer-safe shared types or primitives.
  *
  * The collision doctrine in one line: SCARCE RESOURCES SERIALIZE, LANES KEEP
- * FLOWING. If no lease a chosen backend needs is free, the REQUEST stays 'queued'
+ * FLOWING. If no lease a request needs is free, the REQUEST stays 'queued'
  * and is retried on the next drain — the lane (a task already on its own
  * RunQueueRegistry PQueue) is never held. nudge() schedules the drain on this
  * scheduler's OWN setImmediate loop, deliberately NOT on RunQueueRegistry
@@ -30,20 +31,15 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
-  DeliverableVerifyConfig,
   RequestStatus,
   ResolvedVisualVerifyConfig,
-  VerificationBackendRegistry,
   VerificationModality,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationType,
   VerifyChainEntry,
-  VisualBackend,
-  VisualBackendId,
 } from '../../../../shared/types/visualVerification';
 import {
-  VERIFY_PORT_ANY,
   VISUAL_VERIFY_DEFAULTS,
   isVerificationModality,
   requireProvenRunbookEngaged,
@@ -60,22 +56,14 @@ import {
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
   DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
-  DEFAULT_SSIM_MATCH_THRESHOLD,
-  HEALTH_CHECK_MEMO_TTL_MS,
 } from './verificationSchedulerContracts';
 import type {
-  DevServerContextResolver,
   OnVerdict,
   ProvenRunbookRevision,
   RunbookRevisionArgs,
   VerificationSchedulerDeps,
 } from './verificationSchedulerContracts';
-import {
-  ResourceLeasePool,
-  sprintVerifyBatchLease,
-  verifyPortLease,
-  verifySimLease,
-} from './verificationLeases';
+import { ResourceLeasePool, sprintVerifyBatchLease } from './verificationLeases';
 import type { LeaseHandle } from './verificationLeases';
 import {
   AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
@@ -94,8 +82,16 @@ import type {
 } from './verificationRequestRows';
 import { TerminalDelivery } from './terminalDelivery';
 import { QueuedAgeDeadline } from './queuedAgeDeadline';
-import { CapturePipeline } from './capturePipeline';
 import { AgentEngine } from './agentEngine';
+
+/**
+ * The terminal `skipped` reason for a request that is not on the verification-AGENT
+ * engine — a run stamped with the retired capture-backend chain, or a row whose
+ * engine stamp is unreadable. No engine can run it, so it settles instead of
+ * stranding its lane.
+ */
+export const RETIRED_ENGINE_SKIP_REASON =
+  'the capture-backend verification engine was removed; only agent-engine runs are verified';
 
 // Re-exported for existing consumers — the type moved to shared so the
 // screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
@@ -117,23 +113,11 @@ export {
   DELIVERY_RETRY_MAX_MS,
   DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
-  HEALTH_CHECK_MEMO_TTL_MS,
-  DEFAULT_SSIM_MATCH_THRESHOLD,
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
 } from './verificationSchedulerContracts';
 export type {
   VerificationTerminalEvent,
-  DevServerSpawnArgs,
-  DevServerHandle,
-  DevServerProvider,
-  DevServerContextResolver,
-  StaticServerSpawnArgs,
-  StaticServerHandle,
-  StaticServerProvider,
-  StaticHtmlContextResolver,
   TerminalExtra,
-  BaselinePreDiffResult,
-  BaselinePreDiffResolver,
   OnVerdict,
   VerificationSchedulerDeps,
   RunbookStatus,
@@ -145,7 +129,6 @@ export {
   VERIFY_AGENT_LEASE,
   verifyAgentSlot,
   verifyPortLease,
-  verifySimLease,
   sprintVerifyBatchLease,
   ResourceLeasePool,
   AbortRaceError,
@@ -185,7 +168,6 @@ export class VerificationScheduler {
   private static instance: VerificationScheduler | null = null;
 
   private readonly db: DatabaseLike;
-  private readonly backends: VerificationBackendRegistry;
   private readonly artifactsDirResolver: (runId: string) => string;
   private readonly logger?: LoggerLike;
   private readonly config: ResolvedVisualVerifyConfig;
@@ -193,9 +175,7 @@ export class VerificationScheduler {
   private readonly onVerdict?: OnVerdict;
   private readonly leasePool: ResourceLeasePool;
   private readonly requestTimeoutMs: number;
-  private readonly devServerContextResolver?: DevServerContextResolver;
   private readonly now: () => number;
-  private readonly legacyKillSwitch: () => boolean;
   private readonly runbookStatus: (
     projectId: number,
     modality: VerificationModality,
@@ -223,31 +203,14 @@ export class VerificationScheduler {
   private readonly delivery: TerminalDelivery;
 
   /**
-   * The legacy capture engine — dev/static server spawn → backend capture →
-   * deterministic / SSIM / VLM verdict → terminal delivery — owned by
-   * {@link CapturePipeline} (capturePipeline.ts, issue #19 step 7). It shares this
-   * scheduler's inFlight registry and delivery, and is handed the drain/agent
-   * helpers it needs (batch mutex, budget, port parsing) as closures.
-   */
-  private readonly capture: CapturePipeline;
-
-  /**
    * The verification-AGENT engine (redesign §5.4/§5.7) — the phase-0 gates, the
    * slot lease + SDK deployment, terminal settlement, runbook-proof and
    * capability-ledger write-back — owned by {@link AgentEngine} (agentEngine.ts,
-   * issue #19 step 8). Like the capture pipeline it shares this scheduler's
-   * inFlight registry, delivery, lease pool, and the row/path helpers it is
-   * handed as closures; the drain dispatches an agent-stamped row to it.
+   * issue #19 step 8). It shares this scheduler's inFlight registry, delivery,
+   * lease pool, and the row/path helpers it is handed as closures; the drain
+   * dispatches every agent-engine row to it.
    */
   private readonly agent: AgentEngine;
-
-  /**
-   * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
-   * `now()` timestamp the probe ran. A hit within HEALTH_CHECK_MEMO_TTL_MS is reused;
-   * a miss (or an expired entry) re-probes. This is the second selection gate that
-   * makes an unhealthy backend behave exactly like an unregistered one.
-   */
-  private readonly healthMemo = new Map<VisualBackendId, { ok: boolean; at: number }>();
 
   /** True while a drain pass is in flight — coalesces concurrent nudges into one loop. */
   private draining = false;
@@ -256,16 +219,16 @@ export class VerificationScheduler {
 
   /**
    * The AbortController of every CURRENTLY in-flight (running) request, keyed by
-   * requestId. Populated when runChosen starts the detached capture+judge work and
-   * deleted in its finally. This is the handle cancelForRun(runId) / the per-request
-   * timeout reach for to `.abort()` the live capture/judge of a row that is already
-   * leased + running (a pure DB UPDATE alone would NOT stop the in-flight promise).
+   * requestId. Populated when the agent engine starts a row's detached deployment
+   * and deleted in its finally. This is the handle cancelForRun(runId) / the
+   * per-request timeout reach for to `.abort()` the live work of a row that is
+   * already leased + running (a pure DB UPDATE alone would NOT stop the in-flight
+   * promise).
    */
   private readonly inFlight = new Map<string, AbortController>();
 
   constructor(deps: VerificationSchedulerDeps) {
     this.db = deps.db;
-    this.backends = deps.backends;
     this.artifactsDirResolver = deps.artifactsDirResolver;
     this.logger = deps.logger;
     this.config = deps.config ?? VISUAL_VERIFY_DEFAULTS;
@@ -274,13 +237,11 @@ export class VerificationScheduler {
     this.delivery = new TerminalDelivery({ db: this.db, logger: this.logger, onVerdict: this.onVerdict });
     this.leasePool = deps.leasePool ?? new ResourceLeasePool();
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    this.devServerContextResolver = deps.devServerContextResolver;
     this.now = deps.now ?? (() => Date.now());
     this.queuedAge = new QueuedAgeDeadline({
       ceilingMs: deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs,
       now: this.now,
     });
-    this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
     // §3.2: an UNWIRED deployment has no way to know a project proved anything —
     // 'absent' is the honest default, not a placeholder. (Phase 2 wires the real
     // store at index.ts; this default is what legacy tests and a pre-096 DB get.)
@@ -290,25 +251,6 @@ export class VerificationScheduler {
     this.runbookStore = deps.runbookStore;
     this.staleProofFinding = deps.staleProofFinding;
     this.runbookBootstrap = deps.runbookBootstrap;
-    this.capture = new CapturePipeline({
-      judge: deps.judge,
-      logger: this.logger,
-      config: this.config,
-      artifactsDirResolver: this.artifactsDirResolver,
-      requestTimeoutMs: this.requestTimeoutMs,
-      baselineMatchThreshold: deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD,
-      devServerProvider: deps.devServerProvider,
-      staticServerProvider: deps.staticServerProvider,
-      staticHtmlContextResolver: deps.staticHtmlContextResolver,
-      baselinePreDiff: deps.baselinePreDiff,
-      delivery: this.delivery,
-      inFlight: this.inFlight,
-      portFromLease: (name) => this.portFromLease(name),
-      inputDeclaresDevServer: (input) => this.inputDeclaresDevServer(input),
-      acquireBatchMutex: (runId) => this.acquireBatchMutex(runId),
-      isProjectBudgetExhausted: (projectId) => this.isProjectBudgetExhausted(projectId),
-      incrementJudgeCallsUsed: (id) => this.incrementJudgeCallsUsed(id),
-    });
     this.agent = new AgentEngine({
       db: this.db,
       logger: this.logger,
@@ -376,7 +318,7 @@ export class VerificationScheduler {
 
   /**
    * Re-drain rows stranded mid-flight by a PRIOR process. After a crash/restart a
-   * row may be persisted 'leased' or 'running' even though the capture/judge that
+   * row may be persisted 'leased' or 'running' even though the deployment that
    * owned it is gone (its in-memory AbortController, lease, and detached promise all
    * died with the process). These CANNOT resume — the scheduler is brand new and
    * holds no in-flight handle for them — so they are marked 'timeout' (lease already
@@ -397,18 +339,6 @@ export class VerificationScheduler {
    * Returns the number of rows re-drained. Idempotent: a second call finds none.
    */
   async runRecovery(): Promise<number> {
-    // §5.8 kill-switch boot terminalization — read the flag ONCE for this whole
-    // recovery pass (never per-row) and, when active, terminalize every
-    // queued/leased/running row whose RUN is agent-stamped BEFORE the generic
-    // orphan-timeout sweep below runs. Both that sweep and the queued-age sweep
-    // further down are status-guarded to `IN ('queued','leased','running')`
-    // (markTerminal), so a row this step already flipped to 'skipped' simply drops
-    // out of their SELECTs — no row is ever double-terminalized, and a
-    // legacy-stamped row is untouched by this step (isAgentStampedRun returns
-    // false for it, so it falls through to the pre-existing recovery behavior
-    // unchanged).
-    const killSwitchTerminalized = await this.terminalizeAgentRowsOnLegacyKillSwitch(this.legacyKillSwitch());
-
     const rows = this.db
       .prepare(
         `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
@@ -460,55 +390,7 @@ export class VerificationScheduler {
     // enqueue would otherwise nudge). No-op when the queue is empty.
     if (this.hasQueuedRequests()) this.nudge();
 
-    return recovered + expired + replayed + killSwitchTerminalized;
-  }
-
-  /**
-   * §5.8 kill-switch boot terminalization (the missing "boot" half — the NEW-run
-   * stamping half already lives in `workflowRegistry.ts`). When `enabled`, every
-   * row still `queued`/`leased`/`running` whose RUN is stamped `verify_chain:
-   * ['agent']` (isAgentStampedRun) is terminalized 'skipped' through the normal
-   * `markTerminalAndDeliver` chokepoint — never a silent UPDATE — so a lane parked
-   * at `awaiting-verify` behind a now-disabled engine advances with a
-   * non-blocking finding instead of wedging forever. `captureOrigin: 'agent'` is
-   * stamped for the same human-facing provenance reason `expireOverAgeQueued`
-   * stamps it on an agent-stamped expiry. A legacy-stamped row is never selected
-   * by isAgentStampedRun and falls through completely untouched by this step.
-   * `enabled === false` (the default posture) is a pure no-op — byte-identical to
-   * pre-§5.8 recovery. Returns the count terminalized.
-   */
-  private async terminalizeAgentRowsOnLegacyKillSwitch(enabled: boolean): Promise<number> {
-    if (!enabled) return 0;
-    const rows = this.db
-      .prepare(
-        `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
-                chain_json, current_backend, attempt, enqueued_at
-           FROM verification_requests
-          WHERE status IN ('queued', 'leased', 'running')
-          ORDER BY enqueued_at ASC, id ASC`,
-      )
-      .all() as VerificationRequestRow[];
-    let terminalized = 0;
-    for (const row of rows) {
-      if (!this.isAgentEngineRequest(row)) continue;
-      const input = parseRequestInput(row.deliverable_json) ?? undefined;
-      await this.delivery.markTerminalAndDeliver(
-        row,
-        'skipped',
-        { error: 'agent engine disabled (CYBOFLOW_VERIFY_LEGACY)', captureOrigin: 'agent' },
-        undefined,
-        [],
-        input,
-      );
-      terminalized += 1;
-    }
-    if (terminalized > 0) {
-      this.logger?.warn(
-        '[VerificationScheduler] terminalized in-flight agent-chain requests — CYBOFLOW_VERIFY_LEGACY kill switch active',
-        { terminalized },
-      );
-    }
-    return terminalized;
+    return recovered + expired + replayed;
   }
 
   // --------------------------------------------------------------------------
@@ -518,8 +400,8 @@ export class VerificationScheduler {
   /**
    * Insert ONE verification request as 'queued' and return its id immediately.
    * Called by the mcp-request-verification handler (P6); the lane never blocks on
-   * the outcome. The chain is stamped from chain_json (resolved live chain); the
-   * scheduler picks the cheapest usable backend within it at drain time.
+   * the outcome. `chain_json` carries the request's own engine selector when it
+   * has one (see {@link VerificationScheduler.isAgentEngineRequest}).
    *
    * DUAL-WRITE (redesign §5.2/§5.13, migration 078): `deliverable_json` is ALWAYS
    * written from `req.input` exactly as before — every legacy reader (recovery
@@ -547,14 +429,11 @@ export class VerificationScheduler {
     type: VerificationType;
     input: VerificationRequestInput;
     /**
-     * The backend chain persisted to `chain_json`. Typed `VerifyChainEntry[]`
-     * (not `VisualBackendId[]`) because the single-member `['agent']` ENGINE
-     * SELECTOR is a legal value here: the `__quick__` chat sentinel resolves its
-     * posture at call time and writes the resolved chain verbatim, which is the
-     * first rung of {@link VerificationScheduler.isAgentEngineRequest}. Flow runs
-     * still pass the host-capability intersection (`[]` under the agent engine).
-     * The legacy waterfall reads this column back through `parseChain`, which
-     * narrows to `VisualBackendId[]` and drops the 'agent' member.
+     * The engine chain persisted to `chain_json`. The `__quick__` chat sentinel
+     * resolves its posture at call time and writes the resolved `['agent']`
+     * selector verbatim, which is the first rung of
+     * {@link VerificationScheduler.isAgentEngineRequest}. Flow runs pass `[]`:
+     * their engine is the RUN stamp, the second rung.
      */
     chain: VerifyChainEntry[];
     /** The composed task (§5.1), when this request was enqueued via the dual-format contract. Absent ⇒ task_json stays NULL. */
@@ -961,7 +840,7 @@ export class VerificationScheduler {
 
   /**
    * The screenshot basenames THIS request's agent report recorded, or `null` when
-   * the row carries no `report_json` at all (the legacy capture path, or a request
+   * the row carries no `report_json` at all (a pre-agent-engine row, or a request
    * that never reached a terminal). Shares the extraction shape with
    * {@link deriveReplayFileNames}; kept separate because that one falls back to the
    * verdict's `judgedFileNames` for the artifact merge, whereas a caller being told
@@ -1024,25 +903,24 @@ export class VerificationScheduler {
   }
 
   // --------------------------------------------------------------------------
-  // drain — FIFO over 'queued' rows; lease scarce resources, capture + judge
+  // drain — FIFO over 'queued' rows; hand each to the agent engine
   // --------------------------------------------------------------------------
 
   /**
    * One drain pass. SELECT all 'queued' rows ordered (enqueued_at, id) for fair
-   * round-robin. For each row we SYNCHRONOUSLY (within this loop, no await on the
-   * capture itself) pick the cheapest backend whose lease is free, acquire it, and
-   * transition the row 'leased'→'running'; the actual capture → judge → terminal
-   * verdict runs as a DETACHED promise that release()s its lease in finally. This
-   * is what makes the doctrine hold: holding the screen lease synchronously means
-   * the very next row's lease probe sees it busy (SERIALIZED), while two null-lease
-   * rows each start their detached work back-to-back (PARALLEL, under the OS/CPU
-   * cap). The lease-selection step is single-threaded in this loop, so the
-   * check-then-acquire on the shared mutex has no intra-scheduler race.
+   * round-robin. For each row the agent engine SYNCHRONOUSLY (within this loop, no
+   * await on the deployment itself) runs its gates, acquires the leases the row
+   * needs, and transitions it 'leased'→'running'; the actual deployment → terminal
+   * verdict runs as a DETACHED promise that release()s its leases in finally. This
+   * is what makes the doctrine hold: holding a count-1 lease synchronously means
+   * the very next row's lease probe sees it busy (SERIALIZED), while rows needing
+   * no shared lease each start their detached work back-to-back (PARALLEL). The
+   * lease-selection step is single-threaded in this loop, so the check-then-acquire
+   * on the shared mutex has no intra-scheduler race.
    *
-   * If NO usable backend's lease is free the row stays 'queued' (the LANE never
-   * blocks — retried next drain). If the chain is empty / no listed backend is in
-   * the registry → 'skipped' (a missing precondition is SKIPPED, never failed). We
-   * await all detached captures before the pass returns so a rescan pass sees a
+   * If a needed lease is held the row stays 'queued' (the LANE never blocks —
+   * retried next drain). A missing precondition resolves 'skipped', never failed.
+   * We await all detached work before the pass returns so a rescan pass sees a
    * settled world (freed leases) rather than re-racing in-flight work.
    */
   async drain(): Promise<void> {
@@ -1176,19 +1054,14 @@ export class VerificationScheduler {
 
   /**
    * Process ONE queued row up to the SYNCHRONOUS lease + status transition, then
-   * return the DETACHED capture→judge→terminal work as a promise (or null when the
-   * row settled inline — skip — or could not lease — left queued). The lease is
-   * acquired and the row marked 'leased'→'running' BEFORE returning, so when the
-   * drain loop moves to the next row a held single-screen lease is already visible
-   * as busy (serialization), while a null-lease row imposes no such hold (the next
-   * null-lease row starts immediately → parallel).
+   * return the DETACHED deployment→terminal work as a promise (or null when the
+   * row settled inline — skip — or could not lease — left queued).
    *
    * Returns a { work } holder (NOT the bare promise — see drain()):
    *   - { work: null }          → settled inline (skipped) OR no free lease (queued).
-   *   - { work: Promise<void> } → the in-flight capture work (drain awaits all).
+   *   - { work: Promise<void> } → the in-flight deployment (drain awaits all).
    */
   private async processRow(row: VerificationRequestRow): Promise<{ work: Promise<void> | null }> {
-    const type = row.verify_type as VerificationType;
     const parsed = parseRequestInput(row.deliverable_json);
     if (!parsed) {
       await this.delivery.markTerminalAndDeliver(
@@ -1201,98 +1074,30 @@ export class VerificationScheduler {
       return { work: null };
     }
 
-    // DISPATCH ON THE ENGINE KEY (redesign §5.8): an agent-engine request routes
-    // to the VerificationAgentRunner instead of the capture-backend + VLM
-    // waterfall below. `isAgentEngineRequest` reads the request's own
-    // `chain_json` first (the `__quick__` late-binding case, where posture is
-    // resolved at call time and the run stamp cannot carry it) and falls back to
-    // the RUN stamp for everything else — which is what every flow run hits, since
-    // its request's chain_json is always the empty intersection. A legacy stamp
-    // (or an unreadable one — fail-soft) falls through byte-identically.
+    // DISPATCH ON THE ENGINE KEY (redesign §5.8). `isAgentEngineRequest` reads the
+    // request's own `chain_json` first (the `__quick__` late-binding case, where
+    // posture is resolved at call time and the run stamp cannot carry it) and
+    // falls back to the RUN stamp for everything else — which is what every flow
+    // run hits, since its request's chain_json is `[]`.
     if (this.isAgentEngineRequest(row)) {
       return this.agent.processAgentRow(row, parsed);
     }
 
-    // ROOT-CAUSE FIX (S8): hydrate the request input from the run's verify.json
-    // deliverable recipe BEFORE lease selection, so a startable deliverable's
-    // `start` is on `input` by the time the Rung-1 Playwright backend's
-    // requiredLease(input) runs — that is the SINGLE signal it keys off to ask for a
-    // `verify:port` lease (inputDeclaresDevServer). Without this the resolver was
-    // only read INSIDE maybeSpawnDevServer (AFTER the lease was chosen), so input
-    // never carried `start`, the backend never leased a port, and no dev server ever
-    // spawned — the dev-build verification path was inert. Resolve ONCE here and
-    // thread the result into maybeSpawnDevServer so verify.json is loaded a single
-    // time per request. Fail-soft: a resolver throw / no provider / no matching
-    // deliverable leaves the resolution null and input unhydrated (no `start` ⇒ no
-    // port lease ⇒ no dev server ⇒ the static url/htmlPath capture path runs exactly
-    // as before this layer).
-    const resolved = await this.resolveDeliverableContext(row, parsed);
-    const input = this.hydrateInput(parsed, resolved?.deliverable);
-
-    const chain = this.parseChain(row.chain_json);
-    // Select the candidate backends through the three ordered gates (registry →
-    // health → dev-server-need), cheapest rung first. An empty result is a MISSING
-    // PRECONDITION and resolves 'skipped' (never a fabricated FAIL) with a reason.
-    const { candidates, skipReason } = await this.selectCandidates(chain, input);
-    if (candidates.length === 0) {
-      // Empty/absent/unhealthy chain OR a dev-server input with no port-capable
-      // backend — a missing precondition. SKIP, never fail (a missing TCC grant /
-      // uninstalled chromium / static-only chain for a startable deliverable must
-      // not wedge a sprint with a blocking finding + merge-gate loopbacks).
-      await this.delivery.markTerminalAndDeliver(
-        row,
-        'skipped',
-        { error: skipReason ?? 'no usable backend' },
-        undefined,
-        [],
-        input,
-      );
-      return { work: null };
-    }
-
-    // Pick the cheapest backend whose required lease is currently free.
-    let chosen: VisualBackend | null = null;
-    let lease: LeaseHandle | null = null;
-    for (const backend of candidates) {
-      const acquired = await this.acquireLeaseFor(backend, input);
-      if (acquired) {
-        chosen = backend;
-        lease = acquired;
-        break;
-      }
-    }
-
-    if (!chosen || !lease) {
-      // Every usable backend's lease is held. Leave 'queued' — the LANE does not
-      // block; we retry on the next drain.
-      this.logger?.debug('[VerificationScheduler] no free lease; leaving queued', {
-        requestId: row.id,
-        chain: candidates.map((b) => b.id),
-      });
-      return { work: null };
-    }
-
-    // Transition leased→running SYNCHRONOUSLY (the lease is already held), then
-    // detach the capture work so the drain loop proceeds to the next row at once.
-    //
-    // CANCEL-SAFE TRANSITION (R1 #3a): markLeased is status-guarded to
-    // `status = 'queued'`. If cancelForRun swept this row to 'timeout' during the
-    // await windows above (deliverable-context resolve / lease acquire), the guarded
-    // UPDATE changes 0 rows — the row is no longer ours to run. Release the
-    // just-acquired lease and return WITHOUT capturing/judging (which would spend a
-    // paid VLM call and clobber the canceled status). The row keeps its canceled
-    // 'timeout'; no delivery fires (nothing to enrich / no lane to advance).
-    const leasedChanges = this.markLeased(row.id, chosen.id);
-    if (leasedChanges === 0) {
-      lease.release();
-      this.logger?.debug('[VerificationScheduler] row no longer queued at lease time; releasing lease, skipping capture', {
-        requestId: row.id,
-        backend: chosen.id,
-      });
-      return { work: null };
-    }
-    this.markRunning(row.id, chosen.id);
-    return { work: this.capture.runChosen(row, type, input, chosen, lease, resolved) };
+    // Anything else belongs to the retired capture-backend + VLM engine: a run
+    // stamped with a legacy backend chain before the agent engine became the only
+    // one, or a row whose stamp is unreadable. Nothing can run it any more, so it
+    // is terminalized 'skipped' through the normal delivery path — never left
+    // queued, where it would strand a lane parked at awaiting-verify until the
+    // queued-age deadline.
+    await this.delivery.markTerminalAndDeliver(
+      row,
+      'skipped',
+      { error: RETIRED_ENGINE_SKIP_REASON },
+      undefined,
+      [],
+      parsed,
+    );
+    return { work: null };
   }
 
   // --------------------------------------------------------------------------
@@ -1304,8 +1109,7 @@ export class VerificationScheduler {
 
   /**
    * True when a persisted chain JSON is exactly `['agent']` (the agent engine,
-   * §5.8). Parsed defensively — accepting the 'agent' member the legacy
-   * VisualBackendId parse would drop — and fail-soft to false (legacy path) on
+   * §5.8). Parsed defensively — fail-soft to false (the retired-engine skip) on
    * malformed JSON. Shared by the run-stamp read and the request-row read so both
    * halves of the dispatch key agree on what "agent" looks like on the wire.
    */
@@ -1331,20 +1135,13 @@ export class VerificationScheduler {
    *      path — see visualVerificationResolver.ts:5-7), so the run stamp cannot
    *      carry it. A request row is never re-enqueued, so this is every bit as
    *      immutable as the run stamp it stands in for.
-   *   2. Otherwise the RUN stamp (`isAgentStampedRun`) — the original §5.8 key,
-   *      unchanged.
+   *   2. Otherwise the RUN stamp (`isAgentStampedRun`) — the original §5.8 key.
+   *      A flow run's request persists `chain_json: '[]'`, so rung 1 misses and
+   *      this rung decides.
    *
-   * FLOW RUNS ARE BYTE-IDENTICAL under this change. An agent-stamped flow run's
-   * request already persists `chain_json: '[]'`, because the MCP handler
-   * intersects `FALLBACK_CHAINS[type]` with a chain narrowed to `VisualBackendId[]`
-   * — and 'agent' is not one, so the intersection is always empty. Rung 1 misses,
-   * rung 2 decides exactly as before.
-   *
-   * Every consumer of the key goes through THIS method — drain dispatch, the
-   * `CYBOFLOW_VERIFY_LEGACY` boot sweep, and the queued-age expiry's provenance
-   * stamp — so a quick request is swept and attributed with the same provenance
-   * as a flow run's rather than being stranded by a sweep that only knew about
-   * the run stamp.
+   * Every consumer of the key goes through THIS method — drain dispatch and the
+   * queued-age expiry's provenance stamp — so a quick request is attributed with
+   * the same provenance as a flow run's.
    */
   private isAgentEngineRequest(row: { run_id: string; chain_json: string | null }): boolean {
     if (this.chainJsonIsAgent(row.chain_json)) return true;
@@ -1353,8 +1150,8 @@ export class VerificationScheduler {
 
   /**
    * True when the row's RUN is stamped `verify_chain: ['agent']` (the agent
-   * engine, §5.8). Fail-soft to false (legacy path) when workflow_runs / the
-   * column is unavailable (a minimal test DB with only verification_requests).
+   * engine, §5.8). Fail-soft to false (the retired-engine skip) when
+   * workflow_runs / the column is unavailable.
    * Read fresh per row from the injected db; the stamp is immutable per run, so
    * there is no staleness concern.
    *
@@ -1668,309 +1465,12 @@ export class VerificationScheduler {
   }
 
   /**
-   * R2 — the pure, ordered backend-selection guard. Given the request's stamped
-   * chain + its HYDRATED input, return the candidate backends (cheapest rung first)
-   * the scheduler may lease, applying three gates IN ORDER:
-   *
-   *  (1) REGISTRY — only backends present in the injected registry survive (a
-   *      host-dep-unavailable backend is simply absent). Cheapest rung first.
-   *  (2) HEALTH (R2 #2) — only backends whose memoized `healthCheck()` currently
-   *      reports healthy survive. This is the documented SECOND gate: an unhealthy
-   *      backend (declined peekaboo TCC / uninstalled chromium) is treated EXACTLY
-   *      like an unregistered one, so its capture is never attempted (a blocking
-   *      FAIL for an environment problem is turned into a clean SKIP instead).
-   *  (3) DEV-SERVER (R2 #1) — when the hydrated input declares a dev server
-   *      (non-empty `start`), the request CANNOT be satisfied by a backend that
-   *      cannot host one: restrict to backends whose `requiredLease(input)` is a
-   *      port lease (the Rung-1 Playwright path that pairs with the scheduler-owned
-   *      dev server). Otherwise capturePage (rung 0, null lease — first in the
-   *      static/responsive chains) would capture the deliverable's `url` against a
-   *      port NOTHING listens on → ERR_CONNECTION_REFUSED → a false FAIL. For a
-   *      STATIC input (no `start`) the chain is left untouched, so capturePage stays
-   *      first and the fast path is byte-identical.
-   *
-   * When a gate empties the chain, `candidates` is `[]` and `skipReason` explains
-   * which precondition is missing — the caller resolves the request 'skipped'
-   * (never 'failed'), matching the existing empty-chain SKIP semantics.
-   */
-  private async selectCandidates(
-    chain: VisualBackendId[],
-    input: VerificationRequestInput,
-  ): Promise<{ candidates: VisualBackend[]; skipReason: string | null }> {
-    if (chain.length === 0) {
-      return { candidates: [], skipReason: 'empty chain' };
-    }
-    // (1) REGISTRY — present backends, cheapest rung first.
-    const registered = chain
-      .map((id) => this.backends[id])
-      .filter((b): b is VisualBackend => b !== undefined)
-      .sort((a, b) => a.rung - b.rung);
-    if (registered.length === 0) {
-      return { candidates: [], skipReason: 'no listed backend available' };
-    }
-    // (2) HEALTH — drop any backend whose memoized probe is unhealthy.
-    const healthy: VisualBackend[] = [];
-    for (const backend of registered) {
-      if (await this.isBackendHealthy(backend)) {
-        healthy.push(backend);
-      }
-    }
-    if (healthy.length === 0) {
-      return { candidates: [], skipReason: 'no healthy backend available' };
-    }
-    // (3) DEV-SERVER — a startable deliverable needs a port-capable backend.
-    if (this.inputDeclaresDevServer(input)) {
-      const portCapable = healthy.filter((b) => this.leaseIsPort(b.requiredLease(input)));
-      if (portCapable.length === 0) {
-        return {
-          candidates: [],
-          skipReason: 'dev server required but no port-capable backend available',
-        };
-      }
-      return { candidates: portCapable, skipReason: null };
-    }
-    return { candidates: healthy, skipReason: null };
-  }
-
-  /**
-   * R2 #2 — memoized health probe. Returns the backend's cached healthCheck result
-   * when it is within HEALTH_CHECK_MEMO_TTL_MS of the last probe, else re-probes and
-   * caches. Fail-soft: a `healthCheck()` that THROWS/rejects counts as UNHEALTHY (the
-   * backend is dropped from selection, exactly like an unregistered one) and is logged
-   * at debug — a transient probe failure must never surface as a request FAIL.
-   */
-  private async isBackendHealthy(backend: VisualBackend): Promise<boolean> {
-    const nowMs = this.now();
-    const cached = this.healthMemo.get(backend.id);
-    if (cached && nowMs - cached.at < HEALTH_CHECK_MEMO_TTL_MS) {
-      return cached.ok;
-    }
-    let ok: boolean;
-    try {
-      ok = await backend.healthCheck();
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] backend healthCheck threw; treating as unhealthy', {
-        backend: backend.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      ok = false;
-    }
-    this.healthMemo.set(backend.id, { ok, at: nowMs });
-    return ok;
-  }
-
-  /**
-   * True when the request's hydrated input declares a scheduler-owned dev server —
-   * i.e. carries a non-empty `start` command. This is the SAME signal the Rung-1
-   * Playwright backend's requiredLease reads; the scheduler mirrors it (it cannot
-   * import the service-side helper — standalone-typecheck invariant) so backend
-   * selection and lease acquisition agree.
-   */
-  private inputDeclaresDevServer(input: VerificationRequestInput): boolean {
-    return typeof input.start === 'string' && input.start.trim().length > 0;
-  }
-
-  /**
-   * True when a backend's requiredLease name is a dev-server PORT lease — either the
-   * VERIFY_PORT_ANY sentinel ("any free pooled port") or a concrete 'verify:port:<p>'.
-   * A port lease is the only kind that can host the scheduler-owned dev server, so it
-   * is the discriminator the dev-server selection gate keys off. A null lease (rung 0)
-   * or the 'verify:screen'/'verify:sim:' leases are NOT port leases.
-   */
-  private leaseIsPort(lease: string | null): boolean {
-    return lease === VERIFY_PORT_ANY || (lease !== null && lease.startsWith('verify:port:'));
-  }
-
-  /**
-   * S8 — resolve the run's verify.json dev-server context ONCE per request (the
-   * project worktree cwd + the matching deliverable recipe), via the injected
-   * devServerContextResolver. The resolution is reused both for input hydration
-   * (BEFORE lease selection) and for maybeSpawnDevServer (AFTER the port lease), so
-   * verify.json is loaded a SINGLE time per request — no double fs read.
-   *
-   * Returns null when there is nothing to resolve (no resolver injected / no
-   * matching deliverable / no worktree) OR when the resolver throws — every null
-   * case fail-softs to the unhydrated, static-capture path. NEVER throws.
-   */
-  private async resolveDeliverableContext(
-    row: VerificationRequestRow,
-    input: VerificationRequestInput,
-  ): Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null> {
-    if (!this.devServerContextResolver) return null;
-    try {
-      return await this.devServerContextResolver({
-        runId: row.run_id,
-        projectId: row.project_id,
-        input,
-      });
-    } catch (err) {
-      this.logger?.debug('[VerificationScheduler] deliverable context resolve failed; leaving input unhydrated', {
-        requestId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  }
-
-  /**
-   * S8 — merge a matched verify.json deliverable's recipe into the request input,
-   * producing the HYDRATED input fed to lease selection + capture. AGENT-PROVIDED
-   * VALUES WIN: a field already present (non-empty) on the request input is left
-   * untouched; only an absent/empty field is filled from the deliverable. No
-   * deliverable (resolver absent / no match) ⇒ input returned unchanged
-   * (referentially identical), so a non-dev-server request is byte-identical to
-   * before this layer.
-   *
-   * Every deliverable field with a VerificationRequestInput counterpart is hydrated
-   * (each only when the agent left it absent/empty):
-   *   - `start` — the SOLE signal the Rung-1 Playwright backend's requiredLease(input)
-   *     reads to ask for a `verify:port` lease (and the dev-server selection gate). The
-   *     deliverable's build/readyWhen stay on the `deliverable` (the provider reads
-   *     them off its `config` arg in maybeSpawnDevServer) — they are NOT input fields.
-   *   - `assertions` — explicit deterministic checks (decision #3).
-   *   - `interactions` — the ordered DOM steps for interactive-web-behavior. WITHOUT
-   *     this the Playwright backend screenshots the PRE-interaction page while the VLM
-   *     judges against the post-interaction intent → false FAILs + loopbacks.
-   *   - `viewports` — the responsive widths for responsive-multi-viewport.
-   *   - `baselineKey` — the golden-baseline selector for the SSIM pre-diff, falling
-   *     back to the deliverable `id` (the STABLE cross-run key that makes
-   *     accept-as-baseline round-trippable). Without hydration a verify.json baseline
-   *     never engages the SSIM pre-diff.
-   *   - `htmlPath` (S9) — a STATIC deliverable (built html, no running url, no dev
-   *     server) becomes first-class. Filled ONLY when the request declares neither a
-   *     `url` (a running server the agent pointed at) NOR an `htmlPath` (an explicit
-   *     target), so an agent-passed target is never shadowed. This gives the S9 static
-   *     server an entry path to stand up; `staticRoot` does NOT ride the input (it is a
-   *     serve-time concern flowing via resolvedContext at spawn) — only the entry path
-   *     belongs on the input the backend captures.
-   */
-  private hydrateInput(
-    input: VerificationRequestInput,
-    deliverable: DeliverableVerifyConfig | undefined,
-  ): VerificationRequestInput {
-    if (!deliverable) return input;
-    const hydrated: VerificationRequestInput = { ...input };
-    let changed = false;
-    // `start` — the signal the Rung-1 Playwright backend's requiredLease reads.
-    if ((hydrated.start === undefined || hydrated.start.trim().length === 0) && deliverable.start) {
-      hydrated.start = deliverable.start;
-      changed = true;
-    }
-    // `htmlPath` (S9) — a static deliverable's built html entry. Fill ONLY when the
-    // request declares neither a running `url` nor an explicit `htmlPath`, so an
-    // agent-passed target is never clobbered. staticRoot deliberately does NOT ride the
-    // input (serve-time concern, threaded via resolvedContext at S9 spawn time).
-    const urlAbsent = hydrated.url === undefined || hydrated.url.trim().length === 0;
-    const htmlPathAbsent = hydrated.htmlPath === undefined || hydrated.htmlPath.trim().length === 0;
-    if (urlAbsent && htmlPathAbsent && deliverable.htmlPath && deliverable.htmlPath.trim().length > 0) {
-      hydrated.htmlPath = deliverable.htmlPath;
-      changed = true;
-    }
-    // `assertions` — explicit deterministic checks (decision #3). Only fill when the
-    // agent passed none, so an inline assertion list is never clobbered.
-    if (
-      (hydrated.assertions === undefined || hydrated.assertions.length === 0) &&
-      deliverable.assertions &&
-      deliverable.assertions.length > 0
-    ) {
-      hydrated.assertions = deliverable.assertions;
-      changed = true;
-    }
-    // `interactions` — ordered DOM steps for interactive-web-behavior. Only fill when
-    // the agent passed none, so an inline interaction list is never clobbered.
-    if (
-      (hydrated.interactions === undefined || hydrated.interactions.length === 0) &&
-      deliverable.interactions &&
-      deliverable.interactions.length > 0
-    ) {
-      hydrated.interactions = deliverable.interactions;
-      changed = true;
-    }
-    // `viewports` — responsive widths. Only fill when the agent passed none.
-    if (
-      (hydrated.viewports === undefined || hydrated.viewports.length === 0) &&
-      deliverable.viewports &&
-      deliverable.viewports.length > 0
-    ) {
-      hydrated.viewports = deliverable.viewports;
-      changed = true;
-    }
-    // `baselineKey` — golden-baseline selector for the SSIM pre-diff. Fill only when
-    // the agent left it absent; fall back to the deliverable id (the STABLE cross-run
-    // key that makes accept-as-baseline round-trippable — R7 builds on this).
-    if (hydrated.baselineKey === undefined || hydrated.baselineKey.trim().length === 0) {
-      const key = deliverable.baselineKey ?? deliverable.id;
-      if (typeof key === 'string' && key.trim().length > 0) {
-        hydrated.baselineKey = key;
-        changed = true;
-      }
-    }
-    return changed ? hydrated : input;
-  }
-
-  /**
-   * Acquire the lease a backend needs for this request, or null when it is held.
-   * A null requiredLease (rung 0 / rung 1 sans dev server / judge) returns the
-   * always-available no-lease handle. The single-display lease is a count-1
-   * acquire; a 'verify:port:'/'verify:sim:' name is probed against the configured
-   * pool so a busy pool returns null (leave queued) rather than spinning.
-   */
-  private async acquireLeaseFor(
-    backend: VisualBackend,
-    input: VerificationRequestInput,
-  ): Promise<LeaseHandle | null> {
-    const required = backend.requiredLease(input);
-    if (required === null) {
-      return this.leasePool.noLease();
-    }
-    // A pooled lease (port/sim): probe every member of the configured pool and
-    // take the first free slot, regardless of which exact name the backend named.
-    const poolCandidates = this.poolCandidatesFor(required);
-    if (poolCandidates) {
-      return this.leasePool.tryAcquireOneOf(poolCandidates);
-    }
-    // A singleton lease (e.g. 'verify:screen'): exact-name count-1 probe.
-    return this.leasePool.tryAcquire(required);
-  }
-
-  /**
-   * Map a backend's requiredLease name to the configured pool of candidate slots,
-   * or null when it is a singleton (non-pooled) lease. A 'verify:port:*' required
-   * name expands to every configured dev port; 'verify:sim:*' to every configured
-   * simulator.
-   *
-   * The VERIFY_PORT_ANY sentinel ("any free pooled port") expands PURELY from the
-   * configured pool — it is NEVER appended as an extra candidate. Appending it (or
-   * any synthetic ':0' name) would mint a phantom always-free count-1 slot that
-   * survives pool exhaustion, defeating the dev-server concurrency cap and yielding
-   * port 0 (portFromLease(sentinel) → null) under contention. A backend that names a
-   * CONCRETE 'verify:port:<p>' is included so it still contends within the pool, but
-   * we guard against the sentinel/':0' phantom names explicitly.
-   */
-  private poolCandidatesFor(required: string): readonly string[] | null {
-    if (required === VERIFY_PORT_ANY || required.startsWith('verify:port:')) {
-      const fromPool = this.config.devServerPorts.map(verifyPortLease);
-      // Any-port sentinel + any non-real ':0' phantom: expand from the pool ONLY.
-      if (required === VERIFY_PORT_ANY || this.portFromLease(required) === null) {
-        return fromPool;
-      }
-      return fromPool.includes(required) ? fromPool : [...fromPool, required];
-    }
-    if (required.startsWith('verify:sim:')) {
-      const fromPool = this.config.simulatorDevices.map(verifySimLease);
-      return fromPool.includes(required) ? fromPool : [...fromPool, required];
-    }
-    return null;
-  }
-
-  /**
    * Read the run's `workflow_runs.batch_id` via the injected DatabaseLike. Returns
    * the trimmed non-empty batch id, or null for a non-batch run / when the column
    * or table is unavailable (e.g. a minimal test DB with only
    * verification_requests). The scheduler never imports better-sqlite3/electron —
    * this is a plain SELECT on the same injected db. Fail-soft: a thrown query
-   * (missing table) degrades to "no batch", so a non-batch capture path is
-   * byte-identical to before this layer.
+   * (missing table) degrades to "no batch".
    */
   private batchIdForRun(runId: string): string | null {
     try {
@@ -1994,9 +1494,9 @@ export class VerificationScheduler {
    * Acquire the batch worktree-sync mutex (`sprint-verify-<batchId>`) for a batched
    * run, or null for a non-batch run (no batch_id). BLOCKING count-1 over the SAME
    * shared mutex the port/screen leases use (leasePool.sharedMutex) so it composes
-   * app-wide and serializes concurrent captures on the same batchId. Called in
-   * runChosen AFTER the dev-server/port lease and BEFORE backend.capture; released
-   * in the SAME finally as the other leases. The returned handle is idempotent on
+   * app-wide and serializes concurrent deployments on the same batchId. Called by
+   * the agent engine after its slot lease and before the deployment; released in
+   * the SAME finally as the other leases. The returned handle is idempotent on
    * release (NO_LEASE-style), and null for a non-batch run so the finally guard has
    * nothing to release.
    */
@@ -2005,15 +1505,12 @@ export class VerificationScheduler {
     if (!batchId) return null;
     const name = sprintVerifyBatchLease(batchId);
     // Count-1 BLOCKING acquire (NOT the non-blocking pool probe): the second
-    // concurrent capture on this batchId waits here until the first releases.
+    // concurrent deployment on this batchId waits here until the first releases.
     //
-    // Timeout MUST exceed how long a holder can legitimately hold this mutex. A
-    // holder keeps it for its WHOLE capture+judge lifetime, bounded by
-    // requestTimeoutMs (default 5 min) — far longer than the Mutex 30s default,
-    // which would THROW 'Mutex timeout' on any capture exceeding 30s and land in
-    // runChosen's catch as a spurious 'failed', defeating the very serialization
-    // this slice provides. A waiter can also stack behind several concurrent
-    // batched holders (rung-0 captures run in parallel), so size the bound as
+    // Timeout MUST exceed how long a holder can legitimately hold this mutex —
+    // far longer than the Mutex 30s default, which would THROW 'Mutex timeout' and
+    // land as a spurious 'failed', defeating the very serialization this provides.
+    // A waiter can also stack behind several batched holders, so size the bound as
     // requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS — generous enough that a
     // genuinely serialized waiter WAITS rather than fails.
     const acquireTimeoutMs = this.requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS;
@@ -2039,15 +1536,12 @@ export class VerificationScheduler {
    * SUM(verification_requests.judge_calls_used) for the project via the injected
    * DatabaseLike. Returns true only when a budget is set AND the cumulative used
    * count is at/above it. Fail-soft: a thrown query (missing column / minimal test
-   * DB) degrades to "not exhausted" so a budget-less deployment is byte-identical to
-   * before this layer (the per-run cap still applies upstream at the capped judge).
+   * DB) degrades to "not exhausted".
    *
-   * ONE counter, TWO engines (redesign §5.8): `maxPerRunJudgeCalls` /
-   * `visual_verify_budget_calls` generalized from a VLM-judge-call cap into a
-   * per-run VERIFICATION budget — this same check gates a verification-AGENT
-   * deployment on the default v1 engine (called from runAgentChosen) exactly as
-   * it gates a VlmJudge call on the legacy engine (called below, from
-   * runChosen). The column/field names predate the redesign and are unchanged.
+   * `visual_verify_budget_calls` / `judge_calls_used` count verification-AGENT
+   * deployments (the agent engine calls this before each one). The column names
+   * predate the agent engine — they once counted VLM judge calls — and are
+   * unchanged.
    */
   private isProjectBudgetExhausted(projectId: number): boolean {
     try {
@@ -2078,10 +1572,8 @@ export class VerificationScheduler {
    * markTerminal — not a router-owned table, so it stays within the no-direct-write
    * rules. Fail-soft (a minimal test DB without the column degrades silently).
    *
-   * Despite the name, this counts a verification-AGENT deployment (the default
-   * v1 engine) exactly as it counts a legacy VlmJudge call — one shared budget
-   * counter across both engines (redesign §5.8); the column name predates the
-   * redesign and is unchanged.
+   * Despite the name, this counts a verification-AGENT deployment; the column
+   * name predates the agent engine and is unchanged.
    */
   private incrementJudgeCallsUsed(id: string): void {
     try {
@@ -2109,14 +1601,14 @@ export class VerificationScheduler {
 
   /**
    * Mark every non-terminal (queued/leased/running) request for a run as
-   * 'timeout' (canceled) AND abort any of its in-flight captures/judges. Called on
+   * 'timeout' (canceled) AND abort any of its in-flight deployments. Called on
    * run cancel / teardown (cancelRunHandler) so a paused or aborted run leaves no
-   * orphaned requests for the drain to pick up AND no detached capture/judge promise
-   * still burning a lease / a vision call.
+   * orphaned requests for the drain to pick up AND no detached deployment still
+   * burning a lease.
    *
    * Order matters: ABORT the live controllers FIRST, then UPDATE. The abort makes
-   * each in-flight runChosen see `signal.aborted` and unwind to its own 'timeout'
-   * write (or, for an abort-unaware backend, finish and release its lease); this
+   * each in-flight deployment see `signal.aborted` and unwind to its own 'timeout'
+   * write; this
    * UPDATE is the authoritative sweep that also catches QUEUED rows (never started,
    * so not in inFlight) and any row whose detached promise has not yet reached its
    * terminal write. Already-terminal rows are untouched. Returns rows swept here.
@@ -2142,7 +1634,7 @@ export class VerificationScheduler {
     // (2) Authoritative sweep: mark every non-terminal request 'timeout'. This is
     // ALSO what handles queued rows (never in inFlight) and any leased/running row
     // whose detached unwind has not yet written its own terminal status. A row whose
-    // runChosen wins the race and writes 'timeout' first is simply re-stamped here
+    // own unwind wins the race and writes 'timeout' first is simply re-stamped here
     // with the same status (the WHERE drops it once terminal on the next observation).
     const res = this.db
       .prepare(
@@ -2160,54 +1652,4 @@ export class VerificationScheduler {
     }
     return res.changes;
   }
-
-  // --------------------------------------------------------------------------
-  // DB write helpers (status-guarded; never a direct router-table write)
-  // --------------------------------------------------------------------------
-
-  /**
-   * queued → leased (records the chosen backend + leased_at). Returns the UPDATE's
-   * .changes: 0 means the row was no longer 'queued' (cancelForRun swept it to
-   * 'timeout' during processRow's await windows), so the caller must release the
-   * just-acquired lease and NOT run capture/judge (R1 #3a).
-   */
-  private markLeased(id: string, backend: VisualBackendId): number {
-    return this.db
-      .prepare(
-        `UPDATE verification_requests
-            SET status = 'leased', current_backend = ?, leased_at = ?
-          WHERE id = ? AND status = 'queued'`,
-      )
-      .run(backend, new Date().toISOString(), id).changes;
-  }
-
-  /** leased → running. Returns the UPDATE's .changes. */
-  private markRunning(id: string, backend: VisualBackendId): number {
-    return this.db
-      .prepare(
-        `UPDATE verification_requests
-            SET status = 'running', current_backend = ?
-          WHERE id = ? AND status = 'leased'`,
-      )
-      .run(backend, id).changes;
-  }
-
-  // --------------------------------------------------------------------------
-  // Parsing helpers
-  // --------------------------------------------------------------------------
-
-  /** Parse chain_json into a VisualBackendId[]; empty array on null / malformed. */
-  private parseChain(json: string | null): VisualBackendId[] {
-    if (!json) return [];
-    try {
-      const parsed: unknown = JSON.parse(json);
-      if (Array.isArray(parsed)) {
-        return parsed.filter((x): x is VisualBackendId => typeof x === 'string');
-      }
-      return [];
-    } catch {
-      return [];
-    }
-  }
 }
-

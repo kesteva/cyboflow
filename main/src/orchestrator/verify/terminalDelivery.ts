@@ -113,7 +113,6 @@ export class TerminalDelivery {
       .prepare(
         `UPDATE verification_requests
             SET status = ?,
-                current_backend = COALESCE(?, current_backend),
                 verdict_json = ?,
                 report_json = COALESCE(?, report_json),
                 error_message = ?,
@@ -124,11 +123,11 @@ export class TerminalDelivery {
       )
       .run(
         status,
-        extra.backend ?? null,
         extra.verdict ? JSON.stringify(extra.verdict) : null,
         // report_json (redesign §5.6): committed atomically with the terminal
-        // status. COALESCE(NULL, report_json) leaves the legacy path's report_json
-        // untouched (always NULL there); an agent row writes its normalized report.
+        // status. COALESCE(NULL, report_json) leaves report_json untouched on a
+        // terminal that carries no report (a skip); an agent row writes its
+        // normalized report.
         extra.report ? JSON.stringify(extra.report) : null,
         extra.error ?? null,
         new Date().toISOString(),
@@ -149,7 +148,6 @@ export class TerminalDelivery {
       .prepare(
         `UPDATE verification_requests
             SET status = ?,
-                current_backend = COALESCE(?, current_backend),
                 verdict_json = ?,
                 report_json = COALESCE(?, report_json),
                 error_message = ?,
@@ -163,7 +161,6 @@ export class TerminalDelivery {
       )
       .run(
         status,
-        extra.backend ?? null,
         extra.verdict ? JSON.stringify(extra.verdict) : null,
         extra.report ? JSON.stringify(extra.report) : null,
         extra.error ?? null,
@@ -203,7 +200,7 @@ export class TerminalDelivery {
    * WON the race: we must NOT overwrite it and must NOT deliver — no artifact
    * enrich, no ReviewItemRouter finding, no SprintLaneStore merge-gate write, no
    * terminal event — for a canceled run (R1 #3b). This is the SINGLE chokepoint
-   * pairing the guarded write with delivery so every runChosen / skip exit is
+   * pairing the guarded write with delivery so every terminal / skip exit is
    * cancel-safe by construction.
    */
   async markTerminalAndDeliver(
@@ -224,22 +221,20 @@ export class TerminalDelivery {
     }
     // Report a verification that genuinely FAILED or TIMED OUT. Deliberately NOT
     // 'skipped': a skip is this scheduler's by-design non-failure for a missing
-    // precondition (no usable/healthy backend, missing TCC grant, uninstalled
-    // chromium, static-only chain, unparseable input) — and on a host without a
-    // provisioned visual-verify backend (the documented common case) EVERY request
-    // skips, which would flood Sentry with non-errors under a seam named
+    // precondition (no proven runbook, missing TCC grant, an unsupported modality,
+    // unparseable input) — and on a host that cannot run a modality EVERY request
+    // for it skips, which would flood Sentry with non-errors under a seam named
     // 'verify-request-failed' and bury real signal. Passed / low_confidence are
     // valid verdicts, also not errors. Only after the guarded write won
     // (changes === 1) so a cancel-race never double-reports.
     if (status === 'failed' || status === 'timeout') {
-      // extra.error (a capture/judge error) may include a URL or path, so it is
-      // NOT put in the exception message — only the bounded errorClass, derived
-      // from it, plus the bounded requestStatus/verifyType/backend tags.
+      // extra.error may include a URL or path, so it is NOT put in the exception
+      // message — only the bounded errorClass, derived from it, plus the bounded
+      // requestStatus/verifyType tags.
       const verifyErrorClass = classifyErrorPattern(extra.error);
       emitSeamError('verify-request-failed', new Error(`verify ${status} (${verifyErrorClass})`), {
         requestStatus: status,
         verifyType: row.verify_type,
-        ...(extra.backend ? { backend: extra.backend } : {}),
         errorClass: verifyErrorClass,
         // An UNCLASSIFIED verify failure is otherwise blind: the message is
         // withheld above and `other`/`unknown` says nothing about which failure
@@ -318,8 +313,8 @@ export class TerminalDelivery {
       const verdict = this.parseVerdict(row.verdict_json);
       const fileNames = this.deriveReplayFileNames(row.report_json, verdict);
       // A persisted report_json means the agent engine produced this terminal —
-      // its capture origin is always 'agent' (§5.9); the legacy path leaves it
-      // undefined on replay (diagnostics are not persisted either).
+      // its capture origin is always 'agent' (§5.9); a report-less terminal (a
+      // skip) leaves it undefined on replay (diagnostics are not persisted either).
       const extra: TerminalExtra = row.report_json ? { captureOrigin: 'agent' } : {};
       const deliverRow: VerificationRequestRow = {
         id: row.id,
@@ -430,9 +425,8 @@ export class TerminalDelivery {
    * (ArtifactRouter enrich + ReviewItemRouter finding + SprintLaneStore
    * advance/loopback) live behind this callback (verdictDelivery.ts). Fail-soft:
    * a throwing hook is logged, never propagated (it must not wedge the drain loop
-   * or leave the lease unreleased — release already ran in runChosen's finally
-   * before deliver here is reached for the judged path, and the skip/parse paths
-   * hold no lease).
+   * or leave the lease unreleased — the agent engine releases its leases in its
+   * own finally, and the skip/parse paths hold no lease).
    *
    * Returns TRUE when the hook fully delivered (or none is wired), FALSE when it
    * threw or explicitly returned `false` (a required consumer failed) — the

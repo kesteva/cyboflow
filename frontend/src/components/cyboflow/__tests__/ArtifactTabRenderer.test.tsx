@@ -1027,35 +1027,6 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('artifact-verdict-issues')).not.toBeInTheDocument();
   });
 
-  it('renders NO Accept-as-baseline button — baseline retirement (§5.10)', () => {
-    // Accept-as-baseline + the SSIM pre-diff retired entirely (verification-agent
-    // redesign §5.10): the button never renders, on ANY verdict status, even PASS.
-    setHook({
-      loading: false,
-      error: null,
-      data: {
-        kind: 'screenshots',
-        payload: {
-          fileNames: ['home.png'],
-          verdict: {
-            status: 'pass',
-            confidence: 0.9,
-            issues: [],
-            feedback: 'ok',
-            judgedFileNames: ['home.png'],
-            baselineUsed: false,
-            model: 'claude-opus-4-8',
-            baselineKey: 'landing-page',
-          },
-        },
-      },
-    });
-    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
-
-    expect(screen.queryByTestId('artifact-accept-baseline-button')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('artifact-verdict-footer')).not.toBeInTheDocument();
-  });
-
   it('renders the FAIL verdict banner with feedback + a per-issue list', () => {
     setHook({
       loading: false,
