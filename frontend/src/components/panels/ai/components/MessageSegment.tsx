@@ -1,7 +1,7 @@
 import React from 'react';
 import { MarkdownPreview } from '../../../MarkdownPreview';
 import { ToolCallView } from './ToolCallView';
-import { MessageSegment as MessageSegmentType } from '../transformers/MessageTransformer';
+import { MessageSegment as MessageSegmentType } from '../../../../../../shared/types/unifiedMessage';
 
 interface MessageSegmentProps {
   segment: MessageSegmentType;

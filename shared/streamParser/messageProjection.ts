@@ -2,8 +2,7 @@
  * MessageProjection — main-process streaming projection of ClaudeStreamEvents
  * into UnifiedMessage shapes consumed by the renderer.
  *
- * Ported from:
- *   frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts
+ * Ported from Crystal's renderer-side ClaudeMessageTransformer (since deleted).
  *
  * Key design shift: the old transformer ran 3 passes over a batch array.
  * This implementation is STREAMING — one event in, zero-or-more messages out.

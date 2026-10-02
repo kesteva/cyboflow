@@ -28,8 +28,7 @@ export interface ToolUseBlock {
 
 /**
  * Thinking block from extended-thinking mode. On the wire the field is `thinking` (not `text`
- * or `content`), though ClaudeMessageTransformer.ts line 249 shows it may surface either key
- * in older parsed representations.
+ * or `content`), though older parsed representations may surface either key.
  */
 export interface ThinkingBlock {
   type: 'thinking';

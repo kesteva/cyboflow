@@ -3,8 +3,7 @@
  * (MessageProjection) and the renderer (UnifiedChatView / ChatTranscript).
  *
  * SINGLE source of truth: all UnifiedMessage, MessageSegment, ToolCall, and
- * ToolResult definitions live here. The renderer-side MessageTransformer.ts
- * re-exports from this file for backward compatibility.
+ * ToolResult definitions live here.
  */
 
 // Session information interface

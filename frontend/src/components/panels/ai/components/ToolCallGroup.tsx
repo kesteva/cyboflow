@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageSegment as MessageSegmentType } from '../transformers/MessageTransformer';
+import { MessageSegment as MessageSegmentType } from '../../../../../../shared/types/unifiedMessage';
 import { ToolCallView } from './ToolCallView';
 
 interface ToolCallGroupProps {
