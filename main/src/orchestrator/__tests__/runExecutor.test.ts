@@ -22,16 +22,10 @@ import { buildAssistantTextEvent } from '../programmatic/syntheticEvents';
 import type { RunDirectives } from '../programmatic/runDirectives';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
-import type {
-  OrchSocketProvider,
-  BridgeScriptResolver,
-  NodeResolver,
-  StreamEventPublisher,
-} from '../runLauncher';
+import type { StreamEventPublisher } from '../runLauncher';
 import type { WorkflowRow, WorkflowRunRow } from '../../../../shared/types/workflows';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { McpConfigWriter } from '../mcpConfigWriter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -89,23 +83,6 @@ class TestableRunExecutor extends RunExecutor {
     return 'test prompt';
   }
 }
-
-// Shared stubs for RunLauncher (MCP collaborators).
-const fakeMcpConfigWriter: McpConfigWriter = {
-  writeForRun: vi.fn().mockResolvedValue('/fake/.mcp.json'),
-} as unknown as McpConfigWriter;
-
-const fakeOrchSocketProvider: OrchSocketProvider = {
-  getSocketPath: () => '/tmp/stub-orch.sock',
-};
-
-const fakeBridgeScriptResolver: BridgeScriptResolver = {
-  getScriptPath: () => '/stub/bridge.js',
-};
-
-const fakeNodeResolver: NodeResolver = {
-  getNodePath: async () => '/usr/local/bin/node',
-};
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -2758,10 +2735,6 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
         spyPublisher,
         executor,
         runQueueRegistry,
@@ -2856,10 +2829,6 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
         undefined,
         executor,
         runQueueRegistry,
@@ -2925,10 +2894,6 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
       );
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-exec');
@@ -3004,10 +2969,6 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
         undefined,
         failingExecutor,
         runQueueRegistry,

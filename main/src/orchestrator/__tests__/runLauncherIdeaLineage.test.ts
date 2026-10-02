@@ -17,28 +17,15 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunLauncher } from '../runLauncher';
-import type {
-  OrchSocketProvider,
-  BridgeScriptResolver,
-  NodeResolver,
-  SessionRefresherLike,
-} from '../runLauncher';
+import type { SessionRefresherLike } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { McpConfigWriter } from '../mcpConfigWriter';
 import { IdeaBusyError } from '../ideaBusy';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
-
-const fakeMcpConfigWriter: McpConfigWriter = {
-  writeForRun: vi.fn().mockResolvedValue('/fake/.mcp.json'),
-} as unknown as McpConfigWriter;
-const fakeOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => '/tmp/stub-orch.sock' };
-const fakeBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '/stub/bridge.js' };
-const fakeNodeResolver: NodeResolver = { getNodePath: async () => '/usr/local/bin/node' };
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -130,10 +117,6 @@ function makeFixture(db: Database.Database, tmpDir: string, workflowName = 'plan
     fakeRegistry,
     fakeWorktree,
     makeSpyLogger(),
-    fakeMcpConfigWriter,
-    fakeOrchSocketProvider,
-    fakeBridgeScriptResolver,
-    fakeNodeResolver,
     undefined, // publisher
     undefined, // runExecutor
     undefined, // runQueueRegistry

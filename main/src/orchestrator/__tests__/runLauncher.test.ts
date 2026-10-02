@@ -21,10 +21,9 @@ import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunLauncher } from '../runLauncher';
-import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher, TaskStageDeriverLike, SprintLanesLike } from '../runLauncher';
+import type { StreamEventPublisher, TaskStageDeriverLike, SprintLanesLike } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { McpConfigWriter } from '../mcpConfigWriter';
 import type { RunExecutor } from '../runExecutor';
 import type { VariantResolver } from '../variantResolver';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -36,28 +35,8 @@ import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import type { SessionAgentPermissionModeDeps } from '../sessionPermissionMode';
 
-// Shared stubs for the 4 required MCP collaborators.
-// All tests that construct RunLauncher must pass these (or equivalent stubs)
-// now that the constructor throws if any are missing.
-
-const fakeMcpConfigWriter: McpConfigWriter = {
-  writeForRun: vi.fn().mockResolvedValue('/fake/.mcp.json'),
-} as unknown as McpConfigWriter;
-
-const fakeOrchSocketProvider: OrchSocketProvider = {
-  getSocketPath: () => '/tmp/stub-orch.sock',
-};
-
-const fakeBridgeScriptResolver: BridgeScriptResolver = {
-  getScriptPath: () => '/stub/bridge.js',
-};
-
-const fakeNodeResolver: NodeResolver = {
-  getNodePath: async () => '/usr/local/bin/node',
-};
-
-// Reset all vi.fn() call history before each test so the module-level shared
-// stubs (fakeMcpConfigWriter, etc.) do not accumulate state across tests.
+// Reset all vi.fn() call history before each test so module-level spies do not
+// accumulate state across tests.
 beforeEach(() => vi.clearAllMocks());
 
 // ---------------------------------------------------------------------------
@@ -151,7 +130,7 @@ function makeFakeSessionPermDeps(): {
 function makeLauncher(logger: ReturnType<typeof makeSpyLogger>, db: Database.Database): RunLauncher {
   const fakeRegistry = {} as WorkflowRegistry;
   const fakeWorktree = {} as WorktreeManager;
-  return new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+  return new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, logger);
 }
 
 describe('RunLauncher.ensureGitExcludeEntry', () => {
@@ -259,7 +238,7 @@ describe('RunLauncher.launch', () => {
       // Session-aware WorktreeManager: branch resolved from the session worktree.
       const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub(cannedBranchName);
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
@@ -304,7 +283,7 @@ describe('RunLauncher.launch', () => {
 
       const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub('main');
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       // A valid workflow but NO sessionId — the launch-level guard fires (after the
       // sprint/finding validation, before the one-running guard binds sessionId).
@@ -349,7 +328,7 @@ describe('RunLauncher.launch', () => {
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       await launcher.launch(workflowId, tmpDir, 'interactive', undefined, undefined, 'sess-1');
 
@@ -393,7 +372,7 @@ describe('RunLauncher.launch', () => {
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       await launcher.launch(
         workflowId,
@@ -460,7 +439,7 @@ describe('RunLauncher.launch', () => {
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
 
       // sessionId = 'sess-1' (6th positional), requestedPermissionMode = 'auto' (7th).
       await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1', 'auto');
@@ -507,8 +486,7 @@ describe('RunLauncher.launch', () => {
       const { deps } = makeFakeSessionPermDeps();
 
       const launcher = new RunLauncher(
-        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
-        fakeBridgeScriptResolver, fakeNodeResolver,
+        adapter, realRegistry, fakeWorktree, logger,
         undefined, undefined, undefined, undefined, undefined, deps,
       );
 
@@ -566,8 +544,7 @@ describe('RunLauncher.launch', () => {
       const { deps, updateSession } = makeFakeSessionPermDeps();
 
       const launcher = new RunLauncher(
-        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
-        fakeBridgeScriptResolver, fakeNodeResolver,
+        adapter, realRegistry, fakeWorktree, logger,
         undefined, undefined, undefined, undefined, undefined, deps,
       );
 
@@ -611,8 +588,7 @@ describe('RunLauncher.launch', () => {
       const { deps, updateSession } = makeFakeSessionPermDeps();
 
       const launcher = new RunLauncher(
-        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
-        fakeBridgeScriptResolver, fakeNodeResolver,
+        adapter, realRegistry, fakeWorktree, logger,
         undefined, undefined, undefined, undefined, undefined, deps,
       );
 
@@ -638,120 +614,9 @@ describe('RunLauncher.launch', () => {
 
       const fakeWorktree = {} as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
 
       await expect(launcher.launch('nonexistent-id', tmpDir)).rejects.toThrow('not found');
-    });
-  });
-
-  it('writes per-run mcp config after worktree resolved, in the correct order', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      // Seed a workflow
-      const seedWorkflowId2 = randomUUID();
-      db.prepare(
-        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
-      ).run(seedWorkflowId2);
-
-      interface IdRow { id: string }
-      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-
-      const cannedRunId = randomUUID().replace(/-/g, '');
-      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
-      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
-      seedSession(db, 'sess-1', cannedWorktreePath);
-
-      // Track call ordering via a sequence array
-      const callOrder: string[] = [];
-
-      const fakeRegistry = {
-        getById: (id: string) => {
-          const row = db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id);
-          return row ?? null;
-        },
-        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
-          db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
-          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
-          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
-        }),
-        resolveEffectiveTuningLevel: () => null,
-      } as unknown as WorkflowRegistry;
-
-      // The session worktree is resolved (getProjectMainBranch) before the mcp.json
-      // is written — record that ordering.
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn(),
-        getProjectMainBranch: vi.fn().mockImplementation(async () => {
-          callOrder.push('resolveWorktree');
-          return cannedBranchName;
-        }),
-        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
-      } as unknown as WorktreeManager;
-
-      const writeForRunSpy = vi.fn().mockImplementation(async () => {
-        callOrder.push('writeForRun');
-        return join(cannedWorktreePath, '.mcp.json');
-      });
-
-      const fakeMcpConfigWriter = {
-        writeForRun: writeForRunSpy,
-      } as unknown as McpConfigWriter;
-
-      const fakeOrchSocketProvider: OrchSocketProvider = {
-        getSocketPath: () => 'stub-socket-path',
-      };
-
-      const fakeBridgeScriptResolver: BridgeScriptResolver = {
-        getScriptPath: () => '/stub/bridge.js',
-      };
-
-      const fakeNodeResolver: NodeResolver = {
-        getNodePath: async () => '/usr/local/bin/node',
-      };
-
-      const launcher = new RunLauncher(
-        adapter,
-        fakeRegistry,
-        fakeWorktree,
-        logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
-      );
-
-      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
-
-      // writeForRun must have been called exactly once
-      expect(writeForRunSpy).toHaveBeenCalledOnce();
-
-      // Verify the args passed to writeForRun
-      const callArgs = writeForRunSpy.mock.calls[0][0] as {
-        runId: string;
-        worktreePath: string;
-        orchSocketPath: string;
-        bridgeScriptPath: string;
-        nodeExecutablePath: string;
-      };
-      expect(callArgs.runId).toBe(cannedRunId);
-      expect(callArgs.worktreePath).toBe(cannedWorktreePath);
-      expect(callArgs.orchSocketPath).toBe('stub-socket-path');
-      expect(callArgs.bridgeScriptPath).toBe('/stub/bridge.js');
-      expect(callArgs.nodeExecutablePath).toBe('/usr/local/bin/node');
-
-      // The session worktree must be resolved BEFORE writeForRun
-      const worktreeIdx = callOrder.indexOf('resolveWorktree');
-      const writeIdx = callOrder.indexOf('writeForRun');
-      expect(worktreeIdx).toBeGreaterThanOrEqual(0);
-      expect(writeIdx).toBeGreaterThan(worktreeIdx);
-
-      // launch return values must still be correct
-      expect(result.runId).toBe(cannedRunId);
-      expect(result.worktreePath).toBe(cannedWorktreePath);
     });
   });
 });
@@ -808,7 +673,7 @@ describe('RunLauncher.launch error handling', () => {
         getHeadCommit: vi.fn().mockRejectedValue(new Error('git rev-parse failed')),
       } as unknown as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
 
       await expect(
         launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
@@ -820,52 +685,6 @@ describe('RunLauncher.launch error handling', () => {
       expect(row.status).toBe('failed');
       expect(row.error_message).not.toBeNull();
       expect(row.error_message).toContain('git rev-parse failed');
-    });
-  });
-
-  it('marks run failed when mcpConfigWriter.writeForRun throws', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
-
-      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
-      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
-      seedSession(db, 'sess-err', cannedWorktreePath);
-
-      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
-
-      const fakeMcpConfigWriter = {
-        writeForRun: vi.fn().mockRejectedValue(new Error('mcp.json write denied')),
-      } as unknown as McpConfigWriter;
-
-      const fakeOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => 'stub-socket' };
-      const fakeBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '/stub/bridge.js' };
-      const fakeNodeResolver: NodeResolver = { getNodePath: async () => '/usr/local/bin/node' };
-
-      const launcher = new RunLauncher(
-        adapter,
-        fakeRegistry,
-        fakeWorktree,
-        logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
-      );
-
-      await expect(
-        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
-      ).rejects.toThrow('mcp.json write denied');
-
-      interface RunRow { status: string; error_message: string | null }
-      const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
-
-      expect(row.status).toBe('failed');
-      expect(row.error_message).not.toBeNull();
-      expect(row.error_message).toContain('mcp.json write denied');
     });
   });
 
@@ -888,7 +707,7 @@ describe('RunLauncher.launch error handling', () => {
         getHeadCommit: vi.fn(),
       } as unknown as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
 
       await expect(
         launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
@@ -948,10 +767,6 @@ describe('RunLauncher.launch error handling', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
         throwingPublisher,
         undefined, // runExecutor
         undefined, // runQueueRegistry
@@ -1038,10 +853,6 @@ describe('RunLauncher.launch publisher', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        fakeMcpConfigWriter,
-        fakeOrchSocketProvider,
-        fakeBridgeScriptResolver,
-        fakeNodeResolver,
         spyPublisher,
       );
 
@@ -1113,261 +924,12 @@ describe('RunLauncher.launch publisher', () => {
 
       const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
-      // No publisher passed — 9th arg omitted entirely (publisher is still optional)
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      // No publisher passed — 5th arg omitted entirely (publisher is still optional)
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       expect(result.runId).toBe(cannedRunId);
     });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// RunLauncher constructor validation
-// ---------------------------------------------------------------------------
-
-describe('RunLauncher constructor validation', () => {
-  function makeMinimalArgs() {
-    const db = createTestDb();
-    const adapter = dbAdapter(db);
-    const fakeRegistry = {} as WorkflowRegistry;
-    const fakeWorktree = {} as WorktreeManager;
-    const logger = makeSpyLogger();
-    return { adapter, fakeRegistry, fakeWorktree, logger };
-  }
-
-  it('throws when mcpConfigWriter is missing', () => {
-    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
-    expect(
-      () => new RunLauncher(
-        adapter, fakeRegistry, fakeWorktree, logger,
-        undefined as unknown as McpConfigWriter,
-        fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
-      ),
-    ).toThrow('RunLauncher: missing required collaborator mcpConfigWriter');
-  });
-
-  it('throws when orchSocketProvider is missing', () => {
-    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
-    expect(
-      () => new RunLauncher(
-        adapter, fakeRegistry, fakeWorktree, logger,
-        fakeMcpConfigWriter,
-        undefined as unknown as OrchSocketProvider,
-        fakeBridgeScriptResolver, fakeNodeResolver,
-      ),
-    ).toThrow('RunLauncher: missing required collaborator orchSocketProvider');
-  });
-
-  it('throws when bridgeScriptResolver is missing', () => {
-    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
-    expect(
-      () => new RunLauncher(
-        adapter, fakeRegistry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider,
-        undefined as unknown as BridgeScriptResolver,
-        fakeNodeResolver,
-      ),
-    ).toThrow('RunLauncher: missing required collaborator bridgeScriptResolver');
-  });
-
-  it('throws when nodeResolver is missing', () => {
-    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
-    expect(
-      () => new RunLauncher(
-        adapter, fakeRegistry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver,
-        undefined as unknown as NodeResolver,
-      ),
-    ).toThrow('RunLauncher: missing required collaborator nodeResolver');
-  });
-
-  it('launch without runExecutor still calls mcpConfigWriter.writeForRun (legacy path regression guard)', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      const workflowId = randomUUID();
-      db.prepare(
-        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
-      ).run(workflowId);
-
-      const cannedRunId = randomUUID().replace(/-/g, '');
-      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
-      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
-      seedSession(db, 'sess-1', cannedWorktreePath);
-
-      const fakeRegistry = {
-        getById: (id: string) => {
-          const row = db.prepare(
-            'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
-          ).get(id);
-          return row ?? null;
-        },
-        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
-          db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
-          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
-          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
-        }),
-        resolveEffectiveTuningLevel: () => null,
-      } as unknown as WorkflowRegistry;
-
-      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
-
-      const writeForRunSpy = vi.fn().mockResolvedValue(join(cannedWorktreePath, '.mcp.json'));
-      const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
-
-      const launcher = new RunLauncher(
-        adapter, fakeRegistry, fakeWorktree, logger,
-        spyMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
-      );
-
-      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
-
-      // Must have been called — no runExecutor supplied, so legacy path is active
-      expect(writeForRunSpy).toHaveBeenCalledOnce();
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // SDK substrate guard — TASK-660
-  // -------------------------------------------------------------------------
-
-  /**
-   * Shared fixture factory for the three TASK-660 SDK-guard tests.
-   * Seeds a workflow row and returns a WorkflowRegistry stub + canned IDs.
-   */
-  async function makeSDKFixture(db: Database.Database, tmpDir: string) {
-    const workflowId = randomUUID();
-    db.prepare(
-      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'prune', '/fake/path.md', 'default')",
-    ).run(workflowId);
-
-    const cannedRunId = randomUUID().replace(/-/g, '');
-    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'prune', cannedRunId.slice(0, 8));
-    const cannedBranchName = `cyboflow/prune/${cannedRunId.slice(0, 8)}`;
-    // Every run is session-hosted now — seed the owning session whose worktree the
-    // run reuses, and hand the caller its id to thread into launch.
-    const sessionId = 'sess-sdk';
-    seedSession(db, sessionId, cannedWorktreePath);
-
-    const fakeRegistry = {
-      getById: (id: string) => {
-        const row = db.prepare(
-          'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
-        ).get(id);
-        return row ?? null;
-      },
-      createRun: vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
-        db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
-        ).run(cannedRunId, workflowId, 1, sid ?? null);
-        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
-      }),
-      resolveEffectiveTuningLevel: () => null,
-    } as unknown as WorkflowRegistry;
-
-    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
-
-    // A RunExecutor stub — execute() resolves immediately (no real spawn)
-    const fakeRunExecutor = {
-      execute: vi.fn().mockResolvedValue(undefined),
-    } as unknown as RunExecutor;
-
-    return { workflowId, sessionId, cannedRunId, cannedWorktreePath, cannedBranchName, fakeRegistry, fakeWorktree, fakeRunExecutor };
-  }
-
-  it('launch with runExecutor skips mcpConfigWriter.writeForRun', async () => {
-    await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      const { workflowId, sessionId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
-
-      const writeForRunSpy = vi.fn().mockResolvedValue('/fake/.mcp.json');
-      const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
-
-      // orchSocketProvider and bridgeScriptResolver omitted (undefined) to prove
-      // they are never consulted when runExecutor is supplied.
-      const launcher = new RunLauncher(
-        adapter,
-        fakeRegistry,
-        fakeWorktree,
-        logger,
-        spyMcpConfigWriter,
-        undefined as unknown as OrchSocketProvider,
-        undefined as unknown as BridgeScriptResolver,
-        undefined as unknown as NodeResolver,
-        undefined,
-        fakeRunExecutor,
-      );
-
-      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
-
-      // writeForRun must NOT be called on the SDK path
-      expect(writeForRunSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  it('launch with runExecutor skips orchSocketProvider.getSocketPath', async () => {
-    await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
-      const db = sessionHostedDb();
-      const adapter = dbAdapter(db);
-      const logger = makeSpyLogger();
-
-      const { workflowId, sessionId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
-
-      // Sentinel: if getSocketPath() is called, the test fails immediately.
-      const throwingOrchSocketProvider: OrchSocketProvider = {
-        getSocketPath: () => {
-          throw new Error('TEST FAILURE: orchSocketProvider.getSocketPath called on SDK path');
-        },
-      };
-
-      const launcher = new RunLauncher(
-        adapter,
-        fakeRegistry,
-        fakeWorktree,
-        logger,
-        fakeMcpConfigWriter,
-        throwingOrchSocketProvider,
-        undefined as unknown as BridgeScriptResolver,
-        undefined as unknown as NodeResolver,
-        undefined,
-        fakeRunExecutor,
-      );
-
-      // Must not throw from the sentinel
-      await expect(launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId)).resolves.not.toThrow();
-    });
-  });
-
-  it('constructor accepts SDK substrate with no legacy collaborators when runExecutor is provided', () => {
-    const db = createTestDb();
-    const adapter = dbAdapter(db);
-    const fakeRegistry = {} as WorkflowRegistry;
-    const fakeWorktree = {} as WorktreeManager;
-    const logger = makeSpyLogger();
-    const fakeRunExecutor = { execute: vi.fn() } as unknown as RunExecutor;
-
-    // Must NOT throw even though the four legacy collaborators are undefined
-    expect(
-      () => new RunLauncher(
-        adapter,
-        fakeRegistry,
-        fakeWorktree,
-        logger,
-        undefined as unknown as McpConfigWriter,
-        undefined as unknown as OrchSocketProvider,
-        undefined as unknown as BridgeScriptResolver,
-        undefined as unknown as NodeResolver,
-        undefined,
-        fakeRunExecutor,
-      ),
-    ).not.toThrow();
   });
 });
 
@@ -1430,14 +992,10 @@ describe('RunLauncher.launch ideaId seed', () => {
       fakeRegistry,
       fakeWorktree,
       logger,
-      fakeMcpConfigWriter,
-      fakeOrchSocketProvider,
-      fakeBridgeScriptResolver,
-      fakeNodeResolver,
       undefined, // publisher
       undefined, // runExecutor
       undefined, // runQueueRegistry
-      deriver,   // taskStageDeriver (12th arg)
+      deriver,   // taskStageDeriver (8th arg)
     );
 
     return { launcher, workflowId, sessionId, cannedRunId, recomputeSpy };
@@ -1530,10 +1088,6 @@ describe('RunLauncher.launch ideaIds (planner multi-idea seed)', () => {
       fakeRegistry,
       fakeWorktree,
       logger,
-      fakeMcpConfigWriter,
-      fakeOrchSocketProvider,
-      fakeBridgeScriptResolver,
-      fakeNodeResolver,
     );
 
     return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
@@ -1661,15 +1215,11 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
       fakeRegistry,
       fakeWorktree,
       logger,
-      fakeMcpConfigWriter,
-      fakeOrchSocketProvider,
-      fakeBridgeScriptResolver,
-      fakeNodeResolver,
       undefined, // publisher
       undefined, // runExecutor
       undefined, // runQueueRegistry
       undefined, // taskStageDeriver
-      opts?.omitSprintLanes ? undefined : { createForRun: createForRunSpy }, // sprintLanes (13th arg)
+      opts?.omitSprintLanes ? undefined : { createForRun: createForRunSpy }, // sprintLanes (9th arg)
     );
 
     return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy, createForRunSpy };
@@ -1850,10 +1400,6 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       fakeRegistry,
       fakeWorktree,
       logger,
-      fakeMcpConfigWriter,
-      fakeOrchSocketProvider,
-      fakeBridgeScriptResolver,
-      fakeNodeResolver,
     );
 
     return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
@@ -1981,10 +1527,6 @@ describe('RunLauncher.launch seedPrompt (Launch flow pre-launch seed)', () => {
       fakeRegistry,
       fakeWorktree,
       logger,
-      fakeMcpConfigWriter,
-      fakeOrchSocketProvider,
-      fakeBridgeScriptResolver,
-      fakeNodeResolver,
     );
 
     return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
@@ -2152,7 +1694,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       await expect(
@@ -2197,7 +1738,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
@@ -2270,7 +1810,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       // 3rd positional arg is the explicit per-run substrate.
@@ -2317,7 +1856,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-fb');
@@ -2349,7 +1887,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       await expect(
@@ -2392,7 +1929,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       await expect(
@@ -2438,7 +1974,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-free');
@@ -2482,7 +2017,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-quick');
@@ -2526,7 +2060,6 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const launcher = new RunLauncher(
         adapter, registry, fakeWorktree, logger,
-        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
       await expect(
@@ -2619,7 +2152,6 @@ describe('RunLauncher.launch tuningLevel override', () => {
 
     const launcher = new RunLauncher(
       dbAdapter(db), registry, worktree, makeSpyLogger(),
-      fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       undefined, undefined, undefined, undefined, undefined, undefined, resolver,
     );
     await launcher.launch(

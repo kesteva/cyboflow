@@ -202,9 +202,8 @@ import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge'
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
-import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
+import type { StreamEventPublisher } from './orchestrator/runLauncher';
 import { VariantResolver } from './orchestrator/variantResolver';
-import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
@@ -1687,7 +1686,6 @@ async function initializeServices(): Promise<boolean> {
   // agent permission mode + CLI substrate via the resolvers (ConfigManager
   // satisfies WorkflowConfigProvider structurally).
   workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger, configManager);
-  const mcpConfigWriter = new McpConfigWriter();
 
   // Native task-tracking write chokepoint (migration 014). The single serialized
   // writer for `tasks`/`task_events`; injected (structurally) into RunExecutor,
@@ -2041,25 +2039,6 @@ async function initializeServices(): Promise<boolean> {
     configManager,
     workflowRegistry,
   });
-
-  // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
-  // injects the live socket path into spawned sessions.
-  const orchSocketProvider: OrchSocketProvider = {
-    getSocketPath: () => orchSocketServer.getSocketPath(),
-  };
-
-  // BridgeScriptResolver — delegates to resolveMcpServerScriptPath(), which
-  // returns the asar-unpacked path in packaged builds and the __dirname-relative
-  // compiled .js in dev (no extraction step needed).
-  const bridgeScriptResolver: BridgeScriptResolver = {
-    getScriptPath: () => resolveMcpServerScriptPath(),
-  };
-
-  // NodeResolver — returns the process's own node executable path as a
-  // best-effort fallback.  A proper findExecutableInPath ladder is epic 7.
-  const nodeResolver: NodeResolver = {
-    getNodePath: async () => process.execPath,
-  };
 
   // Concrete WorkflowPromptReaderLike adapter — keeps RunExecutor free of direct
   // fs/concrete-module imports while branching on the run's workflow row.
@@ -2465,10 +2444,6 @@ async function initializeServices(): Promise<boolean> {
     workflowRegistry,
     worktreeManager,
     cyboflowLogger,
-    mcpConfigWriter,
-    orchSocketProvider,
-    bridgeScriptResolver,
-    nodeResolver,
     permissionTrust.wrapRunPublisher(cyboflowPublisher),
     runExecutor,
     runQueues,
@@ -2588,10 +2563,12 @@ async function initializeServices(): Promise<boolean> {
       orchSocketServer.cancelInFlightShellApprovals(runId),
     );
   }
+  // The cyboflow MCP server entry for the Codex/OMP runtimes: the bundled server
+  // script (asar-unpacked in packaged builds) run by this process's own binary.
   createdCodexSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
-    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
-    nodeExecutablePath: await nodeResolver.getNodePath(),
+    bridgeScriptPath: resolveMcpServerScriptPath(),
+    nodeExecutablePath: process.execPath,
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
   createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
@@ -2599,8 +2576,8 @@ async function initializeServices(): Promise<boolean> {
   // them; content questions use the same durable QuestionRouter as Claude/Codex.
   createdOmpSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
-    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
-    nodeExecutablePath: await nodeResolver.getNodePath(),
+    bridgeScriptPath: resolveMcpServerScriptPath(),
+    nodeExecutablePath: process.execPath,
   });
   createdOmpSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 

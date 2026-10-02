@@ -35,7 +35,7 @@
  * needs deterministic turn-end detection so the UI can leave 'running', so it
  * is unconditionally present in the returned fragment.
  *
- * Standalone invariant (mirrors permissionRules.ts / mcpConfigWriter.ts): only
+ * Standalone invariant (mirrors permissionRules.ts): only
  * `fs`/`path`/`os` plus electron's `app.isPackaged` (mocked in tests) for the
  * packaged-vs-dev path resolution — no 'better-sqlite3', no service imports.
  */

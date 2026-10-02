@@ -39,7 +39,7 @@
  * buildCommandArgs' `--disallowed-tools mcp__<server>` (model context). Mirrors
  * the SDK substrate's strictMcpConfig + disallowedTools deny enforcement.
  *
- * Standalone invariant (mirrors interactiveSettingsWriter / mcpConfigWriter):
+ * Standalone invariant (mirrors interactiveSettingsWriter):
  * only `fs`/`path` — no 'electron', no 'better-sqlite3', no service imports.
  */
 import * as fs from 'fs';

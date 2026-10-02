@@ -2,7 +2,8 @@
  * bundle-mcp-server — make cyboflowMcpServer.js self-contained.
  *
  * The MCP server is spawned as a STANDALONE node subprocess (by McpServerLifecycle
- * and via the per-run .mcp.json the SDK/CLI reads). In a packaged app its only
+ * and as the per-session `cyboflow` MCP server entry each agent runtime spawns). In
+ * a packaged app its only
  * external dependency, `@modelcontextprotocol/sdk`, lives inside `app.asar`, which
  * stock node cannot read — so the subprocess dies with MODULE_NOT_FOUND and every
  * MCP connection fails. (It only works in dev because the repo's node_modules is on

@@ -43,12 +43,6 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import { WorkflowRegistry } from '../../orchestrator/workflowRegistry';
 import { RunLauncher } from '../../orchestrator/runLauncher';
-import type {
-  OrchSocketProvider,
-  BridgeScriptResolver,
-  NodeResolver,
-} from '../../orchestrator/runLauncher';
-import { McpConfigWriter } from '../../orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../services/worktreeManager';
 import { ApprovalRouter } from '../../orchestrator/approvalRouter';
 import { DatabaseService } from '../../database/database';
@@ -346,19 +340,11 @@ export async function createHeadlessHarness(
         .get(PROJECT_ID, workflow) as { id: string } | undefined;
       if (!wfRow) throw new Error(`startRun: seeded workflow row for ${workflow} not found`);
 
-      // RunLauncher — stub the MCP collaborators (the fake never spawns a bridge).
-      const stubOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => '' };
-      const stubBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '' };
-      const stubNodeResolver: NodeResolver = { getNodePath: async () => process.execPath };
       const runLauncher = new RunLauncher(
         dbLike,
         workflowRegistry,
         worktreeManager,
         logger,
-        new McpConfigWriter(),
-        stubOrchSocketProvider,
-        stubBridgeScriptResolver,
-        stubNodeResolver,
       );
 
       // Session-hosted (permission-mode redesign slice 1b): launch REQUIRES a

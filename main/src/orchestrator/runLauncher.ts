@@ -10,9 +10,7 @@
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron'
  * or any concrete service in main/src/services/*.  All collaborators are
- * injected via the constructor. The new optional 10th (runExecutor) and 11th
- * (runQueueRegistry) constructor parameters preserve backward compatibility
- * with all existing call sites that omit them.
+ * injected via the constructor; everything after `logger` is optional.
  */
 import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import type { WorkflowRegistry } from './workflowRegistry';
@@ -28,7 +26,6 @@ import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { StreamEnvelope } from '../../../shared/types/claudeStream';
-import type { McpConfigWriter } from './mcpConfigWriter';
 import type { RunExecutor } from './runExecutor';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { TaskChange } from './taskChangeRouter';
@@ -45,33 +42,6 @@ import {
 } from './sessionPermissionMode';
 import { assertIdeaNotBusy } from './ideaBusy';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
-
-/**
- * Provides the Unix socket path that the orchestrator IPC server listens on.
- * In production, this is the real `permissionIpcServer.getSocketPath()`.
- * In tests, a stub returns a canned string.
- */
-export interface OrchSocketProvider {
-  getSocketPath(): string;
-}
-
-/**
- * Resolves the absolute path to the bundled cyboflowPermissionBridge.js.
- * In production, this handles ASAR extraction and dev vs packaged build differences.
- * In tests, a stub returns a canned path.
- */
-export interface BridgeScriptResolver {
-  getScriptPath(): string;
-}
-
-/**
- * Resolves the path to the node executable.
- * In production, delegates to findExecutableInPath('node') with a fallback ladder.
- * In tests, a stub returns a canned path.
- */
-export interface NodeResolver {
-  getNodePath(): Promise<string>;
-}
 
 /**
  * Decouples RunLauncher from the Electron layer by accepting a plain publisher
@@ -163,10 +133,6 @@ export class RunLauncher {
     private readonly workflowRegistry: WorkflowRegistry,
     private readonly worktreeManager: WorktreeManager,
     private readonly logger: LoggerLike,
-    private readonly mcpConfigWriter: McpConfigWriter,
-    private readonly orchSocketProvider: OrchSocketProvider,
-    private readonly bridgeScriptResolver: BridgeScriptResolver,
-    private readonly nodeResolver: NodeResolver,
     private readonly publisher?: StreamEventPublisher,
     private readonly runExecutor?: RunExecutor,
     private readonly runQueueRegistry?: RunQueueRegistry,
@@ -218,17 +184,7 @@ export class RunLauncher {
      * the stamp still lands; only the immediate emit is skipped.
      */
     private readonly sessionRefresher?: SessionRefresherLike,
-  ) {
-    // Legacy-bridge collaborators are required only when no runExecutor is
-    // supplied.  Under the SDK substrate, the PreToolUse hook gates permissions
-    // in-process; the MCP permission-bridge file (writeForRun) is skipped.
-    if (!runExecutor) {
-      if (!mcpConfigWriter) throw new Error('RunLauncher: missing required collaborator mcpConfigWriter');
-      if (!orchSocketProvider) throw new Error('RunLauncher: missing required collaborator orchSocketProvider');
-      if (!bridgeScriptResolver) throw new Error('RunLauncher: missing required collaborator bridgeScriptResolver');
-      if (!nodeResolver) throw new Error('RunLauncher: missing required collaborator nodeResolver');
-    }
-  }
+  ) {}
 
   /**
    * Launch a workflow run:
@@ -715,22 +671,6 @@ export class RunLauncher {
       // session's EXISTING worktree. The legacy session-less createDeterministicWorktree
       // branch (and the `baseBranch` it consumed) was removed with the invariant.
       const { worktreePath, branchName } = await this.resolveSessionHostedWorktree(runId, sessionId);
-
-      // Write the per-run .mcp.json into the worktree so Claude can discover
-      // the cyboflow-permissions bridge.
-      // Skipped when runExecutor is wired: the SDK substrate gates permissions
-      // via PreToolUse in-process; the legacy Unix-socket bridge file is dead
-      // code on every SDK-driven launch.
-      if (!this.runExecutor) {
-        const nodeExecutablePath = await this.nodeResolver.getNodePath();
-        await this.mcpConfigWriter.writeForRun({
-          runId,
-          worktreePath,
-          orchSocketPath: this.orchSocketProvider.getSocketPath(),
-          bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
-          nodeExecutablePath,
-        });
-      }
 
       // Worktree columns first, UNGUARDED: they describe where the run's work
       // lives and stay true whatever the row's status is, so a run canceled during
