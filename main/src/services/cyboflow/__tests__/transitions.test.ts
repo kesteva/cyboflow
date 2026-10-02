@@ -13,7 +13,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import {
-  transitionToAwaitingReview,
   transitionFromAwaitingReview,
   transitionToRunning,
   transitionRunningToAwaitingReview,
@@ -74,174 +73,6 @@ describe('transitions', () => {
 
   afterEach(() => {
     db.close();
-  });
-
-  // -------------------------------------------------------------------------
-  // Case (a): Happy-path forward transition
-  // -------------------------------------------------------------------------
-
-  describe('transitionToAwaitingReview', () => {
-    it('(a) happy-path: updates run to awaiting_review and inserts pending approval', () => {
-      seedRun(db, 'running');
-
-      transitionToAwaitingReview(db, {
-        runId: RUN_ID,
-        approvalId: APPROVAL_ID,
-        toolName: 'bash',
-        toolInputJson: '{"cmd":"ls"}',
-        toolUseId: 'tu-happy-001',
-        rationale: 'Needs review',
-      });
-
-      const run = db
-        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-        .get(RUN_ID) as { status: string };
-      expect(run.status).toBe('awaiting_review');
-
-      const approval = db
-        .prepare('SELECT status FROM approvals WHERE id = ?')
-        .get(APPROVAL_ID) as { status: string };
-      expect(approval.status).toBe('pending');
-    });
-
-    it('(a2) stamps created_at as ISO-8601, not SQLite CURRENT_TIMESTAMP form', () => {
-      // REGRESSION: this writer used to omit created_at and inherit the column's
-      // DEFAULT CURRENT_TIMESTAMP, which spells the timestamp
-      // 'YYYY-MM-DD HH:MM:SS' while every other approval writer uses
-      // toISOString(). StuckDetector's stale scan compared the column against an
-      // ISO cutoff, and since ' ' (0x20) sorts below 'T' (0x54) a same-date row
-      // in the default spelling always compared as older than the cutoff — a
-      // seconds-old approval read as stale and stamped its run 'stuck'. Keep the
-      // column in ONE format at the source.
-      seedRun(db, 'running');
-      const before = new Date().toISOString();
-
-      transitionToAwaitingReview(db, {
-        runId: RUN_ID,
-        approvalId: APPROVAL_ID,
-        toolName: 'bash',
-        toolInputJson: '{"cmd":"ls"}',
-        toolUseId: 'tu-createdat-001',
-        rationale: null,
-      });
-
-      const { created_at: createdAt } = db
-        .prepare('SELECT created_at FROM approvals WHERE id = ?')
-        .get(APPROVAL_ID) as { created_at: string };
-
-      expect(createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-      // And it is the real clock, not a constant: it lands in [before, after].
-      expect(createdAt >= before).toBe(true);
-      expect(createdAt <= new Date().toISOString()).toBe(true);
-    });
-
-    // -----------------------------------------------------------------------
-    // Case (b): Stale-status rejection
-    // -----------------------------------------------------------------------
-
-    it('(b) stale-status: throws TransitionRejectedError and does NOT insert approval when run is canceled', () => {
-      seedRun(db, 'canceled');
-
-      expect(() =>
-        transitionToAwaitingReview(db, {
-          runId: RUN_ID,
-          approvalId: APPROVAL_ID,
-          toolName: 'bash',
-          toolInputJson: '{"cmd":"ls"}',
-          toolUseId: 'tu-stale-001',
-          rationale: null,
-        }),
-      ).toThrow(TransitionRejectedError);
-
-      // Run must still be in 'canceled' — the UPDATE rolled back
-      const run = db
-        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-        .get(RUN_ID) as { status: string };
-      expect(run.status).toBe('canceled');
-
-      // No approval row must have been inserted (INSERT was rolled back)
-      const count = (
-        db
-          .prepare('SELECT COUNT(*) as cnt FROM approvals WHERE id = ?')
-          .get(APPROVAL_ID) as { cnt: number }
-      ).cnt;
-      expect(count).toBe(0);
-    });
-
-    it('(b) stale-status error has correct code and entity discriminators', () => {
-      seedRun(db, 'canceled');
-
-      let caught: unknown;
-      try {
-        transitionToAwaitingReview(db, {
-          runId: RUN_ID,
-          approvalId: APPROVAL_ID,
-          toolName: 'bash',
-          toolInputJson: '{}',
-          toolUseId: 'tu-disc-001',
-          rationale: null,
-        });
-      } catch (err) {
-        caught = err;
-      }
-
-      expect(caught).toBeInstanceOf(TransitionRejectedError);
-      const e = caught as TransitionRejectedError;
-      expect(e.code).toBe('TRANSITION_REJECTED');
-      expect(e.details.entity).toBe('workflow_run');
-      expect(e.details.expectedStatus).toBe('running');
-      expect(e.details.runId).toBe(RUN_ID);
-    });
-
-    // -----------------------------------------------------------------------
-    // Case (g): In-process guard rejects transitionToAwaitingReview
-    //
-    // The assertTransitionAllowed guard is forced to throw IllegalTransitionError
-    // via a spy. This verifies the guard fires BEFORE the SQL UPDATE — the DB
-    // row remains unchanged and no approval row is inserted, confirming the
-    // SQL never ran.
-    // -----------------------------------------------------------------------
-
-    it('(g) in-process guard: throws IllegalTransitionError before SQL UPDATE when assertTransitionAllowed rejects', async () => {
-      const stateMachine = await import('../../../../../shared/workflows/runStateMachine');
-      const guardSpy = vi.spyOn(stateMachine, 'assertTransitionAllowed').mockImplementationOnce(
-        (from, to, runId) => {
-          throw new IllegalTransitionError(from, to, runId);
-        },
-      );
-
-      seedRun(db, 'running');
-
-      expect(() =>
-        transitionToAwaitingReview(db, {
-          runId: RUN_ID,
-          approvalId: APPROVAL_ID,
-          toolName: 'bash',
-          toolInputJson: '{"cmd":"ls"}',
-          toolUseId: 'tu-guard-to-001',
-          rationale: null,
-        }),
-      ).toThrow(IllegalTransitionError);
-
-      // Guard must have been called with the correct static args
-      expect(guardSpy).toHaveBeenCalledWith('running', 'awaiting_review', RUN_ID);
-
-      // Row must still be 'running' — the SQL UPDATE was never reached
-      const run = db
-        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-        .get(RUN_ID) as { status: string };
-      expect(run.status).toBe('running');
-
-      // No approval row was inserted
-      const count = (
-        db
-          .prepare('SELECT COUNT(*) as cnt FROM approvals WHERE id = ?')
-          .get(APPROVAL_ID) as { cnt: number }
-      ).cnt;
-      expect(count).toBe(0);
-
-      guardSpy.mockRestore();
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -508,7 +339,7 @@ describe('transitions', () => {
       expect(after.status).toBe('awaiting_review');
 
       // Distinguishing signal: a REST awaiting_review has NO pending approval row
-      // (unlike the tool-approval gate via transitionToAwaitingReview).
+      // (unlike the tool-approval gate, which inserts one).
       const approvals = db
         .prepare('SELECT COUNT(*) AS n FROM approvals WHERE run_id = ?')
         .get(RUN_ID) as { n: number };

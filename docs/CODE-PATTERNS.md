@@ -747,9 +747,8 @@ Two valid categories:
 ```
 
 - **Whole-file case:** the marker is the file's first comment, ahead of the imports.
-- **Canonical example (forward-looking placeholder):**
-  `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
-  (an ApprovalRouter integration point)
+- **Canonical example:** none in the tree today — the last markers were retired in the
+  Crystal-fork cleanup, so the template above is the reference.
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   inactive surfaces (both categories).
 
