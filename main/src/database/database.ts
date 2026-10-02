@@ -2907,10 +2907,6 @@ export class DatabaseService {
     };
   }
 
-  deletePanelsForSession(sessionId: string): void {
-    this.db.prepare('DELETE FROM tool_panels WHERE session_id = ?').run(sessionId);
-  }
-
   // ========== UNIFIED PANEL SETTINGS OPERATIONS ==========
   // These methods store all panel-specific settings as JSON in the tool_panels.settings column
   // This provides a flexible, extensible way to store settings without schema changes

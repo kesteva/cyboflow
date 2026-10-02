@@ -199,9 +199,3 @@ export function findCliNodeScript(cliExecutablePath: string): string | null {
 
   return null;
 }
-
-/**
- * @deprecated Use findCliNodeScript instead
- * Kept for backward compatibility
- */
-export const findClaudeCodeScript = findCliNodeScript;

@@ -176,12 +176,4 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
 
     super.registerPanel(panelId, sessionId, baseInitialState, isUserInitiated);
   }
-
-  /**
-   * Utility method to get panel ID from Claude resume ID
-   * This is a Claude-specific convenience method
-   */
-  getPanelIdFromClaudeResumeId(claudeResumeId: string): string | undefined {
-    return this.getPanelIdFromResumeId(claudeResumeId);
-  }
 }

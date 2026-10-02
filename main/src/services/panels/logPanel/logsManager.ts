@@ -339,18 +339,6 @@ export class LogsManager {
   }
   
   /**
-   * Get the running process for a session's logs panel
-   */
-  async getRunningProcess(sessionId: string): Promise<ChildProcess | undefined> {
-    const panels = await panelManager.getPanelsForSession(sessionId);
-    const logsPanel = panels.find((p: ToolPanel) => p.type === 'logs');
-    
-    if (!logsPanel) return undefined;
-    
-    return this.activeProcesses.get(logsPanel.id);
-  }
-  
-  /**
    * Cleanup all running processes
    */
   async cleanup(): Promise<void> {

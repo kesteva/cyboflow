@@ -142,10 +142,6 @@ export class ArchiveProgressManager extends EventEmitter {
     return this.activeTasks.size;
   }
 
-  getQueuedTaskCount(): number {
-    return this.taskQueue.length;
-  }
-
   private emitProgress(): void {
     const tasks = this.getActiveTasks();
     const activeCount = tasks.filter(t => 

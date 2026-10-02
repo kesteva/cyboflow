@@ -261,43 +261,6 @@ export class TerminalPanelManager {
     return process.cwd();
   }
   
-  async restoreTerminalState(panel: ToolPanel, state: TerminalPanelState): Promise<void> {
-    if (!state.scrollbackBuffer || state.scrollbackBuffer.length === 0) {
-      return;
-    }
-    
-    // Initialize terminal first
-    const restoreCwd = hasCwdString(state) ? state.cwd : process.cwd();
-    await this.initializeTerminal(panel, restoreCwd);
-    
-    const terminal = this.terminals.get(panel.id);
-    if (!terminal) return;
-    
-    // Restore scrollback buffer (handle both string and array formats)
-    if (typeof state.scrollbackBuffer === 'string') {
-      terminal.scrollbackBuffer = state.scrollbackBuffer;
-    } else if (Array.isArray(state.scrollbackBuffer)) {
-      // Convert legacy array format to string
-      terminal.scrollbackBuffer = state.scrollbackBuffer.join('\n');
-    } else {
-      terminal.scrollbackBuffer = '';
-    }
-    terminal.commandHistory = state.commandHistory || [];
-    
-    // Send restoration indicator to terminal
-    const restorationMsg = `\r\n[Session Restored from ${state.lastActivityTime || 'previous session'}]\r\n`;
-    terminal.pty.write(restorationMsg);
-    
-    // Send scrollback to frontend
-    if (mainWindow && state.scrollbackBuffer) {
-      mainWindow.webContents.send('terminal:output', {
-        sessionId: panel.sessionId,
-        panelId: panel.id,
-        output: state.scrollbackBuffer + restorationMsg
-      });
-    }
-  }
-  
   getTerminalState(panelId: string): TerminalPanelState | null {
     const terminal = this.terminals.get(panelId);
     if (!terminal) return null;
@@ -343,10 +306,6 @@ export class TerminalPanelManager {
     }
     
     this.terminals.clear();
-  }
-  
-  getActiveTerminals(): string[] {
-    return Array.from(this.terminals.keys());
   }
 }
 

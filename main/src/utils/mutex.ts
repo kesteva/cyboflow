@@ -1,9 +1,3 @@
-// Use console logging for mutex operations since logger might not be available
-const logger = {
-  debug: (msg: string) => console.log(`[Mutex] ${msg}`),
-  warn: (msg: string) => console.warn(`[Mutex] ${msg}`)
-};
-
 /**
  * A simple async mutex implementation for preventing race conditions
  * in critical sections of code. Supports named locks and timeouts.
@@ -84,28 +78,11 @@ export class Mutex {
   }
 
   /**
-   * Get the current number of active locks
-   * @returns number - Number of active locks
-   */
-  getActiveLockCount(): number {
-    return this.locks.size;
-  }
-
-  /**
    * Get all currently locked resource names
    * @returns string[] - Array of locked resource names
    */
   getLockedResources(): string[] {
     return Array.from(this.locks.keys());
-  }
-
-  /**
-   * Force release all locks (use with caution)
-   */
-  releaseAll(): void {
-    logger.warn(`[Mutex] Force releasing all locks (${this.locks.size} active locks)`);
-    this.locks.clear();
-    this.lockCounts.clear();
   }
 }
 
@@ -125,16 +102,6 @@ export async function withLock<T>(
   timeout?: number
 ): Promise<T> {
   return mutex.withLock(resourceName, fn, timeout);
-}
-
-/**
- * Convenience function to acquire a named lock
- * @param resourceName - Unique name for the resource to lock
- * @param timeout - Optional timeout in milliseconds
- * @returns Promise<() => void> - Release function to unlock the resource
- */
-export async function acquireLock(resourceName: string, timeout?: number): Promise<() => void> {
-  return mutex.acquire(resourceName, timeout);
 }
 
 /**

@@ -99,7 +99,6 @@ export class GitStatusManager {
     // Check cache first
     const cached = this.cache[sessionId];
     if (cached && Date.now() - cached.lastChecked < this.CACHE_TTL_MS) {
-      this.gitLogger.logSessionFetch(sessionId, true);
       return cached.status;
     }
 
@@ -572,8 +571,6 @@ export class GitStatusManager {
         this.abortControllers.delete(sessionId);
         return null;
       }
-      
-      this.gitLogger.logSessionFetch(sessionId, false);
 
       const project = this.sessionManager.getProjectForSession(sessionId);
       if (!project?.path) {
@@ -715,7 +712,6 @@ export class GitStatusManager {
 
       // Check if this was a cancellation
       if (error instanceof Error && error.name === 'AbortError') {
-        this.gitLogger.logSessionFetch(sessionId, true); // cancelled
         return null;
       }
 

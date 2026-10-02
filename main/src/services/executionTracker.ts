@@ -175,13 +175,6 @@ export class ExecutionTracker extends EventEmitter {
   }
 
   /**
-   * Get execution context for a session
-   */
-  getExecutionContext(sessionId: string): ExecutionContext | undefined {
-    return this.activeExecutions.get(sessionId);
-  }
-
-  /**
    * Get combined diff for multiple executions
    */
   async getCombinedDiff(sessionId: string, executionIds?: number[]): Promise<GitDiffResult> {

@@ -26,13 +26,6 @@ export class GitStatusLogger {
   }
 
   // 2. Session-level Operations
-  logSessionFetch(sessionId: string, cached: boolean): void {
-    // Only log cache hits in verbose mode
-    if (cached && this.logger) {
-      // Removed debug cache logging for production
-    }
-  }
-
   logSessionError(sessionId: string, error: Error): void {
     const errorCount = (this.sessionErrors.get(sessionId) || 0) + 1;
     this.sessionErrors.set(sessionId, errorCount);
@@ -53,16 +46,7 @@ export class GitStatusLogger {
     }
   }
 
-  // 3. Git Operations
-  logGitOperation(operation: string, sessionId: string, projectId?: number): void {
-    if (projectId !== undefined) {
-      this.logger?.info(`[GitStatus] ${operation} triggered for project ${projectId}`);
-    } else {
-      this.logger?.verbose(`[GitStatus] ${operation} triggered for session ${sessionId}`);
-    }
-  }
-
-  // 4. Summary Statistics
+  // 3. Summary Statistics
   logSummary(): void {
     if (this.sessionErrors.size > 0) {
       const errorSummary = Array.from(this.sessionErrors.entries())
@@ -72,7 +56,7 @@ export class GitStatusLogger {
     }
   }
 
-  // 5. Debounce Events
+  // 4. Debounce Events
   logDebounce(sessionId: string, action: 'start' | 'complete' | 'cancelled'): void {
     // Only log in verbose mode
     this.logger?.verbose(`[GitStatus] Debounce ${action} for session ${sessionId}`);
