@@ -63,7 +63,6 @@ function makeDbMock(overrides: Partial<Record<string, unknown>> = {}) {
     addPanelConversationMessage: vi.fn(),
     updateSession: vi.fn(),
     updatePanelPromptMarkerCompletion: vi.fn(),
-    getActiveProject: vi.fn().mockReturnValue(null),
     ...overrides,
   };
 }

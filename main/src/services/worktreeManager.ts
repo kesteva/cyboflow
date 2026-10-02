@@ -121,15 +121,6 @@ export class WorktreeManager {
     return this.projectsCache.get(cacheKey)!;
   }
 
-  async initializeProject(projectPath: string, worktreeFolder?: string): Promise<void> {
-    const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder);
-    try {
-      await mkdir(baseDir, { recursive: true });
-    } catch (error) {
-      console.error('Failed to create worktrees directory:', error);
-    }
-  }
-
   /**
    * Private helper: execute the git-worktree-add sequence for a given path and branch.
    * Both `createWorktree` and `createDeterministicWorktree` delegate here so the

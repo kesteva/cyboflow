@@ -2052,19 +2052,6 @@ export class DatabaseService {
       .get(worktreePath) as Session | undefined;
   }
 
-  getActiveProject(): Project | undefined {
-    const project = this.db.prepare('SELECT * FROM projects WHERE active = 1 LIMIT 1').get() as Project | undefined;
-    if (project) {
-      console.log(`[Database] Retrieved active project:`, {
-        id: project.id,
-        name: project.name,
-        build_script: project.build_script,
-        run_script: project.run_script
-      });
-    }
-    return project;
-  }
-
   getAllProjects(): Project[] {
     return this.db.prepare('SELECT * FROM projects ORDER BY display_order ASC, created_at ASC').all() as Project[];
   }
@@ -2134,16 +2121,6 @@ export class DatabaseService {
       SET ${fields.join(', ')} 
       WHERE id = ?
     `).run(...values);
-    
-    return this.getProject(id);
-  }
-
-  setActiveProject(id: number): Project | undefined {
-    // First deactivate all projects
-    this.db.prepare('UPDATE projects SET active = 0').run();
-    
-    // Then activate the selected project
-    this.db.prepare('UPDATE projects SET active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
     
     return this.getProject(id);
   }

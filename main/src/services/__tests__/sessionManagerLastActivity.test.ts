@@ -49,7 +49,6 @@ function dbRow(overrides: Record<string, unknown> = {}) {
 function managerFor(row: Record<string, unknown>): SessionManager {
   const db = {
     getAllSessions: vi.fn().mockReturnValue([row]),
-    getActiveProject: vi.fn().mockReturnValue(null),
   };
   return new SessionManager(db as unknown as DbCtorArg);
 }

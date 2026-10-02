@@ -57,7 +57,7 @@ interface CreateSessionJob {
   worktreeTemplate: string;
   index?: number;
   permissionMode?: 'approve' | 'ignore';
-  projectId?: number;
+  projectId: number;
   folderId?: string;
   baseBranch?: string;
   /**
@@ -155,20 +155,9 @@ export class TaskQueue {
       // Processing session creation job - verbose debug logging removed
 
       try {
-        let targetProject;
-
-        if (projectId) {
-          // Use the project specified in the job
-          targetProject = sessionManager.getProjectById(projectId);
-          if (!targetProject) {
-            throw new Error(`Project with ID ${projectId} not found`);
-          }
-        } else {
-          // Fall back to active project for backward compatibility
-          targetProject = sessionManager.getActiveProject();
-          if (!targetProject) {
-            throw new Error('No project specified and no active project selected');
-          }
+        const targetProject = sessionManager.getProjectById(projectId);
+        if (!targetProject) {
+          throw new Error(`Project with ID ${projectId} not found`);
         }
 
         let worktreeName = worktreeTemplate;
@@ -469,8 +458,8 @@ export class TaskQueue {
     prompt: string,
     worktreeTemplate: string,
     count: number,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     baseBranch?: string,
     toolType?: 'claude' | 'none',
     claudeConfig?: {

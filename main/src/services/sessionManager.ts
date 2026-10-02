@@ -62,27 +62,11 @@ function parseStringArrayColumn(raw: string | undefined | null): string[] | unde
 
 export class SessionManager extends EventEmitter {
   private activeSessions: Map<string, Session> = new Map();
-  private activeProject: Project | null = null;
 
   constructor(public db: DatabaseService) {
     super();
     // Increase max listeners to prevent warnings when many components listen to events
     this.setMaxListeners(100);
-  }
-
-  setActiveProject(project: Project): void {
-    this.activeProject = project;
-    this.emit('active-project-changed', project);
-  }
-
-  getActiveProject(): Project | null {
-    if (!this.activeProject) {
-      this.activeProject = this.db.getActiveProject() || null;
-      if (this.activeProject) {
-        // Active project loaded successfully
-      }
-    }
-    return this.activeProject;
   }
 
   getDbSession(id: string): DbSession | undefined {
@@ -261,8 +245,8 @@ export class SessionManager extends EventEmitter {
     worktreePath: string,
     prompt: string,
     worktreeName: string,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     isMainRepo?: boolean,
     folderId?: string,
     toolType?: 'claude' | 'none',
@@ -301,8 +285,8 @@ export class SessionManager extends EventEmitter {
     worktreePath: string,
     prompt: string,
     worktreeName: string,
-    permissionMode?: 'approve' | 'ignore',
-    projectId?: number,
+    permissionMode: 'approve' | 'ignore' | undefined,
+    projectId: number,
     isMainRepo?: boolean,
     folderId?: string,
     toolType?: 'claude' | 'none',
@@ -321,19 +305,9 @@ export class SessionManager extends EventEmitter {
     // Add log entry for session creation
     addSessionLog(id, 'info', `Creating session: ${name}`, 'SessionManager');
     
-    let targetProject;
-    
-    if (projectId) {
-      targetProject = this.getProjectById(projectId);
-      if (!targetProject) {
-        throw new Error(`Project with ID ${projectId} not found`);
-      }
-    } else {
-      // Fall back to active project for backward compatibility
-      targetProject = this.getActiveProject();
-      if (!targetProject) {
-        throw new Error('No project specified and no active project selected');
-      }
+    const targetProject = this.getProjectById(projectId);
+    if (!targetProject) {
+      throw new Error(`Project with ID ${projectId} not found`);
     }
 
     // run_id is intentionally omitted: no flow-owned-session creation surface exists today.

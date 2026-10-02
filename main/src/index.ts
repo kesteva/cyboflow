@@ -1498,12 +1498,6 @@ async function initializeServices(): Promise<boolean> {
   // Create worktree manager
   worktreeManager = new WorktreeManager(codexBrokerReaper);
 
-  // Initialize the active project's worktree directory if one exists
-  const activeProject = sessionManager.getActiveProject();
-  if (activeProject) {
-    await worktreeManager.initializeProject(activeProject.path);
-  }
-
   // Initialize CLI manager factory
   cliManagerFactory = CliManagerFactory.getInstance(logger, configManager);
 

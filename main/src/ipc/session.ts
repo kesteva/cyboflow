@@ -899,21 +899,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // Session management handlers
   ipcMain.handle('sessions:create', async (_event, request: CreateSessionRequest) => {
     try {
-      let targetProject;
-
-      if (request.projectId) {
-        // Use the project specified in the request
-        targetProject = databaseService.getProject(request.projectId);
-        if (!targetProject) {
-          return { success: false, error: 'Project not found' };
-        }
-      } else {
-        // Fall back to active project for backward compatibility
-        targetProject = sessionManager.getActiveProject();
-        if (!targetProject) {
-          console.warn('[IPC] No project specified and no active project found');
-          return { success: false, error: 'No project specified. Please provide a projectId.' };
-        }
+      if (!request.projectId) {
+        return { success: false, error: 'No project specified. Please provide a projectId.' };
+      }
+      const targetProject = databaseService.getProject(request.projectId);
+      if (!targetProject) {
+        return { success: false, error: 'Project not found' };
       }
 
       if (!taskQueue) {

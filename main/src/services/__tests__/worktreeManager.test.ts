@@ -707,11 +707,10 @@ describe('WorktreeManager.removeWorktree (integration)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// createWorktree / initializeProject — placement, base-branch selection,
-// name collision, and idempotent bootstrap.
+// createWorktree — placement, base-branch selection, and name collision.
 // ---------------------------------------------------------------------------
 
-describe('WorktreeManager.createWorktree / initializeProject (integration)', () => {
+describe('WorktreeManager.createWorktree (integration)', () => {
   it('creates a worktree at baseDir/<name> off the default HEAD', async () => {
     await withTempDir('worktree-create-default-', async (tmpDir) => {
       initRepo(tmpDir);
@@ -750,20 +749,6 @@ describe('WorktreeManager.createWorktree / initializeProject (integration)', () 
       const res2 = await manager.createWorktree(tmpDir, 'dup');
       expect(res2.worktreePath).toBe(join(tmpDir, 'worktrees', 'dup'));
       expect(existsSync(res2.worktreePath)).toBe(true);
-    });
-  });
-
-  it('initializeProject creates the worktrees base dir idempotently (default + custom folder)', async () => {
-    await withTempDir('worktree-init-project-', async (tmpDir) => {
-      const manager = new WorktreeManager();
-      await manager.initializeProject(tmpDir);
-      expect(existsSync(join(tmpDir, 'worktrees'))).toBe(true);
-      // Second call is a no-op (mkdir recursive) — must not throw.
-      await expect(manager.initializeProject(tmpDir)).resolves.toBeUndefined();
-
-      // A nested custom folder is bootstrapped too.
-      await manager.initializeProject(tmpDir, join('.cyboflow', 'worktrees'));
-      expect(existsSync(join(tmpDir, '.cyboflow', 'worktrees'))).toBe(true);
     });
   });
 });
