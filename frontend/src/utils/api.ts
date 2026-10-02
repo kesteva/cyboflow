@@ -476,44 +476,6 @@ export class API {
     },
   };
 
-  // Folders
-  static folders = {
-    async getByProject(projectId: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.getByProject(projectId);
-    },
-
-    async create(name: string, projectId: number, parentFolderId?: string | null) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.create(name, projectId, parentFolderId);
-    },
-
-    async update(folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.update(folderId, updates);
-    },
-
-    async delete(folderId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.delete(folderId);
-    },
-
-    async reorder(projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.reorder(projectId, folderOrders);
-    },
-
-    async moveSession(sessionId: string, folderId: string | null) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.moveSession(sessionId, folderId);
-    },
-
-    async move(folderId: string, parentFolderId: string | null) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.folders.move(folderId, parentFolderId);
-    },
-  };
-
   // Demo mode
   static demo = {
     async getInfo() {

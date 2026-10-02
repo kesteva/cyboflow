@@ -24,7 +24,6 @@ import { useNavigationStore } from './stores/navigationStore';
 import { useLayoutStore } from './stores/layoutStore';
 import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts';
 import { useKeyboardShortcutsHydration } from './hooks/useKeyboardShortcutsHydration';
-import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import LandingHome from './components/landing/LandingHome';
 import SessionStartWizard from './components/cyboflow/wizard/SessionStartWizard';
@@ -272,222 +271,220 @@ function App() {
   // identity across renders since the underlying setters are themselves stable.
   const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
 
+  // Outer: h-screen flex-col so StatusBar sits below the main row.
   return (
-    <ContextMenuProvider>
-      {/* Outer: h-screen flex-col so StatusBar sits below the main row */}
-      <div className="h-screen flex flex-col overflow-hidden bg-bg-primary">
-        <MainProcessLogger />
-        {/* 38px Protoflow title bar (flowed, drag region with native traffic-light gutter) */}
-        <TitleBar
-          searchQuery={globalSearch}
-          onSearchChange={setGlobalSearch}
-        />
-        {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
-            the fullscreen surface. TitleBar (native drag region) and the dialog
-            siblings below stay mounted. */}
-        {/* Post-approve planner handoff — mounted OUTSIDE the swap so the
-            prompt survives the design surface's unmount on exit. */}
-        <DesignPlannerPrompt />
-        {activeDesignSessionId !== null ? (
-          <DesignModeSurface />
-        ) : onboardingShellHidden ? (
-          <OnboardingShellSurface />
-        ) : (
-        <>
-        {/* Shell geometry: [agent rail | center]. Human review folds into the
-            rail as a primary item that swaps the center to a full-width review
-            pane (see docs/SHELL-LAYOUT.md). */}
-        <div className="flex flex-1 overflow-hidden">
-          {/* Left rail. Collapsing hides the Sidebar rather than unmounting it
-              (mirrors the TerminalDock invariant): the project tree's expansion
-              state and its in-flight queries survive a collapse, and re-expanding
-              is instant. The hide is applied INSIDE Sidebar, to its own root box
-              only — Sidebar also renders the Settings / bug-report / status-guide
-              dialogs as siblings, and a display:none wrapper here would hide
-              those too (Settings is openable from surfaces far outside the rail). */}
-          {/* A display:contents wrapper keeps the flex geometry and the Sidebar
-              mounted across the tour → shell transition. The Sidebar stays
-              CLICKABLE during the in-shell guided steps — navigating through it
-              parks the tour (guidedNavPause, installed above). */}
-          <div className="contents" data-testid="shell-sidebar-slot">
-          <PerfProfiler id="sidebar">
-            <Sidebar
-              onAboutClick={handleAboutClick}
-              width={sidebarWidth}
-              onResize={startResize}
-              collapsed={leftRailCollapsed}
-              onCollapse={toggleLeftRail}
-              pendingReviewCount={reviewQueueCount}
-              humanReviewActive={showHumanReview}
-              onToggleHumanReview={toggleHumanReview}
-              backlogCount={backlogCount}
-              backlogActive={showBacklog}
-              onToggleBacklog={toggleBacklog}
-              insightsCount={insightsCount}
-              insightsActive={showInsights}
-              onToggleInsights={toggleInsights}
-              workflowsActive={showWorkflows}
-              onToggleWorkflows={toggleWorkflows}
-              verifyQueueActive={showVerifyQueue}
-              onToggleVerifyQueue={toggleVerifyQueue}
-            />
-          </PerfProfiler>
-          </div>
-          {/* Collapsed left rail — a thin strip with only a re-expand chevron,
-              deliberately the same 28px geometry + affordance as RunRightRail's
-              collapsed strip (mirrored horizontally). */}
-          {leftRailCollapsed && (
-            <aside
-              data-testid="sidebar-collapsed"
-              className="relative w-[28px] shrink-0 border-r border-border-primary bg-bg-secondary"
-            >
-              {/* Vertically centered on the strip, mirroring the expanded rail's
-                  divider-centered collapse handle. */}
-              <button
-                type="button"
-                data-testid="sidebar-expand"
-                aria-label="Expand left rail"
-                title="Expand left rail"
-                onClick={toggleLeftRail}
-                className="absolute top-1/2 -translate-y-1/2 flex h-9 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
-              >
-                <ChevronRight size={14} />
-              </button>
-            </aside>
-          )}
-          {/* Center-surface state machine, keyed off navigationStore.view
-                (pre-empted by the guided set-up column while the in-shell tour
-                steps 9-14 run — see `guidedShell` above):
-                • 'session' → CyboflowRoot (the active run/session workspace, the
-                  only mount point for the run surface; legacy SessionView retired
-                  in TASK-690).
-                • 'wizard'  → SessionStartWizard (the new-flow launcher).
-                • 'home'    → the rail-driven overlays, checked in priority order:
-                  InsightsView when the insights rail item is active, else
-                  BacklogPane when the backlog rail item is active, else
-                  LandingHome (the cross-project home). The navigationStore
-                  mutual-exclusion invariant guarantees at most one overlay flag
-                  is set, so the order is just a tiebreaker. focusQueue scrolls
-                  LandingHome to its review queue when the user arrived from the
-                  human-review rail affordance. */}
-          <div className="flex flex-col flex-1 overflow-hidden">
-            {guidedShell !== 'none' ? (
-              <GuidedSetupSurface />
-            ) : view === 'session' ? (
-              <CyboflowRoot projectId={activeProjectId} />
-            ) : view === 'wizard' ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">New-flow wizard error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <SessionStartWizard />
-              </ErrorBoundary>
-            ) : experimentComparisonId !== null ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Comparison error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <ExperimentComparisonView experimentId={experimentComparisonId} />
-              </ErrorBoundary>
-            ) : showInsights ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Insights error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <InsightsView />
-              </ErrorBoundary>
-            ) : showWorkflows ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Workflows error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <WorkflowsView />
-              </ErrorBoundary>
-            ) : showVerifyQueue ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Verify Queue error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <VerifyQueueView />
-              </ErrorBoundary>
-            ) : showBacklog ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Task backlog error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <BacklogPane projectId={activeProjectId} />
-              </ErrorBoundary>
-            ) : showProjectOverview && activeProjectId !== null ? (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Project overview error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <ProjectOverviewPage projectId={activeProjectId} />
-              </ErrorBoundary>
-            ) : (
-              <ErrorBoundary fallback={(error) => (
-                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
-                  <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Home surface error — restart app</p>
-                    <p className="text-xs text-text-muted">{error.message}</p>
-                  </div>
-                </div>
-              )}>
-                <LandingHome focusQueue={showHumanReview} />
-              </ErrorBoundary>
-            )}
-          </div>
-          {/* Global "cyboflow assistant" rail — every landing-family surface
-              except the session workspace (RunRightRail) and the wizard. During
-              the in-shell tour it appears exactly at step 12 ("meet the
-              assistant") and stays. */}
-          {(guidedShell === 'none' ? shouldShowAgentRail(view) : guidedShell === 'full') &&
-            assistantEnabled && <AgentRail />}
+    <div className="h-screen flex flex-col overflow-hidden bg-bg-primary">
+      <MainProcessLogger />
+      {/* 38px Protoflow title bar (flowed, drag region with native traffic-light gutter) */}
+      <TitleBar
+        searchQuery={globalSearch}
+        onSearchChange={setGlobalSearch}
+      />
+      {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
+          the fullscreen surface. TitleBar (native drag region) and the dialog
+          siblings below stay mounted. */}
+      {/* Post-approve planner handoff — mounted OUTSIDE the swap so the
+          prompt survives the design surface's unmount on exit. */}
+      <DesignPlannerPrompt />
+      {activeDesignSessionId !== null ? (
+        <DesignModeSurface />
+      ) : onboardingShellHidden ? (
+        <OnboardingShellSurface />
+      ) : (
+      <>
+      {/* Shell geometry: [agent rail | center]. Human review folds into the
+          rail as a primary item that swaps the center to a full-width review
+          pane (see docs/SHELL-LAYOUT.md). */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left rail. Collapsing hides the Sidebar rather than unmounting it
+            (mirrors the TerminalDock invariant): the project tree's expansion
+            state and its in-flight queries survive a collapse, and re-expanding
+            is instant. The hide is applied INSIDE Sidebar, to its own root box
+            only — Sidebar also renders the Settings / bug-report / status-guide
+            dialogs as siblings, and a display:none wrapper here would hide
+            those too (Settings is openable from surfaces far outside the rail). */}
+        {/* A display:contents wrapper keeps the flex geometry and the Sidebar
+            mounted across the tour → shell transition. The Sidebar stays
+            CLICKABLE during the in-shell guided steps — navigating through it
+            parks the tour (guidedNavPause, installed above). */}
+        <div className="contents" data-testid="shell-sidebar-slot">
+        <PerfProfiler id="sidebar">
+          <Sidebar
+            onAboutClick={handleAboutClick}
+            width={sidebarWidth}
+            onResize={startResize}
+            collapsed={leftRailCollapsed}
+            onCollapse={toggleLeftRail}
+            pendingReviewCount={reviewQueueCount}
+            humanReviewActive={showHumanReview}
+            onToggleHumanReview={toggleHumanReview}
+            backlogCount={backlogCount}
+            backlogActive={showBacklog}
+            onToggleBacklog={toggleBacklog}
+            insightsCount={insightsCount}
+            insightsActive={showInsights}
+            onToggleInsights={toggleInsights}
+            workflowsActive={showWorkflows}
+            onToggleWorkflows={toggleWorkflows}
+            verifyQueueActive={showVerifyQueue}
+            onToggleVerifyQueue={toggleVerifyQueue}
+          />
+        </PerfProfiler>
         </div>
-        {/* Persistent status bar at the bottom of the app shell */}
-        <StatusBar />
-        </>
+        {/* Collapsed left rail — a thin strip with only a re-expand chevron,
+            deliberately the same 28px geometry + affordance as RunRightRail's
+            collapsed strip (mirrored horizontally). */}
+        {leftRailCollapsed && (
+          <aside
+            data-testid="sidebar-collapsed"
+            className="relative w-[28px] shrink-0 border-r border-border-primary bg-bg-secondary"
+          >
+            {/* Vertically centered on the strip, mirroring the expanded rail's
+                divider-centered collapse handle. */}
+            <button
+              type="button"
+              data-testid="sidebar-expand"
+              aria-label="Expand left rail"
+              title="Expand left rail"
+              onClick={toggleLeftRail}
+              className="absolute top-1/2 -translate-y-1/2 flex h-9 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </aside>
         )}
-        <OnboardingGate />
-        <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
-        <ErrorDialog
-          isOpen={!!currentError}
-          onClose={clearError}
-          title={currentError?.title}
-          error={currentError?.error || ''}
-          details={currentError?.details}
-          command={currentError?.command}
-        />
+        {/* Center-surface state machine, keyed off navigationStore.view
+              (pre-empted by the guided set-up column while the in-shell tour
+              steps 9-14 run — see `guidedShell` above):
+              • 'session' → CyboflowRoot (the active run/session workspace, the
+                only mount point for the run surface; legacy SessionView retired
+                in TASK-690).
+              • 'wizard'  → SessionStartWizard (the new-flow launcher).
+              • 'home'    → the rail-driven overlays, checked in priority order:
+                InsightsView when the insights rail item is active, else
+                BacklogPane when the backlog rail item is active, else
+                LandingHome (the cross-project home). The navigationStore
+                mutual-exclusion invariant guarantees at most one overlay flag
+                is set, so the order is just a tiebreaker. focusQueue scrolls
+                LandingHome to its review queue when the user arrived from the
+                human-review rail affordance. */}
+        <div className="flex flex-col flex-1 overflow-hidden">
+          {guidedShell !== 'none' ? (
+            <GuidedSetupSurface />
+          ) : view === 'session' ? (
+            <CyboflowRoot projectId={activeProjectId} />
+          ) : view === 'wizard' ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">New-flow wizard error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <SessionStartWizard />
+            </ErrorBoundary>
+          ) : experimentComparisonId !== null ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Comparison error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <ExperimentComparisonView experimentId={experimentComparisonId} />
+            </ErrorBoundary>
+          ) : showInsights ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Insights error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <InsightsView />
+            </ErrorBoundary>
+          ) : showWorkflows ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Workflows error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <WorkflowsView />
+            </ErrorBoundary>
+          ) : showVerifyQueue ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Verify Queue error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <VerifyQueueView />
+            </ErrorBoundary>
+          ) : showBacklog ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Task backlog error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <BacklogPane projectId={activeProjectId} />
+            </ErrorBoundary>
+          ) : showProjectOverview && activeProjectId !== null ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Project overview error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <ProjectOverviewPage projectId={activeProjectId} />
+            </ErrorBoundary>
+          ) : (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">Home surface error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <LandingHome focusQueue={showHumanReview} />
+            </ErrorBoundary>
+          )}
+        </div>
+        {/* Global "cyboflow assistant" rail — every landing-family surface
+            except the session workspace (RunRightRail) and the wizard. During
+            the in-shell tour it appears exactly at step 12 ("meet the
+            assistant") and stays. */}
+        {(guidedShell === 'none' ? shouldShowAgentRail(view) : guidedShell === 'full') &&
+          assistantEnabled && <AgentRail />}
       </div>
-    </ContextMenuProvider>
+      {/* Persistent status bar at the bottom of the app shell */}
+      <StatusBar />
+      </>
+      )}
+      <OnboardingGate />
+      <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
+      <ErrorDialog
+        isOpen={!!currentError}
+        onClose={clearError}
+        title={currentError?.title}
+        error={currentError?.error || ''}
+        details={currentError?.details}
+        command={currentError?.command}
+      />
+    </div>
   );
 }
 

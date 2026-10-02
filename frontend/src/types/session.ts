@@ -343,14 +343,6 @@ export interface GitErrorDetails {
   };
 }
 
-// Import Folder from the proper types file
-import type { Folder } from './folder';
-
-// FolderWithProjectId is just an alias for Folder since it already has projectId
-export type FolderWithProjectId = Folder;
-
-export type ContextMenuPayload = Session | Folder;
-
 /**
  * `sessions:open-idea-session` wire types (the backlog idea card's "Open").
  * RE-EXPORTED, never re-declared: the single declaration lives in

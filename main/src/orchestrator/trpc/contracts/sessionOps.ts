@@ -46,7 +46,7 @@ export type SessionOpsError = { success: false; error: string };
 /**
  * Structural mirror of the `projects` row (source of truth:
  * main/src/database/models.ts `Project`) — what `getAllWithProjects` spreads
- * into each entry before attaching its sessions and folders.
+ * into each entry before attaching its sessions.
  */
 export interface SessionProjectRow {
   id: number;
@@ -67,25 +67,9 @@ export interface SessionProjectRow {
   permission_trust?: 'trusted' | 'untrusted' | null;
 }
 
-/**
- * A folder as the renderer sees it — the camelCase projection
- * `convertDbFolderToFolder` (main/src/ipc/folders.ts, source of truth) makes of
- * the snake_case `folders` row.
- */
-export interface SessionFolderRow {
-  id: string;
-  name: string;
-  projectId: number;
-  parentFolderId?: string | null;
-  displayOrder: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** One entry of `getAllWithProjects`: a project plus its sessions and folders. */
+/** One entry of `getAllWithProjects`: a project plus its sessions. */
 export type ProjectWithSessions = SessionProjectRow & {
   sessions: Session[];
-  folders: SessionFolderRow[];
 };
 
 /**
@@ -199,7 +183,7 @@ export interface SessionOpsLike {
 
   /**
    * Mirrors legacy `sessions:get-all-with-projects`. Every project with its
-   * sessions and its (camelCased) folders attached.
+   * sessions attached.
    */
   getAllWithProjects(): Promise<{ success: true; data: ProjectWithSessions[] } | SessionOpsError>;
 

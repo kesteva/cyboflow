@@ -73,16 +73,6 @@ interface SessionOutputAvailableData {
   hasNewOutput?: boolean;
 }
 
-interface Folder {
-  id: string;
-  name: string;
-  project_id: number;
-  parent_folder_id?: string | null;
-  display_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
 // Increase max listeners for ipcRenderer to prevent warnings when many components listen to events
 ipcRenderer.setMaxListeners(50);
 
@@ -454,17 +444,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     detectBranch: (path: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('projects:detect-branch', path),
   },
 
-  // Folders
-  folders: {
-    getByProject: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('folders:get-by-project', projectId),
-    create: (name: string, projectId: number, parentFolderId?: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:create', name, projectId, parentFolderId),
-    update: (folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }): Promise<IPCResponse> => ipcRenderer.invoke('folders:update', folderId, updates),
-    delete: (folderId: string): Promise<IPCResponse> => ipcRenderer.invoke('folders:delete', folderId),
-    reorder: (projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>): Promise<IPCResponse> => ipcRenderer.invoke('folders:reorder', projectId, folderOrders),
-    moveSession: (sessionId: string, folderId: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:move-session', sessionId, folderId),
-    move: (folderId: string, parentFolderId: string | null): Promise<IPCResponse> => ipcRenderer.invoke('folders:move', folderId, parentFolderId),
-  },
-
   // Configuration
   demo: {
     getInfo: (): Promise<IPCResponse<{ demoMode: boolean; sandboxPath: string | null; projectName: string }>> =>
@@ -532,7 +511,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // UI State management
   uiState: {
     getExpanded: (): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:get-expanded'),
-    saveExpanded: (projectIds: number[], folderIds: string[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded', projectIds, folderIds),
+    saveExpanded: (projectIds: number[]): Promise<IPCResponse> => ipcRenderer.invoke('ui-state:save-expanded', projectIds),
   },
 
   // Event listeners for real-time updates
@@ -596,23 +575,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, panel: ToolPanel) => callback(panel);
       ipcRenderer.on('panel:updated', wrappedCallback);
       return () => ipcRenderer.removeListener('panel:updated', wrappedCallback);
-    },
-    
-    // Folder events
-    onFolderCreated: (callback: (folder: Folder) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folder: Folder) => callback(folder);
-      ipcRenderer.on('folder:created', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:created', wrappedCallback);
-    },
-    onFolderUpdated: (callback: (folder: Folder) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folder: Folder) => callback(folder);
-      ipcRenderer.on('folder:updated', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:updated', wrappedCallback);
-    },
-    onFolderDeleted: (callback: (folderId: string) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, folderId: string) => callback(folderId);
-      ipcRenderer.on('folder:deleted', wrappedCallback);
-      return () => ipcRenderer.removeListener('folder:deleted', wrappedCallback);
     },
     
     // Panel events

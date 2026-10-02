@@ -1641,7 +1641,6 @@ async function initializeServices(): Promise<boolean> {
     claudeCodeManager: defaultCliManager, // Use default CLI manager for backward compatibility
     gitDiffManager,
     executionTracker,
-    getMainWindow: () => mainWindow
   });
 
   // ---------------------------------------------------------------------------

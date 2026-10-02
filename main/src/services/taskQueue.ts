@@ -9,7 +9,6 @@ import * as os from 'os';
 import { panelManager } from './panelManager';
 import type { Session } from '../types/session';
 import type { ToolPanel } from '../../../shared/types/panels';
-import type { DatabaseService } from '../database/database';
 import type { Project } from '../database/models';
 import { getCurrentBranch } from './gitPlumbingCommands';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
@@ -51,7 +50,6 @@ interface TaskQueueOptions {
   claudeCodeManager: AbstractCliManager;
   gitDiffManager: GitDiffManager;
   executionTracker: ExecutionTracker;
-  getMainWindow: () => Electron.BrowserWindow | null;
 }
 
 interface CreateSessionJob {
@@ -480,50 +478,16 @@ export class TaskQueue {
       permissionMode?: 'approve' | 'ignore';
       ultrathink?: boolean;
     },
-    providedFolderId?: string,
+    folderId?: string,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
     agentModel?: string | null
   ): Promise<{ id: string; data: CreateSessionJob; status: string }[]> {
-    let folderId: string | undefined = providedFolderId;
     let generatedBaseName: string | undefined;
 
     // Generate a name if no template provided
     if (!worktreeTemplate || worktreeTemplate.trim() === '') {
       generatedBaseName = generateWorktreeNameFromPrompt(prompt);
-    }
-
-    // Create a folder for multi-session prompts (only if not already provided)
-    if (!providedFolderId && count > 1 && projectId) {
-      try {
-        const { sessionManager } = this.options;
-        const db = sessionManager.db as DatabaseService;
-        const folderName = worktreeTemplate || generatedBaseName || 'Multi-session prompt';
-
-        // Ensure projectId is a number
-        const numericProjectId = typeof projectId === 'string' ? parseInt(projectId, 10) : projectId;
-        if (isNaN(numericProjectId)) {
-          throw new Error(`Invalid project ID: ${projectId}`);
-        }
-
-        const folder = db.createFolder(folderName, numericProjectId);
-        folderId = folder.id;
-
-        // Emit folder created event immediately and wait for it to be processed
-        const getMainWindow = this.options.getMainWindow;
-        const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('folder:created', folder);
-
-          // Wait a bit to ensure the frontend has processed the folder event
-          await new Promise(resolve => setTimeout(resolve, 200));
-        } else {
-          console.warn(`[TaskQueue] Could not emit folder:created event - main window not available`);
-        }
-      } catch (error) {
-        console.error('[TaskQueue] Failed to create folder for multi-session prompt:', error);
-        // Continue without folder - sessions will be created at project level
-      }
     }
 
     const jobs = [];

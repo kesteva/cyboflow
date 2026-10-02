@@ -1,13 +1,10 @@
 /**
- * DraggableProjectTreeView — the project/folder drag-and-drop handlers, driven
+ * DraggableProjectTreeView — the project drag-and-drop handlers, driven
  * through the component with focused mocks (the 1570-line file is not snapshotted).
  *
  * Covers:
  *   - handleProjectDrop reorder → API.projects.reorder(full order), local order
  *     flips only on {success:true}; failure → showError, order unchanged.
- *   - a folder dropped on a project header → API.folders.move(folderId, null).
- *   - handleFolderDrop A-onto-B → move(A, B.id) + auto-expands B (its child shows).
- *   - a folder dropped on itself → no move.
  *   - dragCounter: an over-highlight clears only when the enter/leave count hits 0.
  */
 import '@testing-library/jest-dom';
@@ -15,20 +12,17 @@ import { useSyncExternalStore } from 'react';
 import { render, screen, waitFor, act, fireEvent, createEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Session } from '../../types/session';
-import type { Folder } from '../../types/folder';
 import type { ExperimentRow } from '../../../../shared/types/experiments';
 import type { RailExperimentData } from '../../hooks/useRailExperiments';
 
-const { mockReorder, mockSessionsReorder, mockFoldersMove, mockShowError, mockSetSessions } = vi.hoisted(() => ({
+const { mockReorder, mockSessionsReorder, mockShowError, mockSetSessions } = vi.hoisted(() => ({
   mockReorder: vi.fn(),
   mockSessionsReorder: vi.fn(),
-  mockFoldersMove: vi.fn(),
   mockShowError: vi.fn(),
   mockSetSessions: vi.fn(),
 }));
 
-// The action layer (reorder / folders.move) lives on API.*; folder *loading*
-// goes through window.electronAPI.folders.getByProject (stubbed below).
+// The action layer (projects/sessions reorder) lives on API.*.
 vi.mock('../../utils/api', () => ({
   API: {
     projects: {
@@ -41,15 +35,6 @@ vi.mock('../../utils/api', () => ({
       })),
       detectBranch: vi.fn(async () => ({ success: false })),
       reorder: (...a: unknown[]) => mockReorder(...a),
-    },
-    folders: {
-      getByProject: vi.fn(async () => ({ success: true, data: [] })),
-      update: vi.fn(),
-      delete: vi.fn(),
-      create: vi.fn(),
-      reorder: vi.fn(),
-      move: (...a: unknown[]) => mockFoldersMove(...a),
-      moveSession: vi.fn(),
     },
     sessions: {
       reorder: (...a: unknown[]) => mockSessionsReorder(...a),
@@ -135,31 +120,18 @@ vi.mock('../ProjectSettings', () => ({ default: () => null }));
 vi.mock('../CreateProjectDialog', () => ({ CreateProjectDialog: () => null }));
 vi.mock('../EmptyState', () => ({ EmptyState: () => null }));
 vi.mock('../LoadingSpinner', () => ({ LoadingSpinner: () => <div>Loading...</div> }));
-vi.mock('../../contexts/ContextMenuContext', () => ({
-  useContextMenu: () => ({ menuState: { type: null, payload: null, position: null }, openMenu: vi.fn(), closeMenu: vi.fn(), isMenuOpen: () => false }),
-}));
 vi.mock('../../utils/debounce', () => ({ debounce: (fn: (...a: unknown[]) => unknown) => fn }));
 vi.mock('../../utils/performanceUtils', () => ({ throttle: (fn: (...a: unknown[]) => unknown) => fn }));
-
-// Folder catalogue per project — Alpha has two root folders (B carries a child C
-// that stays hidden until B expands); Beta has none.
-let mockFoldersByProject: Record<number, Folder[]> = {};
-function folder(id: string, name: string, projectId: number, parentFolderId: string | null = null): Folder {
-  return { id, name, projectId, parentFolderId, displayOrder: 0, createdAt: '2026-01-01', updatedAt: '2026-01-01' };
-}
 
 function makeElectronAPI() {
   return {
     uiState: {
-      // success:false → no saved layout → auto-expand ALL projects (folders render).
+      // success:false → no saved layout → auto-expand ALL projects.
       getExpanded: vi.fn().mockResolvedValue({ success: false }),
       saveExpanded: vi.fn().mockResolvedValue({ success: true }),
     },
     projects: { getRunningScript: vi.fn().mockResolvedValue({ success: false }), stopScript: vi.fn(), runScript: vi.fn() },
     git: { cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }) },
-    folders: {
-      getByProject: vi.fn(async (pid: number) => ({ success: true, data: mockFoldersByProject[pid] ?? [] })),
-    },
     events: null,
     invoke: vi.fn().mockResolvedValue({ success: false }),
   };
@@ -168,7 +140,6 @@ function makeElectronAPI() {
 beforeEach(() => {
   mockReorder.mockReset().mockResolvedValue({ success: true });
   mockSessionsReorder.mockReset().mockResolvedValue({ success: true });
-  mockFoldersMove.mockReset().mockResolvedValue({ success: true });
   mockShowError.mockReset();
   mockSetSessions.mockReset().mockImplementation((sessions: Session[]) => {
     mockSessions = sessions;
@@ -176,10 +147,6 @@ beforeEach(() => {
   mockSessions = [];
   mockRailByProject = {};
   mockRunsByProject = {};
-  mockFoldersByProject = {
-    1: [folder('f-a', 'Folder A', 1), folder('f-b', 'Folder B', 1), folder('f-c', 'Folder C', 1, 'f-b')],
-    2: [],
-  };
   Object.defineProperty(window, 'electronAPI', { writable: true, value: makeElectronAPI() });
 });
 
@@ -201,8 +168,6 @@ async function renderTree() {
     render(<DraggableProjectTreeView />);
   });
   await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-  // Folders load in a follow-on effect — wait for a root folder to appear.
-  await waitFor(() => expect(screen.getByText('Folder A')).toBeInTheDocument());
 }
 
 function session(id: string, name: string, projectId: number, displayOrder: number): Session {
@@ -307,41 +272,6 @@ describe('DraggableProjectTreeView — project reorder drop', () => {
     // Order unchanged (Alpha still first).
     const names = screen.getAllByText(/Project$/).map((n) => n.textContent);
     expect(names.indexOf('Alpha Project')).toBeLessThan(names.indexOf('Beta Project'));
-  });
-});
-
-describe('DraggableProjectTreeView — folder drops', () => {
-  it('a folder dropped on a project header moves it to the project root (parent=null)', async () => {
-    await renderTree();
-    fireEvent.dragStart(draggableOf('Folder A'), { dataTransfer: dataTransfer() });
-    await act(async () => {
-      fireEvent.drop(draggableOf('Beta Project'), { dataTransfer: dataTransfer() });
-    });
-    await waitFor(() => expect(mockFoldersMove).toHaveBeenCalledWith('f-a', null));
-  });
-
-  it('folder-onto-folder moves under the target and auto-expands it (child appears)', async () => {
-    await renderTree();
-    // Folder C is a child of B, hidden while B is collapsed.
-    expect(screen.queryByText('Folder C')).toBeNull();
-    fireEvent.dragStart(draggableOf('Folder A'), { dataTransfer: dataTransfer() });
-    await act(async () => {
-      fireEvent.drop(draggableOf('Folder B'), { dataTransfer: dataTransfer() });
-    });
-    await waitFor(() => expect(mockFoldersMove).toHaveBeenCalledWith('f-a', 'f-b'));
-    // B auto-expanded on success → its child C is now visible.
-    await waitFor(() => expect(screen.getByText('Folder C')).toBeInTheDocument());
-  });
-
-  it('a folder dropped on itself is a no-op (no move)', async () => {
-    await renderTree();
-    fireEvent.dragStart(draggableOf('Folder A'), { dataTransfer: dataTransfer() });
-    await act(async () => {
-      fireEvent.drop(draggableOf('Folder A'), { dataTransfer: dataTransfer() });
-    });
-    // Give any async handler a tick.
-    await act(async () => { await Promise.resolve(); });
-    expect(mockFoldersMove).not.toHaveBeenCalled();
   });
 });
 

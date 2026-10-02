@@ -1,7 +1,6 @@
 // Type definitions for Electron preload API
 import type { Session, SessionOutput } from './session';
 import type { Project } from './project';
-import type { Folder } from './folder';
 import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
@@ -278,17 +277,6 @@ interface ElectronAPI {
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
   };
 
-  // Folders
-  folders: {
-    getByProject: (projectId: number) => Promise<IPCResponse<Folder[]>>;
-    create: (name: string, projectId: number, parentFolderId?: string | null) => Promise<IPCResponse<Folder>>;
-    update: (folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }) => Promise<IPCResponse<void>>;
-    delete: (folderId: string) => Promise<IPCResponse<void>>;
-    reorder: (projectId: number, folderOrders: Array<{ id: string; displayOrder: number }>) => Promise<IPCResponse<void>>;
-    moveSession: (sessionId: string, folderId: string | null) => Promise<IPCResponse<void>>;
-    move: (folderId: string, parentFolderId: string | null) => Promise<IPCResponse<void>>;
-  };
-
   // Configuration — IPCDataResponse so callers can access .data fields directly after success check
   // Demo-mode tour info (sandbox repo to prefill in the Create Project dialog)
   demo: {
@@ -319,8 +307,8 @@ interface ElectronAPI {
 
   // UI State management
   uiState: {
-    getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[]; expandedFolders: string[] }>>;
-    saveExpanded: (projectIds: number[], folderIds: string[]) => Promise<IPCResponse<void>>;
+    getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[] }>>;
+    saveExpanded: (projectIds: number[]) => Promise<IPCResponse<void>>;
   };
 
   // Event listeners for real-time updates
@@ -336,11 +324,6 @@ interface ElectronAPI {
 
     // Project events
     onProjectUpdated: (callback: (project: Project) => void) => () => void;
-
-    // Folder events
-    onFolderCreated: (callback: (folder: Folder) => void) => () => void;
-    onFolderUpdated: (callback: (folder: Folder) => void) => () => void;
-    onFolderDeleted: (callback: (folderId: string) => void) => () => void;
 
     // Panel events
     onPanelCreated: (callback: (panel: ToolPanel) => void) => () => void;

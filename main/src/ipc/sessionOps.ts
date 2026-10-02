@@ -22,7 +22,6 @@
  */
 import type { AppServices } from './types';
 import type { SessionOpsLike } from '../orchestrator/trpc/contracts/sessionOps';
-import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
 import { aggregateExecutionDiffTotals } from './executionDiffAggregation';
 import { computeSessionFileStats, type SessionFileStats } from './sessionFileStats';
@@ -98,12 +97,9 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       const allProjects = databaseService.getAllProjects();
       const projectsWithSessions = allProjects.map(project => {
         const sessions = sessionManager.getSessionsForProject(project.id);
-        const folders = databaseService.getFoldersForProject(project.id);
-        const convertedFolders = folders.map(convertDbFolderToFolder);
         return {
           ...project,
           sessions,
-          folders: convertedFolders
         };
       });
       return { success: true, data: projectsWithSessions };

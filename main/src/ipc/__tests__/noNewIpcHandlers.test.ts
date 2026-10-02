@@ -20,7 +20,11 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 137 handlers — down from 140 when three dead granular
+/** Frozen 2026-10-02 at 130 handlers — down from 137 when `ipc/folders.ts`
+ * (7 `folders:*` handlers) was deleted with the vestigial sidebar project-folder
+ * UI.
+ *
+ * Earlier 2026-10-02: 137 handlers — down from 140 when three dead granular
  * channels were deleted: `sessions:add-log` (`ipc/logs.ts`; internal producers
  * call `addSessionLog()` directly) and `ui-state:save-expanded-projects` /
  * `ui-state:save-expanded-folders` (`ipc/uiState.ts`; superseded by the
@@ -52,7 +56,6 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/cyboflow.ts': 1,
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,
-  'ipc/folders.ts': 7,
   'ipc/ideaAttachments.ts': 2,
   'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
