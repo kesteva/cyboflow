@@ -20,33 +20,12 @@ export const panelApi = {
     }
   },
   
-  async updatePanel(panelId: string, updates: Partial<ToolPanel>): Promise<void> {
-    // If only updating title, use renamePanel for backward compatibility
-    if (Object.keys(updates).length === 1 && updates.title !== undefined) {
-      const response = await window.electronAPI.panels.renamePanel(panelId, updates.title || '');
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to update panel');
-      }
-    } else {
-      // Use the full update handler for state and other updates
-      const response = await window.electronAPI.invoke('panels:update', panelId, updates);
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to update panel');
-      }
-    }
-  },
-  
   async loadPanelsForSession(sessionId: string): Promise<ToolPanel[]> {
     const response = await window.electronAPI.panels.getSessionPanels(sessionId);
     if (!response.success || !response.data) {
       throw new Error(response.error || 'Failed to load panels');
     }
     return response.data;
-  },
-  
-  async getActivePanel(sessionId: string): Promise<ToolPanel | null> {
-    const panels = await this.loadPanelsForSession(sessionId);
-    return panels.find(panel => panel.state.isActive) || null;
   },
   
   async setActivePanel(sessionId: string, panelId: string): Promise<void> {

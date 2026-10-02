@@ -315,7 +315,6 @@ interface ElectronAPI {
      *  main/src/preload.ts's structural request type. */
     createPanel: (request: CreatePanelRequest) => Promise<IPCResponse<ToolPanel>>;
     deletePanel: (panelId: string) => Promise<IPCResponse<void>>;
-    renamePanel: (panelId: string, name: string) => Promise<IPCResponse<void>>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse<void>>;
     sendInput: (panelId: string, input: string, images?: Array<{ name: string; dataUrl: string; type: string }>) => Promise<IPCResponse<void>>;
     getConversationMessages: (panelId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly

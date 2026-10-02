@@ -579,7 +579,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }): Promise<IPCResponse> => ipcRenderer.invoke('panels:create', request),
     getSessionPanels: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:list', sessionId),
     deletePanel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:delete', panelId),
-    renamePanel: (panelId: string, name: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:update', panelId, { name }),
     setActivePanel: (sessionId: string, panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:set-active', sessionId, panelId),
     getConversationMessages: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-conversation-messages', panelId),
     getJsonMessages: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-json-messages', panelId),
