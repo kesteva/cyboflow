@@ -8,7 +8,7 @@ import type { ClaudeCredentialDetection } from '../../../shared/types/onboarding
  * Claude Code LOGIN probe (onboarding step 1).
  *
  * This detects whether the user is signed into Claude Code — NOT whether the
- * `claude` binary is installed (that is claudeCodeTest.ts). The default SDK
+ * `claude` binary is installed (that is claudeBinaryDetection.ts). The default SDK
  * substrate bundles its own binary, so a fresh install's only genuine
  * requirement is the login; see shared/types/onboarding.ts for the contract and
  * the main-side state mapping.

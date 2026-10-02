@@ -6,7 +6,7 @@ vi.mock('child_process', () => ({ execFile: vi.fn() }));
 
 import { execFile } from 'child_process';
 import { getShellPath, findExecutableInPath } from './shellPath';
-import { detectClaudeBinary } from './claudeCodeTest';
+import { detectClaudeBinary } from './claudeBinaryDetection';
 
 const mockExecFile = execFile as unknown as Mock;
 const mockGetShellPath = getShellPath as unknown as Mock;

@@ -68,7 +68,7 @@ vi.mock('../../services/database', () => ({
 vi.mock('../../utils/claudeCredentials', () => ({
   detectClaudeCredentials: vi.fn(async () => ({ found: true, source: 'keychain', account: null })),
 }));
-vi.mock('../../utils/claudeCodeTest', () => ({
+vi.mock('../../utils/claudeBinaryDetection', () => ({
   detectClaudeBinary: vi.fn(async () => ({ found: true, path: '/usr/local/bin/claude', version: '1.0.0' })),
 }));
 // Design-mode v0.5 re-entry stub: the design branch mints a bytes-less
@@ -108,7 +108,7 @@ import {
 } from '../session';
 import { panelManager } from '../../services/panelManager';
 import { detectClaudeCredentials } from '../../utils/claudeCredentials';
-import { detectClaudeBinary } from '../../utils/claudeCodeTest';
+import { detectClaudeBinary } from '../../utils/claudeBinaryDetection';
 import type { AppServices } from '../types';
 
 // ---------------------------------------------------------------------------
