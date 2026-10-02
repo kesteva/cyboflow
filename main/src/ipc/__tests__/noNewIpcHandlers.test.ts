@@ -20,7 +20,13 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 115 handlers — down from 126 when
+/** Frozen 2026-10-02 at 111 handlers — down from 115 when four
+ * caller-less Crystal session-scoped reads/continue were deleted from
+ * `ipc/session.ts`: `sessions:continue`, `sessions:get-output`,
+ * `sessions:get-conversation` and `sessions:get-conversation-messages` (the
+ * panel-scoped channels superseded them).
+ *
+ * Earlier 2026-10-02: 115 handlers — down from 126 when
  * `ipc/baseAIPanelHandler.ts` (9 never-exposed `claude-panels:*` common
  * handlers) was folded into `ipc/claudePanel.ts`, which also dropped the
  * never-exposed `claude-panels:start` / `claude-panels:continue`.
@@ -77,7 +83,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,
-  'ipc/session.ts': 25,
+  'ipc/session.ts': 21,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,
 };

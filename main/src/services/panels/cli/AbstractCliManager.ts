@@ -492,24 +492,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   // These provide default implementations that map to panel-based methods
 
   /**
-   * @deprecated Use startPanel with real panel IDs instead
-   */
-  async startSession(sessionId: string, worktreePath: string, prompt: string, ...args: unknown[]): Promise<void> {
-    console.warn(`[${this.getCliToolName()}Manager] DEPRECATED: startSession called with virtual panel ID for session ${sessionId}. Use real panel IDs instead.`);
-    const virtualPanelId = `session-${sessionId}`;
-    return this.startPanel(virtualPanelId, sessionId, worktreePath, prompt, ...args);
-  }
-
-  /**
-   * @deprecated Use continuePanel with real panel IDs instead
-   */
-  async continueSession(sessionId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], ...args: unknown[]): Promise<void> {
-    console.warn(`[${this.getCliToolName()}Manager] DEPRECATED: continueSession called with virtual panel ID for session ${sessionId}. Use real panel IDs instead.`);
-    const virtualPanelId = `session-${sessionId}`;
-    return this.continuePanel(virtualPanelId, sessionId, worktreePath, prompt, conversationHistory, ...args);
-  }
-
-  /**
    * @deprecated Use stopPanel with real panel IDs instead
    */
   async stopSession(sessionId: string): Promise<void> {

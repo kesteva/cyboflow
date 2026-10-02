@@ -153,11 +153,6 @@ export class API {
       return window.electronAPI.sessions.sendInput(sessionId, input);
     },
 
-    async continue(sessionId: string, prompt?: string, model?: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.continue(sessionId, prompt, model);
-    },
-
     // Interactive (PTY) quick-session resume — see ResumeSessionPrompt / ClaudePanel.
     // `panelId` scopes the probe/respawn to ONE chat panel — a session can host
     // several (Add chat) and the session-scoped form always hit the first.
@@ -180,10 +175,6 @@ export class API {
       return window.electronAPI.sessions.restartInteractive(sessionId, panelId);
     },
 
-    async getOutput(sessionId: string, limit?: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getOutput(sessionId, limit);
-    },
     // baseRef (TASK-278): the caller's persisted BaseSelector selection for
     // this session, when any — threaded through so the quick-session card
     // agrees with whatever base the Diff panel beside it is showing. Omitted
@@ -193,16 +184,6 @@ export class API {
       return trpc.cyboflow.sessions.getStatistics.query(
         baseRef != null ? { sessionId, baseRef } : { sessionId },
       );
-    },
-
-    async getConversation(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getConversation(sessionId);
-    },
-
-    async getConversationMessages(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getConversationMessages(sessionId);
     },
 
     async markViewed(sessionId: string) {

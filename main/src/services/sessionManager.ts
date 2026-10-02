@@ -11,7 +11,6 @@ import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
-import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
 import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
@@ -930,31 +929,6 @@ export class SessionManager extends EventEmitter {
   addPanelInitialPromptMarker(panelId: string, prompt: string): void {
     // Prompt markers are no longer needed for panels - using conversation_messages instead
     // The prompt is already being added to conversation_messages in addPanelConversationMessage
-  }
-
-  async continueConversation(id: string, userMessage: string): Promise<void> {
-    return await withLock(`session-input-${id}`, async () => {
-      // Store the user's message
-      this.addConversationMessage(id, 'user', userMessage);
-      
-      // Add the continuation prompt to output so it's visible
-      const timestamp = formatForDisplay(new Date());
-      const userPromptDisplay = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[42m\x1b[30m 👤 USER PROMPT \x1b[0m\r\n` +
-                               `\x1b[1m\x1b[92m${userMessage}\x1b[0m\r\n\r\n`;
-      this.addSessionOutput(id, {
-        type: 'stdout',
-        data: userPromptDisplay,
-        timestamp: new Date()
-      });
-      
-      // Add a prompt marker for this continued conversation
-      // Get current output count to use as index
-      const outputs = this.db.getSessionOutputs(id);
-      this.db.addPromptMarker(id, userMessage, outputs.length);
-      
-      // Emit event for the Claude Code manager to handle
-      this.emit('conversation-continue', { sessionId: id, message: userMessage });
-    });
   }
 
   markSessionAsViewed(id: string): void {

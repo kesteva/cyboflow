@@ -144,7 +144,6 @@ interface ElectronAPI {
     openIdeaSession: (request: OpenIdeaSessionRequest) => Promise<IPCResponse<OpenIdeaSessionResponse>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
-    continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
     getInteractiveResumeState: (sessionId: string, panelId?: string) => Promise<IPCResponse<InteractiveResumeState>>;
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean) => Promise<IPCResponse<void>>;
     /**
@@ -154,10 +153,6 @@ interface ElectronAPI {
      * conversation in the same worktree. Handler: `sessions:restart-interactive`.
      */
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
-    // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
-    getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
-    getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Script operations

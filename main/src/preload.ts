@@ -316,13 +316,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('sessions:open-idea-session', request),
     delete: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:delete', sessionId),
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
-    continue: (sessionId: string, prompt?: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:continue', sessionId, prompt, model),
     getInteractiveResumeState: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-interactive-resume-state', sessionId, panelId),
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resume-interactive', sessionId, panelId, acknowledgeProviderDisabled),
     restartInteractive: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:restart-interactive', sessionId, panelId),
-    getOutput: (sessionId: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-output', sessionId, limit),
-    getConversation: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation', sessionId),
-    getConversationMessages: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation-messages', sessionId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
     // Main repo session

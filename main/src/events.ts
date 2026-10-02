@@ -775,8 +775,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     const mw = getMainWindow();
     if (mw) {
       // Always send the output as-is, without formatting
-      // JSON messages will be formatted when loaded from the database via sessions:get-output
-      // This prevents duplicate formatted messages in the Output view
       mw.webContents.send('session:output', output);
     }
   });
