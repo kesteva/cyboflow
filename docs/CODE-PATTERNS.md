@@ -643,6 +643,24 @@ EXISTS` must be a no-op after `schema.sql` runs. When adding a column to a shipp
 migration, also search every test file's INSERT/SELECT for the old column list — missing
 columns surface as runtime `undefined`, not typecheck errors.
 
+### Timestamps: SQLite stamps are UTC but carry no zone
+
+SQLite's `CURRENT_TIMESTAMP` / `datetime('now')` write `"YYYY-MM-DD HH:MM:SS"` — UTC with no
+zone marker — and `new Date()` reads that shape as LOCAL time, so every such value lands the
+host's UTC offset in the future. The failure is quiet: "time ago" formatters fold a negative
+interval into their zero bucket, so the wrong clock renders as a confident "just now".
+
+- Parse DB-sourced timestamp strings with `parseTimestamp` (`main/src/utils/timestampUtils.ts`
+  or `frontend/src/utils/timestampUtils.ts`; the two copies must keep identical normalization).
+  Never `new Date(row.some_at)`. `parseDbTimestampMs` in `frontend/src/utils/homeClassify.ts`
+  is the other sanctioned parser.
+- The zone test is an allow-list on the UNZONED shape (`/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/`),
+  not "contains a `T`": some queries emit zone-marked values with no `T` (`datetime(col) || 'Z'`),
+  and a `T` check would append a second `Z` and produce Invalid Date.
+- Write application timestamps as ISO 8601 (`formatForDatabase()` → `toISOString()`); do not
+  assume every column is `CURRENT_TIMESTAMP` format — a column can mix both shapes.
+- When auditing, look for the sink that absorbs a negative interval, not for a wrong-looking number.
+
 ### SQLite migrations: idempotence is per STATEMENT, and a real error stops the boot
 
 `runFileBasedMigrations()` splits each `.sql` file into statements
