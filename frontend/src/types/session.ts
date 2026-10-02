@@ -325,23 +325,6 @@ export interface GitCommands {
   getSquashAndRebaseToMainCommand?: () => string;
 }
 
-export interface GitErrorDetails {
-  title: string;
-  message: string;
-  command?: string;
-  commands?: string[];
-  output: string;
-  workingDirectory?: string;
-  projectPath?: string;
-  isRebaseConflict?: boolean;
-  hasConflicts?: boolean;
-  conflictingFiles?: string[];
-  conflictingCommits?: {
-    ours: string[];
-    theirs: string[];
-  };
-}
-
 /**
  * `sessions:open-idea-session` wire types (the backlog idea card's "Open").
  * RE-EXPORTED, never re-declared: the single declaration lives in
