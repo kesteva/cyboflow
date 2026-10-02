@@ -100,7 +100,7 @@ describe('formatDistanceToNow normalizes a raw SQLite string', () => {
 });
 
 describe('formatDistanceToNow leaves correct callers alone', () => {
-  it('accepts a Date unchanged (the sidebar / ProjectDashboard case)', () => {
+  it('accepts a Date unchanged (the sidebar case)', () => {
     expect(formatDistanceToNow(new Date(Date.now() - 2 * 60 * 60_000))).toBe('2 hours ago');
   });
 

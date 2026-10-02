@@ -130,7 +130,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     currentActivePanel,
     handlePanelSelect,
     handlePanelClose,
-  } = usePanelSurface(projectId, { autoCreatePermanentPanels: false });
+  } = usePanelSurface(projectId);
 
   const handleAddTerminal = useAddTerminalPanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
   const handleAddChat = useAddClaudePanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });

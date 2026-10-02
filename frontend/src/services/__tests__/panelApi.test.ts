@@ -57,7 +57,7 @@ describe('panelApi.createPanel', () => {
   it('forwards metadata overrides (the permanent-panel flag)', async () => {
     await panelApi.createPanel({
       sessionId: 'session-1',
-      type: 'dashboard',
+      type: 'terminal',
       metadata: { permanent: true },
     });
 

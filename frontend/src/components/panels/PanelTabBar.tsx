@@ -1,5 +1,5 @@
 import React, { useCallback, memo, useState, useRef, useEffect } from 'react';
-import { X, Terminal, MessageSquare, GitBranch, FileCode, MoreVertical, BarChart3, Edit2, Plus, ChevronDown } from 'lucide-react';
+import { X, Terminal, MessageSquare, GitBranch, FileCode, MoreVertical, Edit2, Plus, ChevronDown } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
@@ -182,8 +182,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
         return <GitBranch className="w-4 h-4" />;
       case 'logs':
         return <FileCode className="w-4 h-4" />;
-      case 'dashboard':
-        return <BarChart3 className="w-4 h-4" />;
       // Add more icons as panel types are added
       default:
         return null;

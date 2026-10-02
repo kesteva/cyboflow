@@ -132,6 +132,15 @@ interface ToolPanelRow {
   substrate?: 'sdk' | 'interactive' | null;
 }
 
+/**
+ * Panel types cyboflow no longer has (Crystal's per-project 'dashboard' and
+ * 'setup-tasks' panels). Older databases can still hold rows of these types,
+ * flagged `permanent`, so the panel-listing reads skip them rather than hand
+ * the renderer an un-closable "Unknown Panel Type" tab. No migration deletes
+ * the rows; they are simply never listed.
+ */
+const RETIRED_PANEL_TYPES_SQL = "('dashboard', 'setup-tasks')";
+
 // Interface for execution diff database rows
 interface ExecutionDiffRow {
   id: number;
@@ -3692,7 +3701,9 @@ export class DatabaseService {
   }
 
   getPanelsForSession(sessionId: string): ToolPanel[] {
-    const rows = this.db.prepare('SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at').all(sessionId) as ToolPanelRow[];
+    const rows = this.db.prepare(
+      `SELECT * FROM tool_panels WHERE session_id = ? AND type NOT IN ${RETIRED_PANEL_TYPES_SQL} ORDER BY created_at`
+    ).all(sessionId) as ToolPanelRow[];
     
     // Get the active panel ID for this session
     const activePanel = this.db.prepare('SELECT active_panel_id FROM sessions WHERE id = ?').get(sessionId) as { active_panel_id: string | null } | undefined;
@@ -3716,7 +3727,9 @@ export class DatabaseService {
   }
 
   getAllPanels(): ToolPanel[] {
-    const rows = this.db.prepare('SELECT * FROM tool_panels ORDER BY created_at').all() as ToolPanelRow[];
+    const rows = this.db.prepare(
+      `SELECT * FROM tool_panels WHERE type NOT IN ${RETIRED_PANEL_TYPES_SQL} ORDER BY created_at`
+    ).all() as ToolPanelRow[];
     
     return rows.map(row => ({
       id: row.id,
@@ -3733,7 +3746,8 @@ export class DatabaseService {
     const rows = this.db.prepare(`
       SELECT tp.* FROM tool_panels tp
       JOIN sessions s ON tp.session_id = s.id
-      WHERE s.archived = 0 OR s.archived IS NULL
+      WHERE (s.archived = 0 OR s.archived IS NULL)
+        AND tp.type NOT IN ${RETIRED_PANEL_TYPES_SQL}
       ORDER BY tp.created_at
     `).all() as ToolPanelRow[];
     
@@ -3756,7 +3770,7 @@ export class DatabaseService {
     const row = this.db.prepare(`
       SELECT tp.* FROM tool_panels tp
       JOIN sessions s ON s.active_panel_id = tp.id
-      WHERE s.id = ?
+      WHERE s.id = ? AND tp.type NOT IN ${RETIRED_PANEL_TYPES_SQL}
     `).get(sessionId) as ToolPanelRow | undefined;
     
     if (!row) return null;

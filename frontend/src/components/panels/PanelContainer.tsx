@@ -8,8 +8,6 @@ import { renderLog } from '../../utils/console';
 // Lazy load panel components for better performance
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
 const LogsPanel = lazy(() => import('./logPanel/LogsPanel'));
-const DashboardPanel = lazy(() => import('./DashboardPanel'));
-const SetupTasksPanel = lazy(() => import('./SetupTasksPanel'));
 
 const PanelErrorFallback: React.FC<{ error: Error; resetErrorBoundary: () => void }> = ({ 
   error, 
@@ -52,10 +50,6 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
         return <TerminalPanel panel={panel} isActive={isActive} />;
       case 'logs':
         return <LogsPanel panel={panel} isActive={isActive} />;
-      case 'dashboard':
-        return <DashboardPanel panelId={panel.id} sessionId={panel.sessionId} isActive={isActive} />;
-      case 'setup-tasks':
-        return <SetupTasksPanel panelId={panel.id} sessionId={panel.sessionId} isActive={isActive} />;
       default:
         return (
           <div className="h-full w-full flex items-center justify-center p-8">

@@ -11,13 +11,13 @@ export interface ToolPanel {
   substrate?: CliSubstrate;
 }
 
-export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'logs' | 'dashboard' | 'setup-tasks';
+export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'logs';
 
 export interface ToolPanelState {
   isActive: boolean;
   isPinned?: boolean;
   hasBeenViewed?: boolean;       // Track if panel has ever been viewed
-  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | Record<string, unknown>;
+  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | Record<string, unknown>;
 }
 
 export interface TerminalPanelState {
@@ -135,19 +135,6 @@ export interface LogsPanelState {
   lastActivityTime?: string;      // Last output received
 }
 
-export interface DashboardPanelState {
-  lastRefresh?: string;           // Last time dashboard was refreshed
-  filterType?: 'all' | 'stale' | 'changes' | 'pr'; // Current filter
-  isRefreshing?: boolean;          // Whether dashboard is currently refreshing
-  cachedData?: Record<string, unknown>;                // Cached dashboard data
-}
-
-export interface SetupTasksPanelState {
-  lastCheck?: string;              // Last time tasks were checked
-  tasksCompleted?: Record<string, boolean>; // Track which tasks are done
-  dismissedTasks?: string[];       // Tasks the user has dismissed
-}
-
 export interface ToolPanelMetadata {
   createdAt: string;
   lastActiveAt: string;
@@ -159,7 +146,7 @@ export interface CreatePanelRequest {
   sessionId: string;
   type: ToolPanelType;
   title?: string;                // Optional custom title
-  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
+  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
   /** Optional per-panel substrate override; absent inherits the session. */
   substrate?: CliSubstrate;
@@ -283,23 +270,5 @@ export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
     singleton: true,                 // ONLY ONE logs panel per session
     canAppearInProjects: true,       // Logs can appear in projects
     canAppearInWorktrees: true       // Logs can appear in worktrees
-  },
-  dashboard: {
-    canEmit: [],                     // Dashboard doesn't emit events
-    canConsume: ['files:changed'],   // Refresh on file changes
-    requiresProcess: false,          // No background process
-    singleton: true,                 // Only one dashboard panel
-    permanent: true,                 // Cannot be closed (like diff panel)
-    canAppearInProjects: true,       // Dashboard ONLY in projects
-    canAppearInWorktrees: false      // Dashboard NOT in worktrees
-  },
-  'setup-tasks': {
-    canEmit: [],                     // Setup tasks doesn't emit events
-    canConsume: ['files:changed'],   // Refresh when files change (e.g., gitignore)
-    requiresProcess: false,          // No background process
-    singleton: true,                 // Only one setup tasks panel
-    permanent: true,                 // Cannot be closed (like dashboard)
-    canAppearInProjects: true,       // Setup tasks ONLY in projects
-    canAppearInWorktrees: false      // Setup tasks NOT in worktrees
   }
 };
