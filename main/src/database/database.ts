@@ -398,6 +398,7 @@ export class DatabaseService {
     const hasInitialPromptColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'initial_prompt');
     const hasLastViewedAtColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'last_viewed_at');
     const hasStatusMessageColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'status_message');
+    const hasRunStartedAtColumn = tableInfo.some((col: SqliteTableInfo) => col.name === 'run_started_at');
 
     if (!hasArchivedColumn) {
       // Run migration to add archived column
@@ -492,9 +493,14 @@ export class DatabaseService {
       this.db.prepare("CREATE INDEX idx_execution_diffs_sequence ON execution_diffs(session_id, execution_sequence)").run();
     }
 
-    // Add last_viewed_at column if it doesn't exist
+    // Add last_viewed_at / run_started_at (both DATETIME) if they don't exist.
+    // Plain ADDs on purpose: never rebuild sessions from a hardcoded column
+    // list, which silently drops every column the list omits.
     if (!hasLastViewedAtColumn) {
-      this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at TEXT").run();
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at DATETIME").run();
+    }
+    if (!hasRunStartedAtColumn) {
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN run_started_at DATETIME").run();
     }
 
     // Add commit_message column to execution_diffs if it doesn't exist
@@ -686,86 +692,6 @@ export class DatabaseService {
       `).run();
       
       this.db.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_display_order ON sessions(project_id, display_order)").run();
-    }
-    
-    // Normalize timestamp fields migration
-    // Check if last_viewed_at is still TEXT type
-    const sessionTableInfoTimestamp = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
-    const lastViewedAtColumn = sessionTableInfoTimestamp.find((col: SqliteTableInfo) => col.name === 'last_viewed_at');
-    
-    // Skip this migration if last_viewed_at_new already exists (migration partially completed)
-    const hasLastViewedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'last_viewed_at_new');
-    
-    if (lastViewedAtColumn && lastViewedAtColumn.type === 'TEXT' && !hasLastViewedAtNew) {
-      console.log('[Database] Running timestamp normalization migration...');
-      
-      try {
-        // Check if the new columns already exist (from a previous failed migration)
-        const hasLastViewedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'last_viewed_at_new');
-        const hasRunStartedAtNew = sessionTableInfoTimestamp.some((col: SqliteTableInfo) => col.name === 'run_started_at_new');
-        
-        // Create new temporary columns with DATETIME type if they don't exist
-        if (!hasLastViewedAtNew) {
-          this.db.prepare("ALTER TABLE sessions ADD COLUMN last_viewed_at_new DATETIME").run();
-        }
-        if (!hasRunStartedAtNew) {
-          this.db.prepare("ALTER TABLE sessions ADD COLUMN run_started_at_new DATETIME").run();
-        }
-        
-        // Copy and convert existing data
-        this.db.prepare("UPDATE sessions SET last_viewed_at_new = datetime(last_viewed_at) WHERE last_viewed_at IS NOT NULL").run();
-        // Note: run_started_at column doesn't exist in the original schema, skip this update
-        
-        // Create a backup of the table with proper schema
-        this.db.prepare(`
-          CREATE TABLE sessions_new (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            initial_prompt TEXT NOT NULL,
-            worktree_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_output TEXT,
-            exit_code INTEGER,
-            pid INTEGER,
-            claude_session_id TEXT,
-            archived BOOLEAN DEFAULT 0,
-            last_viewed_at DATETIME,
-            project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
-            run_started_at DATETIME,
-            is_main_repo BOOLEAN DEFAULT 0,
-            display_order INTEGER
-          )
-        `).run();
-        
-        // Copy all data to new table
-        this.db.prepare(`
-          INSERT INTO sessions_new 
-          SELECT id, name, initial_prompt, worktree_name, worktree_path, status, 
-                 created_at, updated_at, last_output, exit_code, pid, claude_session_id,
-                 archived, last_viewed_at_new, project_id, permission_mode, 
-                 run_started_at_new, is_main_repo, display_order
-          FROM sessions
-        `).run();
-        
-        // Drop old table and rename new one
-        this.db.prepare("DROP TABLE sessions").run();
-        this.db.prepare("ALTER TABLE sessions_new RENAME TO sessions").run();
-        
-        // Recreate indexes
-        this.db.prepare("CREATE INDEX idx_sessions_archived ON sessions(archived)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_project_id ON sessions(project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_is_main_repo ON sessions(is_main_repo, project_id)").run();
-        this.db.prepare("CREATE INDEX idx_sessions_display_order ON sessions(project_id, display_order)").run();
-        
-        console.log('[Database] Timestamp normalization migration completed successfully');
-      } catch (error) {
-        console.error('[Database] Failed to normalize timestamps:', error);
-        // Don't throw - allow app to continue with TEXT fields
-      }
     }
     
     // Add missing completion_timestamp to prompt_markers if it doesn't exist
