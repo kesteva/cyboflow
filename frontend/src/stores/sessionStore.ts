@@ -1,16 +1,13 @@
 import { create } from 'zustand';
-import type { Session, SessionOutput, ClaudeJsonMessage, CreateSessionRequest } from '../types/session';
+import type { Session } from '../types/session';
 import { API } from '../utils/api';
 import { useCenterPaneStore } from './centerPaneStore';
-
-type CreateSessionInput = Pick<CreateSessionRequest, 'prompt' | 'worktreeTemplate' | 'count'>;
 
 interface SessionStore {
   sessions: Session[];
   activeSessionId: string | null;
   activeMainRepoSession: Session | null; // Special storage for main repo session
   isLoaded: boolean;
-  deletingSessionIds: Set<string>; // Track sessions currently being deleted
 
   setSessions: (sessions: Session[]) => void;
   loadSessions: (sessions: Session[]) => void;
@@ -18,19 +15,7 @@ interface SessionStore {
   updateSession: (session: Session) => void;
   deleteSession: (session: Session) => void;
   setActiveSession: (sessionId: string | null) => Promise<void>;
-  addSessionOutput: (output: SessionOutput) => void;
-  setSessionOutput: (sessionId: string, output: string) => void;
-  setSessionOutputs: (sessionId: string, outputs: SessionOutput[]) => void;
-  clearSessionOutput: (sessionId: string) => void;
-  createSession: (request: CreateSessionInput) => Promise<void>;
   markSessionAsViewed: (sessionId: string) => Promise<void>;
-  
-  setDeletingSessionIds: (ids: string[]) => void;
-  addDeletingSessionId: (id: string) => void;
-  removeDeletingSessionId: (id: string) => void;
-  clearDeletingSessionIds: () => void;
-  
-  getActiveSession: () => Session | undefined;
 
   // Performance cleanup methods
   cleanupInactiveSessions: () => void;
@@ -41,7 +26,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeSessionId: null,
   activeMainRepoSession: null,
   isLoaded: false,
-  deletingSessionIds: new Set(),
 
   setSessions: (sessions) => set({ sessions }),
   
@@ -213,228 +197,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }
   },
   
-  addSessionOutput: (output) => set((state) => {
-    
-    // Find session in sessions array
-    const sessionIndex = state.sessions.findIndex(s => s.id === output.sessionId);
-    if (sessionIndex === -1) {
-      return state;
-    }
-    
-    // Performance: Only clone sessions array once
-    const sessions = state.sessions.slice();
-    const session = sessions[sessionIndex];
-    
-    // CRITICAL PERFORMANCE FIX: Much stricter limits to prevent V8 array iteration issues
-    const MAX_OUTPUTS = 300; // Drastically reduced from 1000
-    const MAX_MESSAGES = 100; // Drastically reduced from 500
-    
-    if (output.type === 'json') {
-      // Update jsonMessages array with limit
-      const currentMessages = session.jsonMessages || [];
-      const newMessage = { ...(output.data as ClaudeJsonMessage), timestamp: output.timestamp };
-      const newJsonMessages = currentMessages.length >= MAX_MESSAGES
-        ? [...currentMessages.slice(1), newMessage] // Remove oldest when at limit
-        : [...currentMessages, newMessage];
-      sessions[sessionIndex] = { ...session, jsonMessages: newJsonMessages };
-    } else {
-      // Add stdout/stderr to output array with limit
-      const currentOutput = session.output || [];
-      const newOutput = currentOutput.length >= MAX_OUTPUTS
-        ? [...currentOutput.slice(1), output.data as string] // Remove oldest when at limit
-        : [...currentOutput, output.data as string];
-      sessions[sessionIndex] = { ...session, output: newOutput };
-    }
-    
-    // Also update activeMainRepoSession if it matches
-    let updatedActiveMainRepoSession = state.activeMainRepoSession;
-    if (state.activeMainRepoSession && state.activeMainRepoSession.id === output.sessionId) {
-      if (output.type === 'json') {
-        const currentMessages = state.activeMainRepoSession.jsonMessages || [];
-        const newMessage = { ...(output.data as ClaudeJsonMessage), timestamp: output.timestamp };
-        const newJsonMessages = currentMessages.length >= MAX_MESSAGES
-          ? [...currentMessages.slice(1), newMessage]
-          : [...currentMessages, newMessage];
-        updatedActiveMainRepoSession = { ...state.activeMainRepoSession, jsonMessages: newJsonMessages };
-      } else {
-        const currentOutput = state.activeMainRepoSession.output || [];
-        const newOutput = currentOutput.length >= MAX_OUTPUTS
-          ? [...currentOutput.slice(1), output.data as string]
-          : [...currentOutput, output.data as string];
-        updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: newOutput };
-      }
-    }
-    
-    return { 
-      ...state,
-      sessions,
-      activeMainRepoSession: updatedActiveMainRepoSession
-    };
-  }),
-  
-  setSessionOutput: (sessionId, output) => set((state) => {
-    // Performance: Only clone array if session exists
-    let updatedSessions = state.sessions;
-    for (let i = 0; i < state.sessions.length; i++) {
-      if (state.sessions[i].id === sessionId) {
-        updatedSessions = state.sessions.slice();
-        updatedSessions[i] = { ...state.sessions[i], output: [output] };
-        break;
-      }
-    }
-    
-    // Update activeMainRepoSession if it matches
-    let updatedActiveMainRepoSession = state.activeMainRepoSession;
-    if (state.activeMainRepoSession && state.activeMainRepoSession.id === sessionId) {
-      updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: [output] };
-    }
-    
-    return {
-      ...state,
-      sessions: updatedSessions,
-      activeMainRepoSession: updatedActiveMainRepoSession
-    };
-  }),
-  
-  setSessionOutputs: (sessionId, outputs) => set((state) => {
-
-    // CRITICAL PERFORMANCE FIX: Even more aggressive limits to prevent V8 optimization failures
-    // V8 was getting stuck in recursive array iterations with large arrays
-    const MAX_STORED_OUTPUTS = 300; // Further reduced to prevent CPU spikes
-    const MAX_STORED_MESSAGES = 100; // Further reduced to prevent memory pressure
-
-    // PERFORMANCE + CORRECTNESS: keep the true TAIL by walking newest→oldest.
-    // We only ever retain the last MAX_STORED_* of each stream, so once both
-    // caps are filled we can stop early — that also bounds work on very large
-    // replay arrays. (The earlier forward batching + early-break kept a stale
-    // MIDDLE window and silently dropped the NEWEST lines of >500-item inputs.)
-    const stdOutputs: string[] = [];
-    const jsonMessages: ClaudeJsonMessage[] = [];
-
-    for (let i = outputs.length - 1; i >= 0; i--) {
-      const output = outputs[i];
-      if (output.type === 'json') {
-        if (jsonMessages.length < MAX_STORED_MESSAGES) {
-          jsonMessages.push({ ...(output.data as ClaudeJsonMessage), timestamp: output.timestamp });
-        }
-      } else if (output.type === 'stdout' || output.type === 'stderr') {
-        if (stdOutputs.length < MAX_STORED_OUTPUTS) {
-          stdOutputs.push(output.data as string);
-        }
-      }
-      // Both streams full — every remaining (older) item would be trimmed anyway.
-      if (stdOutputs.length >= MAX_STORED_OUTPUTS && jsonMessages.length >= MAX_STORED_MESSAGES) {
-        break;
-      }
-    }
-
-    // Restore chronological (oldest→newest) order after the reverse walk.
-    stdOutputs.reverse();
-    jsonMessages.reverse();
-
-    const trimmedOutputs = stdOutputs;
-    const trimmedMessages = jsonMessages;
-
-
-    // Performance optimization: Only create new array if session is found
-    let updatedSessions = state.sessions;
-    let sessionFound = false;
-    
-    // Use a for loop for better performance with large arrays
-    for (let i = 0; i < state.sessions.length; i++) {
-      if (state.sessions[i].id === sessionId) {
-        const newSession = { ...state.sessions[i], output: trimmedOutputs, jsonMessages: trimmedMessages };
-        // Only create new array when we actually find the session to update
-        if (!sessionFound) {
-          updatedSessions = state.sessions.slice(); // Shallow copy is more efficient than spread
-          sessionFound = true;
-        }
-        updatedSessions[i] = newSession;
-        break;
-      }
-    }
-    
-    // Also update activeMainRepoSession if it matches
-    let updatedActiveMainRepoSession = state.activeMainRepoSession;
-    if (state.activeMainRepoSession && state.activeMainRepoSession.id === sessionId) {
-      updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: trimmedOutputs, jsonMessages: trimmedMessages };
-    }
-    
-    return {
-      ...state,
-      sessions: updatedSessions,
-      activeMainRepoSession: updatedActiveMainRepoSession
-    };
-  }),
-  
-  clearSessionOutput: (sessionId) => set((state) => {
-    // Performance: Only clone array if session exists
-    let updatedSessions = state.sessions;
-    for (let i = 0; i < state.sessions.length; i++) {
-      if (state.sessions[i].id === sessionId) {
-        updatedSessions = state.sessions.slice();
-        updatedSessions[i] = { ...state.sessions[i], output: [], jsonMessages: [] };
-        break;
-      }
-    }
-    
-    // Update activeMainRepoSession if it matches
-    let updatedActiveMainRepoSession = state.activeMainRepoSession;
-    if (state.activeMainRepoSession && state.activeMainRepoSession.id === sessionId) {
-      updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: [], jsonMessages: [] };
-    }
-    
-    return {
-      ...state,
-      sessions: updatedSessions,
-      activeMainRepoSession: updatedActiveMainRepoSession
-    };
-  }),
-  
-  createSession: async (request) => {
-    try {
-      const response = await API.sessions.create(request);
-
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to create session');
-      }
-
-      // Sessions will be added via IPC events, no need to manually add here
-    } catch (error) {
-      console.error('Error creating session:', error);
-      throw error;
-    }
-  },
-  
-  getActiveSession: () => {
-    const state = get();
-    
-    // If we have a main repo session, return it
-    if (state.activeMainRepoSession && state.activeMainRepoSession.id === state.activeSessionId) {
-      return state.activeMainRepoSession;
-    }
-    
-    // Otherwise look in regular sessions
-    const found = state.sessions.find(session => session.id === state.activeSessionId);
-    return found;
-  },
-
-  setDeletingSessionIds: (ids) => set({ deletingSessionIds: new Set(ids) }),
-  
-  addDeletingSessionId: (id) => set((state) => {
-    const newSet = new Set(state.deletingSessionIds);
-    newSet.add(id);
-    return { deletingSessionIds: newSet };
-  }),
-  
-  removeDeletingSessionId: (id) => set((state) => {
-    const newSet = new Set(state.deletingSessionIds);
-    newSet.delete(id);
-    return { deletingSessionIds: newSet };
-  }),
-  
-  clearDeletingSessionIds: () => set({ deletingSessionIds: new Set() }),
-
   markSessionAsViewed: async (sessionId) => {
     try {
       const response = await API.sessions.markViewed(sessionId);
