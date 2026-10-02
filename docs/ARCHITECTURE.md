@@ -364,9 +364,8 @@ Core business logic services. Key components:
   `InteractiveClaudeManager`, the per-provider PTY+SDK manager pairs
   (`CodexPtyManager`/`CodexSdkManager` in `panels/codex/`, `OmpPtyManager`/`OmpSdkManager` in
   `panels/omp/`, `PiPtyManager`/`PiSdkManager` in `panels/pi/`), and `DemoCliManager`. Contrast
-  with `AbstractAIPanelManager` (`panels/ai/AbstractAIPanelManager.ts`) and `BaseAIPanelHandler`
-  (`main/src/ipc/baseAIPanelHandler.ts`), which ARE collapse candidates — Crystal-era
-  Claude+Codex UI scaffolding.
+  with `AbstractAIPanelManager` (`panels/ai/AbstractAIPanelManager.ts`), which IS a collapse
+  candidate — Crystal-era Claude+Codex UI scaffolding.
 - **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
   Claude substrate (IDEA-013), a sibling of the SDK `ClaudeCodeManager`. It drives a REAL
   interactive `claude` REPL over the inherited `AbstractCliManager` PTY machinery (no headless

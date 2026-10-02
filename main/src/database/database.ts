@@ -2739,8 +2739,8 @@ export class DatabaseService {
       VALUES (?, ?, ?, ?)
     `).run(panel.sessionId, panelId, messageType, content);
     // TASK-225 auto-clear, panel-backed twin of addConversationMessage above:
-    // the common chat send paths (ipc/session.ts sessions:input / continue,
-    // baseAIPanelHandler) persist the user's turn THROUGH this method, so
+    // the common chat send paths (ipc/session.ts sessions:input /
+    // panels:continue) persist the user's turn THROUGH this method, so
     // without the same clear here answering in-chat left the Needs-your-input
     // card standing until the user also hit Dismiss.
     if (messageType === 'user') {

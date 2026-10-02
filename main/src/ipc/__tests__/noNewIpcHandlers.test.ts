@@ -20,7 +20,12 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 126 handlers — down from 128 when the orphaned
+/** Frozen 2026-10-02 at 115 handlers — down from 126 when
+ * `ipc/baseAIPanelHandler.ts` (9 never-exposed `claude-panels:*` common
+ * handlers) was folded into `ipc/claudePanel.ts`, which also dropped the
+ * never-exposed `claude-panels:start` / `claude-panels:continue`.
+ *
+ * Earlier 2026-10-02: 126 handlers — down from 128 when the orphaned
  * `claude-panels:get-substrate` / `set-substrate` bridges (`ipc/claudePanel.ts`)
  * were deleted; the per-panel substrate is set at creation via
  * CreatePanelRequest.substrate.
@@ -60,9 +65,8 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/app.ts': 10,
   'ipc/artifactHtml.ts': 2,
   'ipc/artifactImages.ts': 2,
-  'ipc/baseAIPanelHandler.ts': 9,
   'ipc/bugReport.ts': 3,
-  'ipc/claudePanel.ts': 9,
+  'ipc/claudePanel.ts': 7,
   'ipc/cyboflow.ts': 1,
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,

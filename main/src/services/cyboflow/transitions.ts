@@ -296,7 +296,7 @@ export interface ReviveQuickRunResult {
  * sentinel run LEAVES `'running'` and is never restored when:
  *   - the app restarts → runRecovery force-fails the orphan to `'failed'`, or
  *   - the session is closed out → Merge/Create-PR `'completed'`, Dismiss `'canceled'`.
- * No quick-turn entry path (sessions:input / claude-panels:continue / startPanel)
+ * No quick-turn entry path (sessions:input / panels:continue / startPanel)
  * put it back, so every approval-gated tool on a LATER turn was silently DENIED
  * (`requestApproval` threw RunNotRunningError → the PreToolUse hook returned
  * `permissionDecision: 'deny'`) and NO permission prompt ever surfaced — the agent

@@ -1,9 +1,10 @@
 /**
- * Regression coverage for the claude-panels:continue routing seam.
+ * Regression coverage for the substrate lookup registerClaudePanelHandlers
+ * wires into the ClaudePanelManager it builds.
  *
  * The panel override is deliberately different from the session substrate so
- * this test proves the IPC handler reaches ClaudePanelManager, which then
- * resolves the panel's own substrate before dispatching the continuation.
+ * this test proves the exported claudePanelManager resolves the panel's own
+ * substrate (via panelManager) before dispatching the continuation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
@@ -43,16 +44,8 @@ import { panelManager } from '../../services/panelManager';
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
-function makeHandlerCapture() {
-  const handlers = new Map<string, Handler>();
-  const ipcMain = { handle: (channel: string, handler: Handler) => handlers.set(channel, handler) };
-  return { ipcMain, handlers };
-}
-
-function invoke(handlers: Map<string, Handler>, channel: string, ...args: unknown[]): Promise<unknown> {
-  const handler = handlers.get(channel);
-  if (!handler) throw new Error(`No handler for ${channel}`);
-  return handler({} as unknown, ...args);
+function makeIpcMain() {
+  return { handle: (_channel: string, _handler: Handler) => undefined };
 }
 
 function makeCliManager() {
@@ -87,7 +80,7 @@ function makeServices(sdkManager: ReturnType<typeof makeCliManager>, interactive
   } as unknown as AppServices;
 }
 
-describe('claude-panels:continue — per-panel substrate override', () => {
+describe('claudePanelManager.continuePanel — per-panel substrate override', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(panelManager.getPanel).mockReturnValue(panel);
@@ -97,7 +90,7 @@ describe('claude-panels:continue — per-panel substrate override', () => {
     const sdkManager = makeCliManager();
     const interactiveManager = makeCliManager();
     const services = makeServices(sdkManager, interactiveManager);
-    const { ipcMain, handlers } = makeHandlerCapture();
+    const ipcMain = makeIpcMain();
 
     registerClaudePanelHandlers(
       ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
@@ -105,15 +98,14 @@ describe('claude-panels:continue — per-panel substrate override', () => {
     );
     claudePanelManager.registerPanel('panel-added', 'session-1');
 
-    const result = (await invoke(
-      handlers,
-      'claude-panels:continue',
+    await claudePanelManager.continuePanel(
       'panel-added',
+      '/tmp/session-1',
       'first turn in the added chat',
+      services.sessionManager.getPanelConversationMessages('panel-added'),
       'opus',
-    )) as { success: boolean };
+    );
 
-    expect(result.success).toBe(true);
     expect(interactiveManager.continuePanel).toHaveBeenCalledWith(
       'panel-added',
       'session-1',
