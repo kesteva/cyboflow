@@ -11,13 +11,13 @@ export interface ToolPanel {
   substrate?: CliSubstrate;
 }
 
-export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'editor' | 'logs' | 'dashboard' | 'setup-tasks';
+export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'logs' | 'dashboard' | 'setup-tasks';
 
 export interface ToolPanelState {
   isActive: boolean;
   isPinned?: boolean;
   hasBeenViewed?: boolean;       // Track if panel has ever been viewed
-  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | Record<string, unknown>;
+  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | Record<string, unknown>;
 }
 
 export interface TerminalPanelState {
@@ -122,27 +122,6 @@ export interface QueuedPanelInput {
   text: string;
 }
 
-export interface EditorPanelState {
-  filePath?: string;              // Currently open file
-  content?: string;               // File content (for unsaved changes)
-  isDirty?: boolean;              // Has unsaved changes
-  cursorPosition?: {              // Cursor location
-    line: number;
-    column: number;
-  };
-  scrollPosition?: number;        // Scroll position
-  language?: string;              // File language for syntax highlighting
-  readOnly?: boolean;             // Read-only mode
-  fontSize?: number;              // Editor font size preference
-  theme?: string;                 // Editor theme preference
-  
-  // File tree state
-  expandedDirs?: string[];        // List of expanded directory paths
-  fileTreeWidth?: number;         // Width of the file tree panel
-  searchQuery?: string;           // Current search query in file tree
-  showSearch?: boolean;           // Whether search is visible
-}
-
 export interface LogsPanelState {
   isRunning: boolean;             // Process currently running
   processId?: number;             // Active process PID
@@ -180,7 +159,7 @@ export interface CreatePanelRequest {
   sessionId: string;
   type: ToolPanelType;
   title?: string;                // Optional custom title
-  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
+  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
   /** Optional per-panel substrate override; absent inherits the session. */
   substrate?: CliSubstrate;
@@ -225,9 +204,6 @@ export type PanelEventType =
   | 'terminal:exit'              // When terminal process exits
   | 'files:changed'              // When terminal detects file system changes
   | 'diff:refreshed'             // When diff panel refreshes its content
-  // Editor panel events
-  | 'editor:file_saved'          // When a file is saved in editor
-  | 'editor:file_changed'        // When file content changes in editor
   // Logs panel events
   | 'process:started'            // When a script process starts
   | 'process:output'             // When process produces output
@@ -299,14 +275,6 @@ export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
     permanent: true,                  // Cannot be closed
     canAppearInProjects: false,       // Diff not available in projects (no worktree)
     canAppearInWorktrees: true        // Diff only in worktrees
-  },
-  editor: {
-    canEmit: ['editor:file_saved', 'editor:file_changed'],
-    canConsume: ['files:changed'],  // React to file system changes
-    requiresProcess: false,          // No background process needed
-    singleton: false,                // Multiple editors allowed
-    canAppearInProjects: true,       // Editor can appear in projects
-    canAppearInWorktrees: true       // Editor can appear in worktrees
   },
   logs: {
     canEmit: ['process:started', 'process:output', 'process:ended'],

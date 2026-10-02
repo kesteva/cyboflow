@@ -243,11 +243,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       return customState?.isInitialized || false;
     }
     
-    // Editor panels don't need initialization
-    if (panel.type === 'editor') {
-      return true;
-    }
-    
     return false;
   });
   

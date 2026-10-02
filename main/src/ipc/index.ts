@@ -12,7 +12,6 @@ import { registerDashboardHandlers } from './dashboard';
 import { setupLogHandlers } from './logs';
 import { registerPanelHandlers } from './panels';
 import { registerClaudePanelHandlers } from './claudePanel';
-import { registerEditorPanelHandlers } from './editorPanel';
 import { registerCyboflowHandlers } from './cyboflow';
 import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 import { registerTelemetryHandlers } from './telemetry';
@@ -42,7 +41,6 @@ export function registerIpcHandlers(services: AppServices): void {
   setupLogHandlers(services.sessionManager);
   registerPanelHandlers(ipcMain, services);
   registerClaudePanelHandlers(ipcMain, services);
-  registerEditorPanelHandlers(ipcMain, services);
   registerCyboflowHandlers(ipcMain, services);
   registerIdeaAttachmentHandlers(ipcMain, services);
   registerTelemetryHandlers(ipcMain, services);

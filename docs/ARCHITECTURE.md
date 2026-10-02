@@ -804,7 +804,7 @@ All procedures are consumed by their respective Zustand stores and React compone
 ### Renderer (`frontend/src/`)
 
 - **`components/panels/`** — Per-panel React components. Panel-type subdirs present today:
-  `ai/` (abstract base), `claude/`, `cli/`, `diff/`, `editor/`, `logPanel/`. The Crystal-era
+  `ai/` (abstract base), `claude/`, `cli/`, `diff/`, `logPanel/`. The Crystal-era
   `codex/` panel has already been removed.
 - **Run center pane (tabbed surface)** — for an active run, `CyboflowRoot` mounts `RunCenterPane`
   (replacing the former WorkflowCanvas-over-RunBottomPane stack): a `CenterPaneTabStrip` over a

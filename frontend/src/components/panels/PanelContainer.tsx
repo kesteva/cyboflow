@@ -8,7 +8,6 @@ import { renderLog } from '../../utils/console';
 // Lazy load panel components for better performance
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
 const DiffPanel = lazy(() => import('./diff/DiffPanel'));
-const EditorPanel = lazy(() => import('./editor/EditorPanel'));
 const LogsPanel = lazy(() => import('./logPanel/LogsPanel'));
 const DashboardPanel = lazy(() => import('./DashboardPanel'));
 const SetupTasksPanel = lazy(() => import('./SetupTasksPanel'));
@@ -55,8 +54,6 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
         return <TerminalPanel panel={panel} isActive={isActive} />;
       case 'diff':
         return <DiffPanel panel={panel} isActive={isActive} sessionId={panel.sessionId} isMainRepo={isMainRepo} />;
-      case 'editor':
-        return <EditorPanel panel={panel} isActive={isActive} />;
       case 'logs':
         return <LogsPanel panel={panel} isActive={isActive} />;
       case 'dashboard':

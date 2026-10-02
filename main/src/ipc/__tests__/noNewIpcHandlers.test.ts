@@ -20,7 +20,11 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
+/** Frozen 2026-10-02 at 146 handlers — down from 150 when the unreachable
+ * `ipc/editorPanel.ts` (4 `editor:*` handlers, never exposed in preload) was
+ * deleted with the hidden Monaco editor panel.
+ *
+ * Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
  * handlers left the raw surface in batch 1 of the session-surface IPC→tRPC
  * migration — 15 became the cyboflow.sessions tRPC router and
  * `debug:get-table-structure` was deleted outright, having had zero callers.
@@ -39,7 +43,6 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/dashboard.ts': 2,
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,
-  'ipc/editorPanel.ts': 4,
   'ipc/folders.ts': 7,
   'ipc/ideaAttachments.ts': 2,
   'ipc/logs.ts': 3,
