@@ -114,7 +114,7 @@ describe('script-src', () => {
     }
   });
 
-  it('allows the app bundle and nothing else — Monaco is self-hosted, not CDN-loaded', () => {
+  it('allows the app bundle and nothing else — no CDN script host', () => {
     const scriptSrc = parseDirectives(policy).get('script-src') ?? [];
     expect(scriptSrc).toContain(`'self'`);
     expect(scriptSrc).not.toContain('https://cdn.jsdelivr.net');
@@ -142,10 +142,6 @@ describe('the rest of the policy', () => {
 
   it('permits base64 data: images — artifact screenshots arrive that way over IPC', () => {
     expect(parseDirectives(policy).get('img-src')).toContain('data:');
-  });
-
-  it('permits blob: workers — the Monaco loader creates its workers that way', () => {
-    expect(parseDirectives(policy).get('worker-src')).toContain('blob:');
   });
 
   it('is present in the EMITTED vite.config.js, which is what vite actually loads', () => {

@@ -21,18 +21,13 @@ import { createHash } from 'node:crypto';
  *
  * Per-directive notes:
  *   script-src   'self' + inline hashes only. NO 'unsafe-eval' — nothing in the
- *                bundle was found to need it. Monaco is self-hosted from the
- *                local `monaco-editor` package (see src/utils/monacoLoader.ts)
- *                rather than fetched from a CDN, so there is no remote script
- *                host to allow here — that used to be jsdelivr, a standing RCE
- *                surface for a renderer with IPC powers; deleting the entry was
- *                the whole point of self-hosting.
- *   style-src    'unsafe-inline' is required: Monaco, xterm and react-remark all
+ *                bundle was found to need it — and no remote script host: a CDN
+ *                entry would be a standing RCE surface for a renderer with IPC
+ *                powers.
+ *   style-src    'unsafe-inline' is required: xterm and react-remark both
  *                inject <style> elements at runtime. Accepted for v1.
  *   font-src     @fontsource woff2 ship in the bundle ('self'); `data:` covers
- *                any inlined font; Monaco's codicon.ttf (~80KB, above Vite's
- *                inline threshold) is emitted as a hashed build asset and
- *                served from 'self' too.
+ *                any inlined font.
  *   img-src      artifact screenshots arrive over IPC as base64 `data:` URLs
  *                (see electron.d.ts artifacts:*), and log/file exports build
  *                `blob:` object URLs.
