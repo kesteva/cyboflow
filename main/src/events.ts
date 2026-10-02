@@ -1,20 +1,16 @@
 import type { BrowserWindow } from 'electron';
-import { runGitAsync } from './utils/runGit';
 import type { AppServices } from './ipc/types';
 import { panelManager } from './services/panelManager';
 import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
 import type { SessionOutput } from './types/session';
 import {
-  validateSessionExists,
   validateEventContext,
   validatePanelEventContext,
   logValidationFailure
 } from './utils/sessionValidation';
-import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ModelAvailabilityService } from './services/modelAvailabilityService';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../shared/types/panels';
-import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
@@ -35,14 +31,28 @@ function isCyboflowRunId(id: string | undefined): boolean {
   return typeof id === 'string' && /^[0-9a-f]{32}$/i.test(id);
 }
 
+/**
+ * Event identities with no `sessions` / `tool_panels` row behind them: cyboflow
+ * workflow run ids (owned by runEventBridge) and the global-agent thread's
+ * synthetic `agent:<threadId>` spawn identity (panelId === sessionId). Session
+ * validation would only log "Session not found" for these, so listeners skip
+ * them up front.
+ */
+function isSyntheticEventIdentity(panelId: string | undefined, sessionId: string | undefined): boolean {
+  return (
+    isCyboflowRunId(panelId) ||
+    isCyboflowRunId(sessionId) ||
+    isAgentThreadSpawnId(panelId) ||
+    isAgentThreadSpawnId(sessionId)
+  );
+}
+
 export function setupEventListeners(services: AppServices, getMainWindow: () => BrowserWindow | null): void {
   const {
     sessionManager,
     claudeCodeManager,
     executionTracker,
-    gitDiffManager,
     gitStatusManager,
-    worktreeManager,
     archiveProgressManager,
     databaseService
   } = services;
@@ -356,155 +366,29 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     return panel.state.isActive === true;
   };
 
-  const attachProcessLifecycleHandlers = (
-    manager: AbstractCliManager | undefined,
-    tool: 'claude'
-  ) => {
-    if (!manager) {
-      return;
+  /**
+   * Shared guard for claudeCodeManager events: drop synthetic identities, then
+   * validate the panel/session context. Returns false when the event must be
+   * ignored.
+   */
+  const acceptClaudeEvent = (
+    label: string,
+    eventData: Record<string, unknown>,
+    panelId: string | undefined,
+    sessionId: string
+  ): boolean => {
+    if (isSyntheticEventIdentity(panelId, sessionId)) return false;
+
+    const validation = panelId
+      ? validatePanelEventContext(eventData, panelId, sessionId)
+      : validateEventContext(eventData, sessionId);
+
+    if (!validation.valid) {
+      logValidationFailure(`claudeCodeManager ${label} event`, validation);
+      return false;
     }
-
-    const toolLabel = 'Claude Code';
-
-    manager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
-      // cyboflow workflow runs use isCyboflowRunId-shaped IDs and are handled
-      // by runEventBridge; skip Crystal session validation (which would log
-      // "Session not found" against the `sessions` table cyboflow never writes to).
-      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
-      // The global-agent thread spawns with the synthetic identity
-      // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-      // exists by design); skip Crystal validation for it too.
-      if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
-
-      const validation = panelId
-        ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
-        : validateEventContext({ sessionId }, sessionId);
-
-      if (!validation.valid) {
-        logValidationFailure(`${toolLabel} spawned event`, validation);
-        return;
-      }
-
-      // Update panel status to running
-      if (panelId) {
-        await updateAIPanelStatus(panelId, 'running');
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      await sessionManager.updateSession(sessionId, {
-        status: 'running',
-        run_started_at: 'CURRENT_TIMESTAMP'
-      });
-
-      const updatedSession = await sessionManager.getSession(sessionId);
-
-      try {
-        const session = await sessionManager.getSession(sessionId);
-        if (session && session.worktreePath) {
-          const panels = panelManager.getPanelsForSession(sessionId);
-          const targetPanels = panels.filter((p: ToolPanel) => p.type === tool);
-
-          const promptMarkers = targetPanels.length > 0
-            ? sessionManager.getPanelPromptMarkers(targetPanels[0].id)
-            : sessionManager.getPromptMarkers(sessionId);
-
-          const latestPrompt = promptMarkers.length > 0
-            ? promptMarkers[promptMarkers.length - 1].prompt_text
-            : session.prompt;
-
-          await executionTracker.startExecution(sessionId, session.worktreePath, undefined, latestPrompt);
-          // NOTE: Run commands are not started automatically; user must trigger them explicitly.
-        }
-      } catch (error) {
-        console.error(`Failed to start execution tracking for session ${sessionId}:`, error);
-      }
-    });
-
-    manager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number | null; signal: number | null | string }) => {
-      // cyboflow workflow runs are owned by the workflow orchestrator; skip the
-      // Crystal session validation (mirror of the spawned-handler guard at line 510).
-      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
-      // The global-agent thread spawns with the synthetic identity
-      // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-      // exists by design); skip Crystal validation for it too.
-      if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
-
-      const validation = panelId
-        ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
-        : validateEventContext({ sessionId }, sessionId);
-
-      if (!validation.valid) {
-        logValidationFailure(`${toolLabel} exit event`, validation);
-        return;
-      }
-
-      const signalText = signal === null || signal === undefined ? 'null' : String(signal);
-
-      // Update panel status to stopped/completed_unviewed
-      if (panelId) {
-        const isActive = isPanelActive(panelId, sessionId);
-        // If panel is not active, mark as having unviewed content
-        const panelStatusOnExit: PanelStatus = exitCode === 0 && !isActive ? 'completed_unviewed' : 'stopped';
-        await updateAIPanelStatus(panelId, panelStatusOnExit, exitCode === 0 && !isActive);
-      }
-
-      if (exitCode !== null && exitCode !== undefined) {
-        await sessionManager.setSessionExitCode(sessionId, exitCode);
-      }
-
-      const session = sessionManager.getSession(sessionId);
-      if (session) {
-        const dbSession = sessionManager.getDbSession(sessionId);
-
-        // Check if ALL panels for this session have stopped before updating session status
-        const sessionPanels = panelManager.getPanelsForSession(sessionId);
-        const aiPanels = sessionPanels.filter((p: ToolPanel) => p.type === 'claude');
-
-        // Check if any AI panel is still running
-        const hasRunningPanels = aiPanels.some((p: ToolPanel) => {
-          const customState = p.state?.customState as BaseAIPanelState | undefined;
-          return customState?.panelStatus === 'running' || customState?.panelStatus === 'waiting';
-        });
-
-        // Only update session status if no panels are still running
-        if (!hasRunningPanels) {
-          // If exit code is 0 (successful completion), mark as completed
-          // The updateSession method will handle converting to 'completed_unviewed' if not viewed
-          if (exitCode === 0 && dbSession && dbSession.status === 'running') {
-            // Update to 'stopped' which will be converted to 'completed_unviewed' by the mapping logic
-            // since the database status will be set to 'completed'
-            sessionManager.db.updateSession(sessionId, { status: 'completed' });
-
-            // Get the updated session with proper status mapping
-            const updatedSession = sessionManager.getSession(sessionId);
-            if (updatedSession) {
-              // Manually emit the event since we bypassed updateSession for direct DB access
-              sessionManager.emit('session-updated', updatedSession);
-            }
-          }
-          // For non-zero exit codes or already completed sessions
-          else if (dbSession && dbSession.status !== 'completed') {
-            await sessionManager.updateSession(sessionId, { status: 'stopped' });
-          }
-        }
-        // If panels are still running, keep session in running state
-        else if (dbSession && dbSession.status !== 'running') {
-          await sessionManager.updateSession(sessionId, { status: 'running' });
-        }
-      }
-
-      try {
-        if (executionTracker.isTracking(sessionId)) {
-          await executionTracker.endExecution(sessionId);
-        }
-      } catch (error) {
-        console.error(`Failed to end execution tracking for session ${sessionId}:`, error);
-      }
-    });
+    return true;
   };
-
-  attachProcessLifecycleHandlers(claudeCodeManager, 'claude');
 
   // Listen to sessionManager events and broadcast to renderer
   sessionManager.on('session-created', async (session) => {
@@ -704,22 +588,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     data: unknown;
     timestamp: Date
   }) => {
-    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
-    if (isCyboflowRunId(output.panelId) || isCyboflowRunId(output.sessionId)) return;
-    // The global-agent thread spawns with the synthetic identity
-    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-    // exists by design); skip Crystal validation for it too.
-    if (isAgentThreadSpawnId(output.panelId) || isAgentThreadSpawnId(output.sessionId)) return;
-
-    // Validate the output has valid context
-    const validation = output.panelId
-      ? validatePanelEventContext(output, output.panelId, output.sessionId)
-      : validateEventContext(output, output.sessionId);
-
-    if (!validation.valid) {
-      logValidationFailure('claudeCodeManager output event', validation);
-      return; // Don't process invalid events
-    }
+    if (!acceptClaudeEvent('output', output, output.panelId, output.sessionId)) return;
 
     // Persist output: let ClaudePanelManager handle panel-based storage to avoid duplicates
     if (!output.panelId) {
@@ -757,22 +626,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   });
 
   claudeCodeManager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
-    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
-    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
-    // The global-agent thread spawns with the synthetic identity
-    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-    // exists by design); skip Crystal validation for it too.
-    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
-
-    // Validate the event context
-    const validation = panelId
-      ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
-      : validateEventContext({ sessionId }, sessionId);
-
-    if (!validation.valid) {
-      logValidationFailure('claudeCodeManager spawned event', validation);
-      return; // Don't process invalid events
-    }
+    if (!acceptClaudeEvent('spawned', { panelId, sessionId }, panelId, sessionId)) return;
 
     // Update panel status to running
     if (panelId) {
@@ -786,9 +640,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       status: 'running',
       run_started_at: 'CURRENT_TIMESTAMP'
     });
-
-    // Verify the update was successful
-    const updatedSession = await sessionManager.getSession(sessionId);
 
     // Start execution tracking
     try {
@@ -818,21 +669,68 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
   });
 
-  claudeCodeManager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number; signal: string }) => {
-    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
-    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
-    // The global-agent thread spawns with the synthetic identity
-    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-    // exists by design); skip Crystal validation for it too.
-    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
+  claudeCodeManager.on('exit', async ({ panelId, sessionId, exitCode }: { panelId?: string; sessionId: string; exitCode: number | null; signal: number | null | string }) => {
+    if (!acceptClaudeEvent('exit', { panelId, sessionId }, panelId, sessionId)) return;
 
-    const validation = panelId
-      ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
-      : validateEventContext({ sessionId }, sessionId);
+    // Update panel status to stopped/completed_unviewed
+    if (panelId) {
+      const isActive = isPanelActive(panelId, sessionId);
+      // If panel is not active, mark as having unviewed content
+      const panelStatusOnExit: PanelStatus = exitCode === 0 && !isActive ? 'completed_unviewed' : 'stopped';
+      await updateAIPanelStatus(panelId, panelStatusOnExit, exitCode === 0 && !isActive);
+    }
 
-    if (!validation.valid) {
-      logValidationFailure('claudeCodeManager exit event', validation);
-      return;
+    if (exitCode !== null && exitCode !== undefined) {
+      await sessionManager.setSessionExitCode(sessionId, exitCode);
+    }
+
+    const session = sessionManager.getSession(sessionId);
+    if (session) {
+      const dbSession = sessionManager.getDbSession(sessionId);
+
+      // Check if ALL panels for this session have stopped before updating session status
+      const sessionPanels = panelManager.getPanelsForSession(sessionId);
+      const aiPanels = sessionPanels.filter((p: ToolPanel) => p.type === 'claude');
+
+      // Check if any AI panel is still running
+      const hasRunningPanels = aiPanels.some((p: ToolPanel) => {
+        const customState = p.state?.customState as BaseAIPanelState | undefined;
+        return customState?.panelStatus === 'running' || customState?.panelStatus === 'waiting';
+      });
+
+      // Only update session status if no panels are still running
+      if (!hasRunningPanels) {
+        // If exit code is 0 (successful completion), mark as completed
+        // The updateSession method will handle converting to 'completed_unviewed' if not viewed
+        if (exitCode === 0 && dbSession && dbSession.status === 'running') {
+          // Update to 'stopped' which will be converted to 'completed_unviewed' by the mapping logic
+          // since the database status will be set to 'completed'
+          sessionManager.db.updateSession(sessionId, { status: 'completed' });
+
+          // Get the updated session with proper status mapping
+          const updatedSession = sessionManager.getSession(sessionId);
+          if (updatedSession) {
+            // Manually emit the event since we bypassed updateSession for direct DB access
+            sessionManager.emit('session-updated', updatedSession);
+          }
+        }
+        // For non-zero exit codes or already completed sessions
+        else if (dbSession && dbSession.status !== 'completed') {
+          await sessionManager.updateSession(sessionId, { status: 'stopped' });
+        }
+      }
+      // If panels are still running, keep session in running state
+      else if (dbSession && dbSession.status !== 'running') {
+        await sessionManager.updateSession(sessionId, { status: 'running' });
+      }
+    }
+
+    try {
+      if (executionTracker.isTracking(sessionId)) {
+        await executionTracker.endExecution(sessionId);
+      }
+    } catch (error) {
+      console.error(`Failed to end execution tracking for session ${sessionId}:`, error);
     }
 
     // Refresh the context-% meter on every successful turn from the turn's own
@@ -857,112 +755,15 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
 
     // Refresh git status after Claude exits, as it may have made commits
-    // This should always happen, even if we skip the session summary
     try {
       await gitStatusManager.refreshSessionGitStatus(sessionId);
     } catch (error) {
       console.error(`Failed to refresh git status for session ${sessionId} after exit:`, error);
     }
-
-    // Add commit information when session ends
-    try {
-      const session = sessionManager.getSession(sessionId);
-      if (session && session.worktreePath) {
-        const timestamp = new Date().toLocaleTimeString();
-        let commitInfo = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[44m\x1b[37m 📊 SESSION SUMMARY \x1b[0m\r\n\r\n`;
-
-        // Check for uncommitted changes
-        const statusOutput = (await runGitAsync(session.worktreePath, ['status', '--porcelain'])).trim();
-
-        if (statusOutput) {
-          const uncommittedFiles = statusOutput.split('\n').length;
-          commitInfo += `\x1b[1m\x1b[33m⚠️  Uncommitted Changes:\x1b[0m ${uncommittedFiles} file${uncommittedFiles > 1 ? 's' : ''}\r\n`;
-
-          // Show first few uncommitted files
-          const filesToShow = statusOutput.split('\n').slice(0, 5);
-          filesToShow.forEach(file => {
-            const [status, ...nameParts] = file.trim().split(/\s+/);
-            const fileName = nameParts.join(' ');
-            commitInfo += `   \x1b[2m${status}\x1b[0m ${fileName}\r\n`;
-          });
-
-          if (uncommittedFiles > 5) {
-            commitInfo += `   \x1b[2m... and ${uncommittedFiles - 5} more\x1b[0m\r\n`;
-          }
-          commitInfo += '\r\n';
-        }
-
-        // Get commit history for this branch
-        const project = sessionManager.getProjectForSession(session.id);
-        if (!project?.path) {
-          throw new Error('Project path not found for session');
-        }
-        const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-
-        // Verbose commit logging removed - details are in error cases if needed
-
-        let commits: GitCommit[] = [];
-        try {
-          commits = await gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
-          // Commit count logging removed - shown in session summary
-        } catch (error) {
-          console.error(`[Events] Error getting commit history:`, error);
-          // If there's an error, try without specifying main branch (get all commits)
-          try {
-            const logOutput = await runGitAsync(session.worktreePath, ['log', '--format=%H|%s|%ai|%an', '--numstat', '-n', '10']);
-            // Fallback output logging removed - only errors are logged
-          } catch (fallbackError) {
-            console.error(`[Events] Fallback also failed:`, fallbackError);
-          }
-        }
-
-        if (commits.length > 0) {
-          commitInfo += `\x1b[1m\x1b[32m📝 Commits in this session:\x1b[0m\r\n`;
-          commits.forEach((commit, index) => {
-            const shortHash = commit.hash.substring(0, 7);
-            const date = commit.date.toLocaleString();
-            const stats = commit.stats;
-            commitInfo += `\r\n  \x1b[1m${index + 1}.\x1b[0m \x1b[33m${shortHash}\x1b[0m - ${commit.message}\r\n`;
-            commitInfo += `     \x1b[2mby ${commit.author} on ${date}\x1b[0m\r\n`;
-            if (stats.filesChanged > 0) {
-              commitInfo += `     \x1b[32m+${stats.additions}\x1b[0m \x1b[31m-${stats.deletions}\x1b[0m (${stats.filesChanged} file${stats.filesChanged > 1 ? 's' : ''})\r\n`;
-            }
-          });
-        } else if (!statusOutput) {
-          commitInfo += `\x1b[2mNo commits were made in this session.\x1b[0m\r\n`;
-        }
-
-        commitInfo += `\r\n\x1b[2m─────────────────────────────────────────\x1b[0m\r\n`;
-
-        // Add this summary to the session output
-        sessionManager.addSessionOutput(sessionId, {
-          type: 'stdout',
-          data: commitInfo,
-          timestamp: new Date()
-        });
-      }
-    } catch (error) {
-      console.error(`Failed to generate session summary for ${sessionId}:`, error);
-    }
   });
 
   claudeCodeManager.on('error', async ({ panelId, sessionId, error }: { panelId?: string; sessionId: string; error: string }) => {
-    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
-    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
-    // The global-agent thread spawns with the synthetic identity
-    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
-    // exists by design); skip Crystal validation for it too.
-    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
-
-    // Validate the event context
-    const validation = panelId
-      ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
-      : validateEventContext({ sessionId }, sessionId);
-
-    if (!validation.valid) {
-      logValidationFailure('claudeCodeManager error event', validation);
-      return; // Don't process invalid events
-    }
+    if (!acceptClaudeEvent('error', { panelId, sessionId }, panelId, sessionId)) return;
 
     if (panelId) {
       console.log(`Panel ${panelId} (session ${sessionId}) encountered an error: ${error}`);
@@ -980,87 +781,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       }
     } catch (trackingError) {
       console.error(`Failed to cancel execution tracking for session ${sessionId}:`, trackingError);
-    }
-
-    // Add commit information when session errors
-    try {
-      const session = sessionManager.getSession(sessionId);
-      if (session && session.worktreePath) {
-        const timestamp = new Date().toLocaleTimeString();
-        let commitInfo = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[41m\x1b[37m 📊 SESSION SUMMARY (ERROR) \x1b[0m\r\n\r\n`;
-
-        // Check for uncommitted changes
-        const statusOutput = (await runGitAsync(session.worktreePath, ['status', '--porcelain'])).trim();
-
-        if (statusOutput) {
-          const uncommittedFiles = statusOutput.split('\n').length;
-          commitInfo += `\x1b[1m\x1b[33m⚠️  Uncommitted Changes:\x1b[0m ${uncommittedFiles} file${uncommittedFiles > 1 ? 's' : ''}\r\n`;
-
-          // Show first few uncommitted files
-          const filesToShow = statusOutput.split('\n').slice(0, 5);
-          filesToShow.forEach(file => {
-            const [status, ...nameParts] = file.trim().split(/\s+/);
-            const fileName = nameParts.join(' ');
-            commitInfo += `   \x1b[2m${status}\x1b[0m ${fileName}\r\n`;
-          });
-
-          if (uncommittedFiles > 5) {
-            commitInfo += `   \x1b[2m... and ${uncommittedFiles - 5} more\x1b[0m\r\n`;
-          }
-          commitInfo += '\r\n';
-        }
-
-        // Get commit history for this branch
-        const project = sessionManager.getProjectForSession(session.id);
-        if (!project?.path) {
-          throw new Error('Project path not found for session');
-        }
-        const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-        
-        // Verbose commit logging removed - details are in error cases if needed
-        
-        let commits: GitCommit[] = [];
-        try {
-          commits = await gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
-          // Commit count logging removed - shown in session summary
-        } catch (error) {
-          console.error(`[Events] Error getting commit history:`, error);
-          // If there's an error, try without specifying main branch (get all commits)
-          try {
-            const logOutput = await runGitAsync(session.worktreePath, ['log', '--format=%H|%s|%ai|%an', '--numstat', '-n', '10']);
-            // Fallback output logging removed - only errors are logged
-          } catch (fallbackError) {
-            console.error(`[Events] Fallback also failed:`, fallbackError);
-          }
-        }
-
-        if (commits.length > 0) {
-          commitInfo += `\x1b[1m\x1b[32m📝 Commits before error:\x1b[0m\r\n`;
-          commits.forEach((commit, index) => {
-            const shortHash = commit.hash.substring(0, 7);
-            const date = commit.date.toLocaleString();
-            const stats = commit.stats;
-            commitInfo += `\r\n  \x1b[1m${index + 1}.\x1b[0m \x1b[33m${shortHash}\x1b[0m - ${commit.message}\r\n`;
-            commitInfo += `     \x1b[2mby ${commit.author} on ${date}\x1b[0m\r\n`;
-            if (stats.filesChanged > 0) {
-              commitInfo += `     \x1b[32m+${stats.additions}\x1b[0m \x1b[31m-${stats.deletions}\x1b[0m (${stats.filesChanged} file${stats.filesChanged > 1 ? 's' : ''})\r\n`;
-            }
-          });
-        } else if (!statusOutput) {
-          commitInfo += `\x1b[2mNo commits were made before the error.\x1b[0m\r\n`;
-        }
-
-        commitInfo += `\r\n\x1b[2m─────────────────────────────────────────\x1b[0m\r\n`;
-
-        // Add this summary to the session output
-        sessionManager.addSessionOutput(sessionId, {
-          type: 'stdout',
-          data: commitInfo,
-          timestamp: new Date()
-        });
-      }
-    } catch (summaryError) {
-      console.error(`Failed to generate session summary for ${sessionId}:`, summaryError);
     }
   });
 
