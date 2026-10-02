@@ -1,6 +1,3 @@
-/* Import markdown styles - must come first */
-/* Removed conflicting markdown.css - using markdown-preview.css instead */
-
 /* Bundled JetBrains Mono (self-hosted via @fontsource — offline-capable) */
 @import '@fontsource/jetbrains-mono/400.css';
 @import '@fontsource/jetbrains-mono/500.css';
