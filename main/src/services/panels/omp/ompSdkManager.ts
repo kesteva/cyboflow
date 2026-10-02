@@ -15,7 +15,7 @@ import type {
   AgentSessionInfoEvent,
   AgentStreamEvent,
 } from '../../../../../shared/types/agentStream';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import type { ConversationMessage } from '../../../database/models';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
 import type { EffectiveAgent } from '../../../orchestrator/agents/effectiveAgents';

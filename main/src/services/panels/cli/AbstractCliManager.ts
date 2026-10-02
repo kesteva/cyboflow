@@ -13,7 +13,7 @@ import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
-import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliSpawn';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
 import {
   collectDescendantPidsAsync,

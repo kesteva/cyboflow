@@ -160,7 +160,7 @@ type definitions across packages.
 
 - `shared/types/models.ts` — database-layer model types
 - `shared/types/panels.ts` — panel configuration and state types
-- `shared/types/cliPanels.ts` — CLI-specific panel types
+- `shared/types/cliSpawn.ts` — the CLI-manager spawn contract (`CliSpawnOutcome`, `LaneSpawnEnv`)
 
 **Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent` and
 `StuckReason`. `reviewQueueSlice`'s `subscribeToStuckEvents()` action

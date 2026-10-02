@@ -1,6 +1,6 @@
 import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
-import type { LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
+import type { LaneSpawnEnv } from '../../../../../shared/types/cliSpawn';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';

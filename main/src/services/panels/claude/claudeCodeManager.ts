@@ -63,7 +63,7 @@ import { LIVE_TASK_STATUSES } from '../../../../../shared/streamParser/taskLifec
 import { reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { UserEvent } from '../../../../../shared/types/claudeStream';
-import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../../../shared/types/cliPanels';
+import type { CliSpawnOutcome, LaneSpawnEnv } from '../../../../../shared/types/cliSpawn';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';

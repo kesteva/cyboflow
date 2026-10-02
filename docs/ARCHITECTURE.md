@@ -827,8 +827,9 @@ All procedures are consumed by their respective Zustand stores and React compone
 Both packages import from here via `../../../shared/types/...`. Changing types here is a
 cross-package concern.
 
-- **Inherited from Crystal:** `panels.ts`, `cliPanels.ts`, `aiPanelConfig.ts`.
+- **Inherited from Crystal:** `panels.ts`, `aiPanelConfig.ts`.
 - **Cyboflow-era:** `cyboflow.ts`, `workflows.ts`, `approval.ts`, `approvals.ts`,
+  `cliSpawn.ts` (the CLI-manager spawn contract: `CliSpawnOutcome`, `LaneSpawnEnv`),
   `mcpHealth.ts`, `stuckDetection.ts`, `stuckInspection.ts`, `claudeStream.ts`,
   `unifiedMessage.ts`, `substrate.ts`, `tasks.ts` (the 3-table entity model: `IdeaRow` /
   `EpicRow` / `TaskRow`, `TaskChangeAction`, board types), `reviews.ts` (`ReviewItem`,
