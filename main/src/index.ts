@@ -946,15 +946,11 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
 // Deferrable (non-first-paint) startup work, kicked off once the main window's
 // first frame is painted ('ready-to-show') rather than on the critical path to
 // first paint. Idempotent: the macOS 'activate' re-created window fires
-// 'ready-to-show' again, and these sweeps / git polling must run only once.
+// 'ready-to-show' again, and these sweeps must run only once.
 let deferredStartupWorkStarted = false;
 function runDeferredStartupWork(): void {
   if (deferredStartupWorkStarted) return;
   deferredStartupWorkStarted = true;
-
-  // Git status polling is comparatively expensive (spawns git per session), so it
-  // is held back until the window is visible instead of started during init.
-  gitStatusManager.startPolling();
 
   // Bug reports use their own Sentry client, built lazily on first submission, so
   // a report the offline transport queued in an earlier session would otherwise
@@ -1304,31 +1300,6 @@ async function createWindow() {
   // Log any renderer errors
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     console.error('Renderer process crashed:', details);
-  });
-
-  // Handle window focus/blur/minimize for smart git status polling
-  mainWindow.on('focus', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(false); // false = visible/focused
-    }
-  });
-
-  mainWindow.on('blur', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(true); // true = hidden/blurred
-    }
-  });
-
-  mainWindow.on('minimize', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(true); // true = hidden/minimized
-    }
-  });
-
-  mainWindow.on('restore', () => {
-    if (gitStatusManager) {
-      gitStatusManager.handleVisibilityChange(false); // false = visible/restored
-    }
   });
 }
 

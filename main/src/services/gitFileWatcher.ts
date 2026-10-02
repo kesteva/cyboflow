@@ -63,10 +63,9 @@ export class GitFileWatcher extends EventEmitter {
   ];
 
   /**
-   * @param mode `'dirty-check'` (default, the git-status badge's contract):
-   *   after the debounce, run `fastCheckWorkingDirectory` and emit
-   *   `needs-refresh` only when the tree is dirty — a clean tree needs no badge
-   *   update. `'always'`: emit on every debounced change without the git
+   * @param mode `'dirty-check'` (default): after the debounce, run
+   *   `fastCheckWorkingDirectory` and emit `needs-refresh` only when the tree
+   *   is dirty. `'always'`: emit on every debounced change without the git
    *   probe. The diff rail needs this: its consumer's own fetch IS the check,
    *   and a tree that just became CLEAN (the last edit reverted, `git commit`
    *   from a terminal) is exactly the transition the dirty-check would swallow

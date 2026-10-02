@@ -309,11 +309,4 @@ export interface SessionOpsLike {
   reorder(request: {
     sessionOrders: Array<{ id: string; displayOrder: number }>;
   }): Promise<{ success: true } | SessionOpsError>;
-
-  /**
-   * Mirrors legacy `sessions:set-active-session`. Tells GitStatusManager which
-   * session the user is looking at, so its polling can favour it. `null` clears
-   * the selection.
-   */
-  setActiveSession(request: { sessionId: string | null }): Promise<{ success: true } | SessionOpsError>;
 }

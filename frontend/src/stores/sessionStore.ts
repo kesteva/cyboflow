@@ -146,25 +146,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     
     if (!sessionId) {
       set({ activeSessionId: null, activeMainRepoSession: null });
-      // Notify backend about active session change for smart git status polling
-      try {
-        await API.sessions.setActiveSession(null);
-      } catch (error) {
-        console.warn('Failed to notify backend about active session change:', error);
-      }
       return;
     }
     
     // Emit session-switched event for cleanup
     if (get().activeSessionId !== sessionId) {
       window.dispatchEvent(new CustomEvent('session-switched', { detail: { sessionId } }));
-      
-      // Notify backend about active session change for smart git status polling
-      try {
-        await API.sessions.setActiveSession(sessionId);
-      } catch (error) {
-        console.warn('Failed to notify backend about active session change:', error);
-      }
     }
     
     // First check if the session is already in our local store

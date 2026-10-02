@@ -215,9 +215,8 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
   // the board (mirrors getSummary's `enabled` contract); (3) at most
   // once per QUICK_GIT_WARM_INTERVAL_MS, a fire-and-forget cache WARM kicks
   // getGitStatus (TTL-aware, coalesced, concurrency-bounded) for the resting
-  // rows — the git watcher pipeline (badge auto-refresh) is disabled in
-  // production (GIT_STATUS_BADGE_ENABLED=false), so the cache this seam reads
-  // would otherwise stay cold. The warm deliberately rides the POLL rather than
+  // rows — nothing refreshes the cache automatically (there is no per-session
+  // git watcher), so the cache this seam reads would otherwise stay cold. The warm deliberately rides the POLL rather than
   // a dedicated endpoint of its own — that scopes warming to exactly "while a
   // board is polling", and it stayed that way when the listing moved onto the
   // cyboflow.sessions tRPC router.
@@ -683,18 +682,6 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     }
   };
 
-  // Set active session for smart git status polling
-  const setActiveSession = async ({ sessionId }: OpsInput<'setActiveSession'>): Promise<OpsResult<'setActiveSession'>> => {
-    try {
-      // Notify GitStatusManager about the active session change
-      gitStatusManager.setActiveSession(sessionId);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to set active session:', error);
-      return { success: false, error: 'Failed to set active session' };
-    }
-  };
-
   return {
     getAll,
     get,
@@ -711,6 +698,5 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     updateSessionMcps,
     updateSessionPlugins,
     reorder,
-    setActiveSession,
   };
 }

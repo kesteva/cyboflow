@@ -8,9 +8,8 @@
  *       payload with, which is exactly what a zod enum here would have
  *       destroyed.
  *   (b) zod rejection of malformed input, never reaching ctx.sessionOps — and,
- *       just as importantly, the inputs zod must NOT reject: a null
- *       setActiveSession, an omitted listQuick projectId, an arbitrary
- *       permission-mode string.
+ *       just as importantly, the inputs zod must NOT reject: an omitted
+ *       listQuick projectId, an arbitrary permission-mode string.
  *   (c) PRECONDITION_FAILED when ctx.sessionOps is absent.
  */
 import { describe, it, expect, vi } from 'vitest';
@@ -51,7 +50,6 @@ function makeFakeOps(): FakeOps {
     updateSessionMcps: vi.fn().mockResolvedValue({ success: true }),
     updateSessionPlugins: vi.fn().mockResolvedValue({ success: true }),
     reorder: vi.fn().mockResolvedValue({ success: true }),
-    setActiveSession: vi.fn().mockResolvedValue({ success: true }),
   } as unknown as FakeOps;
 }
 
@@ -238,14 +236,6 @@ describe('cyboflow.sessions', () => {
   });
 
   describe('(b2) the inputs the schema must NOT reject', () => {
-    it('setActiveSession accepts null — that is how the sidebar clears the selection', async () => {
-      const sessionOps = makeFakeOps();
-      const caller = appRouter.createCaller(createContext({ sessionOps }));
-      const result = await caller.cyboflow.sessions.setActiveSession({ sessionId: null });
-      expect(sessionOps.setActiveSession).toHaveBeenCalledWith({ sessionId: null });
-      expect(result).toEqual({ success: true });
-    });
-
     it('listQuick accepts an omitted projectId — the cross-project review home', async () => {
       const sessionOps = makeFakeOps();
       const caller = appRouter.createCaller(createContext({ sessionOps }));
@@ -299,13 +289,6 @@ describe('cyboflow.sessions', () => {
       const caller = appRouter.createCaller(createContext());
       await expect(
         caller.cyboflow.sessions.rename({ sessionId: 's1', newName: 'x' }),
-      ).rejects.toSatisfy(isPrecond);
-    });
-
-    it('setActiveSession', async () => {
-      const caller = appRouter.createCaller(createContext());
-      await expect(
-        caller.cyboflow.sessions.setActiveSession({ sessionId: null }),
       ).rejects.toSatisfy(isPrecond);
     });
 

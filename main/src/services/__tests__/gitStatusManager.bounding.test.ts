@@ -332,30 +332,21 @@ describe('GitStatusManager — concurrency-cap deadlock regression', () => {
       });
 
       const { sessionManager, worktreeManager, gitDiffManager } = makeFakeCollaborators();
-      // badgeEnabled=true: this regression drives the auto-refresh entry points
-      // (setActiveSession + handleVisibilityChange), which are gated off in
-      // production while the git-status badge is unmounted (see
-      // GIT_STATUS_BADGE_ENABLED). Opt back in so the call sites actually fire.
-      const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, undefined, true);
+      const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager);
       const internals = manager as unknown as GitStatusManagerInternals;
 
-      // Drive this through the REAL production entry points that fire rapid same-session
-      // refreshes — setActiveSession + handleVisibilityChange — rather than calling
-      // refreshSessionGitStatus directly, so this test exercises the actual call sites
-      // the reviewed diff touched.
-      manager.setActiveSession('burst-session');
-
-      // Fire 5 rapid "window became visible" events for the SAME active session —
-      // simulating repeated file-watcher/focus fires within one debounce window. Each
-      // call to refreshSessionGitStatus underneath clearTimeout()s the prior call's
-      // still-pending debounce timer, so the prior call's Promise — whose `resolve`
-      // lives inside that now-cleared setTimeout callback — never settles. That
-      // orphaning is pre-existing debounce behavior, independent of this fix; only the
-      // LAST call's timer survives to fire.
+      // Fire 5 rapid non-user-initiated refreshes for the SAME session within one
+      // debounce window — the shape the live callers produce (events.ts on panel
+      // output / session completion, gitOps after commits and rebases). Each call to
+      // refreshSessionGitStatus clearTimeout()s the prior call's still-pending
+      // debounce timer, so the prior call's Promise — whose `resolve` lives inside
+      // that now-cleared setTimeout callback — never settles. That orphaning is
+      // pre-existing debounce behavior, independent of this fix; only the LAST
+      // call's timer survives to fire.
       //
-      // The regression this covers: the reviewed diff briefly wrapped
-      // `executeWithLimit(() => refreshSessionGitStatus(...))` at call sites like this
-      // one. Because an orphaned call's Promise never settles, executeWithLimit's
+      // The regression this covers: a reviewed diff briefly wrapped
+      // `executeWithLimit(() => refreshSessionGitStatus(...))` at call sites.
+      // Because an orphaned call's Promise never settles, executeWithLimit's
       // `activeOperations` slot for it was held FOREVER — after
       // MAX_CONCURRENT_OPERATIONS such orphans, the shared spin-gate wedges and every
       // future fetch, for every session, hangs. The fix moves the ONE executeWithLimit
@@ -363,7 +354,7 @@ describe('GitStatusManager — concurrency-cap deadlock regression', () => {
       // always settles) instead of the debounced-refresh wrapper (which sometimes
       // doesn't) — so refreshSessionGitStatus is never itself wrapped anymore.
       for (let i = 0; i < 5; i++) {
-        manager.handleVisibilityChange(false); // isHidden=false => window visible => refresh
+        void manager.refreshSessionGitStatus('burst-session', false);
       }
 
       await vi.advanceTimersByTimeAsync(internals.DEBOUNCE_MS);

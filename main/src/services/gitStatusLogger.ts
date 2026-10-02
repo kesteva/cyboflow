@@ -62,12 +62,7 @@ export class GitStatusLogger {
     }
   }
 
-  // 4. Window Focus Events
-  logFocusChange(focused: boolean): void {
-    this.logger?.info(`[GitStatus] Polling ${focused ? 'resumed' : 'paused'} (window ${focused ? 'focused' : 'blurred'})`);
-  }
-
-  // 5. Summary Statistics
+  // 4. Summary Statistics
   logSummary(): void {
     if (this.sessionErrors.size > 0) {
       const errorSummary = Array.from(this.sessionErrors.entries())
@@ -77,7 +72,7 @@ export class GitStatusLogger {
     }
   }
 
-  // 6. Debounce Events
+  // 5. Debounce Events
   logDebounce(sessionId: string, action: 'start' | 'complete' | 'cancelled'): void {
     // Only log in verbose mode
     this.logger?.verbose(`[GitStatus] Debounce ${action} for session ${sessionId}`);

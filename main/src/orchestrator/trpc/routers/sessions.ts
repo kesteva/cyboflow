@@ -183,12 +183,4 @@ export const sessionsRouter = router({
     .mutation(async ({ ctx, input }): Promise<{ success: true } | SessionOpsError> => {
       return requireOps(ctx.sessionOps).reorder(input);
     }),
-
-  setActiveSession: protectedProcedure
-    // Nullable, not optional: `null` is the meaningful "no session is active"
-    // value the sidebar sends when the selection is cleared.
-    .input(z.object({ sessionId: z.string().min(1).nullable() }))
-    .mutation(async ({ ctx, input }): Promise<{ success: true } | SessionOpsError> => {
-      return requireOps(ctx.sessionOps).setActiveSession(input);
-    }),
 });

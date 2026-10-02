@@ -8,7 +8,6 @@ import type { WorktreeManager } from './worktreeManager';
 import type { GitDiffManager } from './gitDiffManager';
 import { GitStatusLogger } from './gitStatusLogger';
 import { perfBump } from './perfTracer';
-import { GitFileWatcher } from './gitFileWatcher';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats, GitOperationalError } from './gitPlumbingCommands';
 import { runGitAsync } from '../utils/runGit';
 
@@ -19,36 +18,12 @@ interface GitStatusCache {
   };
 }
 
-/**
- * @cyboflow-hidden — the per-session git-status badge (GitStatusIndicator:
- * ahead/behind + dirty/untracked dots) was the ONLY consumer of this manager's
- * output. It was dropped when the sidebar went run-centric (TASK-687 "remodel
- * sidebar to show project > workflow runs"), which deleted the session row that
- * rendered it; the component is now orphaned and nothing in
- * the live UI reads session.gitStatus. Until the badge returns (planned alongside
- * upcoming diff-view work), leave this flag false so we don't spawn an FSEvents
- * file watcher + periodic git subprocesses per active session to feed an unmounted
- * UI. Flip to true to revive the entire pipeline (watcher + auto-refresh) unchanged
- * — no other code needs to move. The manual/on-demand paths (getGitStatus IPC,
- * project-refresh button, post-rebase updateProjectGitStatusAfterMainUpdate) stay
- * live regardless; only the automatic hammering is gated.
- *
- * The right-rail Diff tab's liveness does NOT go through here: it uses
- * WorktreeChangeNotifier (services/worktreeChangeNotifier.ts), which watches
- * ONE worktree per open Diff tab via the `sessionGit.onWorktreeChanged`
- * subscription and stops when the tab closes — not every active session.
- */
-const GIT_STATUS_BADGE_ENABLED = false;
-
-
 export class GitStatusManager extends EventEmitter {
   private cache: GitStatusCache = {};
-  // Smart visibility-aware polling for active sessions only
   private readonly CACHE_TTL_MS = 5000; // 5 seconds cache
   private refreshDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
   private readonly DEBOUNCE_MS = 2000; // 2 seconds debounce to batch rapid changes
   private gitLogger: GitStatusLogger;
-  private fileWatcher: GitFileWatcher;
   
   // Throttling for UI events
   private eventThrottleTimer: NodeJS.Timeout | null = null;
@@ -80,114 +55,23 @@ export class GitStatusManager extends EventEmitter {
   private isInitialLoadInProgress = false;
   private initialLoadQueue: string[] = [];
   private readonly INITIAL_LOAD_DELAY_MS = 200; // Increased to 200ms for better staggering
-  
-  // Track active session and window visibility for optimized refreshes
-  private activeSessionId: string | null = null;
-  private isWindowVisible = true;
 
   constructor(
     private sessionManager: SessionManager,
     private worktreeManager: WorktreeManager,
     private gitDiffManager: GitDiffManager,
-    private logger?: Logger,
-    // @cyboflow-hidden — defaults to the disabled module flag so production runs
-    // with the automatic watcher/polling off (see GIT_STATUS_BADGE_ENABLED).
-    // Overridable so tests can exercise the real auto-refresh entry points.
-    private readonly badgeEnabled: boolean = GIT_STATUS_BADGE_ENABLED
+    private logger?: Logger
   ) {
     super();
     // Increase max listeners to prevent warnings when many components listen to git status events
     this.setMaxListeners(100);
     this.gitLogger = new GitStatusLogger(logger);
-    
-    // Initialize file watcher for smart refresh detection
-    this.fileWatcher = new GitFileWatcher(logger);
-    this.fileWatcher.on('needs-refresh', (sessionId: string) => {
-      // File watcher detected changes, refresh git status
-      this.logger?.info(`[GitStatus] File watcher triggered refresh for session ${sessionId}`);
-      // NOT wrapped in executeWithLimit — see the comment on fetchGitStatusCoalesced
-      // for why bounding belongs at the git-spawn level, not the debounced-refresh level.
-      this.refreshSessionGitStatus(sessionId, false).catch(error => {
-        this.logger?.error(`[GitStatus] Failed to refresh after file change for session ${sessionId}:`, error);
-      });
-    });
-  }
-
-
-  /**
-   * Set the currently active session for smart polling
-   */
-  setActiveSession(sessionId: string | null): void {
-    const previousActive = this.activeSessionId;
-    this.activeSessionId = sessionId;
-
-    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED).
-    // Still track activeSessionId above so on-demand callers behave, but skip
-    // starting the file watcher / kicking the auto-refresh.
-    if (!this.badgeEnabled) return;
-
-    if (previousActive !== sessionId) {
-      console.log(`[GitStatus] Active session changed from ${previousActive} to ${sessionId}`);
-      
-      // Start watching the active session's files if we have one
-      if (sessionId) {
-        this.startWatchingSession(sessionId);
-        
-        // If window is visible, also refresh immediately
-        // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
-        if (this.isWindowVisible) {
-          this.refreshSessionGitStatus(sessionId, false).catch(error => {
-            console.warn(`[GitStatus] Failed to refresh active session ${sessionId}:`, error);
-          });
-        }
-      }
-      
-      // Stop watching the previous active session if it exists
-      if (previousActive) {
-        this.stopWatchingSession(previousActive);
-      }
-    }
-  }
-  
-  /**
-   * Start file watching for a session
-   */
-  private async startWatchingSession(sessionId: string): Promise<void> {
-    try {
-      const session = await this.sessionManager.getSession(sessionId);
-      if (session?.worktreePath) {
-        this.fileWatcher.startWatching(sessionId, session.worktreePath);
-        this.logger?.info(`[GitStatus] Started file watching for session ${sessionId}`);
-      }
-    } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to start file watching for session ${sessionId}:`, error as Error);
-    }
-  }
-  
-  /**
-   * Stop file watching for a session
-   */
-  private stopWatchingSession(sessionId: string): void {
-    this.fileWatcher.stopWatching(sessionId);
-    this.logger?.info(`[GitStatus] Stopped file watching for session ${sessionId}`);
-  }
-  
-  /**
-   * Start git status manager (initializes file watching)
-   */
-  startPolling(): void {
-    // File watching is started per-session in setActiveSession
-    // This method is kept for backward compatibility
-    this.gitLogger.logPollStart(1);
   }
 
   /**
    * Stop git status manager
    */
   stopPolling(): void {
-    // Stop all file watchers
-    this.fileWatcher.stopAll();
-    
     this.gitLogger.logSummary();
 
     // Clear any pending debounce timers
@@ -204,25 +88,6 @@ export class GitStatusManager extends EventEmitter {
     // Cancel all active operations
     this.abortControllers.forEach(controller => controller.abort());
     this.abortControllers.clear();
-  }
-
-  // Called when window focus changes
-  handleVisibilityChange(isHidden: boolean): void {
-    this.isWindowVisible = !isHidden;
-    this.gitLogger.logFocusChange(!isHidden);
-
-    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED);
-    // no active-session auto-refresh on focus.
-    if (!this.badgeEnabled) return;
-
-    // If window becomes visible and we have an active session, refresh it
-    // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
-    if (!isHidden && this.activeSessionId) {
-      const sessionId = this.activeSessionId;
-      this.refreshSessionGitStatus(sessionId, false).catch(error => {
-        console.warn(`[GitStatus] Failed to refresh active session on focus:`, error);
-      });
-    }
   }
 
   /**

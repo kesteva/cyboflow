@@ -19,10 +19,9 @@ import type { Session, SessionOutput } from '../../types/session';
 // ---------------------------------------------------------------------------
 // API mock — setActiveSession/createSession call into it.
 // ---------------------------------------------------------------------------
-const { apiGet, apiMarkViewed, apiSetActiveSession } = vi.hoisted(() => ({
+const { apiGet, apiMarkViewed } = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiMarkViewed: vi.fn(),
-  apiSetActiveSession: vi.fn(),
 }));
 
 vi.mock('../../utils/api', () => ({
@@ -30,7 +29,6 @@ vi.mock('../../utils/api', () => ({
     sessions: {
       get: apiGet,
       markViewed: apiMarkViewed,
-      setActiveSession: apiSetActiveSession,
     },
   },
 }));
@@ -74,7 +72,6 @@ beforeEach(() => {
   resetStore();
   apiGet.mockReset();
   apiMarkViewed.mockReset().mockResolvedValue({ success: true });
-  apiSetActiveSession.mockReset().mockResolvedValue({ success: true });
 });
 
 describe('addSession — display order', () => {
@@ -184,15 +181,12 @@ describe('updateSession — preserves output/jsonMessages (silent-drop guard)', 
 });
 
 describe('setActiveSession — branches', () => {
-  it('null clears active ids and notifies the backend', async () => {
+  it('null clears active ids', async () => {
     useSessionStore.setState({ activeSessionId: 's1', activeMainRepoSession: makeSession('s1') });
     await useSessionStore.getState().setActiveSession(null);
     const state = useSessionStore.getState();
     expect(state.activeSessionId).toBeNull();
     expect(state.activeMainRepoSession).toBeNull();
-    // The backend notification rides API.sessions.setActiveSession (the
-    // cyboflow.sessions tRPC mutation) rather than the generic invoke bridge.
-    expect(apiSetActiveSession).toHaveBeenCalledWith(null);
   });
 
   it('uses the in-store regular session without fetching', async () => {

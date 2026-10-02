@@ -416,16 +416,6 @@ export class API {
       return trpc.cyboflow.sessions.reorder.mutate({ sessionOrders });
     },
 
-    /**
-     * Tell the backend which session the user is looking at, so GitStatusManager
-     * can favour it when polling. `null` clears the selection. Called only from
-     * sessionStore.setActiveSession, which used the generic invoke bridge before
-     * this moved onto the cyboflow.sessions router.
-     */
-    async setActiveSession(sessionId: string | null) {
-      return trpc.cyboflow.sessions.setActiveSession.mutate({ sessionId });
-    },
-
     /** Mirrors the sidebar's archive-task poll (legacy `archive:get-progress`). */
     async getArchiveProgress() {
       return trpc.cyboflow.sessions.getArchiveProgress.query();
