@@ -209,9 +209,9 @@ async function waitForProjectsTable(dataDir: string, timeoutMs: number): Promise
  * the host-node Playwright runner throws NODE_MODULE_VERSION. The `sqlite3` CLI
  * (`/usr/bin/sqlite3`, present on every macOS runner) sidesteps that entirely.
  *
- * `active = 1` makes it the project `ProjectSelector` auto-selects
- * (`data.find(p => p.active)`), which is what renders CyboflowRoot / the
- * workflow picker instead of the no-project fallback.
+ * With a single project row, the sidebar (DraggableProjectTreeView) auto-selects
+ * it on boot, which is what renders CyboflowRoot / the workflow picker instead
+ * of the no-project fallback.
  *
  * Requires `bootToCreateDb(dataDir)` first (the schema must exist).
  */
