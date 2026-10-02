@@ -419,6 +419,25 @@ function gatherIdeaRunOverlayRows(
 }
 
 /**
+ * The hosting-session projection shared by the run-overlay reads. The `sessions`
+ * table is legacy (schema.sql, not a numbered migration) — some partial-migration
+ * test DBs add workflow_runs.session_id (migration 019) WITHOUT ever creating it,
+ * so the column check alone is not enough; PRAGMA table_info on a MISSING table
+ * returns zero rows (no error), so this doubles as a table-existence probe.
+ */
+function runSessionProjection(db: DatabaseLike): { sessionSelect: string; sessionJoin: string } {
+  const hasSession =
+    columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
+  return {
+    sessionSelect: hasSession
+      ? 'wr.session_id AS session_id, s.name AS session_name'
+      : 'NULL AS session_id, NULL AS session_name',
+    sessionJoin: hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '',
+  };
+}
+
+
+/**
  * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
  * runs whose lane names it (migration 066's derived 'In development' stage
  * tracks the SAME association — see TaskChangeRouter.gatherTaskRuns). LEFT
@@ -439,17 +458,7 @@ function gatherTaskRunOverlayRows(
   taskId: string,
   entityType?: TaskDbRow['type'],
 ): RunOverlayRow[] {
-  // The `sessions` table is legacy (schema.sql, not a numbered migration) —
-  // some partial-migration test DBs add workflow_runs.session_id (migration
-  // 019) WITHOUT ever creating it, so the column check alone is not enough;
-  // PRAGMA table_info on a MISSING table returns zero rows (no error), so this
-  // doubles as a table-existence probe.
-  const hasSession =
-    columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
-  const sessionSelect = hasSession
-    ? 'wr.session_id AS session_id, s.name AS session_name'
-    : 'NULL AS session_id, NULL AS session_name';
-  const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+  const { sessionSelect, sessionJoin } = runSessionProjection(db);
 
   if (entityType === 'idea') {
     return gatherIdeaRunOverlayRows(db, taskId, sessionSelect, sessionJoin);
@@ -493,13 +502,18 @@ function gatherTaskRunOverlayRows(
 export function computeTaskOverlay(
   db: DatabaseLike,
   task: Pick<TaskDbRow, 'id' | 'stage_id'> & Partial<Pick<TaskDbRow, 'type'>>,
+  prefetch?: BacklogOverlayPrefetch,
 ): { inFlow: FlowOverlay[]; awaitingReview: boolean; isDone: boolean; experimentSeed: boolean } {
-  const stage = db
-    .prepare('SELECT is_terminal, position FROM board_stages WHERE id = ?')
-    .get(task.stage_id) as StageOverlayRow | undefined;
+  const stage = prefetch
+    ? prefetch.stageById.get(task.stage_id)
+    : (db
+        .prepare('SELECT is_terminal, position FROM board_stages WHERE id = ?')
+        .get(task.stage_id) as StageOverlayRow | undefined);
   const isDone = stage ? stage.is_terminal === 1 && stage.position === 9 : false;
 
-  const runs = gatherTaskRunOverlayRows(db, task.id, task.type);
+  const runs = prefetch
+    ? (prefetch.runsByEntity.get(task.id) ?? [])
+    : gatherTaskRunOverlayRows(db, task.id, task.type);
 
   const inFlow: FlowOverlay[] = runs
     .filter((r) => !TERMINAL_RUN_STATUS_SET.has(r.status))
@@ -519,9 +533,218 @@ export function computeTaskOverlay(
   const runIds = runs.map((r) => r.id);
   const awaitingReview =
     runs.some((r) => r.status === 'awaiting_review' || r.outcome === 'pr_open') ||
-    hasPendingApprovals(db, runIds);
+    (prefetch
+      ? runIds.some((id) => prefetch.pendingApprovalRunIds.has(id))
+      : hasPendingApprovals(db, runIds));
 
-  return { inFlow, awaitingReview, isDone, experimentSeed: isLiveExperimentSeed(db, task.id) };
+  const experimentSeed = prefetch
+    ? prefetch.liveSeedTaskIds.has(task.id)
+    : isLiveExperimentSeed(db, task.id);
+  return { inFlow, awaitingReview, isDone, experimentSeed };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk overlay prefetch (whole-backlog reads)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything computeTaskOverlay reads, loaded for a whole backlog read in a
+ * handful of grouped queries. Without it, selectProjectBacklog ran ~5 prepared
+ * statements PER ENTITY (stage, run overlay, experiment seed, pending approvals)
+ * — ~3.5k statement compiles for a ~700-entity board, plus a full workflow_runs
+ * scan per idea for the seed-idea arm — ~150-450ms of synchronous main-thread
+ * work, re-run on every run-status change via the backlog store's refetch.
+ * The single-entity paths (selectTaskById etc.) keep the per-row reads.
+ */
+interface BacklogOverlayPrefetch {
+  stageById: Map<string, StageOverlayRow>;
+  /** Overlay runs per entity id — the SAME association gatherTaskRunOverlayRows derives. */
+  runsByEntity: Map<string, RunOverlayRow[]>;
+  liveSeedTaskIds: Set<string>;
+  pendingApprovalRunIds: Set<string>;
+}
+
+/** Keeps every grouped `IN (...)` well under SQLite's ~999 bound-parameter ceiling. */
+const PREFETCH_ID_CHUNK = 400;
+
+function chunkIds(ids: readonly string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += PREFETCH_ID_CHUNK) out.push(ids.slice(i, i + PREFETCH_ID_CHUNK));
+  return out;
+}
+
+const RUN_OVERLAY_COLUMNS = 'wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json';
+
+type EntityRunRow = RunOverlayRow & { entity_id: unknown };
+
+/**
+ * Append each run to its entity's list, deduped by run id (the per-row reads'
+ * SELECT DISTINCT — a run matching two arms counts once).
+ */
+function addEntityRuns(
+  runsByEntity: Map<string, RunOverlayRow[]>,
+  seen: Map<string, Set<string>>,
+  rows: readonly EntityRunRow[],
+): void {
+  for (const { entity_id: entityId, ...run } of rows) {
+    if (typeof entityId !== 'string') continue;
+    let ids = seen.get(entityId);
+    if (!ids) {
+      ids = new Set();
+      seen.set(entityId, ids);
+    }
+    if (ids.has(run.id)) continue;
+    ids.add(run.id);
+    const list = runsByEntity.get(entityId);
+    if (list) list.push(run);
+    else runsByEntity.set(entityId, [run]);
+  }
+}
+
+/**
+ * The string members of a `seed_idea_ids` value, read the way the per-row
+ * `json_each(...) je WHERE je.value = ?` arm matches them (array elements,
+ * object values, or a bare scalar). Malformed JSON contributes nothing — the
+ * per-row arm's json_valid() guard.
+ */
+function seedIdeaIdMembers(raw: unknown): string[] {
+  if (typeof raw !== 'string') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const values: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object'
+      ? Object.values(parsed)
+      : [parsed];
+  return values.filter((v): v is string => typeof v === 'string');
+}
+
+/** Run overlay rows for every entity in `rows`, grouped by entity id. */
+function prefetchRunsByEntity(db: DatabaseLike, rows: readonly TaskDbRow[]): Map<string, RunOverlayRow[]> {
+  const runsByEntity = new Map<string, RunOverlayRow[]>();
+  const seen = new Map<string, Set<string>>();
+  const { sessionSelect, sessionJoin } = runSessionProjection(db);
+
+  // Task/epic arm (gatherTaskRunOverlayRows): direct task_id link, then any
+  // sprint batch whose lane names the entity.
+  const taskIds = rows.filter((r) => r.type !== 'idea').map((r) => r.id);
+  const hasBatch = columnExists(db, 'workflow_runs', 'batch_id');
+  for (const ids of chunkIds(taskIds)) {
+    const marks = ids.map(() => '?').join(',');
+    addEntityRuns(
+      runsByEntity,
+      seen,
+      db
+        .prepare(
+          `SELECT wr.task_id AS entity_id, ${RUN_OVERLAY_COLUMNS}, ${sessionSelect}
+             FROM workflow_runs wr
+             ${sessionJoin}
+            WHERE wr.task_id IN (${marks})
+            ORDER BY wr.rowid`,
+        )
+        .all(...ids) as EntityRunRow[],
+    );
+    if (hasBatch) {
+      addEntityRuns(
+        runsByEntity,
+        seen,
+        db
+          .prepare(
+            `SELECT sbt.task_id AS entity_id, ${RUN_OVERLAY_COLUMNS}, ${sessionSelect}
+               FROM sprint_batch_tasks sbt
+               JOIN workflow_runs wr ON wr.batch_id = sbt.batch_id
+               ${sessionJoin}
+              WHERE sbt.task_id IN (${marks})
+              ORDER BY wr.rowid`,
+          )
+          .all(...ids) as EntityRunRow[],
+      );
+    }
+  }
+
+  // Idea arm (gatherIdeaRunOverlayRows): Planner/Ship runs seeded with the idea.
+  const ideaIds = new Set(rows.filter((r) => r.type === 'idea').map((r) => r.id));
+  const hasSeedIdeaId = columnExists(db, 'workflow_runs', 'seed_idea_id');
+  const hasSeedIdeaIds = columnExists(db, 'workflow_runs', 'seed_idea_ids');
+  if (ideaIds.size > 0 && (hasSeedIdeaId || hasSeedIdeaIds)) {
+    const seedColumns = [
+      hasSeedIdeaId ? 'wr.seed_idea_id AS seed_idea_id' : 'NULL AS seed_idea_id',
+      hasSeedIdeaIds ? 'wr.seed_idea_ids AS seed_idea_ids' : 'NULL AS seed_idea_ids',
+    ].join(', ');
+    const seedFilter = [
+      hasSeedIdeaId ? 'wr.seed_idea_id IS NOT NULL' : null,
+      hasSeedIdeaIds ? 'wr.seed_idea_ids IS NOT NULL' : null,
+    ]
+      .filter((c): c is string => c !== null)
+      .join(' OR ');
+    const seeded = db
+      .prepare(
+        `SELECT ${RUN_OVERLAY_COLUMNS}, w.name AS workflow_name, ${sessionSelect}, ${seedColumns}
+           FROM workflow_runs wr
+           JOIN workflows w ON w.id = wr.workflow_id
+           ${sessionJoin}
+          WHERE (${seedFilter}) AND w.name IN ('planner', 'ship')
+          ORDER BY wr.id`,
+      )
+      .all() as Array<RunOverlayRow & { seed_idea_id: unknown; seed_idea_ids: unknown }>;
+    const ideaRows: EntityRunRow[] = [];
+    for (const { seed_idea_id: seedIdeaId, seed_idea_ids: seedIdeaIds, ...run } of seeded) {
+      const members = new Set(seedIdeaIdMembers(seedIdeaIds));
+      if (typeof seedIdeaId === 'string') members.add(seedIdeaId);
+      for (const ideaId of members) {
+        if (ideaIds.has(ideaId)) ideaRows.push({ ...run, entity_id: ideaId });
+      }
+    }
+    addEntityRuns(runsByEntity, seen, ideaRows);
+  }
+
+  return runsByEntity;
+}
+
+/** Original task ids of every LIVE A/B experiment (isLiveExperimentSeed, in bulk). */
+function prefetchLiveSeedTaskIds(db: DatabaseLike): Set<string> {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT est.original_task_id AS id FROM experiment_seed_tasks est
+           JOIN experiments e ON e.id = est.experiment_id
+          WHERE e.status NOT IN ('decided', 'abandoned', 'superseded')`,
+      )
+      .all() as Array<{ id: unknown }>;
+    return new Set(rows.map((r) => r.id).filter((id): id is string => typeof id === 'string'));
+  } catch (err) {
+    if (err instanceof Error && /no such (column|table)/i.test(err.message)) return new Set();
+    throw err;
+  }
+}
+
+/** Run ids with a pending approval (hasPendingApprovals, in bulk). */
+function prefetchPendingApprovalRunIds(db: DatabaseLike): Set<string> {
+  try {
+    const rows = db
+      .prepare(`SELECT DISTINCT run_id AS id FROM approvals WHERE status = 'pending' AND run_id IS NOT NULL`)
+      .all() as Array<{ id: unknown }>;
+    return new Set(rows.map((r) => r.id).filter((id): id is string => typeof id === 'string'));
+  } catch (err) {
+    if (err instanceof Error && /no such (column|table)/i.test(err.message)) return new Set();
+    throw err;
+  }
+}
+
+function prefetchBacklogOverlays(db: DatabaseLike, rows: readonly TaskDbRow[]): BacklogOverlayPrefetch {
+  const stageRows = db.prepare('SELECT id, is_terminal, position FROM board_stages').all() as Array<
+    StageOverlayRow & { id: string }
+  >;
+  return {
+    stageById: new Map(stageRows.map((r) => [r.id, { is_terminal: r.is_terminal, position: r.position }])),
+    runsByEntity: prefetchRunsByEntity(db, rows),
+    liveSeedTaskIds: prefetchLiveSeedTaskIds(db),
+    pendingApprovalRunIds: prefetchPendingApprovalRunIds(db),
+  };
 }
 
 /**
@@ -1066,8 +1289,8 @@ function resolveIdeaComponentsSafe(db: DatabaseLike, ideaId: string): IdeaCompon
  * Project a base task row + its overlays into a BacklogTaskItem (children are
  * filled in by selectProjectBacklog's nesting pass, not here).
  */
-function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
-  const { inFlow, awaitingReview, isDone, experimentSeed } = computeTaskOverlay(db, row);
+function projectTaskItem(db: DatabaseLike, row: TaskDbRow, prefetch?: BacklogOverlayPrefetch): BacklogTaskItem {
+  const { inFlow, awaitingReview, isDone, experimentSeed } = computeTaskOverlay(db, row, prefetch);
   return {
     id: row.id,
     project_id: row.project_id,
@@ -1423,10 +1646,14 @@ export function selectProjectBacklog(
   const taskIds = rows.filter((row) => row.type === 'task').map((row) => row.id);
   const membershipsByTask = loadMembershipsForTaskIds(db, taskIds);
 
+  // Per-entity overlay inputs (stage, runs, approvals, experiment seeds) in a
+  // handful of grouped queries, never a statement per row.
+  const overlayPrefetch = prefetchBacklogOverlays(db, rows);
+
   // First pass: project every row to a BacklogTaskItem keyed by id.
   const itemsById = new Map<string, BacklogTaskItem>();
   for (const row of rows) {
-    const item = projectTaskItem(db, row);
+    const item = projectTaskItem(db, row, overlayPrefetch);
     if (row.type === 'task') {
       applyDependencyOverlay(
         item,

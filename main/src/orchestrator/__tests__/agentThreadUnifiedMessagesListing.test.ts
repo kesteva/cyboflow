@@ -14,7 +14,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { selectAgentThreadUnifiedMessages } from '../agentThreadUnifiedMessagesListing';
+import {
+  selectAgentThreadMessagesPage,
+  selectAgentThreadUnifiedMessages,
+} from '../agentThreadUnifiedMessagesListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
@@ -184,5 +187,129 @@ describe('selectAgentThreadUnifiedMessages', () => {
     expect(result).toEqual([]);
     expect(logger.debug).toHaveBeenCalled();
     expect(logger.calls.some((c) => c.level === 'debug')).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Incremental projection cache — the SAME adapter across calls hits the
+  // cache, so each test below holds one adapter and appends between reads.
+  // -------------------------------------------------------------------------
+
+  it('correlates a tool_result appended AFTER a previous read into the cached tool_call', () => {
+    const adapter = dbAdapter(db);
+    insertEvent(db, 'thread-1', assistantToolUsePayload('asst-1', 'toolu_x'), '2026-01-01T00:00:01Z');
+
+    const before = selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    expect(before).toHaveLength(1);
+    const pendingSeg = before[0].segments[0];
+    if (pendingSeg.type !== 'tool_call') throw new Error('expected tool_call segment');
+    expect(pendingSeg.tool.status).toBe('pending');
+
+    insertEvent(db, 'thread-1', userToolResultPayload('toolu_x', 'out'), '2026-01-01T00:00:02Z');
+    const after = selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    expect(after).toHaveLength(1);
+    const seg = after[0].segments[0];
+    if (seg.type !== 'tool_call') throw new Error('expected tool_call segment');
+    expect(seg.tool.status).toBe('success');
+    expect(seg.tool.result).toEqual({ content: 'out', isError: false });
+
+    // Identical to a cold full re-projection of the same rows.
+    expect(after).toEqual(selectAgentThreadUnifiedMessages(dbAdapter(db), 'thread-1'));
+  });
+
+  it('coalesces a same-id assistant message split across two reads', () => {
+    const adapter = dbAdapter(db);
+    insertEvent(db, 'thread-1', assistantTextPayload('asst-1', 'part one'), '2026-01-01T00:00:01Z');
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1')).toHaveLength(1);
+
+    insertEvent(db, 'thread-1', assistantTextPayload('asst-1', 'part two'), '2026-01-01T00:00:02Z');
+    insertEvent(db, 'thread-1', assistantTextPayload('asst-2', 'next'), '2026-01-01T00:00:03Z');
+    const result = selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    expect(result.map((m) => m.id)).toEqual(['asst-1', 'asst-2']);
+    expect(result[0].segments).toEqual([
+      { type: 'text', content: 'part one' },
+      { type: 'text', content: 'part two' },
+    ]);
+  });
+
+  it('rebuilds from scratch when the thread shrinks underneath the cache', () => {
+    const adapter = dbAdapter(db);
+    insertEvent(db, 'thread-1', assistantTextPayload('gone', 'old'), '2026-01-01T00:00:01Z');
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1').map((m) => m.id)).toEqual(['gone']);
+
+    db.prepare(`DELETE FROM agent_thread_events WHERE thread_id = 'thread-1'`).run();
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1')).toEqual([]);
+
+    insertEvent(db, 'thread-1', assistantTextPayload('fresh', 'new'), '2026-01-01T00:00:02Z');
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1').map((m) => m.id)).toEqual(['fresh']);
+  });
+
+  it('windows by newest `limit` or absolute `fromIndex`, reporting start + total', () => {
+    const adapter = dbAdapter(db);
+    for (let i = 1; i <= 5; i++) {
+      insertEvent(db, 'thread-1', assistantTextPayload(`m${i}`, `t${i}`), `2026-01-01T00:00:0${i}Z`);
+    }
+    expect(selectAgentThreadMessagesPage(adapter, 'thread-1', { limit: 2 })).toMatchObject({
+      startIndex: 3,
+      totalCount: 5,
+      messages: [{ id: 'm4' }, { id: 'm5' }],
+    });
+    expect(selectAgentThreadMessagesPage(adapter, 'thread-1', { limit: 50 }).messages).toHaveLength(5);
+    expect(selectAgentThreadMessagesPage(adapter, 'thread-1').messages).toHaveLength(5);
+
+    // fromIndex wins over limit, and a window anchored there GROWS as the thread does.
+    expect(
+      selectAgentThreadMessagesPage(adapter, 'thread-1', { fromIndex: 3, limit: 1 }).messages.map((m) => m.id),
+    ).toEqual(['m4', 'm5']);
+    insertEvent(db, 'thread-1', assistantTextPayload('m6', 't6'), '2026-01-01T00:00:06Z');
+    expect(selectAgentThreadMessagesPage(adapter, 'thread-1', { fromIndex: 3 })).toMatchObject({
+      startIndex: 3,
+      totalCount: 6,
+      messages: [{ id: 'm4' }, { id: 'm5' }, { id: 'm6' }],
+    });
+    // Out-of-range indices clamp.
+    expect(selectAgentThreadMessagesPage(adapter, 'thread-1', { fromIndex: 99 })).toMatchObject({
+      startIndex: 6,
+      messages: [],
+    });
+  });
+
+  it('returns a fresh array each call so callers cannot mutate the cache', () => {
+    const adapter = dbAdapter(db);
+    insertEvent(db, 'thread-1', assistantTextPayload('m1', 'one'), '2026-01-01T00:00:01Z');
+    const first = selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    first.length = 0;
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1')).toHaveLength(1);
+  });
+
+  it('a repeat read fetches only rows past the consumed watermark (no full re-read)', () => {
+    const inner = dbAdapter(db);
+    const fetched: unknown[][] = [];
+    const adapter: typeof inner = {
+      ...inner,
+      prepare: (sql: string) => {
+        const stmt = inner.prepare(sql);
+        if (!/ate\.id > \?/.test(sql)) return stmt;
+        return {
+          ...stmt,
+          all: (...params: unknown[]) => {
+            const rows = stmt.all(...params);
+            fetched.push(rows as unknown[]);
+            return rows;
+          },
+        };
+      },
+    };
+    insertEvent(db, 'thread-1', assistantTextPayload('m1', 'one'), '2026-01-01T00:00:01Z');
+    insertEvent(db, 'thread-1', assistantTextPayload('m2', 'two'), '2026-01-01T00:00:02Z');
+    selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    expect(fetched.map((r) => r.length)).toEqual([2]);
+
+    // Nothing new → no fetch at all.
+    selectAgentThreadUnifiedMessages(adapter, 'thread-1');
+    expect(fetched.map((r) => r.length)).toEqual([2]);
+
+    insertEvent(db, 'thread-1', assistantTextPayload('m3', 'three'), '2026-01-01T00:00:03Z');
+    expect(selectAgentThreadUnifiedMessages(adapter, 'thread-1').map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+    expect(fetched.map((r) => r.length)).toEqual([2, 1]);
   });
 });

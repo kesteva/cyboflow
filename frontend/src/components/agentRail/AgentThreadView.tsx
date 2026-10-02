@@ -54,7 +54,8 @@ export function AgentThreadView({
   const cancelQueuedTurn = useAgentThreadStore((s) => s.cancelQueuedTurn);
   const interruptAndSend = useAgentThreadStore((s) => s.interruptAndSend);
 
-  const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
+  const { messages, loadError, hasEarlier, earlierCount, isLoadingEarlier, loadEarlier } =
+    useUnifiedAgentThreadMessages(thread?.id ?? null);
 
   // Progressive-render live tail (Option A — see render-map.md), mirroring
   // RunChatView / ClaudePanel: reconstruct the in-flight assistant message's
@@ -140,6 +141,21 @@ export function AgentThreadView({
       loadError={loadError}
       isWaitingForResponse={sending}
       liveTail={liveTail}
+      transcriptStartSlot={
+        hasEarlier ? (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              data-testid="agent-thread-load-earlier"
+              onClick={loadEarlier}
+              disabled={isLoadingEarlier}
+              className="rounded border border-border-primary px-3 py-1 text-xs text-text-secondary hover:bg-surface-hover disabled:opacity-50"
+            >
+              {isLoadingEarlier ? 'Loading…' : `Load earlier messages (${earlierCount} more)`}
+            </button>
+          </div>
+        ) : undefined
+      }
       folderLabel={null}
       branchName={null}
       contextUsage={null}

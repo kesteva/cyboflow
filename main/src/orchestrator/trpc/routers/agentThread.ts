@@ -4,7 +4,8 @@
  *
  * Queries / mutations:
  *   - getThread        : query    → AgentThread   (ensures the single 'global' thread exists)
- *   - listMessages     : query    → UnifiedMessage[] (projection over agent_thread_events)
+ *   - listMessages     : query    → { messages, totalCount } (newest-`limit` page of the
+ *                        projection over agent_thread_events)
  *   - sendMessage      : mutation → { ok: true }   (one agent turn; optional
  *                        prompt-only `contextHint`, never persisted to the transcript)
  *   - interruptTurn    : mutation → { interrupted: boolean } (the rail's Stop
@@ -40,8 +41,10 @@ import type { Context } from '../context';
 import type { AgentThreadServiceLike, AgentThreadStoreLike } from '../context';
 import { eventToAsyncIterable } from './events';
 import { batchAsyncIterator } from '../throttle';
-import { selectAgentThreadUnifiedMessages } from '../../agentThreadUnifiedMessagesListing';
-import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
+import {
+  selectAgentThreadMessagesPage,
+  type AgentThreadMessagesPage,
+} from '../../agentThreadUnifiedMessagesListing';
 import type {
   AgentThread,
   AgentProposal,
@@ -187,18 +190,34 @@ export const agentThreadRouter = router({
   /**
    * Reconstruct the thread's chat history as fully-correlated UnifiedMessage[]
    * (tool_use folded with its tool_result) — the SAME rich projection the run +
-   * quick-session paths produce, over `agent_thread_events`.
+   * quick-session paths produce, over `agent_thread_events` — returned as a
+   * window (newest `limit`, or from `fromIndex`) plus where it starts and the
+   * thread's total message count.
    */
   listMessages: protectedProcedure
-    .input(z.object({ threadId: z.string() }))
-    .query(async ({ ctx, input }): Promise<UnifiedMessage[]> => {
+    .input(
+      z.object({
+        threadId: z.string(),
+        // Window selectors (both omitted = the whole history). The rail pages
+        // through a long thread with these rather than shipping (and
+        // rendering) thousands of messages on every mount/live-tail refetch:
+        // `limit` = the newest N; `fromIndex` = everything from that absolute
+        // index on (wins over `limit`).
+        limit: z.number().int().positive().max(100_000).optional(),
+        fromIndex: z.number().int().nonnegative().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }): Promise<AgentThreadMessagesPage> => {
       if (!ctx.db) {
         throw new TRPCError({
           code: 'PRECONDITION_FAILED',
           message: '[agentThread.listMessages] db not wired into tRPC context',
         });
       }
-      return selectAgentThreadUnifiedMessages(ctx.db, input.threadId);
+      return selectAgentThreadMessagesPage(ctx.db, input.threadId, {
+        limit: input.limit,
+        fromIndex: input.fromIndex,
+      });
     }),
 
   /** Send one agent turn (spawn / warm-continue). `contextHint` is optional
