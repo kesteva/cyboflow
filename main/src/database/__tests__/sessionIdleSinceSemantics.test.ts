@@ -186,8 +186,10 @@ describe('idle_since survives writes that are not a rest boundary', () => {
 
   it('a presentation-only write touches neither clock', () => {
     createSession('s1', { status: 'completed', idleSince: SEEDED_IDLE_SINCE });
-    const folder = db.createFolder('Bucket', projectId);
-    db.updateSession('s1', { folder_id: folder.id });
+    db.getDb()
+      .prepare('INSERT INTO folders (id, name, project_id) VALUES (?, ?, ?)')
+      .run('folder-1', 'Bucket', projectId);
+    db.updateSession('s1', { folder_id: 'folder-1' });
 
     const row = read('s1');
     expect(row.idle_since).toBe(SEEDED_IDLE_SINCE);

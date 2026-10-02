@@ -13,8 +13,7 @@
  * every idle row's "quiet" label to the same value; and merely opening a
  * session (markSessionAsViewed) reset its idle clock.
  *
- * Uses a REAL DatabaseService against a temp-file DB (folderCrud.test.ts
- * pattern). updated_at is seeded to a fixed past value via raw SQL so a
+ * Uses a REAL DatabaseService against a temp-file DB. updated_at is seeded to a fixed past value via raw SQL so a
  * spurious CURRENT_TIMESTAMP bump is detectable regardless of test speed.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -114,8 +113,10 @@ describe('presentation-only writes do not bump sessions.updated_at', () => {
 
   it('updateSession with only folder_id does not touch updated_at', () => {
     createSession('s1');
-    const folder = db.createFolder('Bucket', projectId);
-    db.updateSession('s1', { folder_id: folder.id });
+    db.getDb()
+      .prepare('INSERT INTO folders (id, name, project_id) VALUES (?, ?, ?)')
+      .run('folder-1', 'Bucket', projectId);
+    db.updateSession('s1', { folder_id: 'folder-1' });
     expect(updatedAt('s1')).toBe(SEEDED_UPDATED_AT);
   });
 

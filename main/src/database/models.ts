@@ -47,16 +47,6 @@ export interface ProjectRunCommand {
   created_at: string;
 }
 
-export interface Folder {
-  id: string;
-  name: string;
-  project_id: number;
-  parent_folder_id?: string | null;
-  display_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Session {
   id: string;
   name: string;
