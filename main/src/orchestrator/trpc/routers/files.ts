@@ -6,9 +6,8 @@
  * runs execute IN the session worktree, this surfaces the same tree whether or not
  * a run is active — and crucially it works for a session with NO active run.
  *
- * Mirrors the legacy run-keyed cyboflow.runs.listFiles / readFile routes exactly,
- * but keyed by sessionId. The RunFileError -> TRPCError mapping is shared via
- * withRunFileErrorMapping (trpc/runFileErrors.ts).
+ * The RunFileError -> TRPCError mapping lives in withRunFileErrorMapping
+ * (trpc/runFileErrors.ts).
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*.

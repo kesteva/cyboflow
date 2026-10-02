@@ -1,8 +1,8 @@
 /**
- * Shared row/payload types for the workflow-run File Explorer
- * (cyboflow.runs.listFiles / cyboflow.runs.readFile).
+ * Shared row/payload types for the File Explorer
+ * (cyboflow.files.list / cyboflow.files.read).
  *
- * A run's files live in its git worktree (workflow_runs.worktree_path). The
+ * A session's files live in its git worktree (sessions.worktree_path). The
  * File Explorer rail lists that tree and reads individual files read-only so the
  * user can inspect what an agent produced. Paths are RELATIVE to the worktree
  * root and use POSIX ('/') separators on the wire.

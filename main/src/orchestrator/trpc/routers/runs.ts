@@ -28,9 +28,7 @@ import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import { selectRunContextUsage, type RunContextUsage } from '../../runContextUsageListing';
-import { listRunFiles, readRunFile } from '../../runFileExplorer';
-import { withRunFileErrorMapping } from '../runFileErrors';
-import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
+import type { RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
@@ -4044,65 +4042,6 @@ export const runsRouter = router({
         });
       }
       return selectRunContextUsage(ctx.db, input.runId);
-    }),
-
-  // @cyboflow-hidden: the run-keyed File Explorer routes (listFiles / readFile)
-  // are superseded by the session-keyed cyboflow.files.* routes in cyboflow v1.
-  // PRESERVED for the Phase-5 legacy parentless-run fallback (a pre-upgrade run
-  // with its own worktree and no sessions row). Behavior is unchanged.
-  // Re-enable by adding a runId-keyed File Explorer surface again — the live
-  // component is now session-keyed (SessionFileExplorer.tsx); prefer
-  // cyboflow.files.list/read keyed by the selected session.
-
-  /**
-   * List one directory level of a run's git worktree for the File Explorer rail.
-   * `path` is relative to the worktree root (omit for the root). Directories
-   * sort first, then files; the `.git` directory is excluded. Read-only.
-   *
-   * Throws:
-   *   PRECONDITION_FAILED — ctx.db missing, or the run has no worktree yet /
-   *                         the worktree no longer exists on disk.
-   *   NOT_FOUND           — unknown runId, or the target directory is missing.
-   *   BAD_REQUEST         — path escapes the worktree or is not a directory.
-   */
-  listFiles: protectedProcedure
-    .input(z.object({ runId: z.string().min(1), path: z.string().optional() }))
-    .query(async ({ ctx, input }): Promise<RunFileEntry[]> => {
-      if (!ctx.db) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: 'db not wired into tRPC context',
-        });
-      }
-      const db = ctx.db;
-      return withRunFileErrorMapping(() => listRunFiles(db, input.runId, input.path));
-    }),
-
-  /**
-   * Read a single file from a run's git worktree as UTF-8 text for the File
-   * Explorer viewer. Binary or oversized files return `content: null` with an
-   * `unviewableReason` instead of throwing. Read-only.
-   *
-   * @cyboflow-hidden: superseded by cyboflow.files.read (session-keyed) in v1;
-   * PRESERVED for the Phase-5 legacy parentless-run fallback. Behavior unchanged.
-   *
-   * Throws:
-   *   PRECONDITION_FAILED — ctx.db missing, or the run has no worktree yet /
-   *                         the worktree no longer exists on disk.
-   *   NOT_FOUND           — unknown runId, or the file is missing.
-   *   BAD_REQUEST         — path escapes the worktree or is a directory.
-   */
-  readFile: protectedProcedure
-    .input(z.object({ runId: z.string().min(1), path: z.string().min(1) }))
-    .query(async ({ ctx, input }): Promise<RunFileContent> => {
-      if (!ctx.db) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: 'db not wired into tRPC context',
-        });
-      }
-      const db = ctx.db;
-      return withRunFileErrorMapping(() => readRunFile(db, input.runId, input.path));
     }),
 
   /**
