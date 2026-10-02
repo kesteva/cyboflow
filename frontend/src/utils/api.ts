@@ -230,10 +230,6 @@ export class API {
     // unchanged; only the transport moved. No isElectron() guard, matching the
     // other trpc-backed statics below (the ipcLink transport is Electron-only
     // by construction).
-    async getExecutions(sessionId: string) {
-      return trpc.cyboflow.sessionGit.getExecutions.query({ sessionId });
-    },
-
     async getExecutionDiff(sessionId: string, executionId: string) {
       return trpc.cyboflow.sessionGit.getExecutionDiff.query({ sessionId, executionId });
     },

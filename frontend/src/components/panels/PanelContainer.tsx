@@ -7,7 +7,6 @@ import { renderLog } from '../../utils/console';
 
 // Lazy load panel components for better performance
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
-const DiffPanel = lazy(() => import('./diff/DiffPanel'));
 const LogsPanel = lazy(() => import('./logPanel/LogsPanel'));
 const DashboardPanel = lazy(() => import('./DashboardPanel'));
 const SetupTasksPanel = lazy(() => import('./SetupTasksPanel'));
@@ -30,8 +29,7 @@ const PanelErrorFallback: React.FC<{ error: Error; resetErrorBoundary: () => voi
 
 export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
   panel,
-  isActive,
-  isMainRepo = false
+  isActive
 }) => {
   renderLog('[PanelContainer] Rendering panel:', panel.id, 'Type:', panel.type, 'Active:', isActive);
   
@@ -52,8 +50,6 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
     switch (panel.type) {
       case 'terminal':
         return <TerminalPanel panel={panel} isActive={isActive} />;
-      case 'diff':
-        return <DiffPanel panel={panel} isActive={isActive} sessionId={panel.sessionId} isMainRepo={isMainRepo} />;
       case 'logs':
         return <LogsPanel panel={panel} isActive={isActive} />;
       case 'dashboard':
@@ -77,7 +73,7 @@ export const PanelContainer: React.FC<PanelContainerProps> = React.memo(({
           </div>
         );
     }
-  }, [panel, isActive, isMainRepo]); // Include panel to catch state changes
+  }, [panel, isActive]); // Include panel to catch state changes
 
   return (
     <ErrorBoundary

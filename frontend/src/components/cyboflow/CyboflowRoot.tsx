@@ -159,7 +159,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           <PanelContainer
             panel={currentActivePanel}
             isActive
-            isMainRepo={!!effectiveSession?.isMainRepo}
           />
         </div>
       )}

@@ -1,9 +1,7 @@
 /**
  * parseFileHunks — parse a unified `git diff` into per-file hunks WITH line
  * numbers, for the center-pane file-tab's 3-col diff grid (old-no │ new-no │
- * code). The existing DiffViewer `parseUnifiedDiff` collapses each file to full
- * old/new text for Monaco and discards hunk line numbers, so the grid needs this
- * dedicated parser.
+ * code).
  *
  * Pure + side-effect-free. Operates on the raw combined-diff string returned by
  * `getCombinedDiff` (a sequence of `diff --git` blocks).

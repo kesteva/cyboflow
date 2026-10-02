@@ -162,7 +162,6 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
                   <PanelContainer
                     panel={panel}
                     isActive={panel.id === currentActivePanel.id}
-                    isMainRepo={!!mainRepoSession?.isMainRepo}
                   />
                 </div>
               ))}

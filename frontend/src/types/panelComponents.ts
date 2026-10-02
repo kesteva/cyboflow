@@ -17,7 +17,6 @@ export interface PanelTabBarProps {
 export interface PanelContainerProps {
   panel: ToolPanel;
   isActive: boolean;
-  isMainRepo?: boolean;
 }
 
 export interface TerminalPanelProps {
