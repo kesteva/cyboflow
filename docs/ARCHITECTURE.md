@@ -1182,9 +1182,7 @@ config writes while a rotation runs.
 #### Migration files
 
 Migrations are numbered `NNN_*.sql` files directly under `main/src/database/migrations/`,
-applied in numeric order by `runFileBasedMigrations()` (see "Phase 2" above). The `legacy/`
-subdirectory holds quarantined pre-fork Crystal migrations kept for reference only — the
-runner's non-recursive numeric scan never reads it and `copy:assets` never ships it. The directory
+applied in numeric order by `runFileBasedMigrations()` (see "Phase 2" above). The directory
 listing is the source of truth for which migrations exist — it is intentionally NOT enumerated
 here, since a hand-maintained file list rots the moment a new migration lands. A few are
 structurally load-bearing enough to be worth naming: `015_entity_model_rebuild.sql` (the 3-table
