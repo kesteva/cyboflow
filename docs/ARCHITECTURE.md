@@ -882,7 +882,7 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
 
 - **Phase 1 — inline migrations** inside `runMigrations()`: hand-written `ALTER TABLE` /
   `CREATE TABLE` blocks gated on `PRAGMA table_info` checks and on `user_preferences` marker
-  keys (e.g. `auto_commit_migrated`, `claude_panels_migrated`, `diff_panels_migrated`,
+  keys (e.g. `claude_panels_migrated`, `diff_panels_migrated`,
   `unified_panel_settings_migrated`, `folder_session_order_fix_applied`). These are the
   legacy Crystal-era migrations and run unconditionally on every boot (each block is
   idempotent via the marker check).
