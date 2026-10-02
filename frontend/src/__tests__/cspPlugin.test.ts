@@ -50,11 +50,6 @@ function parseDirectives(csp: string): Map<string, string[]> {
 }
 
 beforeAll(async () => {
-  // Import the .ts EXPLICITLY. `tsc -b` emits vite.config.js next to it
-  // (tsconfig.node.json is composite) and both are committed, so a bare
-  // '../../vite.config' would resolve to whatever .js happens to be on disk —
-  // testing a stale build artifact instead of the source. The sync between the
-  // two is asserted separately below.
   const config = (await import('../../vite.config.ts')).default;
   // Vite plugin arrays nest (react() returns an array). Flattened by hand —
   // `.flat(Infinity)` blows TypeScript's recursion budget on vite's plugin type.
@@ -142,15 +137,6 @@ describe('the rest of the policy', () => {
 
   it('permits base64 data: images — artifact screenshots arrive that way over IPC', () => {
     expect(parseDirectives(policy).get('img-src')).toContain('data:');
-  });
-
-  it('is present in the EMITTED vite.config.js, which is what vite actually loads', () => {
-    // Vite prefers vite.config.js over vite.config.ts when both exist, and this
-    // repo commits both (the .js is `tsc -b` output). An edit to the .ts that
-    // was never rebuilt would ship a renderer with no policy at all.
-    const emitted = readFileSync(join(__dirname, '../../vite.config.js'), 'utf8');
-    expect(emitted).toContain('cyboflow-csp');
-    expect(emitted).toContain('Content-Security-Policy');
   });
 
   it('omits the directives <meta> delivery ignores, rather than logging warnings', () => {

@@ -118,7 +118,10 @@ test-file.txt
 # Pre-rewrite backups
 *.backup
 
-# Generated TypeScript files
+# Generated TypeScript files (tsconfig.node.json now emits under
+# node_modules/.tmp; these guard against a stale sibling emit shadowing
+# vite.config.ts)
+frontend/vite.config.js
 frontend/vite.config.d.ts
 
 # Generated files
