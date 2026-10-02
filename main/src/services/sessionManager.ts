@@ -76,7 +76,6 @@ export class SessionManager extends EventEmitter {
   constructor(public db: DatabaseService) {
     super();
     // Increase max listeners to prevent warnings when many components listen to events
-    // This is expected since multiple SessionListItem components and project tree views listen to events
     this.setMaxListeners(100);
     this.terminalSessionManager = new TerminalSessionManager();
     

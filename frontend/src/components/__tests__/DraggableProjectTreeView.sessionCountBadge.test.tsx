@@ -108,7 +108,6 @@ vi.mock('../../stores/navigationStore', () => ({
   ),
 }));
 
-vi.mock('../SessionListItem', () => ({ SessionListItem: () => null }));
 vi.mock('../ProjectSettings', () => ({ default: () => null }));
 vi.mock('../EmptyState', () => ({
   EmptyState: ({ title, description }: { title: string; description: string }) => (

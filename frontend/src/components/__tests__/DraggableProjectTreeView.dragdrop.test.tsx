@@ -131,7 +131,6 @@ vi.mock('../../stores/activeRunsStore', () => {
   };
 });
 
-vi.mock('../SessionListItem', () => ({ SessionListItem: () => null }));
 vi.mock('../ProjectSettings', () => ({ default: () => null }));
 vi.mock('../CreateProjectDialog', () => ({ CreateProjectDialog: () => null }));
 vi.mock('../EmptyState', () => ({ EmptyState: () => null }));

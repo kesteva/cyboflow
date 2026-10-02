@@ -1,7 +1,6 @@
 /**
  * SessionRow inline rename (sidebar rail, session rows) — SessionRow-local
- * state only (no new props; sessionRowPropsEqual is untouched). Mirrors
- * SessionListItem's handleSaveEdit/handleCancelEdit/handleKeyDown semantics:
+ * state only (no new props; sessionRowPropsEqual is untouched). Semantics:
  * trim; empty-or-unchanged closes the editor without calling the API; Enter
  * saves; Escape cancels.
  *

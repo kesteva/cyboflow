@@ -11,9 +11,8 @@
  * by zero — this is the "no data yet" steady state.
  *
  * Styling resolves entirely through the paper-theme semantic tokens
- * (styles/tokens/colors.css): the track is `bg-surface-tertiary` (the same muted
- * fill StatusIndicator uses for its progress bar) and the fill defaults to the
- * terracotta `bg-interactive` accent. Override `accentClass` to recolor the fill
+ * (styles/tokens/colors.css): the track is the muted `bg-surface-tertiary` fill
+ * and the fill defaults to the terracotta `bg-interactive` accent. Override `accentClass` to recolor the fill
  * (e.g. a status hue) without touching the track.
  */
 import { cn } from '../../../utils/cn';

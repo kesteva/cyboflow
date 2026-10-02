@@ -228,9 +228,8 @@ export const SessionRow = memo(function SessionRow({
   isDraggable = true,
 }: SessionRowProps) {
   // Inline rename — SessionRow-local only (no new props, so sessionRowPropsEqual
-  // above needs no changes). Mirrors SessionListItem's handleSaveEdit/
-  // handleCancelEdit/handleKeyDown: trim; empty or unchanged closes without an
-  // API call; failure alerts + reverts. No optimistic local name cache after a
+  // above needs no changes). Save/cancel/keydown semantics: trim; empty or
+  // unchanged closes without an API call; failure alerts + reverts. No optimistic local name cache after a
   // successful save — the store's 'session-updated' replaces `session` and this
   // memoized row re-renders from that, same as every other prop.
   const [isEditingName, setIsEditingName] = useState(false);

@@ -20,11 +20,11 @@ interface GitStatusCache {
 }
 
 /**
- * @cyboflow-hidden — the per-session git-status badge (SessionListItem →
- * GitStatusIndicator: ahead/behind + dirty/untracked dots) was the ONLY consumer
- * of this manager's output. It was dropped when the sidebar went run-centric
- * (TASK-687 "remodel sidebar to show project > workflow runs"), which deleted
- * every <SessionListItem> render; the component is now orphaned and nothing in
+ * @cyboflow-hidden — the per-session git-status badge (GitStatusIndicator:
+ * ahead/behind + dirty/untracked dots) was the ONLY consumer of this manager's
+ * output. It was dropped when the sidebar went run-centric (TASK-687 "remodel
+ * sidebar to show project > workflow runs"), which deleted the session row that
+ * rendered it; the component is now orphaned and nothing in
  * the live UI reads session.gitStatus. Until the badge returns (planned alongside
  * upcoming diff-view work), leave this flag false so we don't spawn an FSEvents
  * file watcher + periodic git subprocesses per active session to feed an unmounted
@@ -97,7 +97,6 @@ export class GitStatusManager extends EventEmitter {
   ) {
     super();
     // Increase max listeners to prevent warnings when many components listen to git status events
-    // This is expected since each SessionListItem listens for git status updates
     this.setMaxListeners(100);
     this.gitLogger = new GitStatusLogger(logger);
     

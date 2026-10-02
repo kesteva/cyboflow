@@ -34,8 +34,6 @@ const SRC = join(__dirname, '..');
 const EXEMPT: Record<string, string> = {
   'components/ui/Tooltip.tsx':
     'hover-only: a lease would blank the page on every hover; a tooltip clipped by the page is cosmetic',
-  'components/SessionListItem.tsx':
-    'its context menu is opened through ContextMenuContext, whose provider holds the lease',
   'components/FilePathAutocomplete.tsx':
     'absolute (not portaled) and trigger-width inside the composer column, so it cannot reach the center pane',
 };
