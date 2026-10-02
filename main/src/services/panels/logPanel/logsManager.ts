@@ -227,13 +227,6 @@ export class LogsManager {
         data: { content, type },
         timestamp: new Date().toISOString()
       });
-      
-      // Also send logs-specific output event for the panel
-      mainWindow.webContents.send('logs:output', {
-        panelId,
-        content,
-        type
-      });
     }
     
     // Update panel state
@@ -309,12 +302,6 @@ export class LogsManager {
         },
         data: { exitCode: code },
         timestamp: new Date().toISOString()
-      });
-
-      // Also send specific event for the panel
-      mainWindow.webContents.send('process:ended', {
-        panelId,
-        exitCode: code
       });
     }
 
