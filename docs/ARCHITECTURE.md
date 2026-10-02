@@ -230,10 +230,8 @@ sprint lane (`mergeGateLaneAdvance.ts`), and raises/supersedes a
 Dispatch keys on `isAgentEngineRequest`: the REQUEST row's own
 `chain_json === '["agent"]'` first, falling back to the per-run stamp
 (`workflow_runs.verify_chain=['agent']`) — never a live flag, so an in-flight
-run always finishes on the engine it started on. For a flow run the two rungs
-are indistinguishable: its request's `chain_json` is always the empty
-intersection `'[]'` (`'agent'` is not a `VisualBackendId`, so it survives no
-intersection), so dispatch still reads the run stamp exactly as it always did.
+run always finishes on the engine it started on. A flow run's request writes
+`chain_json` `'[]'`, so its dispatch reads the run stamp.
 The ONE exception is the `__quick__` chat sentinel: it is minted once on the
 session's first chat turn and `verify_chain` has no UPDATE path (see the
 header on `visualVerificationResolver.ts`), so a quick run's posture is
@@ -242,19 +240,14 @@ the optional `getVisualVerifyConfig` dep) and written VERBATIM onto the
 request row's `chain_json`. A request row is never re-enqueued, so this is
 every bit as immutable as the run stamp it substitutes for — the dispatch key
 is still frozen at first write, just at request granularity instead of run
-granularity for this one case. The prior LEGACY engine (capture backends
-`capturePageBackend`/`playwrightBackend`/`peekabooBackend` + `VlmJudge`, plus
-the `.cyboflow/verify.json`-driven `DevServerManager`/`StaticServerManager`
-and the retired golden-baseline `pixelDiff`/`baselineStore`) is retired **in
-place** (`@cyboflow-hidden` — see `docs/CODE-PATTERNS.md`) under
-`main/src/services/visualVerify/`: it stays reachable only for a pre-upgrade
-run's legacy `verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback
-kill switch, which also boot-terminalizes any agent-engine request stranded
-queued/leased/running when the switch flips (via the same
-`isAgentEngineRequest` key, `VerificationScheduler.runRecovery`). Both engines
-share one per-project verification budget
-(`projects.visual_verify_budget_calls` / `verification_requests.judge_calls_used`,
-migration 056).
+granularity for this one case. The agent engine is the only engine: the
+earlier capture-backend + VLM-judge engine (and its golden-baseline compare)
+was deleted, so a request that is not on the agent engine — a run stamped with
+a capture-backend chain before the agent engine shipped, or an unreadable
+stamp — is terminalized `skipped` with `RETIRED_ENGINE_SKIP_REASON` rather than
+left queued. Agent deployments count against one per-project verification
+budget (`projects.visual_verify_budget_calls` /
+`verification_requests.judge_calls_used`, migration 056).
 
 **Quick sessions are the first user-conversation-triggered path into this
 queue, and firing one is deliberately UN-GATED at the PreToolUse layer.** In
@@ -1434,10 +1427,9 @@ a `dlopen`ed addon — cannot live inside the ASAR archive and must be listed in
 - `node_modules/@openai/codex*/**` — the bundled per-platform `codex` CLI
   binaries (resolved through `app.asar.unpacked` by
   `panels/codex/codexExecutablePath.ts`).
-- `node_modules/@steipete/peekaboo-mcp/**` — the retired-in-place legacy
-  visual-verify capture backend's bundled Peekaboo CLI
-  (`main/src/services/visualVerify/peekabooExecutablePath.ts`), still
-  asar-unpacked for the `CYBOFLOW_VERIFY_LEGACY=1` rollback path.
+- `node_modules/@steipete/peekaboo-mcp/**` — the bundled Peekaboo CLI the
+  `native-screen` modality runs (`main/src/services/visualVerify/peekabooExecutablePath.ts`):
+  the grant probe (`peekabooGrantProbe.ts`) and the deployed driver both spawn it.
 - `main/dist/main/src/orchestrator/mcpServer/**/*.js` — `cyboflowMcpServer.js`,
   spawned as an external `node` subprocess (the per-session Cyboflow MCP
   server; the worked example below).

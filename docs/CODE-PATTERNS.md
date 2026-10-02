@@ -544,9 +544,7 @@ serializes writes, and each op atomically mutates `artifacts`, appends an `entit
 under `entity_type='artifact'`, and emits an `ArtifactChangedEvent` after commit. `apply`
 dispatches on `op` (`create` | `update` | `commit`); `create` UPSERTs by `(runId, atype)` so
 re-deriving a templated artifact (auto-mint) is idempotent — one artifact per `(run_id, atype)`
-in v1. Two further ops ride the same per-project queue outside `apply` proper: `acceptAsBaseline`
-(the Accept-as-baseline git action, delegating the fs-copy + commit to an injected
-`BaselineAcceptor` so the router itself imports no `fs`/git — standalone-typecheck invariant) and
+in v1. One further op rides the same per-project queue outside `apply` proper:
 `mergeScreenshots` (an atomic read-merge-UPSERT for concurrent screenshot deliveries). The tRPC
 sub-router, the `cyboflow_report_artifact` MCP tool family, and the orchestrator's auto-mint path
 are the only callers.
@@ -748,8 +746,7 @@ Two valid categories:
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical example (whole-file case):** `main/src/services/visualVerify/baselineStore.ts`
-  (the golden-baseline feature, retired entirely — not merely behind a kill switch)
+- **Whole-file case:** the marker is the file's first comment, ahead of the imports.
 - **Canonical example (forward-looking placeholder):**
   `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
   (an ApprovalRouter integration point)

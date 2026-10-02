@@ -578,8 +578,8 @@ mirror, but not the channel the app or website depends on).
 
 - **The gate is the release's single point of failure, and the Windows leg is
   its slowest, flakiest job.** A unit test that spawns a real process (the first
-  0.4.3 attempt: `playwrightBackend.test.ts` driving the default installer's
-  `npx playwright install chromium`) runs 13 s on ubuntu and 25–30 s on the
+  0.4.3 attempt: a since-deleted capture-backend test driving the default
+  installer's `npx playwright install chromium`) runs 13 s on ubuntu and 25–30 s on the
   Windows runner — 30,009 ms on the tagged SHA, one ms over budget, red gate, no
   release. Fixed by injecting the spawn away (85 ms). When the gate goes red on a
   timeout that passed at the edge last time, look for a test doing real I/O

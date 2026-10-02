@@ -3,26 +3,24 @@
 ## Agent engine (current)
 
 cyboflow's **built-in** visual-verification feature — the `visual-verify` lane
-step that checks a Sprint/Ship task's UI deliverable — now runs on a
-**verification AGENT** by default (see
+step that checks a Sprint/Ship task's UI deliverable — runs on a
+**verification AGENT** (see
 `docs/proposals/verification-agent-redesign.md`): `task-verify` composes a
 `VerificationTaskV1` (build/serve/behaviors), the central
 `VerificationScheduler` deploys the workflow-defined `visual-verify` Claude
 agent into a snapshot worktree, and the agent builds, serves, drives the UI via
-a bundled driver CLI, and judges its own screenshots — no `.cyboflow/verify.json`
-prerequisite, no capture-backend/VLM waterfall. The OLD capture backends
-(`capturePageBackend`/`playwrightBackend`/`peekabooBackend`), the VLM judge,
-and the `.cyboflow/verify.json`-driven dev/static server spawners are retired
-**in place** (`@cyboflow-hidden`) — they stay reachable only for a pre-upgrade
-run's legacy `verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback
-kill switch, never the default path.
+a bundled driver CLI, and judges its own screenshots. It is the only engine:
+the earlier capture-backend + VLM-judge engine (and its `.cyboflow/verify.json`
+deliverable recipes, dev/static server spawners and golden baselines) was
+deleted. `.cyboflow/verify.json` now carries only the project's `enabled` /
+`defaultType` rungs of the enablement ladder; a run stamped by the old engine
+has its requests settled as `skipped`.
 
 This is a **separate concern** from the rest of this document below, which
 covers verifying **cyboflow's own** renderer while an agent works ON this
 codebase (dogfooding) via the Playwright-MCP CDP attach and the `visual_macos`
 Peekaboo fallback — that guidance is engine-independent and remains fully
-current regardless of the section above. Exception: "Deliverable `htmlPath`
-capture" further down is LEGACY-ENGINE-ONLY, not the dogfooding path.
+current regardless of the section above.
 
 (Separately, cyboflow the *product* now also ships a `mobile` modality —
 iOS Simulator, on `xcodebuild`/`xcrun simctl` — for verifying a project's own
@@ -231,33 +229,6 @@ Security, then restart `pnpm dev`. Recurring failure across SPRINT-031..SPRINT-0
 ## Mobile (visual_mobile) — not applicable
 
 cyboflow is desktop-only. `verification.visual_mobile=false`.
-
-## Deliverable `htmlPath` capture (product feature, for cyboflow's users) — LEGACY ENGINE ONLY
-
-See "Agent engine (current)" above for the default agent-engine behavior and
-retirement scope. `.cyboflow/verify.json` is only an optional hint during task
-composition for the current default engine, never a prerequisite.
-
-cyboflow's *built-in* layered visual verification
-(`cyboflow_request_verification`, see `docs/proposals/visual-verification-design.md`) lets a
-lane agent point at a plain built html file via `htmlPath` — e.g. a static site
-export with no dev server. That capture is now served over an ephemeral loopback
-HTTP server rather than `file://`, so `<script type="module">` and other
-same-origin fetches work as expected (a `file://` load gets CORS-blocked by
-Chromium and silently renders a blank shell).
-
-What to know if you're declaring a deliverable in `.cyboflow/verify.json`:
-- The static-serve root defaults to `dirname(htmlPath)` — correct for the common
-  case where the html sits at the build root and its assets are siblings/descendants.
-- A ROOT-ABSOLUTE asset reference in the html (e.g. `<script src="/assets/app.js">`)
-  only resolves correctly when the html itself sits at that same build root. If
-  your html lives BELOW the root the assets are served from (e.g.
-  `dist/docs/index.html` referencing `/assets/...` that live under `dist/`),
-  declare that deliverable's `staticRoot` explicitly in `.cyboflow/verify.json` —
-  otherwise the default `dirname(htmlPath)` root won't contain the asset path and
-  requests for it will 404.
-- Dotfiles (`.git`, `.env*`, `.cyboflow`, ...) and `node_modules` are never served,
-  regardless of `staticRoot` — a request for either is a 404, logged.
 
 ## Manual Playwright E2E (independent of MCP)
 
