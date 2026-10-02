@@ -22,8 +22,6 @@ export type ConfigOpsResult<T = undefined> = T extends undefined
   ? { success: true } | { success: false; error: string }
   : { success: true; data: T } | { success: false; error: string };
 
-export type SessionCreationPreferences = NonNullable<AppConfig['sessionCreationPreferences']>;
-
 export interface ConfigOpsLike {
   /** Mirrors legacy `config:get`. */
   getConfig(): Promise<ConfigOpsResult<AppConfig>>;
@@ -38,8 +36,4 @@ export interface ConfigOpsLike {
     key: string,
     op: RunTypeDefaultsOp,
   ): Promise<ConfigOpsResult<{ previous: RunTypeDefaults | undefined; config: AppConfig }>>;
-  /** Mirrors legacy `config:get-session-preferences`. */
-  getSessionPreferences(): Promise<ConfigOpsResult<SessionCreationPreferences>>;
-  /** Mirrors legacy `config:update-session-preferences`. */
-  updateSessionPreferences(preferences: SessionCreationPreferences): Promise<ConfigOpsResult>;
 }

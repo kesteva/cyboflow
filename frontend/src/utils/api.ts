@@ -1,7 +1,6 @@
 // Utility for making API calls using Electron IPC
 import type { CreateSessionRequest, Session } from '../types/session';
 import type { Project } from '../types/project';
-import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
@@ -560,23 +559,6 @@ export class API {
       op: RunTypeDefaultsOp,
     ): Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>> {
       return trpc.cyboflow.config.applyRunTypeDefault.mutate({ key, op });
-    },
-
-    async getSessionPreferences() {
-      return trpc.cyboflow.config.getSessionPreferences.query();
-    },
-
-    async updateSessionPreferences(preferences: SessionCreationPreferences) {
-      // Cast for the same reason as `update` above: the frontend's
-      // SessionCreationPreferences (stores/sessionPreferencesStore) and the
-      // router's (main's AppConfig['sessionCreationPreferences']) are
-      // separately-maintained mirrors that have already drifted (main's
-      // claudeConfig.model omits 'fable', which the frontend type allows) —
-      // pre-existing drift, unrelated to this migration, that only surfaces
-      // now because tRPC type-checks the call the legacy IPC bridge did not.
-      return trpc.cyboflow.config.updateSessionPreferences.mutate(
-        preferences as unknown as Parameters<typeof trpc.cyboflow.config.updateSessionPreferences.mutate>[0],
-      );
     },
   };
 

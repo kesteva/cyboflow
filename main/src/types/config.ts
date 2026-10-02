@@ -285,21 +285,6 @@ export interface AppConfig {
   };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
-  // Session creation preferences
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
   // Sparse per-launch-type defaults, keyed by `workflow:<workflowId>` or the
   // synthetic global `quick` key. Intentionally NOT seeded into ConfigManager's
   // constructor defaults, so config.json stays byte-identical for users who
@@ -403,18 +388,4 @@ export interface UpdateConfigRequest {
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
   additionalPaths?: string[];
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
 }

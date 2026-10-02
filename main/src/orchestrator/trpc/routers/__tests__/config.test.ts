@@ -28,8 +28,6 @@ function makeFakeConfigOps(): ConfigOpsLike & {
   getConfig: ReturnType<typeof vi.fn>;
   updateConfig: ReturnType<typeof vi.fn>;
   applyRunTypeDefault: ReturnType<typeof vi.fn>;
-  getSessionPreferences: ReturnType<typeof vi.fn>;
-  updateSessionPreferences: ReturnType<typeof vi.fn>;
 } {
   return {
     getConfig: vi.fn().mockResolvedValue({ success: true, data: { verbose: true } as AppConfig }),
@@ -38,11 +36,6 @@ function makeFakeConfigOps(): ConfigOpsLike & {
       success: true,
       data: { previous: undefined, config: {} as AppConfig },
     }),
-    getSessionPreferences: vi.fn().mockResolvedValue({
-      success: true,
-      data: { sessionCount: 1, toolType: 'none' },
-    }),
-    updateSessionPreferences: vi.fn().mockResolvedValue({ success: true }),
   };
 }
 
@@ -83,23 +76,6 @@ describe('cyboflow.config', () => {
         success: true,
         data: { previous: undefined, config: {} },
       });
-    });
-
-    it('getSessionPreferences', async () => {
-      const configOps = makeFakeConfigOps();
-      const caller = appRouter.createCaller(createContext({ configOps }));
-      const result = await caller.cyboflow.config.getSessionPreferences();
-      expect(configOps.getSessionPreferences).toHaveBeenCalledTimes(1);
-      expect(result).toEqual({ success: true, data: { sessionCount: 1, toolType: 'none' } });
-    });
-
-    it('updateSessionPreferences', async () => {
-      const configOps = makeFakeConfigOps();
-      const caller = appRouter.createCaller(createContext({ configOps }));
-      const preferences = { sessionCount: 2, toolType: 'claude' as const };
-      const result = await caller.cyboflow.config.updateSessionPreferences(preferences);
-      expect(configOps.updateSessionPreferences).toHaveBeenCalledWith(preferences);
-      expect(result).toEqual({ success: true });
     });
 
     it('a failure envelope from ctx.configOps also passes through untouched', async () => {
@@ -206,18 +182,6 @@ describe('cyboflow.config', () => {
       const caller = appRouter.createCaller(createContext());
       await expect(
         caller.cyboflow.config.applyRunTypeDefault({ key: 'quick', op: { kind: 'merge', value: {} } }),
-      ).rejects.toSatisfy(isPrecond);
-    });
-
-    it('getSessionPreferences', async () => {
-      const caller = appRouter.createCaller(createContext());
-      await expect(caller.cyboflow.config.getSessionPreferences()).rejects.toSatisfy(isPrecond);
-    });
-
-    it('updateSessionPreferences', async () => {
-      const caller = appRouter.createCaller(createContext());
-      await expect(
-        caller.cyboflow.config.updateSessionPreferences({ sessionCount: 1, toolType: 'none' }),
       ).rejects.toSatisfy(isPrecond);
     });
   });

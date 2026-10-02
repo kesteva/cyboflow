@@ -180,20 +180,6 @@ export interface AppConfig {
     usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
-  sessionCreationPreferences?: {
-    sessionCount?: number;
-    toolType?: 'claude' | 'none';
-    selectedTools?: {
-      claude?: boolean;
-    };
-    claudeConfig?: {
-      model?: 'auto' | 'fable' | 'sonnet' | 'opus' | 'haiku';
-      permissionMode?: 'ignore' | 'approve';
-      ultrathink?: boolean;
-    };
-    showAdvanced?: boolean;
-    baseBranch?: string;
-  };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
 }

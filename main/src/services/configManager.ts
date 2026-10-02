@@ -139,19 +139,6 @@ export class ConfigManager extends EventEmitter {
         errorReportingEnabled: defaultTelemetryEnabled(),
         usageMetricsEnabled: defaultTelemetryEnabled(),
         installId: ''
-      },
-      sessionCreationPreferences: {
-        sessionCount: 1,
-        toolType: 'none',
-        selectedTools: {
-          claude: false
-        },
-        claudeConfig: {
-          model: 'auto',
-          permissionMode: 'approve',
-          ultrathink: false
-        },
-        showAdvanced: false
       }
     };
   }
@@ -175,18 +162,6 @@ export class ConfigManager extends EventEmitter {
         telemetry: {
           ...this.config.telemetry,
           ...loadedConfig.telemetry
-        },
-        sessionCreationPreferences: {
-          ...this.config.sessionCreationPreferences,
-          ...loadedConfig.sessionCreationPreferences,
-          selectedTools: {
-            ...this.config.sessionCreationPreferences?.selectedTools,
-            ...loadedConfig.sessionCreationPreferences?.selectedTools
-          },
-          claudeConfig: {
-            ...this.config.sessionCreationPreferences?.claudeConfig,
-            ...loadedConfig.sessionCreationPreferences?.claudeConfig
-          }
         }
       };
     } catch (error) {
@@ -913,22 +888,6 @@ export class ConfigManager extends EventEmitter {
       agentObserve: wv?.agentObserve ?? WEB_VIEWER_DEFAULTS.agentObserve,
       agentDrive: wv?.agentDrive ?? WEB_VIEWER_DEFAULTS.agentDrive,
       persistLogin: wv?.persistLogin ?? WEB_VIEWER_DEFAULTS.persistLogin,
-    };
-  }
-
-  getSessionCreationPreferences() {
-    return this.config.sessionCreationPreferences || {
-      sessionCount: 1,
-      toolType: 'none',
-      selectedTools: {
-        claude: false
-      },
-      claudeConfig: {
-        model: 'auto',
-        permissionMode: 'approve',
-        ultrathink: false
-      },
-      showAdvanced: false
     };
   }
 
