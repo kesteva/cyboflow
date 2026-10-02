@@ -151,10 +151,6 @@ interface ElectronAPI {
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
-    // Git merge operations
-    mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
-    mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
-
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;
 
@@ -243,7 +239,6 @@ interface ElectronAPI {
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
     reorder: (projectOrders: Array<{ id: number; displayOrder: number }>) => Promise<IPCResponse<void>>;
     listBranches: (projectId: string) => Promise<IPCResponse<{ name: string; isCurrent: boolean; hasWorktree: boolean }[]>>;
-    refreshGitStatus: (projectId: number) => Promise<IPCResponse<void>>;
     runScript: (projectId: number) => Promise<IPCResponse<{ sessionId: string }>>;
     getRunningScript: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     stopScript: (projectId?: number) => Promise<IPCResponse<void>>;
