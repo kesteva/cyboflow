@@ -81,7 +81,6 @@ import {
   resolveLaneManager,
   type ManagerRegistration,
 } from './services/substrateDispatchFacade';
-import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
@@ -593,9 +592,6 @@ if (isDevelopment) {
     console.error('Failed to reset debug log files:', error);
   }
 }
-
-// Set up console wrapper to reduce logging in production
-setupConsoleWrapper();
 
 // Global crash guards. Two independent failure modes were surfacing the native
 // Electron crash dialog:
