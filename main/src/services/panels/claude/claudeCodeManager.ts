@@ -1069,17 +1069,14 @@ interface PipelineTuple {
  */
 export class ClaudeCodeManager extends AbstractCliManager {
   /**
-   * Inject the orchestrator IPC socket path so the cyboflow MCP server entry
-   * can be included in per-session mcpServers options.
+   * Inject the orchestrator socket path. While it is set, composeMcpServers()
+   * adds the 'cyboflow' MCP server entry (CYBOFLOW_ORCH_SOCKET) to every spawned
+   * session's mcpServers; while it is null, no cyboflow_* tools are surfaced.
    *
-   * Call this once at boot after the permission IPC server has started.
-   * The socket path is reused for both crystal-permissions (via PreToolUse hook
-   * in this SDK path) and the cyboflow MCP server.
+   * Called once at boot (index.ts) after the orchestrator socket server is
+   * created.
    */
   setOrchSocketPath(socketPath: string): void {
-    // TODO(epic-7): first production caller is the OrchSocketProvider wiring task.
-    // Until that task lands, composeMcpServers() always takes the orchSocketPath=null branch
-    // and no cyboflow_* tools are surfaced to Claude sessions.
     this.orchSocketPath = socketPath;
     // Eagerly kick off node-path resolution at boot so the first session never
     // races against a not-yet-resolved promise.  The result is stored as a
@@ -1646,7 +1643,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Abort controller for cancellation.
       const abortController = new AbortController();
 
-      // Push stub into processes map so isPanelRunning / getAllProcesses work.
+      // Push stub into processes map so isPanelRunning works.
       const stub: StubCliProcess = {
         process: undefined as never,
         panelId,

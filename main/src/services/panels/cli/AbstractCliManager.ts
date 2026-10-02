@@ -417,13 +417,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
-   * Get all active process panel IDs
-   */
-  getAllProcesses(): string[] {
-    return Array.from(this.processes.keys());
-  }
-
-  /**
    * Check if a panel is running
    */
   isPanelRunning(panelId: string): boolean {
@@ -510,73 +503,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   // Protected utility methods
-
-  /**
-   * Find and store tool-specific session ID for resume functionality
-   * This is used by CLI tools that have their own session management systems
-   * @param panelId The panel ID
-   * @param sessionIdPath Path to search for session files
-   * @param extractSessionId Function to extract session ID from a session file
-   */
-  protected async findAndStoreToolSessionId(
-    panelId: string,
-    sessionIdPath: string,
-    extractSessionId: (filePath: string, worktreePath: string) => Promise<string | null>
-  ): Promise<void> {
-    try {
-      const fs = await import('fs').then(m => m.promises);
-      const path = await import('path');
-      
-      // Check if session directory exists
-      try {
-        await fs.access(sessionIdPath);
-      } catch {
-        this.logger?.verbose(`[${this.getCliToolName()}] Session directory not found: ${sessionIdPath}`);
-        return;
-      }
-
-      // Get the worktree path for this panel
-      const process = this.processes.get(panelId);
-      if (!process) {
-        this.logger?.warn(`[${this.getCliToolName()}] No process found for panel ${panelId}`);
-        return;
-      }
-
-      // Extract session ID
-      const sessionId = await extractSessionId(sessionIdPath, process.worktreePath);
-      
-      if (sessionId) {
-        this.logger?.info(`[${this.getCliToolName()}] Found session ID for panel ${panelId}: ${sessionId}`);
-        
-        // Store the session ID in the panel's custom state
-        if (this.sessionManager) {
-          // Use panelManager instead of direct database access
-          const { panelManager } = await import('../../panelManager');
-          const panel = await panelManager.getPanel(panelId);
-          if (panel) {
-            const currentState = panel.state || {};
-            const customState = (currentState.customState as Record<string, unknown>) || {};
-            
-            // Only update if we don't already have a session ID
-            const toolSessionKey = `${this.getCliToolName().toLowerCase()}SessionId`;
-            if (!customState[toolSessionKey]) {
-              const updatedState = {
-                ...currentState,
-                customState: { ...customState, [toolSessionKey]: sessionId }
-              };
-              
-              await panelManager.updatePanel(panelId, { state: updatedState });
-              this.logger?.verbose(`[${this.getCliToolName()}] Stored session ID in panel ${panelId}: ${sessionId}`);
-            }
-          }
-        }
-      } else {
-        this.logger?.verbose(`[${this.getCliToolName()}] No session ID found for panel ${panelId}`);
-      }
-    } catch (error) {
-      this.logger?.error(`[${this.getCliToolName()}] Error finding session ID: ${error}`);
-    }
-  }
 
   /**
    * Process-global key recording that this CLI's executable is a script whose
