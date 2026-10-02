@@ -329,19 +329,9 @@ export class API {
       return window.electronAPI.projects.getAll();
     },
 
-    async getActive() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.projects.getActive();
-    },
-
     async create(projectData: Omit<Project, 'id' | 'created_at' | 'updated_at'>) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.projects.create(projectData);
-    },
-
-    async activate(projectId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.projects.activate(projectId);
     },
 
     async update(projectId: string, updates: Partial<Project>) {

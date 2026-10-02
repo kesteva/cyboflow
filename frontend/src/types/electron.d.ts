@@ -237,9 +237,7 @@ interface ElectronAPI {
   projects: {
     // IPCDataResponse so callers can do response.data.find(...) directly after success check
     getAll: () => Promise<IPCDataResponse<Project[]>>;
-    getActive: () => Promise<IPCResponse<Project | null>>;
     create: (projectData: Omit<Project, 'id' | 'created_at' | 'updated_at'>) => Promise<IPCResponse<Project>>;
-    activate: (projectId: string) => Promise<IPCResponse<void>>;
     update: (projectId: string, updates: Partial<Project>) => Promise<IPCResponse<void>>;
     delete: (projectId: string) => Promise<IPCResponse<void>>;
     detectBranch: (path: string) => Promise<IPCResponse<string>>;

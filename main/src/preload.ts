@@ -388,9 +388,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Project management
   projects: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-all'),
-    getActive: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-active'),
     create: (projectData: CreateProjectRequest): Promise<IPCResponse> => ipcRenderer.invoke('projects:create', projectData),
-    activate: (projectId: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:activate', projectId),
     update: (projectId: string, updates: UpdateProjectRequest): Promise<IPCResponse> => ipcRenderer.invoke('projects:update', projectId, updates),
     delete: (projectId: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:delete', projectId),
     detectBranch: (path: string): Promise<IPCResponse> => ipcRenderer.invoke('projects:detect-branch', path),

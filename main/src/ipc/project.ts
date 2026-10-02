@@ -14,14 +14,14 @@ import { projectSettingsContainAllowRules } from '../orchestrator/permissionRule
 
 /**
  * One-time per-project trust prompt for repo-supplied permission ALLOW rules
- * (migration 127). Shown at project activation/creation, never more
+ * (migration 127). Shown at project creation, never more
  * than once — `permission_trust` is terminal once set, either answer. Skips
  * entirely when the project's `.claude/settings*` carries no `allow` rules,
  * since there is nothing to decide trust over.
  *
  * Fire-and-forget from the caller (not awaited): the dialog must not block
- * `projects:activate` / `projects:create` from returning to the renderer.
- * Fail-soft — any error here must never fail activation/creation.
+ * `projects:create` from returning to the renderer.
+ * Fail-soft — any error here must never fail creation.
  */
 async function maybePromptPermissionTrust(
   databaseService: DatabaseService,
@@ -145,16 +145,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to get projects:', error);
       return { success: false, error: 'Failed to get projects' };
-    }
-  });
-
-  ipcMain.handle('projects:get-active', async () => {
-    try {
-      const activeProject = sessionManager.getActiveProject();
-      return { success: true, data: activeProject };
-    } catch (error) {
-      console.error('Failed to get active project:', error);
-      return { success: false, error: 'Failed to get active project' };
     }
   });
 
@@ -319,22 +309,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         details: errorDetails,
         command: command
       };
-    }
-  });
-
-  ipcMain.handle('projects:activate', async (_event, projectId: string) => {
-    try {
-      const project = databaseService.setActiveProject(parseInt(projectId));
-      if (project) {
-        sessionManager.setActiveProject(project);
-        await worktreeManager.initializeProject(project.path);
-        // Fire-and-forget: must not delay the activate response.
-        void maybePromptPermissionTrust(databaseService, getMainWindow, project);
-      }
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to activate project:', error);
-      return { success: false, error: 'Failed to activate project' };
     }
   });
 

@@ -20,7 +20,13 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 90 handlers — down from 95 when five
+/** Frozen 2026-10-02 at 88 handlers — down from 90 when Crystal's
+ * 'active project' channels were deleted from `ipc/project.ts`:
+ * `projects:get-active` (no caller) and `projects:activate` (its only caller,
+ * ProjectSelector, was already gone). Every session/run carries an explicit
+ * projectId now.
+ *
+ * Earlier 2026-10-02: 90 handlers — down from 95 when five
  * caller-less `ipc/app.ts` handlers were deleted: `get-app-version` and
  * `is-packaged` (bridged, never called) plus `app:record-open`,
  * `app:get-last-open` and `preferences:get-all` (never exposed; Crystal's
@@ -110,7 +116,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
   'ipc/panels.ts': 11,
-  'ipc/project.ts': 13,
+  'ipc/project.ts': 11,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 2,
   'ipc/session.ts': 20,
