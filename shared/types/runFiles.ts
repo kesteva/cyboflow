@@ -35,7 +35,7 @@ export interface RunGitDiffStats {
  * (cyboflow.runs.gitDiff). Flow runs have workflow_runs.session_id = NULL and
  * are keyed by runId (not sessionId), so the diff is resolved from
  * workflow_runs.worktree_path rather than the session-scoped diff path. `diff`
- * is the raw unified-diff string the DiffViewer parses; an empty string means
+ * is the raw unified-diff string the Diff tab parses; an empty string means
  * the worktree has no working-directory changes.
  */
 export interface RunGitDiff {
