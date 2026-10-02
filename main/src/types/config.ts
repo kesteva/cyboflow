@@ -306,8 +306,6 @@ export interface AppConfig {
   // never touch it. Writes use the dedicated IPC operation below, not the
   // generic UpdateConfigRequest, so the two channels cannot race on this field.
   runTypeDefaults?: Record<string, RunTypeDefaults>;
-  // Cyboflow commit footer setting (enabled by default)
-  enableCyboflowFooter?: boolean;
 }
 
 // `runTypeDefaults` is deliberately absent from this generic payload: its
@@ -419,5 +417,4 @@ export interface UpdateConfigRequest {
     showAdvanced?: boolean;
     baseBranch?: string;
   };
-  enableCyboflowFooter?: boolean;
 }

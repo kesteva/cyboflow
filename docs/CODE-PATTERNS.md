@@ -94,13 +94,6 @@ to a canonical example — read those for the actual implementation.
   never inside a closure that runs on every render or log call.
 - **Canonical example:** the contract is pinned in `frontend/src/utils/migrateLocalStorageKey.test.ts`.
 
-### `main/src/utils/commitFooter`
-
-- **Path:** `main/src/utils/commitFooter.ts`
-- **Use it for:** The canonical Cyboflow commit-footer string. Single source of truth — never inline the footer literal elsewhere.
-- **Key export:** `buildCommitFooter(enabled: boolean): string` (empty string when disabled).
-- **Canonical example:** `main/src/utils/shellEscape.ts` (`buildGitCommitCommand`); byte-level contract pinned in `main/src/utils/commitFooter.test.ts`.
-
 ### `main/src/utils/devDebugLog`
 
 - **Path:** `main/src/utils/devDebugLog.ts`

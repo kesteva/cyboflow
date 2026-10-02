@@ -59,7 +59,6 @@ beforeEach(() => {
     sessionManager: { getSession: vi.fn(() => session) },
     databaseService: { getProject: vi.fn(() => ({ id: 1, path: PROJECT_PATH })) },
     gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
-    configManager: { isDemoMode: () => false },
   } as unknown as AppServices);
 });
 

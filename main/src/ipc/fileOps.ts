@@ -2,7 +2,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { glob } from 'glob';
-import { appendCommitFooter } from '../utils/commitFooter';
 import { runGitAsync, runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
 import { normalizePathSeparators } from '../utils/posixPath';
 import type { AppServices } from './types';
@@ -183,9 +182,9 @@ function resolveProjectGitArgv(args: readonly string[]): string[] {
  * (resolveWithinRoot) is still used by the other methods below.
  */
 export function createFileOps(
-  services: Pick<AppServices, 'sessionManager' | 'databaseService' | 'gitStatusManager' | 'configManager'>,
+  services: Pick<AppServices, 'sessionManager' | 'databaseService' | 'gitStatusManager'>,
 ): WorkspaceFileOpsLike {
-  const { sessionManager, databaseService, gitStatusManager, configManager } = services;
+  const { sessionManager, databaseService, gitStatusManager } = services;
 
   return {
     // Read file contents from a session's worktree
@@ -299,8 +298,7 @@ export function createFileOps(
           // Stage all changes
           await runGitAsync(session.worktreePath, ['add', '-A']);
 
-          // Create the commit with Cyboflow signature if enabled
-          const commitMessage = appendCommitFooter(request.message, configManager);
+          const commitMessage = request.message;
 
           // Use a temporary file to handle commit messages with special characters
           const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-${Date.now()}.txt`);
@@ -330,7 +328,7 @@ export function createFileOps(
             try {
               await runGitAsync(session.worktreePath, ['add', '-A']);
 
-              const retryMessage = appendCommitFooter(request.message, configManager);
+              const retryMessage = request.message;
 
               // Use a temporary file for retry as well
               const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-retry-${Date.now()}.txt`);

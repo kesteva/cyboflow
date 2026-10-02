@@ -21,7 +21,6 @@ import type { DatabaseService } from '../database/database';
 import type { LoggerLike } from '../orchestrator/types';
 import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
 import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
-import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
 import { panelEventBus } from '../services/panelEventBus';
@@ -506,7 +505,7 @@ export async function backfillLandedSprintCloseOuts(
 }
 
 export function createGitOps(services: AppServices): SessionGitOpsLike {
-  const { sessionManager, gitDiffManager, worktreeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
+  const { sessionManager, gitDiffManager, worktreeManager, gitStatusManager, databaseService, endLiveSession } = services;
 
   // Quick-session close-out (IDEA-030): after a merge/rebase the session's work
   // is accepted, so a live persistent chat process should exit instead of
@@ -1056,12 +1055,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // Stage all changes
       runGit(session.worktreePath, ['add', '-A']);
 
-      // Create the commit with Cyboflow's signature. The message is a plain argv
-      // element, so it needs no shell escaping.
-      const commitMessage = appendCommitFooter(message, configManager);
-
       try {
-        runGit(session.worktreePath, ['commit', '-m', commitMessage]);
+        // The message is a plain argv element, so it needs no shell escaping.
+        runGit(session.worktreePath, ['commit', '-m', message]);
 
         // Refresh git status for this session after commit
         await refreshGitStatusForSession(sessionId);

@@ -454,11 +454,11 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
   // Same full-suite flake profile as the advanced-tip test below (see its
   // comment): forks ~15 git subprocesses; 5s default flakes under full-suite
   // CPU/fork contention while passing in isolation.
-  it('squashes a clean multi-commit branch into ONE footer-stamped commit and fast-forwards main', { timeout: 30_000 }, async () => {
+  it('squashes a clean multi-commit branch into ONE commit and fast-forwards main', { timeout: 30_000 }, async () => {
     await withTempDir('worktree-squash-ok-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);
-      const manager = new WorktreeManager(); // no configManager → footer enabled by default
+      const manager = new WorktreeManager();
       const { worktreePath } = await manager.createWorktree(tmpDir, 'feat');
       ensureUser(worktreePath);
       commitFile(worktreePath, 'f1.txt', 'one', 'w1');
@@ -471,10 +471,9 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
       const count = execSync(`git rev-list --count ${mainBefore}..${main}`, { cwd: tmpDir }).toString().trim();
       expect(count).toBe('1');
 
-      // The squashed commit carries the caller message AND the Cyboflow footer.
+      // The squashed commit message is the caller's message verbatim — no footer or trailer appended.
       const body = execSync(`git log -1 --format=%B ${main}`, { cwd: tmpDir }).toString();
-      expect(body).toContain('my squash message');
-      expect(body).toMatch(/Built using \[Cyboflow\]/);
+      expect(body.trim()).toBe('my squash message');
 
       // Both files' content is present on main (nothing dropped by the squash).
       expect(execSync(`git show ${main}:f1.txt`, { cwd: tmpDir }).toString().trim()).toBe('one');
@@ -979,7 +978,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       execSync(`git worktree add -b quick-X "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
 
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await manager.removeWorktree(tmpDir, 'quick-X');
 
@@ -993,7 +992,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       initRepo(tmpDir);
       const bogus = join(tmpDir, 'worktrees', 'never-existed');
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await expect(manager.removeWorktreeByPath(tmpDir, bogus)).resolves.toBeUndefined();
 
@@ -1008,7 +1007,7 @@ describe('WorktreeManager Codex-broker reaping (integration)', () => {
       execSync(`git worktree add -b quick-Y "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
 
       const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockRejectedValue(new Error('boom'));
-      const manager = new WorktreeManager(undefined, { reapForWorktree });
+      const manager = new WorktreeManager({ reapForWorktree });
 
       await expect(manager.removeWorktree(tmpDir, 'quick-Y')).resolves.toBeUndefined();
       expect(existsSync(wtPath)).toBe(false);

@@ -59,7 +59,6 @@ function servicesFor(session: Session | undefined): AppServices {
     sessionManager: { getSession: vi.fn(() => session) },
     databaseService: { getProject: vi.fn() },
     gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
-    configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
 }
 

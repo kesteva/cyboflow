@@ -14,8 +14,6 @@ import { trackEvent } from '../../utils/telemetry';
  * a presentation container, not a self-fetching panel like `IntegrationsSettings`.
  */
 export interface FeatureControlsSettingsProps {
-  enableCyboflowFooter: boolean;
-  onEnableCyboflowFooterChange: (enabled: boolean) => void;
   interactivePtyOnly: boolean;
   onInteractivePtyOnlyChange: (ptyOnly: boolean) => void;
   computeCostFromRates: boolean;
@@ -42,8 +40,6 @@ export interface FeatureControlsSettingsProps {
 }
 
 export function FeatureControlsSettings({
-  enableCyboflowFooter,
-  onEnableCyboflowFooterChange,
   interactivePtyOnly,
   onInteractivePtyOnlyChange,
   computeCostFromRates,
@@ -75,21 +71,6 @@ export function FeatureControlsSettings({
         icon={<ToggleRight className="w-5 h-5" />}
         defaultExpanded={true}
       >
-        <SettingsSection
-          title="Cyboflow Attribution"
-          description="Add Cyboflow branding to commit messages"
-          icon={<FileText className="w-4 h-4" />}
-        >
-          <Checkbox
-            label="Include Cyboflow footer in commits"
-            checked={enableCyboflowFooter}
-            onChange={(e) => onEnableCyboflowFooterChange(e.target.checked)}
-          />
-          <p className="text-xs text-text-tertiary mt-1">
-            When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
-          </p>
-        </SettingsSection>
-
         {/* A Feature control, not a session default: this answers "is the SDK
             substrate available in this app at all". Locking it to the CLI also
             hides the Session settings group's per-session runtime picker — the

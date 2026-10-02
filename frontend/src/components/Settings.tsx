@@ -163,7 +163,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Demo mode is hidden in the stable DMG (it's a dev/internal affordance).
   const [buildVariant, setBuildVariant] = useState<'stable' | 'dev' | undefined>(undefined);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
-  const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   // Model alias for the global cyboflow assistant (the agent-rail chat). '' =
   // follow the app's default model (defaultModel / getDefaultModel()).
   const [assistantModel, setAssistantModel] = useState('');
@@ -335,7 +334,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setAriaMode(data.ariaMode ?? false);
       setDemoMode(data.demoMode || false);
       setInitialDemoMode(data.demoMode || false);
-      setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setAssistantModel(data.assistantModel ?? '');
       setAssistantRuntimeChoice(isAssistantRuntime(data.assistantRuntime) ? data.assistantRuntime : '');
       setAssistantEnabled(data.assistantEnabled !== false);
@@ -421,7 +419,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // an undefined value would fail to overwrite a stored `true`.
         ariaMode,
         demoMode,
-        enableCyboflowFooter,
         // Empty ('App default') → undefined so getAssistantModel() floors to
         // getDefaultModel() and config.json stays free of the key.
         assistantModel: assistantModel.trim() ? assistantModel.trim() : undefined,
@@ -937,8 +934,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 containers over the lifted state above and this form's shared
                 handleSubmit — no separate save round trip. */}
             <FeatureControlsSettings
-              enableCyboflowFooter={enableCyboflowFooter}
-              onEnableCyboflowFooterChange={setEnableCyboflowFooter}
               interactivePtyOnly={interactivePtyOnly}
               onInteractivePtyOnlyChange={setInteractivePtyOnly}
               computeCostFromRates={computeCostFromRates}

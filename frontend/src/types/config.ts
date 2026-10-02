@@ -196,8 +196,6 @@ export interface AppConfig {
   };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
-  // Cyboflow commit footer setting (enabled by default)
-  enableCyboflowFooter?: boolean;
 }
 
 /**

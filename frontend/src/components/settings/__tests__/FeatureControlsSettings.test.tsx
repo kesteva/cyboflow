@@ -1,6 +1,6 @@
 /**
  * FeatureControlsSettings — the AI tab's "Feature controls" group (is the
- * capability available at all). Pins the seven sections the user-approved
+ * capability available at all). Pins the six sections the user-approved
  * classification assigns to this group, and that every control is a pure
  * props-in/callback-out surface (no local state, no config round trip of its own
  * — `Settings.tsx` still owns the state and the save).
@@ -17,8 +17,6 @@ vi.mock('../../../utils/telemetry', () => ({
 
 function renderGroup(over: Partial<FeatureControlsSettingsProps> = {}) {
   const props: FeatureControlsSettingsProps = {
-    enableCyboflowFooter: true,
-    onEnableCyboflowFooterChange: vi.fn(),
     interactivePtyOnly: false,
     onInteractivePtyOnlyChange: vi.fn(),
     computeCostFromRates: false,
@@ -49,7 +47,6 @@ function renderGroup(over: Partial<FeatureControlsSettingsProps> = {}) {
 
 /** The frozen membership list for this group (see TASK-158's classification). */
 const FEATURE_CONTROL_SECTIONS = [
-  'Cyboflow Attribution',
   'CLI Runtime',
   'Computed Run Cost',
   'Artifact Commit Location',
@@ -59,7 +56,7 @@ const FEATURE_CONTROL_SECTIONS = [
 ] as const;
 
 describe('FeatureControlsSettings', () => {
-  it('renders exactly the seven Feature-control sections', () => {
+  it('renders exactly the six Feature-control sections', () => {
     renderGroup();
 
     for (const title of FEATURE_CONTROL_SECTIONS) {
@@ -85,7 +82,6 @@ describe('FeatureControlsSettings', () => {
   it('renders every control the sections own', () => {
     renderGroup();
 
-    expect(screen.getByLabelText('Include Cyboflow footer in commits')).toBeChecked();
     expect(screen.getByRole('button', { name: /Allow SDK/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /Interactive CLI only/ })).toBeInTheDocument();
     expect(screen.getByTestId('computed-run-cost-off')).toHaveAttribute('aria-pressed', 'true');
@@ -98,9 +94,6 @@ describe('FeatureControlsSettings', () => {
 
   it('reports every change back through its callback (no local state)', () => {
     const props = renderGroup();
-
-    fireEvent.click(screen.getByLabelText('Include Cyboflow footer in commits'));
-    expect(props.onEnableCyboflowFooterChange).toHaveBeenCalledWith(false);
 
     fireEvent.click(screen.getByRole('button', { name: /Interactive CLI only/ }));
     expect(props.onInteractivePtyOnlyChange).toHaveBeenCalledWith(true);

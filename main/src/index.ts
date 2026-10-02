@@ -842,7 +842,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
     getConfiguredClaudePath: () => configManager.getConfig()?.claudeExecutablePath,
     log: (message) => logger.info(message),
   });
-  const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
+  const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager });
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -1534,7 +1534,7 @@ async function initializeServices(): Promise<boolean> {
   archiveProgressManager = new ArchiveProgressManager();
 
   // Create worktree manager
-  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper);
+  worktreeManager = new WorktreeManager(codexBrokerReaper);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();

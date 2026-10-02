@@ -1,10 +1,8 @@
 import { join, dirname } from 'path';
 import { mkdir } from 'fs/promises';
 import { withLock } from '../utils/mutex';
-import { appendCommitFooter } from '../utils/commitFooter';
 import { runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
 import { gitIdentityFallbackArgs } from '../utils/gitIdentityFallback';
-import type { ConfigManager } from './configManager';
 
 // Interface for raw commit data
 interface RawCommitData {
@@ -85,7 +83,6 @@ export class WorktreeManager {
   private projectsCache: Map<string, { baseDir: string }> = new Map();
 
   constructor(
-    private configManager?: ConfigManager,
     private codexBrokerReaper?: WorktreeBrokerReaper,
   ) {
     // No longer initialized with a single repo path
@@ -958,11 +955,8 @@ export class WorktreeManager {
         const resetResult = await runGitCapture(worktreePath, ['reset', '--soft', END_OF_OPTIONS, base]);
         lastOutput = resetResult.stdout || resetResult.stderr || '';
 
-        // Add Cyboflow footer if enabled
-        const fullMessage = appendCommitFooter(commitMessage, this.configManager);
-
         executedCommands.push(`git commit -m "..." (in ${worktreePath})`);
-        const commitResult = await runGitCapture(worktreePath, ['commit', '-m', fullMessage]);
+        const commitResult = await runGitCapture(worktreePath, ['commit', '-m', commitMessage]);
         lastOutput = commitResult.stdout || commitResult.stderr || '';
 
         // Switch to main branch in the main repository
