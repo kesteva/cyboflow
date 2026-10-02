@@ -2563,11 +2563,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // Panel-based handlers for Claude panels
   ipcMain.handle('panels:get-conversation-messages', async (_event, panelId: string) => {
     try {
-      if (!sessionManager.getPanelConversationMessages) {
-        console.error('[IPC] Panel-based conversation methods not available on sessionManager');
-        return { success: false, error: 'Panel-based conversation methods not available' };
-      }
-
       const messages = await sessionManager.getPanelConversationMessages(panelId);
       // Ensure timestamps are in ISO format for proper sorting with JSON messages
       const messagesWithIsoTimestamps = messages.map(msg => ({
@@ -2591,11 +2586,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (!panelValidation.valid) {
         logValidationFailure('panels:get-json-messages', panelValidation);
         return createValidationError(panelValidation);
-      }
-
-      if (!sessionManager.getPanelOutputs) {
-        console.error('[IPC] Panel-based output methods not available on sessionManager');
-        return { success: false, error: 'Panel-based output methods not available' };
       }
 
       const outputs = await sessionManager.getPanelOutputs(panelId);
@@ -3115,7 +3105,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       };
 
       try {
-        if (stopClaudePanels.length > 0 && sessionManager.addPanelOutput) {
+        if (stopClaudePanels.length > 0) {
           for (const claudePanel of stopClaudePanels) {
             sessionManager.addPanelOutput(claudePanel.id, {
               type: 'json',

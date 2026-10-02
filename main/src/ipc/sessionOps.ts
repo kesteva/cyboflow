@@ -578,28 +578,18 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
         };
       })();
 
-      // MIGRATION FIX: Get prompt count and messages using appropriate method
+      // Prompt count and messages come from the session's first Claude panel; a
+      // session with no Claude panel (created before its panel, or whose panel
+      // create failed) reads the session-scoped rows instead.
       const statsPanels = panelManager.getPanelsForSession(sessionId);
-      const statsClaudePanels = statsPanels.filter(p => p.type === 'claude');
+      const statsClaudePanel = statsPanels.find(p => p.type === 'claude');
 
-      let promptMarkers, messageCount;
-      if (statsClaudePanels.length > 0) {
-        // Use panel-based methods for migrated sessions
-        const claudePanel = statsClaudePanels[0];
-        console.log(`[IPC] Using panel-based prompt/message counts for session ${sessionId} with Claude panel ${claudePanel.id}`);
-
-        promptMarkers = databaseService.getPanelPromptMarkers ?
-          databaseService.getPanelPromptMarkers(claudePanel.id) :
-          databaseService.getPromptMarkers(sessionId);
-
-        messageCount = databaseService.getPanelConversationMessageCount ?
-          databaseService.getPanelConversationMessageCount(claudePanel.id) :
-          databaseService.getConversationMessageCount(sessionId);
-      } else {
-        // Use session-based methods for non-migrated sessions
-        promptMarkers = databaseService.getPromptMarkers(sessionId);
-        messageCount = databaseService.getConversationMessageCount(sessionId);
-      }
+      const promptMarkers = statsClaudePanel
+        ? databaseService.getPanelPromptMarkers(statsClaudePanel.id)
+        : databaseService.getPromptMarkers(sessionId);
+      const messageCount = statsClaudePanel
+        ? databaseService.getPanelConversationMessageCount(statsClaudePanel.id)
+        : databaseService.getConversationMessageCount(sessionId);
 
       // Resolve the session's model from its Claude panel SETTINGS (model is
       // managed at panel level, not on the session row — stored in
@@ -609,9 +599,8 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
       // resolves families by substring, and the frontend defaults a missing /
       // 'auto' model to the quick-session default. Null when no setting exists.
       const statsPanelModel = ((): string | null => {
-        const p = statsClaudePanels[0];
-        if (!p) return null;
-        const m = databaseService.getPanelSettings(p.id).model;
+        if (!statsClaudePanel) return null;
+        const m = databaseService.getPanelSettings(statsClaudePanel.id).model;
         return typeof m === 'string' && m.length > 0 ? m : null;
       })();
 

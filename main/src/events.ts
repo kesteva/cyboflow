@@ -407,12 +407,9 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           const panels = panelManager.getPanelsForSession(sessionId);
           const targetPanels = panels.filter((p: ToolPanel) => p.type === tool);
 
-          let promptMarkers;
-          if (targetPanels.length > 0 && typeof sessionManager.getPanelPromptMarkers === 'function') {
-            promptMarkers = sessionManager.getPanelPromptMarkers(targetPanels[0].id);
-          } else {
-            promptMarkers = sessionManager.getPromptMarkers(sessionId);
-          }
+          const promptMarkers = targetPanels.length > 0
+            ? sessionManager.getPanelPromptMarkers(targetPanels[0].id)
+            : sessionManager.getPromptMarkers(sessionId);
 
           const latestPrompt = promptMarkers.length > 0
             ? promptMarkers[promptMarkers.length - 1].prompt_text
@@ -817,20 +814,16 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     try {
       const session = await sessionManager.getSession(sessionId);
       if (session && session.worktreePath) {
-        // MIGRATION FIX: Get the latest prompt from prompt markers or use the session prompt
-        // Check if session has Claude panels and use appropriate method
+        // The latest prompt comes from the session's first Claude panel's prompt
+        // markers; a session with no Claude panel (created before its panel, or
+        // whose panel create failed) reads the session-scoped markers instead.
         const eventsPanels = panelManager.getPanelsForSession(sessionId);
         const eventsClaudePanels = eventsPanels.filter((p: ToolPanel) => p.type === 'claude');
-        
-        let promptMarkers;
-        if (eventsClaudePanels.length > 0 && sessionManager.getPanelPromptMarkers) {
-          // Use panel-based method for migrated sessions
-          promptMarkers = sessionManager.getPanelPromptMarkers(eventsClaudePanels[0].id);
-        } else {
-          // Use session-based method for non-migrated sessions
-          promptMarkers = sessionManager.getPromptMarkers(sessionId);
-        }
-        
+
+        const promptMarkers = eventsClaudePanels.length > 0
+          ? sessionManager.getPanelPromptMarkers(eventsClaudePanels[0].id)
+          : sessionManager.getPromptMarkers(sessionId);
+
         const latestPrompt = promptMarkers.length > 0
           ? promptMarkers[promptMarkers.length - 1].prompt_text
           : session.prompt;
@@ -870,10 +863,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     // NEWEST assistant usage / context window win.
     if (panelId && exitCode === 0) {
       try {
-        const recentOutputs =
-          typeof sessionManager.getPanelOutputs === 'function'
-            ? [...sessionManager.getPanelOutputs(panelId, 200)].reverse()
-            : [];
+        const recentOutputs = [...sessionManager.getPanelOutputs(panelId, 200)].reverse();
         const turnContextUsage = extractContextUsageFromOutputs(recentOutputs);
         if (turnContextUsage) {
           await updateClaudePanelCustomState(panelId, (state) => ({
