@@ -94,11 +94,6 @@ describe('getTimeDifference is unaffected when BOTH sides share a format', () =>
     // A same-format pair cancels: both sides misparse by the identical offset,
     // so the subtraction is right even unnormalized. Only a MIXED pair — one
     // raw column against a `new Date()` — goes wrong.
-    //
-    // NOTE this is NOT why contextCompactor is safe. Its operands come back
-    // from database.ts as `datetime(x) || 'Z'`, i.e. already zone-marked, so
-    // each one parses correctly on its own. Both facts are true; do not
-    // conflate them when auditing a new call site.
     const start = '2026-08-24 19:00:00';
     const end = '2026-08-24 19:12:52';
     expect(getTimeDifference(start, end)).toBe(12 * 60_000 + 52_000);

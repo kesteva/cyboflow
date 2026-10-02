@@ -101,9 +101,6 @@ export const useClaudePanel = (
   const [loadError, setLoadError] = useState<string | null>(null);
   const [outputLoadState, setOutputLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [gitCommands, setGitCommands] = useState<GitCommands | null>(null);
-  const [contextCompacted, setContextCompacted] = useState(false);
-  const [compactedContext, setCompactedContext] = useState<string | null>(null);
-  const [hasConversationHistory, setHasConversationHistory] = useState(false);
 
   // Refs
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -260,28 +257,6 @@ export const useClaudePanel = (
     loadGitData();
   }, [activeSessionId]);
 
-  // Check if session has conversation history
-  useEffect(() => {
-    if (!activeSession) {
-      setHasConversationHistory(false);
-      return;
-    }
-    
-    const checkConversationHistory = async () => {
-      try {
-        // Use panel-based API for Claude conversation data
-        const response = await API.panels.getConversationMessages(panelId);
-        if (response.success && response.data) {
-          setHasConversationHistory((response.data as unknown[]).length > 0);
-        }
-      } catch (error) {
-        console.error('Failed to check conversation history:', error);
-        setHasConversationHistory(false);
-      }
-    };
-    checkConversationHistory();
-  }, [activeSession?.id]);
-
   // Load output when panel becomes active and has an associated session
   useEffect(() => {
     if (isActive && activeSession && outputLoadState === 'idle') {
@@ -304,16 +279,7 @@ export const useClaudePanel = (
     }
 
     let finalInput = text;
-    
-    // Check if we have compacted context to inject
-    if (contextCompacted && compactedContext) {
-      finalInput = `<session_context>\n${compactedContext}\n</session_context>\n\n${finalInput}`;
-      
-      // Clear the compacted context after using it
-      setContextCompacted(false);
-      setCompactedContext(null);
-    }
-    
+
     // Collect all attachments (text and images)
     const attachmentPaths = [];
     
@@ -378,16 +344,7 @@ export const useClaudePanel = (
     isContinuingConversationRef.current = true;
 
     let finalInput = text;
-    
-    // Check if we have compacted context to inject
-    if (contextCompacted && compactedContext) {
-      finalInput = `<session_context>\n${compactedContext}\n</session_context>\n\n${finalInput}`;
-      
-      // Clear the compacted context after using it
-      setContextCompacted(false);
-      setCompactedContext(null);
-    }
-    
+
     // Collect all attachments (text and images)
     const attachmentPaths = [];
     
@@ -449,26 +406,6 @@ export const useClaudePanel = (
     if (activeSession) await API.sessions.stop(activeSession.id);
   };
 
-  const handleCompactContext = async () => {
-    if (!activeSession) return;
-    
-    try {
-      
-      // Generate the compacted context
-      const response = await API.sessions.generateCompactedContext(activeSession.id);
-      
-      if (response.success && response.data) {
-        const summary = response.data.summary;
-        setCompactedContext(summary);
-        setContextCompacted(true);
-      } else {
-        console.error('[Context Compaction] Failed to compact context:', response.error);
-      }
-    } catch (error) {
-      console.error('[Context Compaction] Error during compaction:', error);
-    }
-  };
-
   // Cleanup on unmount or panel change
   useEffect(() => {
     return () => {
@@ -496,9 +433,6 @@ export const useClaudePanel = (
     outputLoadState,
     loadError,
     textareaRef,
-    contextCompacted,
-    compactedContext,
-    hasConversationHistory,
     gitCommands,
     
     // Actions
@@ -506,7 +440,6 @@ export const useClaudePanel = (
     handleContinueConversation,
     handleTerminalCommand,
     handleStopSession,
-    handleCompactContext,
     
     // Utilities
     loadOutputContent,

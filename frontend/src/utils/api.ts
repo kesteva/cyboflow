@@ -420,12 +420,6 @@ export class API {
     async getArchiveProgress() {
       return trpc.cyboflow.sessions.getArchiveProgress.query();
     },
-
-    async generateCompactedContext(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.generateCompactedContext(sessionId);
-    },
-
   };
 
   // Project management

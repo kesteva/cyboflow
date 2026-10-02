@@ -66,9 +66,6 @@ vi.mock('../../../../hooks/useClaudePanel', () => ({
     ultrathink: false,
     setUltrathink: vi.fn(),
     gitCommands: null,
-    handleCompactContext: vi.fn(),
-    hasConversationHistory: false,
-    contextCompacted: false,
     handleStopSession: vi.fn(),
   }),
 }));

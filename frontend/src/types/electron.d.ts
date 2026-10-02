@@ -158,7 +158,6 @@ interface ElectronAPI {
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Script operations

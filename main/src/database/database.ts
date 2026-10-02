@@ -3090,16 +3090,6 @@ export class DatabaseService {
     return this.convertDbExecutionDiff(diff);
   }
 
-  getPanelExecutionDiffs(panelId: string): ExecutionDiff[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM execution_diffs 
-      WHERE panel_id = ? 
-      ORDER BY execution_sequence ASC
-    `).all(panelId) as ExecutionDiffRow[];
-    
-    return rows.map(this.convertDbExecutionDiff.bind(this));
-  }
-
   getNextPanelExecutionSequence(panelId: string): number {
     const result = this.db.prepare(`
       SELECT MAX(execution_sequence) as max_seq 
