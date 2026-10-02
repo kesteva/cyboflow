@@ -1993,7 +1993,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     databaseService,
     getMainWindow: () => mainWindow,
-    devMode: !app.isPackaged,
   });
 
   // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically

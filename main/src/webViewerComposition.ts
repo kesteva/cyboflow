@@ -49,7 +49,6 @@ export interface WebViewerCompositionDeps {
    * a destroyed window and orphaning live remote webContents.
    */
   getMainWindow: () => BrowserWindow | null;
-  devMode: boolean;
 }
 
 export interface WebViewerComposition {
@@ -66,7 +65,7 @@ export interface WebViewerComposition {
 }
 
 export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerComposition {
-  const { configManager, sessionManager, databaseService, getMainWindow, devMode } = deps;
+  const { configManager, sessionManager, databaseService, getMainWindow } = deps;
 
   const manager = new WebViewerManager({
     getMainWindow,
@@ -75,7 +74,6 @@ export function composeWebViewer(deps: WebViewerCompositionDeps): WebViewerCompo
     isEnabled: () => configManager.getWebViewerConfig().enabled,
     persistLogin: () => configManager.getWebViewerConfig().persistLogin,
     shortcutOverrides: () => configManager.getConfig().keyboardShortcuts,
-    devMode,
     platform: process.platform === 'darwin' ? 'mac' : 'other',
   });
   // The router sees the PERSISTING wrapper, so every open/close is recorded and

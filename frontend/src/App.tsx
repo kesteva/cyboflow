@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useIPCEvents } from './hooks/useIPCEvents';
-import { useReservedChord } from './hooks/useReservedChord';
 import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
@@ -26,7 +25,6 @@ import { useLayoutStore } from './stores/layoutStore';
 import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts';
 import { useKeyboardShortcutsHydration } from './hooks/useKeyboardShortcutsHydration';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
-import { TokenTest } from './components/TokenTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import LandingHome from './components/landing/LandingHome';
 import SessionStartWizard from './components/cyboflow/wizard/SessionStartWizard';
@@ -55,7 +53,6 @@ import {
   useAggregatedReviewItems,
   useLandingStore,
 } from './stores/landingStore';
-import { useOcclusion } from './hooks/useOcclusion';
 
 /**
  * What stands in for the shell row while the first-run tour owns the window:
@@ -118,8 +115,6 @@ function App() {
   const insightsCount = useReviewItemsSlice(
     (s) => s.items.filter((it) => it.kind === 'finding' && it.status === 'pending').length,
   );
-  const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
-  useOcclusion(isTokenTestOpen, 'token-test-modal');
   const { currentError, clearError } = useErrorStore();
   const { fetchConfig } = useConfigStore();
   // Global assistant on/off (Settings → Assistant). Reactive off the shared
@@ -276,18 +271,6 @@ function App() {
   // arrows defeat React.memo on every App re-render; these keep referential
   // identity across renders since the underlying setters are themselves stable.
   const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
-
-  // Token test page (Cmd/Ctrl + Shift + T) — development only. Goes through the
-  // shared reserved-chord registry rather than its own window listener, so it
-  // still fires while a native web-viewer view holds focus (which swallows every
-  // renderer keydown). `enabled` gates it to development, which also keeps the
-  // chord out of main's reserved table in a packaged build — so a page there is
-  // free to use Cmd-Shift-T itself. See shared/types/reservedChords.ts.
-  useReservedChord(
-    'tokenTest',
-    useCallback(() => setIsTokenTestOpen((prev) => !prev), []),
-    { enabled: process.env.NODE_ENV === 'development' },
-  );
 
   return (
     <ContextMenuProvider>
@@ -503,26 +486,6 @@ function App() {
           details={currentError?.details}
           command={currentError?.command}
         />
-        {/* Token Test Modal - Toggle with Cmd/Ctrl + Shift + T (Development Only) */}
-        {isTokenTestOpen && process.env.NODE_ENV === 'development' && (
-          <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50 p-4 overflow-y-auto">
-            <div className="bg-bg-primary w-full max-w-6xl max-h-[90vh] overflow-y-auto rounded-lg relative border border-border-primary shadow-2xl">
-              <button
-                onClick={() => setIsTokenTestOpen(false)}
-                className="absolute top-4 right-4 p-2 hover:bg-surface-hover rounded-lg transition-colors text-text-secondary hover:text-text-primary"
-                title="Close Token Test (Cmd/Ctrl + Shift + T)"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-              <div className="absolute top-4 left-4 text-xs text-text-muted bg-surface-secondary px-2 py-1 rounded">
-                DEV ONLY
-              </div>
-              <TokenTest />
-            </div>
-          </div>
-        )}
       </div>
     </ContextMenuProvider>
   );

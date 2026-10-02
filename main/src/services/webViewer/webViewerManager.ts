@@ -120,8 +120,6 @@ export interface WebViewerManagerDeps {
   persistLogin: () => boolean;
   /** The user's shortcut remaps, for the reserved-chord matcher. */
   shortcutOverrides: () => KeyboardShortcutOverrides | undefined;
-  /** True in development — gates the dev-only Cmd-Shift-T chord. */
-  devMode: boolean;
   platform: 'mac' | 'other';
   /** Clock seam for the caps' LRU and rate window. Defaults to `Date.now`. */
   now?: () => number;
@@ -779,7 +777,7 @@ export class WebViewerManager extends EventEmitter implements WebViewerCoreLike 
 
   /** Resolve the reserved-chord table for the current config. */
   private chords(): readonly ReservedChord[] {
-    return resolveReservedChords(this.deps.shortcutOverrides(), { devMode: this.deps.devMode });
+    return resolveReservedChords(this.deps.shortcutOverrides());
   }
 
   private emitChord(record: TabRecord, action: ReservedChordAction): void {
