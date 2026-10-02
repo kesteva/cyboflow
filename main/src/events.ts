@@ -18,7 +18,6 @@ import type { FastModeStateNotice } from '../../shared/types/panels';
 import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
-import type { GitStatus } from './types/session';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
 import { primaryModelUsageEntry } from '../../shared/utils/primaryModelUsage';
 import { isAgentThreadSpawnId } from '../../shared/types/agentThread';
@@ -1146,31 +1145,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     const mw = getMainWindow();
     if (mw && !mw.isDestroyed()) {
       mw.webContents.send('zombie-processes-detected', data);
-    }
-  });
-
-  // Listen to gitStatusManager events and broadcast to renderer
-  // Only broadcast for active sessions or recent updates to reduce EventEmitter load
-  gitStatusManager.on('git-status-updated', (sessionId: string, gitStatus: GitStatus) => {
-    const mw = getMainWindow();
-    if (mw && !mw.isDestroyed()) {
-      try {
-        mw.webContents.send('git-status-updated', { sessionId, gitStatus });
-      } catch (error) {
-        console.error('[Main] Failed to send git-status-updated event:', error);
-      }
-    }
-  });
-
-  // Listen for git status loading events
-  gitStatusManager.on('git-status-loading', (sessionId: string) => {
-    const mw = getMainWindow();
-    if (mw && !mw.isDestroyed()) {
-      try {
-        mw.webContents.send('git-status-loading', { sessionId });
-      } catch (error) {
-        console.error('[Main] Failed to send git-status-loading event:', error);
-      }
     }
   });
 

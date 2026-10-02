@@ -1,4 +1,3 @@
-import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { Logger } from '../utils/logger';
@@ -18,18 +17,13 @@ interface GitStatusCache {
   };
 }
 
-export class GitStatusManager extends EventEmitter {
+export class GitStatusManager {
   private cache: GitStatusCache = {};
   private readonly CACHE_TTL_MS = 5000; // 5 seconds cache
   private refreshDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
   private readonly DEBOUNCE_MS = 2000; // 2 seconds debounce to batch rapid changes
   private gitLogger: GitStatusLogger;
-  
-  // Throttling for UI events
-  private eventThrottleTimer: NodeJS.Timeout | null = null;
-  private pendingEvents: Map<string, { type: 'loading' | 'updated', data?: GitStatus }> = new Map();
-  private readonly EVENT_THROTTLE_MS = 100; // Throttle UI events to prevent flooding
-  
+
   // Concurrent operation limiting
   private activeOperations = 0;
   private readonly MAX_CONCURRENT_OPERATIONS = 3; // Reduced to limit CPU usage
@@ -62,9 +56,6 @@ export class GitStatusManager extends EventEmitter {
     private gitDiffManager: GitDiffManager,
     private logger?: Logger
   ) {
-    super();
-    // Increase max listeners to prevent warnings when many components listen to git status events
-    this.setMaxListeners(100);
     this.gitLogger = new GitStatusLogger(logger);
   }
 
@@ -78,13 +69,6 @@ export class GitStatusManager extends EventEmitter {
     this.refreshDebounceTimers.forEach(timer => clearTimeout(timer));
     this.refreshDebounceTimers.clear();
 
-    // Clear event throttle timer
-    if (this.eventThrottleTimer) {
-      clearTimeout(this.eventThrottleTimer);
-      this.eventThrottleTimer = null;
-    }
-    this.pendingEvents.clear();
-    
     // Cancel all active operations
     this.abortControllers.forEach(controller => controller.abort());
     this.abortControllers.clear();
@@ -181,9 +165,7 @@ export class GitStatusManager extends EventEmitter {
                 updatedStatus.ahead = ahead;
                 updatedStatus.behind = behind;
 
-                // Update cache and emit
                 this.updateCache(session.id, updatedStatus, generation);
-                this.emitThrottled(session.id, 'updated', updatedStatus);
               }
             } catch {
               // Fall back to full refresh on error
@@ -280,9 +262,7 @@ export class GitStatusManager extends EventEmitter {
         updatedStatus.filesChanged = 0;
       }
 
-      // Update cache and emit
       this.updateCache(sessionId, updatedStatus, generation);
-      this.emitThrottled(sessionId, 'updated', updatedStatus);
 
       this.logger?.info(`[GitStatus] Updated status after ${rebaseType} rebase for session ${sessionId}`);
     } catch (error) {
@@ -299,10 +279,7 @@ export class GitStatusManager extends EventEmitter {
    */
   async refreshSessionGitStatus(sessionId: string, isUserInitiated = false): Promise<GitStatus | null> {
     perfBump('git.status.refresh');
-    // Immediately emit loading state so user sees refresh is happening
-    // This provides immediate visual feedback
-    this.emitThrottled(sessionId, 'loading');
-    
+
     // Clear any existing debounce timer for this session
     const existingTimer = this.refreshDebounceTimers.get(sessionId);
     if (existingTimer) {
@@ -324,12 +301,7 @@ export class GitStatusManager extends EventEmitter {
           const hasChanged = await this.hasGitStatusChanged(sessionId, session.worktreePath);
           if (!hasChanged) {
             this.logger?.info(`[GitStatus] Quick check: no changes for session ${sessionId}, skipping refresh`);
-            // Still emit updated to clear loading state even if no changes
-            const cached = this.cache[sessionId]?.status || null;
-            if (cached) {
-              this.emitThrottled(sessionId, 'updated', cached);
-            }
-            resolve(cached);
+            resolve(this.cache[sessionId]?.status || null);
             return;
           }
         }
@@ -337,7 +309,6 @@ export class GitStatusManager extends EventEmitter {
         const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
         if (status) {
           this.updateCache(sessionId, status, generation);
-          this.emitThrottled(sessionId, 'updated', status);
         }
         resolve(status);
       }, this.DEBOUNCE_MS);
@@ -360,8 +331,6 @@ export class GitStatusManager extends EventEmitter {
     // Add to initial load queue if not already there
     if (!this.initialLoadQueue.includes(sessionId)) {
       this.initialLoadQueue.push(sessionId);
-      // Show loading immediately for this session
-      this.emitThrottled(sessionId, 'loading');
     }
 
     // Start processing queue if not already running
@@ -369,7 +338,7 @@ export class GitStatusManager extends EventEmitter {
       this.processInitialLoadQueue();
     }
 
-    // Return cached status immediately (UI will update when fresh data arrives via events)
+    // Return cached status immediately; the queued fetch refreshes the cache
     return cached?.status || null;
   }
 
@@ -399,7 +368,6 @@ export class GitStatusManager extends EventEmitter {
             const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
             if (status) {
               this.updateCache(sessionId, status, generation);
-              this.emitThrottled(sessionId, 'updated', status);
             }
           } catch (error) {
             this.logger?.error(`[GitStatus] Error fetching status for session ${sessionId}:`, error as Error);
@@ -429,11 +397,6 @@ export class GitStatusManager extends EventEmitter {
       );
 
       this.gitLogger.logPollStart(activeSessions.length);
-      
-      // Immediately show loading for all sessions so user sees refresh happening
-      activeSessions.forEach(session => {
-        this.emitThrottled(session.id, 'loading');
-      });
 
       // Process sessions with concurrent limiting — bounded by fetchGitStatusCoalesced's
       // internal executeWithLimit, NOT wrapped here (see its comment for why: this was a
@@ -471,10 +434,7 @@ export class GitStatusManager extends EventEmitter {
       controller.abort();
       this.abortControllers.delete(sessionId);
     }
-    
-    // Clear from loading state by emitting loading false
-    this.setGitStatusLoading(sessionId, false);
-    
+
     // Clear any pending debounce timer
     const timer = this.refreshDebounceTimers.get(sessionId);
     if (timer) {
@@ -483,16 +443,6 @@ export class GitStatusManager extends EventEmitter {
     }
   }
   
-  /**
-   * Helper to set git status loading state
-   */
-  private setGitStatusLoading(sessionId: string, loading: boolean): void {
-    if (!loading) {
-      // Emit that loading has stopped
-      this.emit('git-status-loading', sessionId);
-    }
-  }
-
   /**
    * Cancel git status operations for multiple sessions
    */
@@ -805,18 +755,10 @@ export class GitStatusManager extends EventEmitter {
       }
     }
 
-    const previousStatus = this.cache[sessionId]?.status;
-    const hasChanged = !previousStatus || JSON.stringify(previousStatus) !== JSON.stringify(status);
-
     this.cache[sessionId] = {
       status,
       lastChecked: Date.now()
     };
-
-    // Only emit event if status actually changed
-    if (hasChanged) {
-      this.emitThrottled(sessionId, 'updated', status);
-    }
   }
 
   /**
@@ -835,56 +777,6 @@ export class GitStatusManager extends EventEmitter {
     this.cache = {};
     this.sessionGenerations.clear();
     this.inFlightFetches.clear();
-  }
-
-  /**
-   * Emit a throttled event to prevent UI flooding
-   * @param sessionId The session ID
-   * @param type The event type (loading or updated)
-   * @param data Optional data for updated events
-   */
-  private emitThrottled(sessionId: string, type: 'loading' | 'updated', data?: GitStatus): void {
-    // Store the pending event
-    this.pendingEvents.set(sessionId, { type, data });
-    
-    // If we don't have a throttle timer, start one
-    if (!this.eventThrottleTimer) {
-      this.eventThrottleTimer = setTimeout(() => {
-        // Batch emit all pending events
-        const eventsToEmit = new Map(this.pendingEvents);
-        this.pendingEvents.clear();
-        this.eventThrottleTimer = null;
-        
-        // Group events by type for batch emission
-        const loadingEvents: string[] = [];
-        const updatedEvents: Array<{ sessionId: string; status: GitStatus }> = [];
-        
-        eventsToEmit.forEach((event, id) => {
-          if (event.type === 'loading') {
-            loadingEvents.push(id);
-          } else if (event.type === 'updated' && event.data) {
-            updatedEvents.push({ sessionId: id, status: event.data });
-          }
-        });
-        
-        // Emit batch events
-        if (loadingEvents.length > 0) {
-          this.emit('git-status-loading-batch', loadingEvents);
-        }
-        if (updatedEvents.length > 0) {
-          this.emit('git-status-updated-batch', updatedEvents);
-        }
-        
-        // Also emit individual events for backward compatibility
-        eventsToEmit.forEach((event, id) => {
-          if (event.type === 'loading') {
-            this.emit('git-status-loading', id);
-          } else if (event.type === 'updated' && event.data) {
-            this.emit('git-status-updated', id, event.data);
-          }
-        });
-      }, this.EVENT_THROTTLE_MS);
-    }
   }
 
   /**

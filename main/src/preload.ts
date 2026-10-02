@@ -59,18 +59,6 @@ interface DialogOptions {
   properties?: Electron.OpenDialogOptions['properties'];
 }
 
-interface GitStatusUpdateData {
-  sessionId: string;
-  gitStatus: {
-    state: string;
-    ahead?: number;
-    behind?: number;
-    additions?: number;
-    deletions?: number;
-    filesChanged?: number;
-  };
-}
-
 interface SessionOutputData {
   sessionId: string;
   type: 'stdout' | 'stderr' | 'json' | 'error';
@@ -572,16 +560,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, sessions: Session[]) => callback(sessions);
       ipcRenderer.on('sessions:loaded', wrappedCallback);
       return () => ipcRenderer.removeListener('sessions:loaded', wrappedCallback);
-    },
-    onGitStatusUpdated: (callback: (data: GitStatusUpdateData) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: GitStatusUpdateData) => callback(data);
-      ipcRenderer.on('git-status-updated', wrappedCallback);
-      return () => ipcRenderer.removeListener('git-status-updated', wrappedCallback);
-    },
-    onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { sessionId: string }) => callback(data);
-      ipcRenderer.on('git-status-loading', wrappedCallback);
-      return () => ipcRenderer.removeListener('git-status-loading', wrappedCallback);
     },
     onSessionOutput: (callback: (output: SessionOutputData) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, output: SessionOutputData) => callback(output);
