@@ -54,7 +54,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
       setBuildScript(project.build_script || '');
       // Fetch the current branch when dialog opens
       if (project.path) {
-        window.electronAPI.git.detectBranch(project.path).then((result) => {
+        API.projects.detectBranch(project.path).then((result) => {
           if (result.success && result.data) {
             setCurrentBranch(result.data);
           }

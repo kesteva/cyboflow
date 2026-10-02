@@ -53,7 +53,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     claudeCodeManager,
     executionTracker,
     gitStatusManager,
-    archiveProgressManager,
     databaseService
   } = services;
 
@@ -862,18 +861,4 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       },
     );
   }
-
-  // Listen for archive progress events
-  if (archiveProgressManager) {
-    archiveProgressManager.on('archive-progress', (progress) => {
-      const mw = getMainWindow();
-      if (mw && !mw.isDestroyed()) {
-        try {
-          mw.webContents.send('archive:progress', progress);
-        } catch (error) {
-          console.error('[Main] Failed to send archive:progress event:', error);
-        }
-      }
-    });
-  }
-} 
+}

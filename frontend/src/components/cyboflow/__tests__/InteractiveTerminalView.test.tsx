@@ -157,10 +157,12 @@ vi.mock('../../../trpc/client', () => ({
 type IpcHandler = (...args: unknown[]) => void;
 
 let registered: { channel: string; handler: IpcHandler } | undefined;
+// The disposer the preload bridge's on() returns — the only unsubscribe path.
+const unsubscribeSpy = vi.fn();
 const onSpy = vi.fn((channel: string, handler: IpcHandler) => {
   registered = { channel, handler };
+  return unsubscribeSpy;
 });
-const offSpy = vi.fn();
 
 // ---------------------------------------------------------------------------
 // Imports after mocks
@@ -223,7 +225,7 @@ beforeEach(() => {
   termMock.rows = 24;
   resizeObserverCb = undefined;
   onSpy.mockClear();
-  offSpy.mockClear();
+  unsubscribeSpy.mockClear();
   registered = undefined;
   lastTerminalOptions = undefined;
   xtermBuffer.viewportY = 0;
@@ -231,7 +233,7 @@ beforeEach(() => {
 
   // Install a minimal electron stub for the raw-IPC subscription.
   Object.defineProperty(window, 'electron', {
-    value: { on: onSpy, off: offSpy },
+    value: { on: onSpy },
     configurable: true,
     writable: true,
   });
@@ -384,16 +386,16 @@ describe('InteractiveTerminalView', () => {
     expect(termMock.scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
-  it('keep-alive (ISSUE B): a tab/flow switch (unmount) does NOT off() the channel or dispose the terminal', () => {
+  it('keep-alive (ISSUE B): a tab/flow switch (unmount) does NOT unsubscribe the channel or dispose the terminal', () => {
     const { unmount } = render(<InteractiveTerminalView runId="run-cleanup" />);
     expect(registered?.handler).toBeDefined();
 
     // An unmount models a tab/flow switch away. The PTY must persist, so the
-    // cached terminal is kept alive: NO channel off(), NO term.dispose(), and the
+    // cached terminal is kept alive: NO channel unsubscribe, NO term.dispose(), and the
     // onData relay binding is NOT disposed — only the per-mount DOM detaches.
     unmount();
 
-    expect(offSpy).not.toHaveBeenCalled();
+    expect(unsubscribeSpy).not.toHaveBeenCalled();
     expect(termMock.dispose).not.toHaveBeenCalled();
     expect(onDataDispose).not.toHaveBeenCalled();
   });
@@ -444,7 +446,7 @@ describe('InteractiveTerminalView', () => {
     expect(secondContainer).not.toBe(firstContainer);
   });
 
-  it('disposeInteractiveTerminal (real end-of-life) off()s the channel + disposes term + onData', () => {
+  it('disposeInteractiveTerminal (real end-of-life) unsubscribes the channel + disposes term + onData', () => {
     render(<InteractiveTerminalView runId="run-endoflife" />);
     const handler = registered?.handler;
     expect(handler).toBeDefined();
@@ -453,8 +455,8 @@ describe('InteractiveTerminalView', () => {
     // this — the backend PTY is killed and the cached xterm is fully released.
     disposeInteractiveTerminal('run-endoflife');
 
-    expect(offSpy).toHaveBeenCalledTimes(1);
-    expect(offSpy).toHaveBeenCalledWith('cyboflow:pty:run-endoflife', handler);
+    expect(unsubscribeSpy).toHaveBeenCalledTimes(1);
+    expect(registered?.channel).toBe('cyboflow:pty:run-endoflife');
     expect(termMock.dispose).toHaveBeenCalledTimes(1);
     expect(onDataDispose).toHaveBeenCalledTimes(1);
   });

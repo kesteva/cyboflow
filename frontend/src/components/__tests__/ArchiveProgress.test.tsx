@@ -15,9 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ArchiveProgress } from '../ArchiveProgress';
 import { API } from '../../utils/api';
 
-// The poll rides API.sessions.getArchiveProgress (tRPC) now; the component still
-// uses window.electron for the push 'archive:progress' subscription, which
-// mockElectron below keeps satisfying.
+// The poll rides API.sessions.getArchiveProgress (tRPC).
 vi.mock('../../utils/api', () => ({
   API: { sessions: { getArchiveProgress: vi.fn() } },
 }));
@@ -37,19 +35,6 @@ function progress(activeCount: number, tasks: ArchiveTaskFixture[] = []) {
   return { tasks, activeCount, totalCount: tasks.length };
 }
 
-function mockElectron() {
-  Object.defineProperty(window, 'electron', {
-    writable: true,
-    configurable: true,
-    value: {
-      invoke: vi.fn(),
-      on: vi.fn(() => undefined),
-      off: vi.fn(),
-      openExternal: vi.fn(),
-    },
-  });
-}
-
 beforeEach(() => {
   vi.useFakeTimers();
   getArchiveProgress.mockReset();
@@ -57,13 +42,11 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  delete window.electron;
 });
 
 describe('ArchiveProgress', () => {
   it('renders nothing when there are no archive tasks', async () => {
     getArchiveProgress.mockResolvedValue({ success: true, data: progress(0) });
-    mockElectron();
 
     const { container } = render(<ArchiveProgress />);
     await act(async () => {
@@ -83,7 +66,6 @@ describe('ArchiveProgress', () => {
       startTime: new Date().toISOString(),
     };
     getArchiveProgress.mockResolvedValue({ success: true, data: progress(1, [task]) });
-    mockElectron();
 
     const hiddenSpy = vi.spyOn(document, 'hidden', 'get');
     hiddenSpy.mockReturnValue(false);
