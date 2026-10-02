@@ -71,7 +71,7 @@ export function isMergeConflictError(err: unknown): err is MergeConflictError {
  * Every git invocation below goes through runGitCapture (execFile, argv array,
  * login-shell PATH) — never a shell string. Repo-controlled values reach nearly
  * all of them: branch, remote and ref names arrive from the on-disk repository
- * and are re-read on every dashboard refresh, so a shell string would make a
+ * and are re-read on every git status refresh, so a shell string would make a
  * branch named `$(…)` executable. `END_OF_OPTIONS` additionally stops a branch
  * named `--upload-pack=…` from being parsed as a git option.
  *

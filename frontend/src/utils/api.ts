@@ -581,29 +581,6 @@ export class API {
     return window.electronAPI.getVersionInfo();
   }
 
-  // Dashboard
-  static dashboard = {
-    async getProjectStatus(projectId: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.dashboard.getProjectStatus(projectId);
-    },
-
-    async getProjectStatusProgressive(projectId: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.dashboard.getProjectStatusProgressive(projectId);
-    },
-
-    onUpdate(callback: (data: Record<string, unknown>) => void) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.dashboard.onUpdate(callback);
-    },
-
-    onSessionUpdate(callback: (data: { type: string; projectId?: number; sessionId?: string; data: unknown }) => void) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.dashboard.onSessionUpdate(callback);
-    },
-  };
-
   // Panels - for Claude panels and other panel types
   static panels = {
     async getOutput(panelId: string, limit?: number) {

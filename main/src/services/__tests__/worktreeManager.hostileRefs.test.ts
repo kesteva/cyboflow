@@ -2,7 +2,7 @@
  * WorktreeManager against hostile repo-controlled refs.
  *
  * Branch names, remote names and refs come off disk and reach almost every
- * method here on an ordinary dashboard refresh. Two distinct attacks have to be
+ * method here on an ordinary git status refresh. Two distinct attacks have to be
  * closed, and they need different proofs:
  *
  *  1. SHELL injection — a branch literally named `$(id>/tmp/…)`. Proven end to

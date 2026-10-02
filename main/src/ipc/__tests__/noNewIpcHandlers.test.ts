@@ -20,7 +20,11 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 146 handlers — down from 150 when the unreachable
+/** Frozen 2026-10-02 at 144 handlers — down from 146 when the 2
+ * `dashboard:*` handlers (`ipc/dashboard.ts`) were deleted with the retired
+ * per-project dashboard panel.
+ *
+ * Earlier 2026-10-02: 146 handlers — down from 150 when the unreachable
  * `ipc/editorPanel.ts` (4 `editor:*` handlers, never exposed in preload) was
  * deleted with the hidden Monaco editor panel.
  *
@@ -40,7 +44,6 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/bugReport.ts': 3,
   'ipc/claudePanel.ts': 12,
   'ipc/cyboflow.ts': 1,
-  'ipc/dashboard.ts': 2,
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,
   'ipc/folders.ts': 7,

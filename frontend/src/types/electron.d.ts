@@ -318,14 +318,6 @@ interface ElectronAPI {
     openDirectory: (options?: Electron.OpenDialogOptions) => Promise<IPCResponse<string | null>>;
   };
 
-  // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access
-  dashboard: {
-    getProjectStatus: (projectId: number) => Promise<IPCDataResponse<unknown>>;
-    getProjectStatusProgressive: (projectId: number) => Promise<IPCDataResponse<unknown>>; // Caller does not consume .data directly
-    onUpdate: (callback: (data: Record<string, unknown>) => void) => () => void;
-    onSessionUpdate: (callback: (data: { type: string; projectId?: number; sessionId?: string; data: unknown }) => void) => () => void;
-  };
-
   // UI State management
   uiState: {
     getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[]; expandedFolders: string[] }>>;

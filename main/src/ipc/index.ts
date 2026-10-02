@@ -8,7 +8,6 @@ import { registerDialogHandlers } from './dialog';
 import { registerScriptHandlers } from './script';
 import { registerFolderHandlers } from './folders';
 import { registerUIStateHandlers } from './uiState';
-import { registerDashboardHandlers } from './dashboard';
 import { setupLogHandlers } from './logs';
 import { registerPanelHandlers } from './panels';
 import { registerClaudePanelHandlers } from './claudePanel';
@@ -37,7 +36,6 @@ export function registerIpcHandlers(services: AppServices): void {
   registerScriptHandlers(ipcMain, services);
   registerFolderHandlers(ipcMain, services);
   registerUIStateHandlers(services);
-  registerDashboardHandlers(ipcMain, services);
   setupLogHandlers(services.sessionManager);
   registerPanelHandlers(ipcMain, services);
   registerClaudePanelHandlers(ipcMain, services);

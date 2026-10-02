@@ -59,13 +59,6 @@ interface DialogOptions {
   properties?: Electron.OpenDialogOptions['properties'];
 }
 
-interface DashboardUpdateData {
-  type: 'status' | 'session' | 'project';
-  projectId?: number;
-  sessionId?: string;
-  data: unknown;
-}
-
 interface GitStatusUpdateData {
   sessionId: string;
   gitStatus: {
@@ -524,22 +517,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openDirectory: (options?: DialogOptions): Promise<IPCResponse<string | null>> => ipcRenderer.invoke('dialog:open-directory', options),
   },
 
-  // Dashboard
-  dashboard: {
-    getProjectStatus: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('dashboard:get-project-status', projectId),
-    getProjectStatusProgressive: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('dashboard:get-project-status-progressive', projectId),
-    onUpdate: (callback: (data: DashboardUpdateData) => void) => {
-      const subscription = (_event: Electron.IpcRendererEvent, data: DashboardUpdateData) => callback(data);
-      ipcRenderer.on('dashboard:update', subscription);
-      return () => ipcRenderer.removeListener('dashboard:update', subscription);
-    },
-    onSessionUpdate: (callback: (data: DashboardUpdateData) => void) => {
-      const subscription = (_event: Electron.IpcRendererEvent, data: DashboardUpdateData) => callback(data);
-      ipcRenderer.on('dashboard:session-update', subscription);
-      return () => ipcRenderer.removeListener('dashboard:session-update', subscription);
-    },
-  },
-
   // First-run onboarding + Settings — per-provider login/runtime probe
   // ("Check again"). Provider-keyed: one channel, the provider as its argument.
   providers: {
@@ -708,7 +685,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // positional args and REBUILD the request here, which silently dropped every
     // field the signature did not name — `substrate` (the Add-chat picker's
     // per-panel override, so an added PTY chat always launched as SDK) and
-    // `metadata` (the dashboard/setup-tasks `permanent` flag). A structural
+    // `metadata` (e.g. the `permanent` flag). A structural
     // request type keeps renderer and main in type parity: a new field on
     // CreatePanelRequest reaches the handler without touching this line.
     createPanel: (request: {
