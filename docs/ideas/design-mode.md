@@ -19,7 +19,7 @@ The current design workflow is: design in Claude Design on the web → export a 
 
 ## Non-goals (this idea)
 
-- **Real-app-environment tier** (rendering the project's actual components; dev-server orchestration; scratch-playground→promote). Deferred to a separate v2+ idea — it is process-supervisor scope: the app has no managed dev-server lifecycle today (`RunCommandManager.startRunCommands` is dead code; `TerminalPanelManager` teardown is a bare `pty.kill()`; the verify port pool is capture-scoped).
+- **Real-app-environment tier** (rendering the project's actual components; dev-server orchestration; scratch-playground→promote). Deferred to a separate v2+ idea — it is process-supervisor scope: the app has no managed dev-server lifecycle today (the project run script is a fire-and-stop logs-panel process; `TerminalPanelManager` teardown is a bare `pty.kill()`; the verify port pool is capture-scoped).
 - **Non-Claude / non-SDK design sessions.** Design sessions are pinned to the Claude SDK substrate in v0/v1 (see Architecture — this is a security boundary, not a preference). Interactive-PTY or Codex-driven design sessions would require a cross-substrate MCP scope contract that does not exist; deferred until one does.
 - **Automated screenshot grounding** as agent input (deferred; a manual side-by-side using existing verify capture is fine).
 - **Design-system curation UI.** Style-kit generation happens inline in the session (agent checks, generates if missing); a dedicated curation flow is separate scope.

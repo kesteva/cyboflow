@@ -5,14 +5,13 @@
  * descendantPids / listDescendants) is injected, so no real `ps`/`kill`/`exec`
  * ever runs. Pins the three POSIX group-resolution shapes and the win32
  * taskkill ladder by their exact
- * command strings and signal order — the contract each call site's ladder was
- * moved under byte-identically:
+ * command strings and signal order:
  *  - 'lookup' (default): SIGTERM, then the
  *    `ps -o pgid=` lookup, group kills by the resolved pgid, dual-probe poll.
- *  - 'root': AbstractCliManager / sessionManager — NO lookup, the root pid IS
- *    the group id, fixed (non-probed) grace.
- *  - 'enumerate': runCommandManager — pgid resolved BEFORE any signal, group
- *    members the tree walk missed swept into the per-descendant kills.
+ *  - 'root' (AbstractCliManager): NO lookup, the root pid IS the group id,
+ *    fixed (non-probed) grace.
+ *  - 'enumerate': pgid resolved BEFORE any signal, group members the tree walk
+ *    missed swept into the per-descendant kills.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {

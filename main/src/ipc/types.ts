@@ -7,7 +7,6 @@ import type { GitDiffManager } from '../services/gitDiffManager';
 import type { GitStatusManager } from '../services/gitStatusManager';
 import type { ExecutionTracker } from '../services/executionTracker';
 import type { DatabaseService } from '../database/database';
-import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
 import type { ClaudeModelCatalogService } from '../services/claudeModelCatalogService';
@@ -134,7 +133,6 @@ export interface AppServices {
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
-  runCommandManager: RunCommandManager;
   taskQueue: TaskQueue | null;
   getMainWindow: () => BrowserWindow | null;
   logger?: Logger;

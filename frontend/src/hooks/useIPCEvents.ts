@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
-import { useErrorStore } from '../stores/errorStore';
 import { usePanelStore } from '../stores/panelStore';
 import { usePanelLiveEventsStore } from '../stores/panelLiveEventsStore';
 import { API } from '../utils/api';
@@ -83,7 +82,6 @@ function isCancellationOutput(raw: unknown): boolean {
 
 export function useIPCEvents() {
   const { setSessions, loadSessions, addSession, updateSession, deleteSession } = useSessionStore();
-  const { showError } = useErrorStore();
 
   useEffect(() => {
     // Check if we're in Electron environment
@@ -236,29 +234,6 @@ export function useIPCEvents() {
       }));
     });
     unsubscribeFunctions.push(unsubscribeOutputAvailable);
-    
-    // Listen for zombie process detection
-    const unsubscribeZombieProcesses = window.electronAPI.events.onZombieProcessesDetected((data: { sessionId?: string | null; pids?: number[]; message: string }) => {
-      console.error('[useIPCEvents] Zombie processes detected:', data);
-      
-      // Show error to user
-      const errorMessage = data.message || 'Some child processes could not be terminated. Please check your system process list.';
-      const details = data.pids && data.pids.length > 0 
-        ? `Unable to terminate process IDs: ${data.pids.join(', ')}\n\nYou may need to manually kill these processes.`
-        : undefined;
-      
-      showError({
-        title: 'Zombie Processes Detected',
-        error: errorMessage,
-        details
-      });
-      
-      // Also log PIDs if available
-      if (data.pids && data.pids.length > 0) {
-        console.error(`Zombie process PIDs: ${data.pids.join(', ')}`);
-      }
-    });
-    unsubscribeFunctions.push(unsubscribeZombieProcesses);
 
     // Load initial sessions
     API.sessions.getAll()
@@ -279,7 +254,7 @@ export function useIPCEvents() {
       // Clean up all event listeners
       unsubscribeFunctions.forEach(unsubscribe => unsubscribe());
     };
-  }, [setSessions, loadSessions, addSession, updateSession, deleteSession, showError]);
+  }, [setSessions, loadSessions, addSession, updateSession, deleteSession]);
   
   // Return a mock socket object for compatibility
   return {

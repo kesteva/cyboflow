@@ -125,7 +125,7 @@ describe('escapeShellArgs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// runCommandManager call-site level: WORKTREE_PATH escaping
+// Call-site level: WORKTREE_PATH escaping
 // ---------------------------------------------------------------------------
 
 describe('WORKTREE_PATH escaping (call-site simulation)', () => {

@@ -1,7 +1,6 @@
 import type { BrowserWindow } from 'electron';
 import { runGitAsync } from './utils/runGit';
 import type { AppServices } from './ipc/types';
-import { addSessionLog } from './ipc/logs';
 import { panelManager } from './services/panelManager';
 import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
 import type { SessionOutput } from './types/session';
@@ -41,7 +40,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     sessionManager,
     claudeCodeManager,
     executionTracker,
-    runCommandManager,
     gitDiffManager,
     gitStatusManager,
     worktreeManager,
@@ -494,12 +492,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         else if (dbSession && dbSession.status !== 'running') {
           await sessionManager.updateSession(sessionId, { status: 'running' });
         }
-      }
-
-      try {
-        await runCommandManager.stopRunCommands(sessionId);
-      } catch (error) {
-        console.error(`Failed to stop run commands for session ${sessionId}:`, error);
       }
 
       try {
@@ -981,13 +973,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
     await sessionManager.updateSession(sessionId, { status: 'error', error });
 
-    // Stop run commands on error
-    try {
-      await runCommandManager.stopRunCommands(sessionId);
-    } catch (stopError) {
-      console.error(`Failed to stop run commands for session ${sessionId}:`, stopError);
-    }
-
     // Cancel execution tracking on error
     try {
       if (executionTracker.isTracking(sessionId)) {
@@ -1076,42 +1061,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       }
     } catch (summaryError) {
       console.error(`Failed to generate session summary for ${sessionId}:`, summaryError);
-    }
-  });
-
-  // Listen to run command manager events (these should go to logs, not terminal)
-  runCommandManager.on('output', (output) => {
-    // Send run command output to logs
-    if (output.sessionId && output.data) {
-      // Split by lines and add to logs
-      const lines = output.data.split('\n').filter((line: string) => line.trim());
-      lines.forEach((line: string) => {
-        addSessionLog(output.sessionId, 'info', line, 'RunCommand');
-      });
-    }
-  });
-
-  runCommandManager.on('error', (error) => {
-    console.error(`Run command error for session ${error.sessionId}:`, error.error);
-    // Add error to logs
-    if (error.sessionId) {
-      addSessionLog(error.sessionId, 'error', `${error.displayName}: ${error.error}`, 'RunCommand');
-    }
-  });
-
-  runCommandManager.on('exit', (info) => {
-    console.log(`Run command exited: ${info.displayName}, exitCode: ${info.exitCode}`);
-    // Add exit info to logs
-    if (info.sessionId && info.exitCode !== 0) {
-      addSessionLog(info.sessionId, 'warn', `${info.displayName} exited with code ${info.exitCode}`, 'RunCommand');
-    }
-  });
-
-  runCommandManager.on('zombie-processes-detected', (data) => {
-    console.error('[Main] Zombie processes detected from run command:', data);
-    const mw = getMainWindow();
-    if (mw && !mw.isDestroyed()) {
-      mw.webContents.send('zombie-processes-detected', data);
     }
   });
 

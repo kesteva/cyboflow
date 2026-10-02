@@ -15,7 +15,6 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { ModelAvailabilityService, isModelUsable } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
-import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
 import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
@@ -499,7 +498,6 @@ let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
-let runCommandManager: RunCommandManager;
 let archiveProgressManager: ArchiveProgressManager;
 // Run user-shells (worktree-terminal feature). Module-level so the before-quit
 // handler (outside the orchestrator-setup block) can destroyAll() on app quit.
@@ -1633,7 +1631,6 @@ async function initializeServices(): Promise<boolean> {
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
-  runCommandManager = new RunCommandManager(databaseService);
 
   taskQueue = new TaskQueue({
     sessionManager,
@@ -2768,7 +2765,6 @@ async function initializeServices(): Promise<boolean> {
     gitDiffManager,
     gitStatusManager,
     executionTracker,
-    runCommandManager,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,
@@ -3445,13 +3441,6 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Pairwise judge worker stopped');
   }
 
-  // Stop all run commands
-  if (runCommandManager) {
-    console.log('[Main] Stopping all run commands...');
-    await runCommandManager.stopAllRunCommands();
-    console.log('[Main] Run commands stopped');
-  }
-  
   // Stop git status polling
   if (gitStatusManager) {
     console.log('[Main] Stopping git status polling...');

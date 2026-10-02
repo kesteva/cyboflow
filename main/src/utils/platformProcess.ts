@@ -4,8 +4,9 @@
  *
  * Call sites may read the host platform to choose their {@link KillTreeOptions}
  * timings, modes and log wording. The kill and enumeration commands themselves
- * may not branch. The single exception is runCommandManager's escapee sweep,
- * where POSIX has a process-group lookup Windows has no equivalent for.
+ * may not branch. The single exception is the 'enumerate' group mode's
+ * escapee sweep, where POSIX has a process-group lookup Windows has no
+ * equivalent for.
  *
  * Every primitive takes a `platform` option so tests pin a platform regardless
  * of the host, and the per-site reporting — zombie events, log lines — stays at
@@ -455,9 +456,9 @@ export interface KillTreeOptions extends PlatformProcessOptions {
    *  - 'lookup' (default): after the SIGTERM,
    *    one `ps -o pgid=` lookup replaces the root-pid stand-in with the real
    *    pgid when it responds.
-   *  - 'root' (AbstractCliManager / sessionManager): no lookup — the pty/spawned
-   *    child is its own group leader, so the root pid IS the group id.
-   *  - 'enumerate' (runCommandManager): BEFORE any signal, resolve the real
+   *  - 'root' (AbstractCliManager): no lookup — the pty/spawned child is its
+   *    own group leader, so the root pid IS the group id.
+   *  - 'enumerate': BEFORE any signal, resolve the real
    *    pgid and sweep group members the up-front tree walk missed into the
    *    per-descendant kill list.
    */
@@ -498,10 +499,8 @@ function defaultIsPidAlive(pid: number): boolean {
  * ladder, false when survivors remain (after {@link KillTreeOptions.onSurvivors}
  * ran) or the ladder threw. The inline steps below own the detail; the shape:
  *
- * win32 — the taskkill ladder shared by runCommandManager and
- * AbstractCliManager: graceful `/T`, the grace
- * window, `/T /F`, per-descendant `/F`, then a verification pass with a
- * survivors re-kill.
+ * win32 — the taskkill ladder: graceful `/T`, the grace window, `/T /F`,
+ * per-descendant `/F`, then a verification pass with a survivors re-kill.
  *
  * POSIX — the SIGTERM → process-group ladder: SIGTERM the root, group
  * handling per {@link KillTreeOptions.posixGroupMode}, `kill -TERM -<pgid>`,

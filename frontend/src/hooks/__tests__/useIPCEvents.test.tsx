@@ -41,10 +41,6 @@ vi.mock('../../stores/sessionStore', () => ({
   ),
 }));
 
-vi.mock('../../stores/errorStore', () => ({
-  useErrorStore: () => ({ showError: vi.fn() }),
-}));
-
 vi.mock('../../utils/api', () => ({
   API: { sessions: { getAll: vi.fn().mockResolvedValue({ success: true, data: [] }) } },
 }));
@@ -71,7 +67,6 @@ function makeEvents() {
     onSessionOutput: vi.fn(noop),
     onTerminalOutput: vi.fn(noop),
     onSessionOutputAvailable: vi.fn(noop),
-    onZombieProcessesDetected: vi.fn(noop),
   };
 }
 

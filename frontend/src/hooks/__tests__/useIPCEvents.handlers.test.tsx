@@ -5,11 +5,10 @@
  * A dropped/misrouted event here silently corrupts every downstream store, so
  * these pin: onSessionUpdated validation + active-status dispatch, the three
  * onSessionDeleted payload shapes, onSessionsLoaded, the validateEventSession
- * missing-sessionId drop on the output handlers, the zombie pid-join, and clean
- * unsubscribe on unmount.
+ * missing-sessionId drop on the output handlers, and clean unsubscribe on
+ * unmount.
  *
- * Real sessionStore + panelStore are used (assert real writes); errorStore + API
- * are mocked.
+ * Real sessionStore + panelStore are used (assert real writes); API is mocked.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
@@ -21,12 +20,6 @@ import type { Session, SessionOutput } from '../../types/session';
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
-const { showError } = vi.hoisted(() => ({ showError: vi.fn() }));
-
-vi.mock('../../stores/errorStore', () => ({
-  useErrorStore: () => ({ showError }),
-}));
-
 vi.mock('../../utils/api', () => ({
   API: { sessions: { getAll: vi.fn().mockResolvedValue({ success: true, data: [] }) } },
 }));
@@ -61,7 +54,6 @@ function makeEvents() {
     onPanelUpdated: make('onPanelUpdated'),
     onSessionOutput: make('onSessionOutput'),
     onSessionOutputAvailable: make('onSessionOutputAvailable'),
-    onZombieProcessesDetected: make('onZombieProcessesDetected'),
   };
 }
 
@@ -90,7 +82,6 @@ function collectEvents(type: string): CustomEvent[] {
 }
 
 beforeEach(() => {
-  showError.mockReset();
   useSessionStore.setState({
     sessions: [],
     activeSessionId: null,
@@ -247,30 +238,11 @@ describe('output handlers — validateEventSession missing-sessionId drop', () =
   });
 });
 
-describe('onZombieProcessesDetected', () => {
-  it('joins pids into the details string and surfaces an error', () => {
-    renderHook(() => useIPCEvents());
-    fire('onZombieProcessesDetected', { pids: [111, 222], message: 'stuck' });
-    expect(showError).toHaveBeenCalledTimes(1);
-    const arg = showError.mock.calls[0][0] as { title: string; error: string; details?: string };
-    expect(arg.title).toBe('Zombie Processes Detected');
-    expect(arg.error).toBe('stuck');
-    expect(arg.details).toContain('111, 222');
-  });
-
-  it('omits details when there are no pids', () => {
-    renderHook(() => useIPCEvents());
-    fire('onZombieProcessesDetected', { message: 'generic' });
-    const arg = showError.mock.calls[0][0] as { details?: string };
-    expect(arg.details).toBeUndefined();
-  });
-});
-
 describe('unmount teardown', () => {
   it('calls every registered unsubscribe exactly once', () => {
     const { unmount } = renderHook(() => useIPCEvents());
     const unsubs = captured.unsubs;
-    expect(unsubs.length).toBeGreaterThanOrEqual(8);
+    expect(unsubs.length).toBeGreaterThanOrEqual(7);
     unmount();
     for (const u of unsubs) expect(u).toHaveBeenCalledTimes(1);
   });

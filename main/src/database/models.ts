@@ -38,15 +38,6 @@ export interface Project {
   solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
 }
 
-export interface ProjectRunCommand {
-  id: number;
-  project_id: number;
-  command: string;
-  display_name?: string;
-  order_index: number;
-  created_at: string;
-}
-
 export interface Session {
   id: string;
   name: string;

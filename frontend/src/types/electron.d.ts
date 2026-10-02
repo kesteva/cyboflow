@@ -317,9 +317,6 @@ interface ElectronAPI {
     onTerminalOutput: (callback: (output: { sessionId: string; data: string; type: 'stdout' | 'stderr' }) => void) => () => void;
     onMainLog: (callback: (level: string, message: string) => void) => () => void;
 
-    // Process management events
-    onZombieProcessesDetected: (callback: (data: { sessionId?: string | null; pids?: number[]; message: string }) => void) => () => void;
-
     removeAllListeners: (channel: string) => void;
   };
 

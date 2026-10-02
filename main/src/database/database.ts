@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
-import type { Project, ProjectRunCommand, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
+import type { Project, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
@@ -2150,70 +2150,6 @@ export class DatabaseService {
 
   deleteProject(id: number): boolean {
     const result = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  // Project run commands operations
-  createRunCommand(projectId: number, command: string, displayName?: string, orderIndex?: number): ProjectRunCommand {
-    const result = this.db.prepare(`
-      INSERT INTO project_run_commands (project_id, command, display_name, order_index)
-      VALUES (?, ?, ?, ?)
-    `).run(projectId, command, displayName || null, orderIndex || 0);
-    
-    const runCommand = this.getRunCommand(result.lastInsertRowid as number);
-    if (!runCommand) {
-      throw new Error('Failed to create run command');
-    }
-    return runCommand;
-  }
-
-  getRunCommand(id: number): ProjectRunCommand | undefined {
-    return this.db.prepare('SELECT * FROM project_run_commands WHERE id = ?').get(id) as ProjectRunCommand | undefined;
-  }
-
-  getProjectRunCommands(projectId: number): ProjectRunCommand[] {
-    return this.db.prepare('SELECT * FROM project_run_commands WHERE project_id = ? ORDER BY order_index ASC, id ASC').all(projectId) as ProjectRunCommand[];
-  }
-
-  updateRunCommand(id: number, updates: { command?: string; display_name?: string; order_index?: number }): ProjectRunCommand | undefined {
-    const fields: string[] = [];
-    const values: (string | number | boolean | null)[] = [];
-
-    if (updates.command !== undefined) {
-      fields.push('command = ?');
-      values.push(updates.command);
-    }
-    if (updates.display_name !== undefined) {
-      fields.push('display_name = ?');
-      values.push(updates.display_name);
-    }
-    if (updates.order_index !== undefined) {
-      fields.push('order_index = ?');
-      values.push(updates.order_index);
-    }
-
-    if (fields.length === 0) {
-      return this.getRunCommand(id);
-    }
-
-    values.push(id);
-
-    this.db.prepare(`
-      UPDATE project_run_commands 
-      SET ${fields.join(', ')} 
-      WHERE id = ?
-    `).run(...values);
-    
-    return this.getRunCommand(id);
-  }
-
-  deleteRunCommand(id: number): boolean {
-    const result = this.db.prepare('DELETE FROM project_run_commands WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  deleteProjectRunCommands(projectId: number): boolean {
-    const result = this.db.prepare('DELETE FROM project_run_commands WHERE project_id = ?').run(projectId);
     return result.changes > 0;
   }
 

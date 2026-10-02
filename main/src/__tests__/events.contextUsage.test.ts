@@ -100,7 +100,6 @@ function makeHarness(initialOutputs: SessionOutput[]) {
       getSession: vi.fn(() => null),
     },
     executionTracker: {},
-    runCommandManager: { on: vi.fn() },
     gitDiffManager: {},
     gitStatusManager: {
       refreshSessionGitStatus,

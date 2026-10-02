@@ -230,19 +230,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         mainBranch
       );
 
-      // If run_script was provided, also create run commands
-      if (projectData.runScript && project) {
-        const commands = projectData.runScript.split('\n').filter((cmd: string) => cmd.trim());
-        commands.forEach((command: string, index: number) => {
-          databaseService.createRunCommand(
-            project.id,
-            command.trim(),
-            `Command ${index + 1}`,
-            index
-          );
-        });
-      }
-
       console.log('[Main] Project created successfully:', project);
 
       // Per-project permission-trust prompt — fire-and-forget, must
@@ -355,28 +342,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
     try {
       // Update the project
       const project = databaseService.updateProject(parseInt(projectId), updates);
-
-      // If run_script was updated, also update the run commands table
-      if (updates.run_script !== undefined) {
-        const projectIdNum = parseInt(projectId);
-
-        // Delete existing run commands
-        databaseService.deleteProjectRunCommands(projectIdNum);
-
-        // Add new run commands from the multiline script
-        // Treat empty string and null the same - both mean no commands
-        if (updates.run_script && updates.run_script.trim()) {
-          const commands = updates.run_script.split('\n').filter((cmd: string) => cmd.trim());
-          commands.forEach((command: string, index: number) => {
-            databaseService.createRunCommand(
-              projectIdNum,
-              command.trim(),
-              `Command ${index + 1}`,
-              index
-            );
-          });
-        }
-      }
 
       // Emit event to notify frontend about project update
       if (project) {

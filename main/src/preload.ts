@@ -574,13 +574,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('main-log', wrappedCallback);
       return () => ipcRenderer.removeListener('main-log', wrappedCallback);
     },
-
-    // Process management events
-    onZombieProcessesDetected: (callback: (data: { count: number; processes: string[] }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { count: number; processes: string[] }) => callback(data);
-      ipcRenderer.on('zombie-processes-detected', wrappedCallback);
-      return () => ipcRenderer.removeListener('zombie-processes-detected', wrappedCallback);
-    },
   },
 
   // Panels API for Claude panels and other panel types
