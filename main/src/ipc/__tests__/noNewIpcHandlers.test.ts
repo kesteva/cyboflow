@@ -20,7 +20,12 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 110 handlers — down from 111 when the caller-less
+/** Frozen 2026-10-02 at 109 handlers — down from 110 when
+ * `panels:get-output` (`ipc/session.ts`) was deleted: its only caller was
+ * useClaudePanel's Crystal output-load, whose one consumer (the slash-command
+ * list) now reads the projected transcript instead.
+ *
+ * Earlier 2026-10-02: 110 handlers — down from 111 when the caller-less
  * `panels:emitEvent` (`ipc/panels.ts`) was deleted along with its
  * generic-invoke allowlist entry; main-side code emits panel events directly.
  *
@@ -87,7 +92,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,
-  'ipc/session.ts': 21,
+  'ipc/session.ts': 20,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,
 };

@@ -56,8 +56,8 @@ export function __resetDeclinedResumeForTests(): void {
  * gate, the open-time REPL resume recovery, the ⌃G composer reveal, and the
  * bottom region (approvals + the unified composer + permission toast).
  */
-export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
-  const hook = useClaudePanel(panel.id, isActive);
+export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel }) => {
+  const hook = useClaudePanel(panel.id);
   const activeSession = hook.activeSession;
   // Reliable run id for inline approvals (Role-G — permission-mode redesign §6):
   // chat turns gate on the persistent __quick__ chat_run_id sentinel, DECOUPLED
@@ -280,24 +280,6 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // SDK substrate emits a "54k/200k tokens (27%)" string; null for PTY/empty.
   const contextUsage = claudePanelState.contextUsage ?? null;
 
-  // Extract and store slash commands when we get JSON messages with init.
-  useEffect(() => {
-    if (!activeSession) return;
-    const jsonMessages = activeSession.jsonMessages || [];
-    const initMessage = jsonMessages.find(
-      (msg: { type?: string; subtype?: string; slash_commands?: string[] }) =>
-        msg.type === 'system' && msg.subtype === 'init' && msg.slash_commands,
-    );
-    if (initMessage && Array.isArray(initMessage.slash_commands)) {
-      try {
-        const slashCommandsKey = `slashCommands_${activeSession.id}`;
-        localStorage.setItem(slashCommandsKey, JSON.stringify(initMessage.slash_commands));
-      } catch (e) {
-        console.warn('[slash-debug] Failed to store slash commands for Cyboflow session:', e);
-      }
-    }
-  }, [activeSession?.jsonMessages, activeSession?.id]);
-
   // Unified-chat chrome derivations for this quick session. Use the PANE's own
   // session (substrateSession), falling back to the global activeSession only
   // when neither context nor store copy is present — the global store
@@ -333,6 +315,29 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.
   const { messages, loadError } = useUnifiedPanelMessages(panel.id, !isInteractive);
+
+  // Persist the SDK's advertised slash commands for the composer's '/'
+  // autocomplete (FilePathAutocomplete reads `slashCommands_<sessionId>`). The
+  // CLI reports them on its system/init event, which the transcript projection
+  // keeps verbatim as `metadata.sessionInfo`; the newest init wins, so a
+  // re-init after the panel mounted is picked up too.
+  const activeSessionId = activeSession?.id;
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const init = [...messages]
+      .reverse()
+      .find((msg) => msg.role === 'system' && msg.metadata?.systemSubtype === 'init');
+    const slashCommands = init?.metadata?.sessionInfo?.slash_commands;
+    if (!Array.isArray(slashCommands)) return;
+    try {
+      localStorage.setItem(
+        `slashCommands_${activeSessionId}`,
+        JSON.stringify(slashCommands.filter((cmd): cmd is string => typeof cmd === 'string')),
+      );
+    } catch (e) {
+      console.warn('[ClaudePanel] Failed to store slash commands:', e);
+    }
+  }, [messages, activeSessionId]);
 
   // Expired Claude login → the in-app sign-in card at the end of the
   // transcript. Two triggers, one card: the CLI's is_error RESULT (a projected

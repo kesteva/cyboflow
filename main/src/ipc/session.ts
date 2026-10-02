@@ -2561,32 +2561,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   });
 
   // Panel-based handlers for Claude panels
-  ipcMain.handle('panels:get-output', async (_event, panelId: string, limit?: number) => {
-    try {
-      // Validate panel exists
-      const panelValidation = validatePanelExists(panelId);
-      if (!panelValidation.valid) {
-        logValidationFailure('panels:get-output', panelValidation);
-        return createValidationError(panelValidation);
-      }
-
-      const outputLimit = limit && limit > 0 ? Math.min(limit, 10000) : undefined;
-      console.log(`[IPC] panels:get-output called for panel: ${panelId} (session: ${panelValidation.sessionId}) with limit: ${outputLimit}`);
-      
-      if (!sessionManager.getPanelOutputs) {
-        console.error('[IPC] Panel-based output methods not available on sessionManager');
-        return { success: false, error: 'Panel-based output methods not available' };
-      }
-      
-      const outputs = await sessionManager.getPanelOutputs(panelId, outputLimit);
-      console.log(`[IPC] Returning ${outputs.length} outputs for panel ${panelId}`);
-      return { success: true, data: outputs };
-    } catch (error) {
-      console.error('Failed to get panel outputs:', error);
-      return { success: false, error: 'Failed to get panel outputs' };
-    }
-  });
-
   ipcMain.handle('panels:get-conversation-messages', async (_event, panelId: string) => {
     try {
       if (!sessionManager.getPanelConversationMessages) {

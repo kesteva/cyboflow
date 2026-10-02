@@ -509,11 +509,6 @@ export class API {
 
   // Panels - for Claude panels and other panel types
   static panels = {
-    async getOutput(panelId: string, limit?: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.panels.getOutput(panelId, limit);
-    },
-
     async getConversationMessages(panelId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.panels.getConversationMessages(panelId);

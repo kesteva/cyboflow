@@ -345,8 +345,6 @@ interface ElectronAPI {
     renamePanel: (panelId: string, name: string) => Promise<IPCResponse<void>>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse<void>>;
     sendInput: (panelId: string, input: string, images?: Array<{ name: string; dataUrl: string; type: string }>) => Promise<IPCResponse<void>>;
-    // getOutput returns SessionOutput[] — IPCDataResponse so callers can pass directly to setSessionOutputs
-    getOutput: (panelId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getConversationMessages: (panelId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getJsonMessages: (panelId: string) => Promise<IPCResponse<UnifiedMessage[]>>;
     // PromptMarker is locally typed; IPCDataResponse for direct .data access
