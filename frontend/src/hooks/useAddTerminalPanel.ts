@@ -23,7 +23,7 @@ export interface UseAddTerminalPanelOptions {
  * registers it in the panel store, marks it active, and fires the optional onAfterActivate
  * side-effect. The callback is a no-op (with a console.warn) when session is null/undefined.
  *
- * Shared by ProjectView and other views so future changes to panelApi.createPanel's
+ * Shared across views so future changes to panelApi.createPanel's
  * input shape (or to the post-create activation sequence) propagate to all call sites.
  */
 export function useAddTerminalPanel(

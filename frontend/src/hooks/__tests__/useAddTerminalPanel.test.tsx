@@ -123,7 +123,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (RunView patte
   });
 });
 
-describe('useAddTerminalPanel — happy path without onAfterActivate (ProjectView pattern)', () => {
+describe('useAddTerminalPanel — happy path without onAfterActivate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreatePanel.mockResolvedValue(MOCK_PANEL);
@@ -132,14 +132,14 @@ describe('useAddTerminalPanel — happy path without onAfterActivate (ProjectVie
 
   it('completes without error when onAfterActivate is omitted', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'ProjectView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'TestView' })
     );
     await expect(act(async () => { await result.current(); })).resolves.toBeUndefined();
   });
 
   it('still calls createPanel, addPanel, setActivePanelInStore, and setActivePanel', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'ProjectView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'TestView' })
     );
     await act(async () => { await result.current(); });
 

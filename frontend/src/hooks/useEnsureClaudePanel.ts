@@ -26,13 +26,13 @@ export interface UseEnsureClaudePanelOptions {
  *   - If no Claude panel exists: calls panelApi.createPanel with { sessionId, type: 'claude' },
  *     registers it via addPanel, marks it active via setActivePanelInStore. Does NOT call
  *     panelApi.setActivePanel after creation — relies on the panel:created event for backend
- *     activation, matching the original ProjectView.ensureClaudePanel contract.
+ *     activation.
  *
  * Panels are read inside the callback via usePanelStore.getState() to avoid
  * re-creating the callback on every panel-store mutation.
  *
- * Shared by ProjectView (migration) and CyboflowRoot so future changes to the
- * find-or-create logic propagate to both call sites.
+ * Kept as a hook so future changes to the find-or-create logic land in one
+ * place.
  */
 export function useEnsureClaudePanel(
   session: UseEnsureClaudePanelSession | null | undefined,
@@ -66,9 +66,7 @@ export function useEnsureClaudePanel(
     });
     addPanel(newPanel);
     setActivePanelInStore(session.id, newPanel.id);
-    // NOTE: panelApi.setActivePanel is intentionally NOT called here.
-    // The original ProjectView.ensureClaudePanel relied on the panel:created
-    // event for backend activation. This hook preserves that contract so the
-    // ProjectView migration (step 8) is behavior-equivalent.
+    // NOTE: panelApi.setActivePanel is intentionally NOT called here — the
+    // panel:created event drives backend activation.
   }, [session, addPanel, setActivePanelInStore, logTag]);
 }
