@@ -9,7 +9,7 @@
  * shared `UnifiedMessage` shape) and running them through the
  * `ClaudeMessageTransformer` (an identity pass-through that fills any gaps).
  * Live-refetches (debounced) on the window `session-output-available` event for
- * this panel — the exact strategy the old RichOutputView used (an SDK quick
+ * this panel — the strategy the old quick-session chat view used (an SDK quick
  * session never populates `cyboflowStore.streamEvents`, so the run hook's
  * streamEvents trigger does not apply here).
  *

@@ -184,7 +184,7 @@ export interface ChatTranscriptProps {
    * workflow-run chat to render the inline `AskUserQuestionCard` where the
    * `AskUserQuestion` tool_use appears. Returns `null`/`undefined` for tool
    * calls that need no extra UI. When omitted, ChatTranscript renders no
-   * extras (default behavior for RichOutputView).
+   * extras.
    */
   renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
 }
@@ -1458,7 +1458,7 @@ function buildRowDescriptors(
  * Holds NO data fetching, NO IPC, NO window-event listeners, and NO
  * localStorage access. All state (collapse/expand/copy/scroll) is owned by the
  * caller and passed in as props so this component can be reused across the
- * quick-session chat (RichOutputView) and future consumers.
+ * run and quick-session chats (UnifiedChatView) and future consumers.
  *
  * Rendering is split into a memoized grouping prepass (`buildRowDescriptors`,
  * keyed on the message array + settings) and memoized per-row components that

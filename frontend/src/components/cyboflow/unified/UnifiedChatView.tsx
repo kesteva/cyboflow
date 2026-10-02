@@ -195,7 +195,7 @@ export function UnifiedChatView({
   // PanelContainer slot is un-keyed), so without this the auto-scroll refs +
   // collapse/expand sets carry over from the previous conversation — leaving the
   // new one parked mid-history instead of pinned to its latest message (the old
-  // RichOutputView force-scrolled to the bottom on every panel change). Declared
+  // quick-session chat view force-scrolled to the bottom on every panel change). Declared
   // BEFORE the auto-scroll effect so a combined railId+messages render resets the
   // refs first. Mirrors the empty-intermediate-render reset the run host already
   // gets from `useUnifiedRunMessages`' setMessages([]) on runId change.
@@ -221,8 +221,8 @@ export function UnifiedChatView({
   // Auto-expand sub-agent (Task) tools so nested transcripts show. Additive: it
   // only ADDS newly-seen Task ids to the expanded set (never removes), so it
   // never triggers a render loop. Note a manually-collapsed Task can re-expand on
-  // the next message delta — this matches the prior RunChatView/RichOutputView
-  // behavior (both auto-expanded Task tools on every load).
+  // the next message delta — this matches the prior run and quick-session chat
+  // views (both auto-expanded Task tools on every load).
   useEffect(() => {
     const subAgentIds = new Set<string>();
     for (const msg of messages) {

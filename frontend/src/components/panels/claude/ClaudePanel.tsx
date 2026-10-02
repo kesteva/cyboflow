@@ -463,7 +463,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // `result` (and on a user cancel via the useIPCEvents buffer reset), so it is
   // safe to fold in here where the sticky pending row is not.
   const composerWorking = sessionRunning || liveTailState.isGenerating;
-  // Working indicator parity with the prior RichOutputView: show it while the
+  // Working indicator parity with the prior quick-session chat view: show it while the
   // agent is producing, as soon as an SDK send is dispatched, OR when the
   // session is waiting and the last turn was the user's. The optimistic-send
   // edge matters for Codex because app-server startup can precede the durable

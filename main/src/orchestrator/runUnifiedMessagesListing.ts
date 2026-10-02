@@ -12,7 +12,7 @@
  * stored event into the Claude-compatible projection shape, then runs it through
  * the SAME projection pipeline the live stream uses — `TypedEventNarrowing` +
  * `MessageProjection` — producing the rich, correlated shape the renderer's
- * RichOutputView consumes.
+ * UnifiedChatView consumes.
  *
  * Pattern note: this mirrors `projectStoredOutputs` in main/src/ipc/session.ts
  * (the quick-session path) but reads from raw_events keyed by runId instead of
