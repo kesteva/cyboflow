@@ -134,10 +134,9 @@ function allProjectIds(projects: ProjectWithRuns[]): Set<number> {
 function noopSessionRowDragHandler(): void {}
 
 // ---------------------------------------------------------------------------
-// SessionRow — extracted + memoized so a git-status update to ONE session
-// (allSessions gets a new array reference, but unrelated Session objects keep
-// their identity — see sessionStore.updateSessionGitStatusBatch) doesn't force
-// every row in the rail to re-render. See sessionRowPropsEqual below for the
+// SessionRow — extracted + memoized so an update to ONE session (allSessions
+// gets a new array reference, but unrelated Session objects keep their
+// identity) doesn't force every row in the rail to re-render. See sessionRowPropsEqual below for the
 // comparator: `childRuns` in particular is rebuilt via .filter() on every
 // parent render (new array reference even with unchanged content), so it's
 // compared by content, not identity.

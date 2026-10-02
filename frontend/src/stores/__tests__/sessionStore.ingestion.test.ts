@@ -1,5 +1,5 @@
 /**
- * sessionStore ingestion tests — the renderer output/git-status ingestion core.
+ * sessionStore ingestion tests — the renderer output ingestion core.
  *
  * These pin the memory-safety caps + merge-order the IPC ingestion relies on:
  *   - addSessionOutput caps output at 300 / jsonMessages at 100 + mirrors into
@@ -8,10 +8,9 @@
  *   - setActiveSession's five branches (null-clear / in-store / main-repo /
  *     fetch-fallback / error),
  *   - updateSession preserves pre-existing output/jsonMessages (silent-drop guard),
- *   - the 50ms git-status batch coalesce,
  *   - cleanupInactiveSessions spares the active session + short arrays.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useSessionStore } from '../sessionStore';
 import { useCenterPaneStore } from '../centerPaneStore';
 import type { Session, SessionOutput } from '../../types/session';
@@ -60,10 +59,6 @@ function resetStore() {
     sessions: [],
     activeSessionId: null,
     activeMainRepoSession: null,
-    gitStatusLoading: new Set(),
-    gitStatusBatchTimer: null,
-    pendingGitStatusLoading: new Map(),
-    pendingGitStatusUpdates: new Map(),
   });
   useCenterPaneStore.setState({ bySession: {} });
 }
@@ -220,23 +215,6 @@ describe('setActiveSession — branches', () => {
     const state = useSessionStore.getState();
     expect(state.activeSessionId).toBe('remote');
     expect(state.activeMainRepoSession).toBeNull();
-  });
-});
-
-describe('git-status batch coalesce (50ms window)', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  it('coalesces multiple setGitStatusLoading calls into one batch after 50ms', () => {
-    const { setGitStatusLoading } = useSessionStore.getState();
-    setGitStatusLoading('s1', true);
-    setGitStatusLoading('s2', true);
-    // Not applied yet (still within the batch window).
-    expect(useSessionStore.getState().gitStatusLoading.size).toBe(0);
-    vi.advanceTimersByTime(50);
-    const loading = useSessionStore.getState().gitStatusLoading;
-    expect(loading.has('s1')).toBe(true);
-    expect(loading.has('s2')).toBe(true);
   });
 });
 

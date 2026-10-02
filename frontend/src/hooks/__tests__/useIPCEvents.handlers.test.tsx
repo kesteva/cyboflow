@@ -4,20 +4,19 @@
  * The hook is the single funnel from Electron IPC into the renderer stores.
  * A dropped/misrouted event here silently corrupts every downstream store, so
  * these pin: onSessionUpdated validation + active-status dispatch, the three
- * onSessionDeleted payload shapes, onSessionsLoaded archived skip, the
- * validateEventSession missing-sessionId drop on the output handlers, the zombie
- * pid-join, the batch git-status setters + per-session CustomEvents, the throttle
- * immediate/coalesce behavior, and clean unsubscribe on unmount.
+ * onSessionDeleted payload shapes, onSessionsLoaded, the validateEventSession
+ * missing-sessionId drop on the output handlers, the zombie pid-join, and clean
+ * unsubscribe on unmount.
  *
  * Real sessionStore + panelStore are used (assert real writes); errorStore + API
  * are mocked.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { usePanelLiveEventsStore } from '../../stores/panelLiveEventsStore';
 import type { StreamEvent } from '../../utils/cyboflowApi';
-import type { Session, SessionOutput, GitStatus } from '../../types/session';
+import type { Session, SessionOutput } from '../../types/session';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -63,10 +62,6 @@ function makeEvents() {
     onSessionOutput: make('onSessionOutput'),
     onSessionOutputAvailable: make('onSessionOutputAvailable'),
     onZombieProcessesDetected: make('onZombieProcessesDetected'),
-    onGitStatusUpdated: make('onGitStatusUpdated'),
-    onGitStatusLoading: make('onGitStatusLoading'),
-    onGitStatusLoadingBatch: make('onGitStatusLoadingBatch'),
-    onGitStatusUpdatedBatch: make('onGitStatusUpdatedBatch'),
   };
 }
 
@@ -88,8 +83,6 @@ function makeSession(id: string, over: Partial<Session> = {}): Session {
   };
 }
 
-const GIT_STATUS: GitStatus = { state: 'modified' } as GitStatus;
-
 function collectEvents(type: string): CustomEvent[] {
   const events: CustomEvent[] = [];
   window.addEventListener(type, (e) => events.push(e as CustomEvent));
@@ -102,10 +95,6 @@ beforeEach(() => {
     sessions: [],
     activeSessionId: null,
     activeMainRepoSession: null,
-    gitStatusLoading: new Set(),
-    gitStatusBatchTimer: null,
-    pendingGitStatusLoading: new Map(),
-    pendingGitStatusUpdates: new Map(),
   });
   (window as unknown as { electronAPI: { events: ReturnType<typeof makeEvents>; invoke: ReturnType<typeof vi.fn> } }).electronAPI = {
     events: makeEvents(),
@@ -175,25 +164,13 @@ describe('onSessionDeleted — payload shapes', () => {
   });
 });
 
-describe('onSessionsLoaded — git-status loading seed', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  it('marks non-archived sessions without gitStatus as loading, skips archived', () => {
+describe('onSessionsLoaded', () => {
+  it('loads the list into the store, archived sessions included', () => {
     renderHook(() => useIPCEvents());
-    fire('onSessionsLoaded', [
-      makeSession('needs'), // no gitStatus, not archived → loading
-      makeSession('archived', { archived: true }), // skipped
-      makeSession('hasStatus', { gitStatus: GIT_STATUS }), // has status → skipped
-    ]);
-    // setGitStatusLoading batches on a 50ms timer — flush it.
-    vi.advanceTimersByTime(50);
-    const loading = useSessionStore.getState().gitStatusLoading;
-    expect(loading.has('needs')).toBe(true);
-    expect(loading.has('archived')).toBe(false);
-    expect(loading.has('hasStatus')).toBe(false);
-    // The list is still loaded into the store.
-    expect(useSessionStore.getState().sessions.map((s) => s.id)).toContain('needs');
+    fire('onSessionsLoaded', [makeSession('live'), makeSession('archived', { archived: true })]);
+    const state = useSessionStore.getState();
+    expect(state.isLoaded).toBe(true);
+    expect(state.sessions.map((s) => s.id)).toEqual(['live', 'archived']);
   });
 });
 
@@ -289,62 +266,11 @@ describe('onZombieProcessesDetected', () => {
   });
 });
 
-describe('batch git-status handlers', () => {
-  it('onGitStatusLoadingBatch sets loading once + dispatches one CustomEvent per session', () => {
-    const events = collectEvents('git-status-loading');
-    renderHook(() => useIPCEvents());
-    fire('onGitStatusLoadingBatch', ['a', 'b', 'c']);
-    const loading = useSessionStore.getState().gitStatusLoading;
-    expect(loading.has('a') && loading.has('b') && loading.has('c')).toBe(true);
-    expect(events.map((e) => (e.detail as { sessionId: string }).sessionId)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('onGitStatusUpdatedBatch applies statuses + dispatches one CustomEvent per session', () => {
-    const events = collectEvents('git-status-updated');
-    useSessionStore.setState({ sessions: [makeSession('a'), makeSession('b')] });
-    renderHook(() => useIPCEvents());
-    fire('onGitStatusUpdatedBatch', [
-      { sessionId: 'a', status: GIT_STATUS },
-      { sessionId: 'b', status: GIT_STATUS },
-    ]);
-    const byId = Object.fromEntries(useSessionStore.getState().sessions.map((s) => [s.id, s]));
-    expect(byId['a'].gitStatus).toEqual(GIT_STATUS);
-    expect(byId['b'].gitStatus).toEqual(GIT_STATUS);
-    expect(events).toHaveLength(2);
-  });
-});
-
-describe('throttled onGitStatusUpdated', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  it('fires immediately on the first call, coalesces rapid calls into one trailing fire', () => {
-    const events = collectEvents('git-status-updated');
-    renderHook(() => useIPCEvents());
-    // Call 1 — immediate.
-    fire('onGitStatusUpdated', { sessionId: 's1', gitStatus: GIT_STATUS });
-    expect(events).toHaveLength(1);
-    // Calls 2 & 3 within the 100ms window for the SAME session — coalesced to one.
-    fire('onGitStatusUpdated', { sessionId: 's1', gitStatus: GIT_STATUS });
-    fire('onGitStatusUpdated', { sessionId: 's1', gitStatus: GIT_STATUS });
-    expect(events).toHaveLength(1);
-    vi.advanceTimersByTime(100);
-    expect(events).toHaveLength(2); // one trailing fire, not two
-  });
-
-  it('drops a throttled event with no sessionId', () => {
-    const events = collectEvents('git-status-updated');
-    renderHook(() => useIPCEvents());
-    fire('onGitStatusUpdated', { gitStatus: GIT_STATUS } as unknown as { sessionId: string; gitStatus: GitStatus });
-    expect(events).toHaveLength(0);
-  });
-});
-
 describe('unmount teardown', () => {
   it('calls every registered unsubscribe exactly once', () => {
     const { unmount } = renderHook(() => useIPCEvents());
     const unsubs = captured.unsubs;
-    expect(unsubs.length).toBeGreaterThanOrEqual(12);
+    expect(unsubs.length).toBeGreaterThanOrEqual(8);
     unmount();
     for (const u of unsubs) expect(u).toHaveBeenCalledTimes(1);
   });

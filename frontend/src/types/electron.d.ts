@@ -1,5 +1,5 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus } from './session';
+import type { Session, SessionOutput } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
@@ -336,10 +336,6 @@ interface ElectronAPI {
     onSessionLog: (callback: (data: { sessionId: string; entry: LogEntry }) => void) => () => void;
     onSessionLogsCleared: (callback: (data: { sessionId: string }) => void) => () => void;
     onSessionOutputAvailable: (callback: (info: { sessionId: string; panelId?: string; hasNewOutput?: boolean }) => void) => () => void;
-    onGitStatusUpdated: (callback: (data: { sessionId: string; gitStatus: GitStatus }) => void) => () => void;
-    onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => () => void;
-    onGitStatusLoadingBatch?: (callback: (sessionIds: string[]) => void) => () => void;
-    onGitStatusUpdatedBatch?: (callback: (updates: Array<{ sessionId: string; status: GitStatus }>) => void) => () => void;
 
     // Project events
     onProjectUpdated: (callback: (project: Project) => void) => () => void;
