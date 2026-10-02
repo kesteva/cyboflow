@@ -368,39 +368,3 @@ export function Dropdown({
     </div>
   );
 }
-
-// Dropdown Menu Item component for custom footer items
-export function DropdownMenuItem({
-  icon: Icon,
-  label,
-  onClick,
-  className,
-  ...props
-}: {
-  icon?: React.ComponentType<{ className?: string }>;
-  label: ReactNode;
-  onClick?: () => void;
-  className?: string;
-} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'w-full text-left px-3 py-2.5 rounded-sm',
-        'text-text-secondary hover:bg-interactive/10 hover:text-text-primary hover:shadow-[inset_0_1px_2px_rgba(0,0,0,0.05)]',
-        'transition-all duration-200 ease-out flex items-center gap-3',
-        'focus:outline-none focus:ring-2 focus:ring-focus-ring-subtle',
-        'min-h-[2.5rem] group', // Better touch target and consistent height
-        className
-      )}
-      {...props}
-    >
-      {Icon && (
-        <div className="flex items-center justify-center w-5 h-5 flex-shrink-0">
-          <Icon className="w-4 h-4 text-text-tertiary group-hover:text-current stroke-[1.5] transition-colors duration-200 ease-out" />
-        </div>
-      )}
-      <span className="text-sm font-medium group-hover:text-inherit transition-colors duration-200 ease-out">{label}</span>
-    </button>
-  );
-}
