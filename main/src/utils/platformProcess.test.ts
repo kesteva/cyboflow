@@ -7,7 +7,7 @@
  * taskkill ladder by their exact
  * command strings and signal order — the contract each call site's ladder was
  * moved under byte-identically:
- *  - 'lookup' (default): terminalSessionManager's shape — SIGTERM, then the
+ *  - 'lookup' (default): SIGTERM, then the
  *    `ps -o pgid=` lookup, group kills by the resolved pgid, dual-probe poll.
  *  - 'root': AbstractCliManager / sessionManager — NO lookup, the root pid IS
  *    the group id, fixed (non-probed) grace.
@@ -65,7 +65,7 @@ describe('killTree POSIX — group resolution shapes', () => {
       pollIntervalMs: 5,
     });
 
-    // Lookup ran (terminalSessionManager's echo-suffix shape) and, returning
+    // Lookup ran (the echo-suffix shape) and, returning
     // nothing, the root pid stood in for the group id in both group kills.
     expect(execCommand).toHaveBeenCalledWith('ps -o pgid= -p 4242 2>/dev/null || echo ""');
     expect(execCommand).toHaveBeenCalledWith('kill -TERM -4242');

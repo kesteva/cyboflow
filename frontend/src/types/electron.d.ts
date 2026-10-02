@@ -155,12 +155,6 @@ interface ElectronAPI {
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
-    // Terminal operations
-    runTerminalCommand: (sessionId: string, command: string) => Promise<IPCResponse<void>>;
-    sendTerminalInput: (sessionId: string, data: string) => Promise<IPCResponse<void>>;
-    preCreateTerminal: (sessionId: string) => Promise<IPCResponse<void>>;
-    resizeTerminal: (sessionId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
-
     // Git merge operations
     mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
     mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -349,8 +343,6 @@ interface ElectronAPI {
     queueInput: (panelId: string, id: string, text: string) => Promise<IPCResponse<{ queued: boolean }>>;
     dequeueInput: (panelId: string, id: string) => Promise<IPCResponse<{ dequeued: boolean }>>;
     stop: (panelId: string) => Promise<IPCResponse<void>>;
-    resizeTerminal: (panelId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
-    sendTerminalInput: (panelId: string, data: string) => Promise<IPCResponse<void>>;
   };
 
   // Claude Panels - specific API for Claude panels

@@ -620,18 +620,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
   });
 
-  sessionManager.on('zombie-processes-detected', (data) => {
-    console.error('[Main] Zombie processes detected:', data);
-    const mw = getMainWindow();
-    if (mw && !mw.isDestroyed()) {
-      try {
-        mw.webContents.send('zombie-processes-detected', data);
-      } catch (error) {
-        console.error('[Main] Failed to send zombie-processes-detected event:', error);
-      }
-    }
-  });
-
   sessionManager.on('session-output', (output) => {
     // Validate the output has valid session context
     const validation = validateEventContext(output);
@@ -1088,15 +1076,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       }
     } catch (summaryError) {
       console.error(`Failed to generate session summary for ${sessionId}:`, summaryError);
-    }
-  });
-
-  // Listen to terminal output events (independent terminal, not run scripts)
-  sessionManager.on('terminal-output', (output) => {
-    // Broadcast terminal output to renderer
-    const mw = getMainWindow();
-    if (mw) {
-      mw.webContents.send('terminal:output', output);
     }
   });
 

@@ -2,11 +2,11 @@
  * B6 — SessionManager.archiveSession teardown slice + addPanelOutput branches.
  *
  * archiveSession is the session-deletion chokepoint: it validates existence,
- * unregisters Claude panels, closes the terminal, drops the in-memory session, and
- * emits `session-deleted`. The contract under test:
- *   - a not-found id throws BEFORE any side effect (no terminal close, no emit);
- *   - a FAILURE in the Claude-panel teardown block is swallowed so terminal-close
- *     + activeSessions delete + `session-deleted` emit still run (fail-soft);
+ * unregisters Claude panels, drops the in-memory session, and emits
+ * `session-deleted`. The contract under test:
+ *   - a not-found id throws BEFORE any side effect (no panel teardown, no emit);
+ *   - a FAILURE in the Claude-panel teardown block is swallowed so the
+ *     activeSessions delete + `session-deleted` emit still run (fail-soft);
  *   - the `session-deleted` payload is `{ id }`.
  *
  * NOTE: archiveSession reaches the Claude-panel unregister via a dynamic
@@ -17,17 +17,15 @@
  * does not abort the rest of teardown.
  *
  *
- * Mocks mirror sessionManager.mainRepoPermission.test.ts, extended with the
- * terminalSessionManager seam archiveSession constructs.
+ * Mocks mirror sessionManager.mainRepoPermission.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ------------------------------------------------------------------
 // Hoisted spies (referenced inside vi.mock factories).
 // ------------------------------------------------------------------
-const { getPanelsForSessionMock, closeTerminalSessionMock } = vi.hoisted(() => ({
+const { getPanelsForSessionMock } = vi.hoisted(() => ({
   getPanelsForSessionMock: vi.fn(),
-  closeTerminalSessionMock: vi.fn(),
 }));
 
 vi.mock('../panelManager', () => ({
@@ -37,25 +35,9 @@ vi.mock('../panelManager', () => ({
   },
 }));
 
-vi.mock('../terminalSessionManager', () => ({
-  TerminalSessionManager: class {
-    on = vi.fn();
-    closeTerminalSession = closeTerminalSessionMock;
-  },
-}));
-
 vi.mock('../../ipc/logs', () => ({
   addSessionLog: vi.fn(),
   cleanupSessionLogs: vi.fn(),
-}));
-
-vi.mock('../scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    markClosing: vi.fn(),
-    isRunning: vi.fn().mockReturnValue(false),
-  },
 }));
 
 // ------------------------------------------------------------------
@@ -93,7 +75,6 @@ function makeManager(db: ReturnType<typeof makeDbMock>): SessionManager {
 beforeEach(() => {
   vi.clearAllMocks();
   getPanelsForSessionMock.mockReturnValue([]);
-  closeTerminalSessionMock.mockResolvedValue(undefined);
 });
 
 describe('SessionManager.archiveSession', () => {
@@ -107,11 +88,10 @@ describe('SessionManager.archiveSession', () => {
 
     // No teardown ran.
     expect(getPanelsForSessionMock).not.toHaveBeenCalled();
-    expect(closeTerminalSessionMock).not.toHaveBeenCalled();
     expect(deleted).not.toHaveBeenCalled();
   });
 
-  it('swallows a Claude-panel teardown failure and still closes the terminal, deletes, and emits', async () => {
+  it('swallows a Claude-panel teardown failure and still deletes and emits', async () => {
     // A session WITH a claude panel drives archiveSession into the panel-teardown
     // block, whose dynamic require('../ipc/claudePanel') throws under vitest (it
     // imports electron). The production inner try/catch must swallow it so the rest
@@ -125,7 +105,6 @@ describe('SessionManager.archiveSession', () => {
 
     await expect(mgr.archiveSession('sess-1')).resolves.toBeUndefined();
 
-    expect(closeTerminalSessionMock).toHaveBeenCalledWith('sess-1');
     expect((mgr as unknown as SessionManagerPrivate).activeSessions.has('sess-1')).toBe(false);
     expect(deleted).toHaveBeenCalledTimes(1);
   });

@@ -20,7 +20,15 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 103 handlers — down from 109 when Crystal's
+/** Frozen 2026-10-02 at 95 handlers — down from 103 when Crystal's
+ * pre-panel per-session terminal was deleted: `sessions:run-terminal-command`,
+ * `sessions:send-terminal-input`, `sessions:pre-create-terminal` and
+ * `sessions:resize-terminal` (`ipc/script.ts`, with TerminalSessionManager),
+ * plus the caller-less `panels:resize-terminal`, `panels:send-terminal-input`,
+ * `panels:getActive` and `terminal:saveState` (`ipc/panels.ts`); terminal
+ * panels use `terminal:input` / `terminal:resize`.
+ *
+ * Earlier 2026-10-02: 103 handlers — down from 109 when Crystal's
  * per-session Run button chain was deleted from `ipc/script.ts`:
  * `sessions:has-run-script`, `sessions:get-running-session`,
  * `sessions:run-script`, `sessions:stop-script` (only the unrendered
@@ -95,10 +103,10 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/ideaAttachments.ts': 2,
   'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
-  'ipc/panels.ts': 15,
+  'ipc/panels.ts': 11,
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
-  'ipc/script.ts': 6,
+  'ipc/script.ts': 2,
   'ipc/session.ts': 20,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,

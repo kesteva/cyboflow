@@ -452,7 +452,7 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   graceMode?: 'poll' | 'fixed';
   /**
    * POSIX process-group resolution (win32 ignores this — no groups there):
-   *  - 'lookup' (default, terminalSessionManager's shape): after the SIGTERM,
+   *  - 'lookup' (default): after the SIGTERM,
    *    one `ps -o pgid=` lookup replaces the root-pid stand-in with the real
    *    pgid when it responds.
    *  - 'root' (AbstractCliManager / sessionManager): no lookup — the pty/spawned
@@ -498,8 +498,8 @@ function defaultIsPidAlive(pid: number): boolean {
  * ladder, false when survivors remain (after {@link KillTreeOptions.onSurvivors}
  * ran) or the ladder threw. The inline steps below own the detail; the shape:
  *
- * win32 — the taskkill ladder shared by runCommandManager,
- * AbstractCliManager and terminalSessionManager: graceful `/T`, the grace
+ * win32 — the taskkill ladder shared by runCommandManager and
+ * AbstractCliManager: graceful `/T`, the grace
  * window, `/T /F`, per-descendant `/F`, then a verification pass with a
  * survivors re-kill.
  *

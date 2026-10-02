@@ -5,7 +5,6 @@ import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { parseTimestamp } from '../utils/timestampUtils';
-import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
@@ -64,25 +63,11 @@ function parseStringArrayColumn(raw: string | undefined | null): string[] | unde
 export class SessionManager extends EventEmitter {
   private activeSessions: Map<string, Session> = new Map();
   private activeProject: Project | null = null;
-  private terminalSessionManager: TerminalSessionManager;
 
   constructor(public db: DatabaseService) {
     super();
     // Increase max listeners to prevent warnings when many components listen to events
     this.setMaxListeners(100);
-    this.terminalSessionManager = new TerminalSessionManager();
-    
-    // Forward terminal output events to the terminal display
-    this.terminalSessionManager.on('terminal-output', ({ sessionId, data, type }) => {
-      // Terminal PTY output goes directly to the terminal view
-      // Terminal is now independent and not used for run scripts
-      this.emit('terminal-output', { sessionId, data, type });
-    });
-    
-    // Forward zombie process detection events
-    this.terminalSessionManager.on('zombie-processes-detected', (data) => {
-      this.emit('zombie-processes-detected', data);
-    });
   }
 
   setActiveProject(project: Project): void {
@@ -682,9 +667,6 @@ export class SessionManager extends EventEmitter {
       console.error(`[SessionManager] Error stopping AI panels for session ${id}:`, error);
     }
 
-    // Close terminal session if it exists
-    await this.terminalSessionManager.closeTerminalSession(id);
-    
     this.activeSessions.delete(id);
     this.emit('session-deleted', { id }); // Keep the same event name for frontend compatibility
   }
@@ -1029,142 +1011,5 @@ export class SessionManager extends EventEmitter {
         PATH: shellPath
       }
     });
-  }
-
-  addScriptOutput(sessionId: string, data: string, type: 'stdout' | 'stderr' = 'stdout'): void {
-    // Send output to logs instead of terminal
-    const lines = data.split('\n').filter(line => line.trim());
-    lines.forEach(line => {
-      const level = type === 'stderr' ? 'error' : 'info';
-      addSessionLog(sessionId, level, line, 'Terminal');
-    });
-  }
-
-  async cleanup(): Promise<void> {
-    await this.terminalSessionManager.cleanup();
-  }
-
-  async runTerminalCommand(sessionId: string, command: string): Promise<void> {
-    // Add log entry for terminal command
-    addSessionLog(sessionId, 'info', `Running terminal command: ${command}`, 'Terminal');
-    
-    const session = this.activeSessions.get(sessionId);
-    if (!session) {
-      // Check if session exists in database and is archived
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession) {
-        throw new Error('Session not found');
-      }
-      if (dbSession.archived) {
-        throw new Error('Cannot access terminal for archived session');
-      }
-      throw new Error('Session not found');
-    }
-
-    const worktreePath = session.worktreePath;
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-        // Give the terminal a moment to initialize
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      // Send the command to the persistent terminal session
-      this.terminalSessionManager.sendCommand(sessionId, command);
-    } catch (error) {
-      // Don't write error to terminal for archived sessions
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (!errorMessage.includes('archived session')) {
-        this.addScriptOutput(sessionId, `\nError: ${error}\n`, 'stderr');
-      }
-      throw error;
-    }
-  }
-
-  async sendTerminalInput(sessionId: string, data: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
-    let worktreePath: string;
-    
-    if (!session) {
-      // Try to get session from database for terminal-only sessions
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession || !dbSession.worktree_path) {
-        throw new Error('Session not found');
-      }
-      
-      // Check if session is archived
-      if (dbSession.archived) {
-        throw new Error('Cannot access terminal for archived session');
-      }
-      
-      worktreePath = dbSession.worktree_path;
-    } else {
-      worktreePath = session.worktreePath;
-    }
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-        // Give the terminal a moment to initialize
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      // Send the raw input to the persistent terminal session
-      this.terminalSessionManager.sendInput(sessionId, data);
-    } catch (error) {
-      // Don't write error to terminal for archived sessions
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (!errorMessage.includes('archived session')) {
-        this.addScriptOutput(sessionId, `\nError: ${error}\n`, 'stderr');
-      }
-      throw error;
-    }
-  }
-
-  async closeTerminalSession(sessionId: string): Promise<void> {
-    await this.terminalSessionManager.closeTerminalSession(sessionId);
-  }
-
-  hasTerminalSession(sessionId: string): boolean {
-    return this.terminalSessionManager.hasSession(sessionId);
-  }
-
-  resizeTerminal(sessionId: string, cols: number, rows: number): void {
-    this.terminalSessionManager.resizeTerminal(sessionId, cols, rows);
-  }
-
-  async preCreateTerminalSession(sessionId: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
-    let worktreePath: string;
-    
-    if (!session) {
-      // Try to get session from database for terminal-only sessions
-      const dbSession = this.db.getSession(sessionId);
-      if (!dbSession || !dbSession.worktree_path) {
-        throw new Error('Session not found');
-      }
-      
-      // Check if session is archived
-      if (dbSession.archived) {
-        throw new Error('Cannot create terminal for archived session');
-      }
-      
-      worktreePath = dbSession.worktree_path;
-    } else {
-      worktreePath = session.worktreePath;
-    }
-
-    try {
-      // Create terminal session if it doesn't exist
-      if (!this.terminalSessionManager.hasSession(sessionId)) {
-        await this.terminalSessionManager.createTerminalSession(sessionId, worktreePath);
-      }
-    } catch (error) {
-      console.error(`[SessionManager] Failed to pre-create terminal session: ${error}`);
-      // Don't throw - this is a best-effort optimization
-    }
   }
 }

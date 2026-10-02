@@ -403,7 +403,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       
       // Get all sessions for this project (including archived) to clean up worktrees
       const allProjectSessions = databaseService.getAllSessionsIncludingArchived().filter(s => s.project_id === projectIdNum);
-      const projectSessions = databaseService.getAllSessions(projectIdNum);
       
       console.log(`[Main] Deleting project ${project.name} with ${allProjectSessions.length} total sessions`);
       
@@ -412,14 +411,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       if (runningScript?.type === 'project' && runningScript.id === projectIdNum) {
         console.log(`[Main] Stopping running script for project ${projectIdNum} before deleting it`);
         await stopProjectScriptInternal(projectIdNum);
-      }
-      
-      // Close all terminal sessions for this project
-      for (const session of projectSessions) {
-        if (sessionManager.hasTerminalSession(session.id)) {
-          console.log(`[Main] Closing terminal session ${session.id} before deleting project`);
-          await sessionManager.closeTerminalSession(session.id);
-        }
       }
       
       // Clean up all worktrees for this project (including archived sessions)

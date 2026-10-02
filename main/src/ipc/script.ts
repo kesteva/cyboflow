@@ -5,58 +5,6 @@ import { logsManager } from '../services/panels/logPanel/logsManager';
 import { ExecException } from 'child_process';
 
 export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: AppServices): void {
-  ipcMain.handle('sessions:run-terminal-command', async (_event, sessionId: string, command: string) => {
-    try {
-      await sessionManager.runTerminalCommand(sessionId, command);
-      return { success: true };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to run terminal command';
-      
-      // Don't log error for archived sessions - this is expected
-      if (!errorMessage.includes('archived session')) {
-        console.error('Failed to run terminal command:', error);
-      }
-      
-      return { success: false, error: errorMessage };
-    }
-  });
-
-  ipcMain.handle('sessions:send-terminal-input', async (_event, sessionId: string, data: string) => {
-    try {
-      await sessionManager.sendTerminalInput(sessionId, data);
-      return { success: true };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to send terminal input';
-      
-      // Don't log error for archived sessions - this is expected
-      if (!errorMessage.includes('archived session')) {
-        console.error('Failed to send terminal input:', error);
-      }
-      
-      return { success: false, error: errorMessage };
-    }
-  });
-
-  ipcMain.handle('sessions:pre-create-terminal', async (_event, sessionId: string) => {
-    try {
-      await sessionManager.preCreateTerminalSession(sessionId);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to pre-create terminal session:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to pre-create terminal session' };
-    }
-  });
-
-  ipcMain.handle('sessions:resize-terminal', async (_event, sessionId: string, cols: number, rows: number) => {
-    try {
-      sessionManager.resizeTerminal(sessionId, cols, rows);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to resize terminal:', error);
-      return { success: false, error: 'Failed to resize terminal' };
-    }
-  });
-
   ipcMain.handle('sessions:open-ide', async (_event, sessionId: string) => {
     try {
       const session = await sessionManager.getSession(sessionId);

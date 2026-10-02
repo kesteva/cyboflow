@@ -39,7 +39,6 @@ const { mockPanelManager, mockTerminalPanelManager } = vi.hoisted(() => {
     resizeTerminal: vi.fn(),
     writeToTerminal: vi.fn(),
     getTerminalState: vi.fn(),
-    saveTerminalState: vi.fn(),
   };
 
   return { mockPanelManager, mockTerminalPanelManager };
@@ -64,7 +63,7 @@ vi.mock('../../services/terminalPanelManager', () => ({
 }));
 
 vi.mock('../../services/database', () => ({
-  databaseService: { getActivePanel: vi.fn() },
+  databaseService: {},
 }));
 
 // Import registerPanelHandlers AFTER mocks are in place.

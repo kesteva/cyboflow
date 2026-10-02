@@ -95,8 +95,6 @@ function makeServices(opts: {
       deleteProject,
     },
     sessionManager: {
-      hasTerminalSession: vi.fn(() => false),
-      closeTerminalSession: vi.fn(async () => {}),
       getAllSessions: vi.fn(async () => []),
     },
     worktreeManager: { removeWorktree, deleteBranch },

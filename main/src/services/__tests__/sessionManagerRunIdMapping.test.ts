@@ -34,15 +34,6 @@ vi.mock('../../ipc/logs', () => ({
   cleanupSessionLogs: vi.fn(),
 }));
 
-vi.mock('../scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    markClosing: vi.fn(),
-    isRunning: vi.fn().mockReturnValue(false),
-  },
-}));
-
 // ------------------------------------------------------------------
 // Import SUT after mocks.
 // ------------------------------------------------------------------

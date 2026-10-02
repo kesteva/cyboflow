@@ -3445,17 +3445,6 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Pairwise judge worker stopped');
   }
 
-  // Cleanup all sessions and terminate child processes. Deliberately AFTER the
-  // queue drain above: cleanup() settles no run-executor task (it stops the
-  // project run script and the terminal-panel PTYs), so running it first buys
-  // the drain nothing and its per-pty exit grace polls eat the 10s quit ceiling
-  // in services/quitDrain.ts ahead of the database flush.
-  if (sessionManager) {
-    console.log('[Main] Cleaning up sessions and terminating child processes...');
-    await sessionManager.cleanup();
-    console.log('[Main] Session cleanup complete');
-  }
-
   // Stop all run commands
   if (runCommandManager) {
     console.log('[Main] Stopping all run commands...');

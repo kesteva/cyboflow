@@ -514,8 +514,8 @@ at launch; `raw_events` / `workflow_runs` / step transitions carry no substrate-
 flipping back to `'sdk'` preserves all prior interactive-run history unchanged — no migration, no
 data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 
-- **`terminalSessionManager.ts` / `terminalPanelManager.ts` / `runCommandManager.ts`** —
-  These three services are the remaining live users of `@homebridge/node-pty-prebuilt-multiarch`
+- **`terminalPanelManager.ts` / `runCommandManager.ts`** —
+  These two services are the remaining live users of `@homebridge/node-pty-prebuilt-multiarch`
   (terminal panel and script execution surfaces — unrelated to Claude).
 - **`simpleTaskQueue.ts`** — In-process concurrency queue (no Redis). Wraps `p-queue`.
   Used for session mutation serialization.
@@ -859,7 +859,7 @@ cross-package concern.
   execute the bundled binary outside the archive.
 - **@homebridge/node-pty-prebuilt-multiarch 0.12.0** — PTY sessions. Pre-built binaries;
   rebuilt for Electron ABI by `electron-builder install-app-deps` postinstall. Used today
-  only by `terminalSessionManager`, `terminalPanelManager`, and `runCommandManager` —
+  only by `terminalPanelManager` and `runCommandManager` —
   **not** by Claude.
 - **@modelcontextprotocol/sdk 1.29.0** — For the cyboflow MCP server (runs as a stdio
   subprocess; entry point asar-unpacked, see below).

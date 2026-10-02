@@ -1,10 +1,10 @@
 /**
  * Shared host-process-table parsing and walking helpers — one parser and one
  * walker for the reapers (codexBrokerReaper, vitestOrphanReaper) and the kill
- * ladders (terminalSessionManager, sessionManager, runCommandManager,
- * logsManager) rather than one per caller. Matching is plain JS over parsed
- * rows rather than `pkill -f <regex>`: the paths involved carry regex
- * metacharacters, and a mis-escaped kill pattern is not a risk worth taking.
+ * ladders in utils/platformProcess.ts rather than one per caller. Matching is
+ * plain JS over parsed rows rather than `pkill -f <regex>`: the paths involved
+ * carry regex metacharacters, and a mis-escaped kill pattern is not a risk
+ * worth taking.
  *
  * Deliberately platform-BLIND: only text shapes are parsed and walked here.
  * The platform choice (which subprocess produces the lines, how trees die)

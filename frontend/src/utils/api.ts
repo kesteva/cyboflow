@@ -236,27 +236,6 @@ export class API {
       return window.electronAPI.sessions.getOrCreateMainRepoSession(projectId);
     },
 
-    // Terminal operations
-    async runTerminalCommand(sessionId: string, command: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.runTerminalCommand(sessionId, command);
-    },
-
-    async sendTerminalInput(sessionId: string, data: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.sendTerminalInput(sessionId, data);
-    },
-
-    async preCreateTerminal(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.preCreateTerminal(sessionId);
-    },
-
-    async resizeTerminal(sessionId: string, cols: number, rows: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.resizeTerminal(sessionId, cols, rows);
-    },
-
     // Git rebase operations
     async rebaseMainIntoWorktree(sessionId: string) {
       return trpc.cyboflow.sessionGit.rebaseMainIntoWorktree.mutate({ sessionId });

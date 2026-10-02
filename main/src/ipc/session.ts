@@ -2701,7 +2701,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             return { success: false, error: disabled ?? 'Failed to send input to Claude panel' };
           }
         case 'terminal':
-          // Terminal panels don't have input handlers - they use runTerminalCommand
+          // Terminal panels take raw PTY input over terminal:input instead
           return { success: false, error: 'Terminal panels use different input methods' };
         default:
           return { success: false, error: `Unsupported panel type: ${panel.type}` };

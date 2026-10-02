@@ -6,8 +6,7 @@
  * is PowerShell, where `export` does not exist and `&&` is a parse error on
  * the PS 5.1 every Windows host ships — the POSIX-shaped strings runCommandManager
  * and sessionManager used to build NEVER executed there. The `platform`
- * parameter is injectable (the TerminalSessionManagerOptions.platform template)
- * so both dialects are pinned deterministically on any host.
+ * parameter is injectable so both dialects are pinned deterministically on any host.
  */
 import { describe, it, expect } from 'vitest';
 import { ShellDetector } from '../shellDetector';
