@@ -120,16 +120,6 @@ export function useIPCEvents() {
       };
       
       updateSession(sessionWithArrays);
-      
-      // Force a re-render if this is the active session and status changed to stopped
-      const state = useSessionStore.getState();
-      if (state.activeSessionId === session.id && 
-          (session.status === 'stopped' || session.status === 'completed_unviewed' || session.status === 'error')) {
-        // Emit a custom event to trigger UI updates
-        window.dispatchEvent(new CustomEvent('session-status-changed', { 
-          detail: { sessionId: session.id, status: session.status } 
-        }));
-      }
     });
     unsubscribeFunctions.push(unsubscribeSessionUpdated);
 
@@ -137,12 +127,7 @@ export function useIPCEvents() {
       console.log('[useIPCEvents] Session deleted:', sessionData);
       // The backend sends just { id } for deleted sessions
       const sessionId = typeof sessionData === 'string' ? sessionData : sessionData.id || sessionData.sessionId;
-      
-      // Dispatch a custom event for other components to listen to
-      window.dispatchEvent(new CustomEvent('session-deleted', {
-        detail: { id: sessionId }
-      }));
-      
+
       // Create a minimal session object for deletion
       deleteSession({ id: sessionId } as Session);
     });

@@ -101,41 +101,14 @@ describe('onSessionUpdated', () => {
     // Unchanged — the invalid payload short-circuited.
     expect(useSessionStore.getState().sessions[0].status).toBe('ready');
   });
-
-  it('dispatches session-status-changed when the ACTIVE session goes to stopped', () => {
-    const events = collectEvents('session-status-changed');
-    useSessionStore.setState({ sessions: [makeSession('s1')], activeSessionId: 's1' });
-    renderHook(() => useIPCEvents());
-    fire('onSessionUpdated', makeSession('s1', { status: 'stopped' }));
-    expect(events).toHaveLength(1);
-    expect(events[0].detail).toEqual({ sessionId: 's1', status: 'stopped' });
-  });
-
-  it('does NOT dispatch when the updated session is not the active one', () => {
-    const events = collectEvents('session-status-changed');
-    useSessionStore.setState({ sessions: [makeSession('s1'), makeSession('s2')], activeSessionId: 's1' });
-    renderHook(() => useIPCEvents());
-    fire('onSessionUpdated', makeSession('s2', { status: 'stopped' }));
-    expect(events).toHaveLength(0);
-  });
-
-  it('does NOT dispatch for a non-terminal status on the active session', () => {
-    const events = collectEvents('session-status-changed');
-    useSessionStore.setState({ sessions: [makeSession('s1')], activeSessionId: 's1' });
-    renderHook(() => useIPCEvents());
-    fire('onSessionUpdated', makeSession('s1', { status: 'running' }));
-    expect(events).toHaveLength(0);
-  });
 });
 
 describe('onSessionDeleted — payload shapes', () => {
   it('accepts a bare string id', () => {
-    const events = collectEvents('session-deleted');
     useSessionStore.setState({ sessions: [makeSession('s1')] });
     renderHook(() => useIPCEvents());
     fire('onSessionDeleted', 's1');
     expect(useSessionStore.getState().sessions.some((s) => s.id === 's1')).toBe(false);
-    expect(events[0].detail).toEqual({ id: 's1' });
   });
 
   it('accepts an { id } object', () => {
@@ -146,11 +119,9 @@ describe('onSessionDeleted — payload shapes', () => {
   });
 
   it('accepts a { sessionId } object (falls back to sessionId when no id)', () => {
-    const events = collectEvents('session-deleted');
     useSessionStore.setState({ sessions: [makeSession('s1')] });
     renderHook(() => useIPCEvents());
     fire('onSessionDeleted', { sessionId: 's1' });
-    expect(events[events.length - 1].detail).toEqual({ id: 's1' });
     expect(useSessionStore.getState().sessions.some((s) => s.id === 's1')).toBe(false);
   });
 });
