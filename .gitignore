@@ -102,7 +102,6 @@ release/
 *.db-journal
 
 # Database files
-main/crystal.db
 main/*.db
 
 # Test results and reports
@@ -118,9 +117,6 @@ test-file.txt
 
 # Pre-rewrite backups
 *.backup
-
-# Crystal user data directory (if accidentally placed in repo)
-.crystal/
 
 # Generated TypeScript files
 frontend/vite.config.d.ts
