@@ -20,7 +20,14 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 109 handlers — down from 110 when
+/** Frozen 2026-10-02 at 103 handlers — down from 109 when Crystal's
+ * per-session Run button chain was deleted from `ipc/script.ts`:
+ * `sessions:has-run-script`, `sessions:get-running-session`,
+ * `sessions:run-script`, `sessions:stop-script` (only the unrendered
+ * SessionListItem called them; run scripts are project-level now) and the
+ * caller-less `logs:runScript` / `logs:isRunning`.
+ *
+ * Earlier 2026-10-02: 109 handlers — down from 110 when
  * `panels:get-output` (`ipc/session.ts`) was deleted: its only caller was
  * useClaudePanel's Crystal output-load, whose one consumer (the slash-command
  * list) now reads the projected transcript instead.
@@ -91,7 +98,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/panels.ts': 15,
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
-  'ipc/script.ts': 12,
+  'ipc/script.ts': 6,
   'ipc/session.ts': 20,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,

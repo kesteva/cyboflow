@@ -1,7 +1,5 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess } from 'child_process';
-import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
@@ -11,9 +9,7 @@ import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
-import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
-import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -44,7 +40,7 @@ interface PanelStateWithCustomData extends ToolPanelState {
   customState?: Record<string, unknown>;
   [key: string]: unknown;
 }
-import { addSessionLog, cleanupSessionLogs } from '../ipc/logs';
+import { addSessionLog } from '../ipc/logs';
 import { withLock } from '../utils/mutex';
 import { panelManager } from './panelManager';
 
@@ -67,8 +63,6 @@ function parseStringArrayColumn(raw: string | undefined | null): string[] | unde
 
 export class SessionManager extends EventEmitter {
   private activeSessions: Map<string, Session> = new Map();
-  private runningScriptProcess: ChildProcess | null = null;
-  private currentRunningSessionId: string | null = null;
   private activeProject: Project | null = null;
   private terminalSessionManager: TerminalSessionManager;
 
@@ -124,19 +118,6 @@ export class SessionManager extends EventEmitter {
       const panelState = panel?.state?.customState as BaseAIPanelState | undefined;
       const claudeSessionId = panelState?.agentSessionId || panelState?.claudeSessionId;
       return claudeSessionId;
-    } catch (e) {
-      return undefined;
-    }
-  }
-
-  // Generic method for getting agent session ID (works for any AI panel)
-  getPanelAgentSessionId(panelId: string): string | undefined {
-    try {
-      const panel = this.db.getPanel(panelId);
-      const customState = panel?.state?.customState as BaseAIPanelState | undefined;
-      // Check new field first, then fall back to legacy claudeSessionId
-      const agentSessionId = customState?.agentSessionId || customState?.claudeSessionId;
-      return agentSessionId;
     } catch (e) {
       return undefined;
     }
@@ -199,7 +180,6 @@ export class SessionManager extends EventEmitter {
       output: [], // Will be loaded separately by frontend when needed
       jsonMessages: [], // Will be loaded separately by frontend when needed
       error: dbSession.exit_code && dbSession.exit_code !== 0 ? `Exit code: ${dbSession.exit_code}` : undefined,
-      isRunning: false,
       lastViewedAt: dbSession.last_viewed_at,
       permissionMode: dbSession.permission_mode,
       runStartedAt: dbSession.run_started_at,
@@ -713,14 +693,6 @@ export class SessionManager extends EventEmitter {
     this.updateSession(id, { status: 'stopped' });
   }
 
-  setSessionPid(id: string, pid: number): void {
-    this.db.updateSession(id, { pid });
-    const session = this.activeSessions.get(id);
-    if (session) {
-      session.pid = pid;
-    }
-  }
-
   setSessionExitCode(id: string, exitCode: number): void {
     this.db.updateSession(id, { exit_code: exitCode });
   }
@@ -926,11 +898,6 @@ export class SessionManager extends EventEmitter {
     return this.db.getPanelPromptMarkers(panelId);
   }
 
-  addPanelInitialPromptMarker(panelId: string, prompt: string): void {
-    // Prompt markers are no longer needed for panels - using conversation_messages instead
-    // The prompt is already being added to conversation_messages in addPanelConversationMessage
-  }
-
   markSessionAsViewed(id: string): void {
     const updatedDbSession = this.db.markSessionAsViewed(id);
     if (updatedDbSession) {
@@ -969,115 +936,6 @@ export class SessionManager extends EventEmitter {
 
   getNextExecutionSequence(sessionId: string): number {
     return this.db.getNextExecutionSequence(sessionId);
-  }
-
-  getProjectRunScript(sessionId: string): string[] | null {
-    const dbSession = this.getDbSession(sessionId);
-    if (dbSession?.project_id) {
-      const project = this.getProjectById(dbSession.project_id);
-      if (project?.run_script) {
-        // Split by newlines to get array of commands
-        return project.run_script.split('\n').filter(cmd => cmd.trim());
-      }
-    }
-    return null;
-  }
-
-  getProjectBuildScript(sessionId: string): string[] | null {
-    const dbSession = this.getDbSession(sessionId);
-    if (dbSession?.project_id) {
-      const project = this.getProjectById(dbSession.project_id);
-      if (project?.build_script) {
-        // Split by newlines to get array of commands
-        return project.build_script.split('\n').filter(cmd => cmd.trim());
-      }
-    }
-    return null;
-  }
-
-  async runScript(sessionId: string, commands: string[], workingDirectory: string): Promise<void> {
-    // Stop any currently running script and wait for it to fully terminate
-    await this.stopRunningScript();
-
-    // Clear previous logs when starting a new run
-    cleanupSessionLogs(sessionId);
-
-    // Mark session as running
-    this.setSessionRunning(sessionId, true);
-    this.currentRunningSessionId = sessionId;
-
-    // Track in shared script execution tracker
-    scriptExecutionTracker.start('session', sessionId);
-    
-    // Join commands to run them sequentially, in the dialect of the shell
-    // getShellCommandArgs routes to (POSIX `a && b`; PowerShell cannot parse
-    // `&&` on PS 5.1, so the win32 form differs — see buildCommandString).
-    const command = ShellDetector.buildCommandString({}, commands);
-    
-    // Get enhanced shell PATH
-    const shellPath = getShellPath();
-    
-    // Get the user's default shell and command arguments
-    const { shell, args } = ShellDetector.getShellCommandArgs(command);
-    
-    // POSIX: a process group of its own, so the stop ladder can signal the
-    // whole tree. Windows has no process groups, and DETACHED_PROCESS overrides
-    // CREATE_NO_WINDOW there, so a console child would allocate a visible
-    // console; the stop path uses taskkill /T on the pid instead.
-    this.runningScriptProcess = spawn(shell, args, {
-      cwd: workingDirectory,
-      stdio: 'pipe',
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PATH: shellPath
-      }
-    });
-
-    // Handle output - send to logs instead of terminal
-    this.runningScriptProcess.stdout?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      // Split by lines and add each as a log entry
-      const lines = output.split('\n').filter(line => line.trim());
-      lines.forEach(line => {
-        addSessionLog(sessionId, 'info', line, 'Application');
-      });
-      // Log output is now handled via addSessionLog above
-    });
-
-    this.runningScriptProcess.stderr?.on('data', (data: Buffer) => {
-      const output = data.toString();
-      // Split by lines and add each as a log entry
-      const lines = output.split('\n').filter(line => line.trim());
-      lines.forEach(line => {
-        addSessionLog(sessionId, 'error', line, 'Application');
-      });
-      // Log output is now handled via addSessionLog above
-    });
-
-    // Handle process exit
-    this.runningScriptProcess.on('exit', (code) => {
-      addSessionLog(sessionId, 'info', `Process exited with code: ${code}`, 'Application');
-
-      this.setSessionRunning(sessionId, false);
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      // Update shared tracker
-      scriptExecutionTracker.stop('session', sessionId);
-    });
-
-    this.runningScriptProcess.on('error', (error) => {
-      addSessionLog(sessionId, 'error', `Error: ${error.message}`, 'Application');
-
-      this.setSessionRunning(sessionId, false);
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      // Update shared tracker
-      scriptExecutionTracker.stop('session', sessionId);
-    });
   }
 
   async runBuildScript(sessionId: string, commands: string[], workingDirectory: string): Promise<{ success: boolean; output: string }> {
@@ -1182,135 +1040,7 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  /**
-   * Every descendant of `parentPid`. The per-platform enumeration lives in
-   * utils/platformProcess.ts; a failed walk degrades to a partial list.
-   */
-  private getAllDescendantPids(parentPid: number): Promise<number[]> {
-    return collectDescendantPidsAsync(parentPid);
-  }
-
-  /**
-   * Stop the running script and everything it spawned. The ladder is in
-   * {@link terminateScriptTree}; this method owns the bookkeeping around it.
-   */
-  stopRunningScript(): Promise<void> {
-    const isWin32 = process.platform === 'win32';
-    return new Promise((resolve) => {
-      if (!this.runningScriptProcess || !this.currentRunningSessionId) {
-        resolve();
-        return;
-      }
-
-      const sessionId = this.currentRunningSessionId;
-      const scriptProcess = this.runningScriptProcess;
-
-      // Mark as closing in shared tracker
-      scriptExecutionTracker.markClosing('session', sessionId);
-
-      // Immediately clear references to prevent new output
-      this.currentRunningSessionId = null;
-      this.runningScriptProcess = null;
-
-      const pid = scriptProcess.pid;
-      if (!pid) {
-        // No process PID
-        this.finishStopScript(sessionId);
-        resolve();
-        return;
-      }
-
-      // Fail-soft by contract: a failed enumeration or session log must not
-      // reject the stop promise — finish the stop either way.
-      void this.terminateScriptTree(sessionId, pid, isWin32).finally(() => {
-        this.finishStopScript(sessionId);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Run the stop ladder for one script tree, reporting through the session log.
-   * Both platform ladders live in utils/platformProcess.ts (killTree); this
-   * site picks the timings and the wording. Never throws.
-   */
-  private async terminateScriptTree(sessionId: string, pid: number, isWin32: boolean): Promise<void> {
-    try {
-      // Enumerated up front, so children orphaned mid-ladder are still reached.
-      const descendantPids = await this.getAllDescendantPids(pid);
-
-      addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
-      addSessionLog(
-        sessionId,
-        'info',
-        isWin32
-          ? `[Forcefully terminating process ${pid} and its tree (taskkill)]`
-          : `[Sending SIGTERM to process ${pid} and its group]`,
-        'System'
-      );
-
-      const stopped = await killTree(pid, {
-        descendantPids,
-        // The ladder's own progress, in the bracketed form the session log
-        // uses. These lines are what the user watches while a stop runs.
-        logger: {
-          info: (message) => addSessionLog(sessionId, 'info', `[${message}]`, 'System'),
-          warn: (message) => addSessionLog(sessionId, 'warn', `[${message}]`, 'System'),
-        },
-        graceMode: 'fixed',
-        // Windows has no catchable signals, so there is nothing for a grace
-        // window to wait for — the ladder is taskkill either way.
-        graceMs: isWin32 ? 0 : 2000,
-        posixGroupMode: 'root',
-        listDescendants: () => this.getAllDescendantPids(pid),
-        onSurvivors: (remainingPids) => {
-          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-          addSessionLog(
-            sessionId,
-            'error',
-            isWin32
-              ? `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`
-              : `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`,
-            'System'
-          );
-        },
-        onError: (error) => console.warn('Error killing script process:', error),
-      });
-
-      if (stopped) {
-        addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-      }
-    } catch (error) {
-      console.warn('Error killing script process:', error);
-    }
-  }
-
-  private finishStopScript(sessionId: string): void {
-    // Update session state
-    this.setSessionRunning(sessionId, false);
-
-    // Update shared tracker
-    scriptExecutionTracker.stop('session', sessionId);
-
-    // Emit a final message to indicate the script was stopped
-    addSessionLog(sessionId, 'info', '\n[Script stopped by user]', 'System');
-  }
-
-  private setSessionRunning(sessionId: string, isRunning: boolean): void {
-    const session = this.activeSessions.get(sessionId);
-    if (session) {
-      session.isRunning = isRunning;
-      this.emit('session-updated', session);
-    }
-  }
-
-  getCurrentRunningSessionId(): string | null {
-    // Use shared tracker for consistency
-    return scriptExecutionTracker.getRunningScriptId('session') as string | null;
-  }
-
   async cleanup(): Promise<void> {
-    this.stopRunningScript();
     await this.terminalSessionManager.cleanup();
   }
 
@@ -1329,11 +1059,6 @@ export class SessionManager extends EventEmitter {
         throw new Error('Cannot access terminal for archived session');
       }
       throw new Error('Session not found');
-    }
-
-    // Don't allow running commands while a script is active
-    if (this.currentRunningSessionId === sessionId && this.runningScriptProcess) {
-      throw new Error('Cannot run terminal commands while a script is running');
     }
 
     const worktreePath = session.worktreePath;

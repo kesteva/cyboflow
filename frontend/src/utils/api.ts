@@ -236,27 +236,7 @@ export class API {
       return window.electronAPI.sessions.getOrCreateMainRepoSession(projectId);
     },
 
-    // Script operations
-    async hasRunScript(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.hasRunScript(sessionId);
-    },
-
-    async getRunningSession() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getRunningSession();
-    },
-
-    async runScript(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.runScript(sessionId);
-    },
-
-    async stopScript(sessionId?: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.stopScript(sessionId);
-    },
-
+    // Terminal operations
     async runTerminalCommand(sessionId: string, command: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.runTerminalCommand(sessionId, command);

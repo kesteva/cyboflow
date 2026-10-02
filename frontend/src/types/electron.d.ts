@@ -155,12 +155,7 @@ interface ElectronAPI {
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
-    // Script operations
-    // IPCDataResponse so callers can use response.data directly after success check
-    hasRunScript: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
-    getRunningSession: () => Promise<IPCResponse<string | null>>;
-    runScript: (sessionId: string) => Promise<IPCResponse<void>>;
-    stopScript: (sessionId?: string) => Promise<IPCResponse<void>>;
+    // Terminal operations
     runTerminalCommand: (sessionId: string, command: string) => Promise<IPCResponse<void>>;
     sendTerminalInput: (sessionId: string, data: string) => Promise<IPCResponse<void>>;
     preCreateTerminal: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -385,9 +380,7 @@ interface ElectronAPI {
 
   // Logs panel operations
   logs: {
-    runScript: (sessionId: string, command: string, cwd: string) => Promise<IPCResponse<void>>;
     stopScript: (panelId: string) => Promise<IPCResponse<void>>;
-    isRunning: (sessionId: string) => Promise<IPCResponse<boolean>>;
   };
 }
 

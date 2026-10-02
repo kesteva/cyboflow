@@ -104,23 +104,6 @@ try {
       console.error('Failed to dispatch project-script-closing to window:', e);
     }
   });
-
-  // Bridge session script events (for consistency)
-  ipcRenderer.on('script-session-changed', (_event, data) => {
-    try {
-      window.dispatchEvent(new CustomEvent('script-session-changed', { detail: data }));
-    } catch (e) {
-      console.error('Failed to dispatch script-session-changed to window:', e);
-    }
-  });
-
-  ipcRenderer.on('script-closing', (_event, data) => {
-    try {
-      window.dispatchEvent(new CustomEvent('script-closing', { detail: data }));
-    } catch (e) {
-      console.error('Failed to dispatch script-closing to window:', e);
-    }
-  });
 } catch (e) {
   // Ignore if IPC is not available for some reason
 }
@@ -323,11 +306,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-or-create-main-repo', projectId),
     
-    // Script operations
-    hasRunScript: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:has-run-script', sessionId),
-    getRunningSession: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-running-session'),
-    runScript: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:run-script', sessionId),
-    stopScript: (sessionId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop-script', sessionId),
+    // Terminal operations
     runTerminalCommand: (sessionId: string, command: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:run-terminal-command', sessionId, command),
     sendTerminalInput: (sessionId: string, data: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:send-terminal-input', sessionId, data),
     preCreateTerminal: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:pre-create-terminal', sessionId),
@@ -663,9 +642,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Logs panel operations
   logs: {
-    runScript: (sessionId: string, command: string, cwd: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:runScript', sessionId, command, cwd),
     stopScript: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:stopScript', panelId),
-    isRunning: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:isRunning', sessionId),
   },
 });
 

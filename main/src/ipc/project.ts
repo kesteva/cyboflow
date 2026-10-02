@@ -5,6 +5,7 @@ import type { Project } from '../database/models';
 import type { DatabaseService } from '../database/database';
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
+import { logsManager } from '../services/panels/logPanel/logsManager';
 import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import { makeLoggerLike } from '../orchestrator/loggerAdapter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
@@ -77,9 +78,6 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 
       // Mark as closing
       scriptExecutionTracker.markClosing('project', projectIdToStop);
-
-      const { panelManager } = require('../services/panelManager');
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
 
       const panels = await panelManager.getPanelsForSession(runningScript.sessionId);
       const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
@@ -409,16 +407,11 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       
       console.log(`[Main] Deleting project ${project.name} with ${allProjectSessions.length} total sessions`);
       
-      // Check if any session from this project has a running script
+      // Stop this project's run script (logs panel) before its rows go away
       const runningScript = scriptExecutionTracker.getRunningScript();
-      if (runningScript) {
-        const runningSession = projectSessions.find(s => s.id === runningScript.id);
-        if (runningSession && runningScript.type === 'session') {
-          console.log(`[Main] Stopping running script for session ${runningScript.id} before deleting project`);
-          await sessionManager.stopRunningScript();
-          // Ensure tracker is updated even if sessionManager's internal update fails
-          scriptExecutionTracker.stop('session', runningScript.id);
-        }
+      if (runningScript?.type === 'project' && runningScript.id === projectIdNum) {
+        console.log(`[Main] Stopping running script for project ${projectIdNum} before deleting it`);
+        await stopProjectScriptInternal(projectIdNum);
       }
       
       // Close all terminal sessions for this project
@@ -631,26 +624,9 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         // Mark the old script as closing
         scriptExecutionTracker.markClosing(runningScript.type, runningScript.id);
 
-        // Stop the script based on its type
-        if (runningScript.type === 'project') {
-          // Call internal stop function
-          const stopResult = await stopProjectScriptInternal(runningScript.id as number);
-          if (!stopResult?.success) {
-            console.warn('[Main] Failed to stop running project script, continuing anyway');
-          }
-        } else if (runningScript.type === 'session') {
-          // Stop session script through logs panel
-          const sessionIdToStop = runningScript.id as string;
-          const panels = await panelManager.getPanelsForSession(sessionIdToStop);
-          const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-          if (logsPanel) {
-            const { logsManager } = require('../services/panels/logPanel/logsManager');
-            await logsManager.stopScript(logsPanel.id);
-          }
-          // Also try old mechanism as fallback
-          await sessionManager.stopRunningScript();
-          // Mark as stopped in tracker
-          scriptExecutionTracker.stop('session', sessionIdToStop);
+        const stopResult = await stopProjectScriptInternal(runningScript.id as number);
+        if (!stopResult?.success) {
+          console.warn('[Main] Failed to stop running project script, continuing anyway');
         }
       }
 
@@ -663,7 +639,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       const sessionId = mainRepoSession.id;
 
       // Run the script in the project root using logsManager
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
       await logsManager.runScript(sessionId, project.run_script, project.path);
 
       // Track the running project

@@ -1,19 +1,19 @@
 /**
  * ScriptExecutionTracker - Centralized service for tracking script execution state
  *
- * This service manages the state of running scripts for both sessions and projects,
- * ensuring only one script can run at a time and providing a unified interface
- * for script state management.
+ * This service manages the state of the running project script (the sidebar's
+ * per-project Run button), ensuring only one script can run at a time and
+ * providing a unified interface for script state management.
  */
 
 import { EventEmitter } from 'events';
 import { mainWindow } from '../index';
 
-export type ScriptType = 'session' | 'project';
+export type ScriptType = 'project';
 
 export interface RunningScriptInfo {
   type: ScriptType;
-  id: string | number; // sessionId or projectId
+  id: string | number; // projectId
   sessionId?: string; // The actual session where the script is running
   startedAt: Date;
 }
@@ -111,11 +111,7 @@ export class ScriptExecutionTracker extends EventEmitter {
 
     // Emit closing event to notify frontend
     if (mainWindow) {
-      if (type === 'session') {
-        mainWindow.webContents.send('script-closing', id);
-      } else {
-        mainWindow.webContents.send('project-script-closing', { projectId: id });
-      }
+      mainWindow.webContents.send('project-script-closing', { projectId: id });
     }
 
     this.emit('script-closing', { type, id });
@@ -139,16 +135,11 @@ export class ScriptExecutionTracker extends EventEmitter {
   }
 
   /**
-   * Emit state change events to frontend based on type
+   * Emit the state change event to the frontend
    */
-  private emitStateChange(type: ScriptType, id: string | number | null): void {
+  private emitStateChange(_type: ScriptType, id: string | number | null): void {
     if (!mainWindow) return;
-
-    if (type === 'session') {
-      mainWindow.webContents.send('script-session-changed', id);
-    } else {
-      mainWindow.webContents.send('project-script-changed', { projectId: id });
-    }
+    mainWindow.webContents.send('project-script-changed', { projectId: id });
   }
 
   /**

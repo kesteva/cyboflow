@@ -2,152 +2,9 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { getShellPath, findExecutableInPath } from '../utils/shellPath';
 import { logsManager } from '../services/panels/logPanel/logsManager';
-import { panelManager } from '../services/panelManager';
 import { ExecException } from 'child_process';
-import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 
 export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: AppServices): void {
-  // Script execution handlers
-  ipcMain.handle('sessions:has-run-script', async (_event, sessionId: string) => {
-    try {
-      const runScript = sessionManager.getProjectRunScript(sessionId);
-      return { success: true, data: !!runScript };
-    } catch (error) {
-      console.error('Failed to check run script:', error);
-      return { success: false, error: 'Failed to check run script' };
-    }
-  });
-
-  ipcMain.handle('sessions:get-running-session', async () => {
-    try {
-      const runningSessionId = sessionManager.getCurrentRunningSessionId();
-      return { success: true, data: runningSessionId };
-    } catch (error) {
-      console.error('Failed to get running session:', error);
-      return { success: false, error: 'Failed to get running session' };
-    }
-  });
-
-  ipcMain.handle('sessions:run-script', async (_event, sessionId: string) => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      const commands = sessionManager.getProjectRunScript(sessionId);
-      if (!commands) {
-        return { success: false, error: 'No run script configured for this project' };
-      }
-
-      // Check if there's already a running script (any type) and stop it
-      const runningScript = scriptExecutionTracker.getRunningScript();
-      if (runningScript) {
-        console.log(`[Script] Stopping currently running ${runningScript.type} script for ${runningScript.type}:${runningScript.id} before starting new script for session ${sessionId}`);
-
-        // Mark the old script as closing
-        scriptExecutionTracker.markClosing(runningScript.type, runningScript.id);
-
-        // Stop the script based on its type
-        if (runningScript.type === 'session') {
-          console.log('[Script] Stopping session script via logs panel');
-          // Find and stop the logs panel for this session
-          const panels = await panelManager.getPanelsForSession(runningScript.id as string);
-          const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-          if (logsPanel) {
-            console.log('[Script] Found logs panel, stopping:', logsPanel.id);
-            await logsManager.stopScript(logsPanel.id);
-          } else {
-            console.log('[Script] No logs panel found, calling sessionManager.stopRunningScript');
-            await sessionManager.stopRunningScript();
-          }
-          // Ensure tracker is updated
-          scriptExecutionTracker.stop('session', runningScript.id);
-          console.log('[Script] Session script stopped and tracker updated');
-        } else if (runningScript.type === 'project') {
-          // Stop project script through logs panel
-          if (runningScript.sessionId) {
-            const panels = await panelManager.getPanelsForSession(runningScript.sessionId);
-            const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-            if (logsPanel) {
-              await logsManager.stopScript(logsPanel.id);
-            }
-          }
-          // Mark as stopped
-          scriptExecutionTracker.stop('project', runningScript.id);
-        }
-      }
-
-      console.log(`[Script] Starting new script for session ${sessionId}`);
-
-      // Use logs panel instead of old script running mechanism
-      const commandString = commands.join(' && ');
-      await logsManager.runScript(sessionId, commandString, session.worktreePath);
-
-      console.log(`[Script] Script started successfully for session ${sessionId}`);
-
-      // Track this session script as running
-      scriptExecutionTracker.start('session', sessionId);
-
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to run script:', error);
-
-      // Clear running state on error
-      scriptExecutionTracker.stop('session', sessionId);
-
-      return { success: false, error: 'Failed to run script' };
-    }
-  });
-
-  ipcMain.handle('sessions:stop-script', async (_event, sessionId?: string) => {
-    try {
-      // If sessionId provided, stop that session's logs panel
-      // Otherwise stop the old running script (for backward compatibility)
-      if (sessionId) {
-        const panels = await panelManager.getPanelsForSession(sessionId);
-        const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-        if (logsPanel) {
-          await logsManager.stopScript(logsPanel.id);
-        }
-      } else {
-        // Get running script info before stopping
-        const runningScript = scriptExecutionTracker.getRunningScript();
-
-        console.log('[Script] Stopping script (no sessionId provided), running script:', runningScript);
-
-        // If it's a session script, stop the logs panel process (critical!)
-        if (runningScript && runningScript.type === 'session') {
-          console.log('[Script] Finding logs panel for session:', runningScript.id);
-          const panels = await panelManager.getPanelsForSession(runningScript.id as string);
-          const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
-          if (logsPanel) {
-            console.log('[Script] Stopping logs panel:', logsPanel.id);
-            await logsManager.stopScript(logsPanel.id);
-            console.log('[Script] Logs panel stopped successfully');
-          } else {
-            console.log('[Script] No logs panel found for session');
-          }
-        }
-
-        // Also call old mechanism for backward compatibility
-        await sessionManager.stopRunningScript();
-
-        // Ensure tracker is updated even if sessionManager's internal update fails
-        if (runningScript && runningScript.type === 'session') {
-          console.log('[Script] Updating tracker to stopped state for session:', runningScript.id);
-          scriptExecutionTracker.stop('session', runningScript.id);
-        }
-
-        console.log('[Script] Stop script completed');
-      }
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to stop script:', error);
-      return { success: false, error: 'Failed to stop script' };
-    }
-  });
-
   ipcMain.handle('sessions:run-terminal-command', async (_event, sessionId: string, command: string) => {
     try {
       await sessionManager.runTerminalCommand(sessionId, command);
@@ -283,17 +140,7 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
     }
   });
 
-  // Logs panel specific handlers
-  ipcMain.handle('logs:runScript', async (_event, sessionId: string, command: string, cwd: string) => {
-    try {
-      await logsManager.runScript(sessionId, command, cwd);
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to run script in logs panel:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to run script' };
-    }
-  });
-
+  // Logs panel stop button
   ipcMain.handle('logs:stopScript', async (_event, panelId: string) => {
     try {
       await logsManager.stopScript(panelId);
@@ -301,16 +148,6 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
     } catch (error) {
       console.error('Failed to stop script in logs panel:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Failed to stop script' };
-    }
-  });
-
-  ipcMain.handle('logs:isRunning', async (_event, sessionId: string) => {
-    try {
-      const isRunning = await logsManager.isRunning(sessionId);
-      return { success: true, data: isRunning };
-    } catch (error) {
-      console.error('Failed to check if script is running:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to check script status' };
     }
   });
 } 

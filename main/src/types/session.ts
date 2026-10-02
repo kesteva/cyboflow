@@ -17,7 +17,6 @@ export interface Session {
   output: string[];
   jsonMessages: unknown[];
   error?: string;
-  isRunning?: boolean;
   lastViewedAt?: string;
   permissionMode?: 'approve' | 'ignore';
   runStartedAt?: string;
