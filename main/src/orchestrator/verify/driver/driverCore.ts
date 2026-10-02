@@ -158,7 +158,7 @@ export const ATTEST_HTTP_TIMEOUT_MS = 10_000;
 /** How long ONE peekaboo invocation (window listing / screen capture) may run. */
 export const PEEKABOO_TIMEOUT_MS = 30_000;
 
-/** The peekaboo binary used when `VERIFY_PEEKABOO_BIN` is unset (matches peekabooBackend's bare-`peekaboo`-on-PATH assumption). */
+/** The peekaboo binary used when `VERIFY_PEEKABOO_BIN` is unset (matches PeekabooGrantProbe's bare-`peekaboo`-on-PATH default). */
 export const DEFAULT_PEEKABOO_BIN = 'peekaboo';
 
 /**

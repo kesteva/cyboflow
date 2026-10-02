@@ -481,7 +481,7 @@ export class AgentEngine {
    *     runner's drive-unsupported coercion), so the question became a HOST
    *     question — can this machine capture the screen at all — and it is
    *     answered by the injected {@link VerificationSchedulerDeps.nativeCaptureProbe}
-   *     (§4: the retired `peekabooBackend.healthCheck()` both-grants probe).
+   *     (§4: `PeekabooGrantProbe.healthCheck()`, the both-grants probe).
    *     True ⇒ proceed; false ⇒ the same unsupported skip carrying the
    *     actionable grant-pair detail; ABSENT ⇒ the phase-0 answer unchanged
    *     (unprobed is not capable). A probe that throws is treated as false —

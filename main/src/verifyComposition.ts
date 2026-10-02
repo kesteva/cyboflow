@@ -72,7 +72,9 @@ import {
 import { composeMobileVerification } from './services/visualVerify/mobileComposition';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { resolvePeekabooExecutable } from './services/visualVerify/peekabooExecutablePath';
-import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
+import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
+import { PeekabooGrantProbe } from './services/visualVerify/peekabooGrantProbe';
+import { DEFAULT_VERIFY_CLAUDE_MODEL } from './orchestrator/verify/verifyDefaultModel';
 import { findNodeExecutable } from './utils/nodeFinder';
 import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
@@ -374,6 +376,13 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     logger: cyboflowLogger,
     executablePath: verifyPeekabooPath,
   });
+  // The native-screen grant probe — ONE instance shared by the scheduler's
+  // native-screen gate, the runner's preflight and the §6 health panel, so the
+  // three can never disagree about this host's screen capability.
+  const peekabooGrantProbe = new PeekabooGrantProbe({
+    logger: cyboflowLogger,
+    executablePath: verifyPeekabooPath,
+  });
   // S5 — the golden-baseline SSIM pre-diff resolver. When a request carries a
   // baselineKey, this closure resolves the accepted baseline PNG per captured
   // viewport (FsBaselineStore) and compares it (comparePngFiles → nativeImage decode,
@@ -515,9 +524,8 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // Alias→concrete Claude id, the SAME mechanism resolveStepAgent uses (bareModelId
     // at the agent default window; strips any [1m] suffix).
     resolveClaudeAlias: (alias) => bareModelId(alias, isModelUsable) ?? null,
-    // Validated Claude fallback for an unpinned agent on a non-Claude run — reuse the
-    // vision-judge default model source.
-    claudeDefaultModel: DEFAULT_JUDGE_MODEL,
+    // Validated Claude fallback for an unpinned agent on a non-Claude run.
+    claudeDefaultModel: DEFAULT_VERIFY_CLAUDE_MODEL,
     resolveNode: findNodeExecutable,
     driverCliPath: verifyDriverCliPath,
     // §3.5 pre-deploy preflight probes (verification-setup-flow.md). Chromium
@@ -531,7 +539,7 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // gate uses (§4) — wired here too so the runner's own §3.5 'native-capture'
     // preflight check actually runs on a native-screen deployment (the gate and
     // the preflight must agree on the same evidence source).
-    nativeCaptureProbe: () => peekabooBackend.healthCheck(),
+    nativeCaptureProbe: () => peekabooGrantProbe.healthCheck(),
     // §5.2 seam 3 — resolve the PINNED runbook revision by its content hash so
     // the runner can refuse to execute anything else. The store answers from
     // `portable_json` (stored verbatim for exactly this reason): the snapshot the
@@ -610,7 +618,7 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // fix rather than offering a button for a settings pane that does not exist.
     ...(process.platform === 'darwin'
       ? {
-          nativeGrants: () => peekabooBackend.probeGrants(),
+          nativeGrants: () => peekabooGrantProbe.probeGrants(),
           requestAccessibility: makeAccessibilityRequester({
             isTrustedAccessibilityClient: (prompt) =>
               systemPreferences.isTrustedAccessibilityClient(prompt),
@@ -688,7 +696,9 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
         // is the Claude SDK boundary. A run pinned to another provider gets the
         // Claude default rather than a deployment that cannot honor the contract.
         const model =
-          agent.model !== null ? bareModelId(agent.model, isModelUsable) ?? DEFAULT_JUDGE_MODEL : DEFAULT_JUDGE_MODEL;
+          agent.model !== null
+            ? bareModelId(agent.model, isModelUsable) ?? DEFAULT_VERIFY_CLAUDE_MODEL
+            : DEFAULT_VERIFY_CLAUDE_MODEL;
         // Authoring from scratch gets the longer budget; adopting a committed
         // runbook keeps the short one — the agent is told which so it can pace.
         const timeoutMs = runbookDraftTimeoutMs(request.adopt && request.existingRunbookRaw !== null);
@@ -891,14 +901,11 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // §A5 — "recipe learned" / "learned recipe promoted" / "suggested entry".
     runbookLearningFinding: createRunbookLearningFinding({ db: cyboflowDb, logger: cyboflowLogger }),
     // Phase 1 modality roster (§4): the live grant probe that decides whether a
-    // `native-screen` request may deploy at all. Reuses the capture backend's
-    // healthCheck verbatim, exactly as the proposal prescribes ("the retired
-    // peekabooBackend.healthCheck() (both-grants probe, never-throws) is reused
-    // as the live grant probe") — binary-on-PATH AND both macOS TCC grants, and
-    // it never throws, so the scheduler's gate gets a plain boolean. Bound to the
-    // SAME backend instance registered above, so the agent path and the legacy
-    // capture path can never disagree about this host's screen capability.
-    nativeCaptureProbe: () => peekabooBackend.healthCheck(),
+    // `native-screen` request may deploy at all: binary-on-PATH AND both macOS
+    // TCC grants, and it never throws, so the scheduler's gate gets a plain
+    // boolean. Bound to the SAME probe instance the runner's preflight and the
+    // health panel read, so they can never disagree about this host.
+    nativeCaptureProbe: () => peekabooGrantProbe.healthCheck(),
     // §8 gate 1 for the `mobile` modality — the SAME probe instance the runner's
     // preflight and the health panel read. The two layers keep OPPOSITE, correct
     // rules over it (§10): this gate fails CLOSED (an unanswerable toolchain must

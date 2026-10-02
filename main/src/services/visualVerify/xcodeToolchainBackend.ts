@@ -9,8 +9,8 @@
  * and screenshots; with it, taps and typing become available too. This class is
  * the one place that asks the host which of those it can actually do.
  *
- * SHAPED AFTER {@link PeekabooBackend}, deliberately: a host-probe backend with
- * an INJECTED exec seam, no `electron` / `better-sqlite3` import, and a
+ * SHAPED AFTER the peekaboo grant probe (peekabooGrantProbe.ts), deliberately:
+ * a host-probe backend with an INJECTED exec seam, no `electron` / `better-sqlite3` import, and a
  * healthCheck that NEVER throws. The mobile tier's gate-1 refusal has to be a
  * clean SKIP with an actionable reason — a missing Xcode must never wedge a
  * sprint, and a probe that could not ask must never be reported as a host that
@@ -259,7 +259,7 @@ export class XcodeToolchainBackend {
   /**
    * The gate: can this host run a mobile verification at all? Folds the
    * three-way verdict to one boolean — `absent` AND `inconclusive` both collapse
-   * to `false`, exactly as `PeekabooBackend.healthCheck` collapses an
+   * to `false`, exactly as `PeekabooGrantProbe.healthCheck` collapses an
    * unanswerable TCC probe. Proceeding on an unverified toolchain would burn a
    * lease and ten minutes of build before failing; a skip is recoverable where a
    * wedge is not. NEVER throws.

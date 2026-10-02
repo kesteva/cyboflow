@@ -111,8 +111,8 @@ export interface AgentPreflightDeps {
   /**
    * `true` when this host can actually capture the screen for the
    * `native-screen` modality — binary present AND both macOS TCC grants
-   * (Screen Recording + Accessibility), i.e. the retired
-   * `peekabooBackend.healthCheck()` reused as the live grant probe (§4,
+   * (Screen Recording + Accessibility), i.e.
+   * `PeekabooGrantProbe.healthCheck()`, the live grant probe (§4,
    * "Driver additions for native-screen").
    *
    * OPTIONAL, and absence is NOT a failure: an unwired probe means the

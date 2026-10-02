@@ -273,8 +273,8 @@ export interface AgentProposalExecutorLike {
  * panel runs (verification-setup-flow.md §6).
  *
  * These are the SAME implementations the verification path wires as its
- * preflight deps (`main/src/index.ts` — Playwright chromium resolution,
- * `peekabooBackend.healthCheck`, the resolved node binary and driver CLI
+ * preflight deps (`main/src/verifyComposition.ts` — Playwright chromium
+ * resolution, `PeekabooGrantProbe.healthCheck`, the resolved node binary and driver CLI
  * path). Sharing them is the point: a panel row and a preflight check that
  * disagreed would make the panel a decorative second opinion, which is exactly
  * the checkbox-vs-probe failure §6 sets out to remove.
@@ -297,7 +297,7 @@ export interface VerifyHostProbesLike {
   probeDriverCli(): Promise<{ path: string; exists: boolean }>;
   /**
    * Read the two macOS TCC grants off the host, keeping "declined" and "could
-   * not ask" apart (`PeekabooBackend.probeGrants`). Absent when no native
+   * not ask" apart (`PeekabooGrantProbe.probeGrants`). Absent when no native
    * backend is wired on this platform.
    */
   nativeGrants?: () => Promise<NativeGrantProbe>;

@@ -664,11 +664,10 @@ export interface VerificationSchedulerDeps {
   /**
    * §4 roster — whether this host can capture the screen at all, the ONE gate
    * that decides whether a `native-screen` request is deployable. The intended
-   * (and index.ts-wired) implementation is the retired capture backend's
-   * `peekabooBackend.healthCheck()`: binary-on-PATH AND both macOS TCC grants,
-   * never-throws, exactly as §4 "Driver additions for native-screen" prescribes
-   * ("the retired peekabooBackend.healthCheck() (both-grants probe,
-   * never-throws) is reused as the live grant probe").
+   * (and verifyComposition.ts-wired) implementation is
+   * `PeekabooGrantProbe.healthCheck()`: binary-on-PATH AND both macOS TCC
+   * grants, never-throws, exactly as §4 "Driver additions for native-screen"
+   * prescribes.
    *
    * ABSENT ⇒ the phase-0 behavior is preserved verbatim: every `native-screen`
    * request is skipped as unsupported without asking. That default is the honest
