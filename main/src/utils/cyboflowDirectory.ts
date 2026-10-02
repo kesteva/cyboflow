@@ -34,13 +34,10 @@ export function _resetCliDirOverrideCacheForTesting(): void {
 /**
  * Parse `--cyboflow-dir` directly from process.argv. This is the single parser
  * for the flag: import hoisting runs every static import BEFORE index.ts's
- * module body, including the services/database.ts databaseService singleton,
- * which binds its sessions.db path at import time. Resolving the flag here, on
- * first getCyboflowDirectory() call, makes import order irrelevant — otherwise
- * import-time consumers would open the DEFAULT data dir while everything wired
- * later opened the override: two live databases in one process, surfacing as
- * FOREIGN KEY failures (e.g. a session row written to one DB and its panel row
- * to the other). Scans full argv (no slice) so it works both in dev
+ * module body, and some of them resolve data-dir paths at import time.
+ * Resolving the flag here, on first getCyboflowDirectory() call, makes import
+ * order irrelevant — otherwise import-time consumers would use the DEFAULT data
+ * dir while everything wired later used the override. Scans full argv (no slice) so it works both in dev
  * (`electron . --cyboflow-dir X`) and packaged (`Cyboflow --cyboflow-dir X`)
  * argv shapes; the last occurrence wins.
  */

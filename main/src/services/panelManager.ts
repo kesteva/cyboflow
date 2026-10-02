@@ -8,14 +8,13 @@ import { withLock } from '../utils/mutex';
 export class PanelManager {
   private panels = new Map<string, ToolPanel>();
 
-  constructor() {
-    // Load panels from database on startup (but don't initialize processes)
-    this.loadPanelsFromDatabase();
-  }
-  
-  private loadPanelsFromDatabase(): void {
-    // This will be called on app startup to restore panel state
-    // But we don't start any processes - that happens lazily
+  /**
+   * Restore panel state from the database. Called once by index.ts right after
+   * the database is initialized and registered (setDatabaseService) — not at
+   * construction, which happens at import time, before the DB exists. Starts no
+   * processes; those spawn lazily.
+   */
+  loadPanelsFromDatabase(): void {
     console.log('[PanelManager] Loading panels from database...');
     
     // Load all panels from database

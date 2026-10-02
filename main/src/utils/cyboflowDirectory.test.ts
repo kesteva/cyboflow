@@ -137,8 +137,8 @@ describe('cyboflowDirectory', () => {
     it('resolves the flag on first call, without index.ts arg parsing (space form)', async () => {
       process.argv = ['electron', '.', '--remote-debugging-port=9223', '--cyboflow-dir', '/flag/dir'];
       const { getCyboflowDirectory } = await import('./cyboflowDirectory');
-      // No setCyboflowDirectory call — simulates an import-time consumer like
-      // the services/database.ts singleton, which runs before index.ts's body.
+      // No setCyboflowDirectory call — simulates an import-time consumer, which
+      // runs before index.ts's body.
       expect(getCyboflowDirectory()).toBe('/flag/dir');
     });
 

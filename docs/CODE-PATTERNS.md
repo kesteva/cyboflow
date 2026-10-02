@@ -605,10 +605,13 @@ Rules when touching workflows:
 
 ### Database access
 
-`main/src/database/database.ts` (`DatabaseService`) is the singleton owning schema DDL, the
-migrations runner, and `seedDefaultBoard`. `main/src/services/database.ts` is a thin bootstrap
-shim (~10 lines) that constructs that `DatabaseService` instance from the boot path and calls
-`.initialize()` — nothing else lives there. All mutations go through the main process — the
+`main/src/database/database.ts` (`DatabaseService`) owns schema DDL, the migrations runner, and
+`seedDefaultBoard`. `index.ts` constructs the ONE instance, runs the schema-version gate, calls
+`.initialize()`, and then registers it with `main/src/services/database.ts`
+(`setDatabaseService`), whose `databaseService` export forwards to it for modules that are not
+handed an instance (PanelManager, the panels IPC, session validation). Never open a second
+`DatabaseService` on the live path: it would migrate the schema before the gate and keep its own
+caches. All mutations go through the main process — the
 renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.

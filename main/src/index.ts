@@ -15,6 +15,7 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { ModelAvailabilityService, isModelUsable } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
+import { setDatabaseService } from './services/database';
 import { Logger } from './utils/logger';
 import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
@@ -1399,10 +1400,7 @@ async function initializeServices(): Promise<boolean> {
   startPerfTracer(logger);
   
   // Use the boot-resolved database path. The demo bootstrap decides ONCE per
-  // process (at module load, before the services/database.ts singleton opens
-  // its handle) whether this boot runs on the throwaway demo database — both
-  // DatabaseService constructions MUST use the same path or sessions and
-  // panels land in different databases (FOREIGN KEY failures on create).
+  // process whether this boot runs on the throwaway demo database.
   const dbPath = getBootDatabasePath();
   const demoBootEnv = getDemoBootEnvironment();
   if (demoBootEnv) {
@@ -1458,6 +1456,10 @@ async function initializeServices(): Promise<boolean> {
     app.quit();
     return false;
   }
+
+  // Register the one DatabaseService for modules not handed it, then restore panels.
+  setDatabaseService(databaseService);
+  panelManager.loadPanelsFromDatabase();
 
   sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
