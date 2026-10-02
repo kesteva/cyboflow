@@ -242,10 +242,10 @@ contextBridge.exposeInMainWorld('__cyboflowPerf', {
 // Verification identity (the cdp-token attestation channel of
 // .cyboflow/verify-runbook.json). Present ONLY when the launcher injected the
 // token, so a developer's own `pnpm dev` instance evaluates to null and can
-// never satisfy a verification's attestation — which the previous channel,
-// `electronAPI.getAppVersion()`, could not distinguish. Same pattern and same
-// justification as the __cyboflowPerf bridge above: preload runs in the Node
-// context, so process.env is available, and the value is a plain string.
+// never satisfy a verification's attestation — which the previous channel, a
+// version-number read (since removed), could not distinguish. Same pattern and
+// same justification as the __cyboflowPerf bridge above: preload runs in the
+// Node context, so process.env is available, and the value is a plain string.
 contextBridge.exposeInMainWorld('__CYBOFLOW_VERIFY__', {
   token: process.env.CYBOFLOW_VERIFY_TOKEN ?? null,
 });
@@ -254,10 +254,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Generic invoke method for direct IPC calls. Gated by the
   // GENERIC_INVOKE_CHANNELS allowlist above (security boundary).
   invoke: (channel: string, ...args: unknown[]) => invokeAllowlistedChannel(channel, args),
-
-  // Basic app info
-  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
-  isPackaged: () => ipcRenderer.invoke('is-packaged'),
 
   // Version info
   getVersionInfo: (): Promise<IPCResponse> => ipcRenderer.invoke('version:get-info'),

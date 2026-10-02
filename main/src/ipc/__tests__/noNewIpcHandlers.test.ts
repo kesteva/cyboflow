@@ -20,7 +20,13 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 95 handlers — down from 103 when Crystal's
+/** Frozen 2026-10-02 at 90 handlers — down from 95 when five
+ * caller-less `ipc/app.ts` handlers were deleted: `get-app-version` and
+ * `is-packaged` (bridged, never called) plus `app:record-open`,
+ * `app:get-last-open` and `preferences:get-all` (never exposed; Crystal's
+ * welcome-screen open tracking).
+ *
+ * Earlier 2026-10-02: 95 handlers — down from 103 when Crystal's
  * pre-panel per-session terminal was deleted: `sessions:run-terminal-command`,
  * `sessions:send-terminal-input`, `sessions:pre-create-terminal` and
  * `sessions:resize-terminal` (`ipc/script.ts`, with TerminalSessionManager),
@@ -92,7 +98,7 @@ import * as path from 'node:path';
  * decrease MUST be recorded here, so the map tracks reality. */
 const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'index.ts': 2,
-  'ipc/app.ts': 10,
+  'ipc/app.ts': 5,
   'ipc/artifactHtml.ts': 2,
   'ipc/artifactImages.ts': 2,
   'ipc/bugReport.ts': 3,

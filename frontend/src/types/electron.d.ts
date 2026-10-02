@@ -89,10 +89,6 @@ interface ElectronAPI {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
 
-  // Basic app info
-  getAppVersion: () => Promise<string>;
-  isPackaged: () => Promise<boolean>;
-
   // Version info — use IPCDataResponse so callers can access .data fields directly
   // after `if (result.success)` without narrowing for undefined.
   getVersionInfo: () => Promise<IPCDataResponse<{

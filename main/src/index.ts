@@ -3310,14 +3310,6 @@ app.whenReady().then(async () => {
   await createWindow();
   console.log('[Main] Window created successfully');
 
-  // Record app open in the local database (used for app-update detection)
-  try {
-    const currentVersion = app.getVersion();
-    databaseService.recordAppOpen(false, currentVersion);
-  } catch (error) {
-    console.error('[Main] Failed to record app open:', error);
-  }
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       console.log('[Main] Activating app, creating new window...');

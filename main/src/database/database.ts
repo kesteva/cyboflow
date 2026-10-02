@@ -3183,43 +3183,6 @@ export class DatabaseService {
     this.db.prepare('DELETE FROM ui_state WHERE key = ?').run(key);
   }
 
-  // App opens operations
-  recordAppOpen(welcomeHidden: boolean, appVersion?: string): void {
-    this.db.prepare(`
-      INSERT INTO app_opens (welcome_hidden, app_version)
-      VALUES (?, ?)
-    `).run(welcomeHidden ? 1 : 0, appVersion || null);
-  }
-
-  getLastAppOpen(): { opened_at: string; welcome_hidden: boolean; app_version?: string } | null {
-    const result = this.db.prepare(`
-      SELECT opened_at, welcome_hidden, app_version
-      FROM app_opens
-      ORDER BY opened_at DESC
-      LIMIT 1
-    `).get() as { opened_at: string; welcome_hidden: number; app_version?: string } | undefined;
-
-    if (!result) return null;
-
-    return {
-      opened_at: result.opened_at,
-      welcome_hidden: Boolean(result.welcome_hidden),
-      app_version: result.app_version
-    };
-  }
-
-  getLastAppVersion(): string | null {
-    const result = this.db.prepare(`
-      SELECT app_version
-      FROM app_opens
-      WHERE app_version IS NOT NULL
-      ORDER BY opened_at DESC
-      LIMIT 1
-    `).get() as { app_version: string } | undefined;
-
-    return result?.app_version || null;
-  }
-
   // User preferences operations
   getUserPreference(key: string): string | null {
     const result = this.db.prepare(`
@@ -3237,18 +3200,6 @@ export class DatabaseService {
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
     `).run(key, value);
-  }
-
-  getUserPreferences(): Record<string, string> {
-    const rows = this.db.prepare(`
-      SELECT key, value FROM user_preferences
-    `).all() as Array<{ key: string; value: string }>;
-    
-    const preferences: Record<string, string> = {};
-    for (const row of rows) {
-      preferences[row.key] = row.value;
-    }
-    return preferences;
   }
 
   // Panel operations
