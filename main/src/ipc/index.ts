@@ -13,7 +13,6 @@ import { setupLogHandlers } from './logs';
 import { registerPanelHandlers } from './panels';
 import { registerClaudePanelHandlers } from './claudePanel';
 import { registerEditorPanelHandlers } from './editorPanel';
-import { registerNimbalystHandlers } from './nimbalyst';
 import { registerCyboflowHandlers } from './cyboflow';
 import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 import { registerTelemetryHandlers } from './telemetry';
@@ -44,7 +43,6 @@ export function registerIpcHandlers(services: AppServices): void {
   registerPanelHandlers(ipcMain, services);
   registerClaudePanelHandlers(ipcMain, services);
   registerEditorPanelHandlers(ipcMain, services);
-  registerNimbalystHandlers(ipcMain, services);
   registerCyboflowHandlers(ipcMain, services);
   registerIdeaAttachmentHandlers(ipcMain, services);
   registerTelemetryHandlers(ipcMain, services);

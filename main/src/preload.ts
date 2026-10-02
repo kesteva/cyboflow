@@ -226,7 +226,6 @@ interface IPCResponse<T = unknown> {
 // ===========================================================================
 export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   // App / system
-  'openExternal',
   'app:consume-open-update-settings',
 
   // Onboarding detection (renderer passes this as an imported constant —
@@ -765,12 +764,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     runScript: (sessionId: string, command: string, cwd: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:runScript', sessionId, command, cwd),
     stopScript: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:stopScript', panelId),
     isRunning: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:isRunning', sessionId),
-  },
-
-  // Nimbalyst integration
-  nimbalyst: {
-    checkInstalled: (): Promise<IPCResponse> => ipcRenderer.invoke('nimbalyst:check-installed'),
-    openWorktree: (worktreePath: string): Promise<IPCResponse> => ipcRenderer.invoke('nimbalyst:open-worktree', worktreePath),
   },
 });
 

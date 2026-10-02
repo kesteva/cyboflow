@@ -432,13 +432,6 @@ interface ElectronAPI {
     stopScript: (panelId: string) => Promise<IPCResponse<void>>;
     isRunning: (sessionId: string) => Promise<IPCResponse<boolean>>;
   };
-
-
-  // Nimbalyst integration
-  nimbalyst: {
-    checkInstalled: () => Promise<IPCResponse<boolean>>;
-    openWorktree: (worktreePath: string) => Promise<IPCResponse<void>>;
-  };
 }
 
 // Additional electron interface for IPC event listeners

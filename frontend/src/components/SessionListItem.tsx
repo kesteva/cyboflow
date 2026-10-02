@@ -5,11 +5,9 @@ import { StatusIndicator } from './StatusIndicator';
 import { GitStatusIndicator } from './GitStatusIndicator';
 import { ConfirmDialog } from './ConfirmDialog';
 import { RunScriptConfigDialog } from './RunScriptConfigDialog';
-import { NimbalystInstallDialog } from './NimbalystInstallDialog';
 import { API } from '../utils/api';
 import { trpc } from '../trpc/client';
 import { Star, Archive } from 'lucide-react';
-import { NimbalystIcon } from './icons/NimbalystIcon';
 import type { Session, GitStatus } from '../types/session';
 import { useContextMenu } from '../contexts/ContextMenuContext';
 import { IconButton } from './ui/IconButton';
@@ -36,7 +34,6 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [showRunScriptConfig, setShowRunScriptConfig] = useState(false);
-  const [showNimbalystInstall, setShowNimbalystInstall] = useState(false);
   const [gitStatusLoading, setGitStatusLoading] = useState(false);
   
   
@@ -343,36 +340,6 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
     }
   };
 
-  const handleOpenInNimbalyst = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-
-    try {
-      // Check if Nimbalyst is installed
-      const checkResponse = await window.electronAPI.nimbalyst.checkInstalled();
-
-      if (!checkResponse.success) {
-        throw new Error(checkResponse.error || 'Failed to check Nimbalyst installation');
-      }
-
-      if (!checkResponse.data) {
-        // Show install dialog if not installed
-        setShowNimbalystInstall(true);
-        return;
-      }
-
-      // Open the worktree in Nimbalyst
-      const openResponse = await window.electronAPI.nimbalyst.openWorktree(session.worktreePath);
-
-      if (!openResponse.success) {
-        throw new Error(openResponse.error || 'Failed to open worktree in Nimbalyst');
-      }
-
-    } catch (error) {
-      console.error('Error opening in Nimbalyst:', error);
-      alert('Failed to open in Nimbalyst');
-    }
-  };
-  
   return (
     <>
       <div
@@ -466,16 +433,6 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
                       strokeWidth={session.isFavorite ? 0 : 2}
                     />
                   }
-                />
-              )}
-              {!session.archived && (
-                <IconButton
-                  onClick={handleOpenInNimbalyst}
-                  variant="ghost"
-                  size="sm"
-                  className="text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity hover:text-interactive"
-                  aria-label="Open in Nimbalyst"
-                  icon={<NimbalystIcon size={18} className="text-current" />}
                 />
               )}
               {!session.archived && (
@@ -596,11 +553,6 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
       <RunScriptConfigDialog
         isOpen={showRunScriptConfig}
         onClose={() => setShowRunScriptConfig(false)}
-      />
-
-      <NimbalystInstallDialog
-        isOpen={showNimbalystInstall}
-        onClose={() => setShowNimbalystInstall(false)}
       />
     </>
   );

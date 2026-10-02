@@ -31,14 +31,6 @@ vi.mock('../RunScriptConfigDialog', () => ({
   RunScriptConfigDialog: () => null,
 }));
 
-vi.mock('../NimbalystInstallDialog', () => ({
-  NimbalystInstallDialog: () => null,
-}));
-
-vi.mock('../icons/NimbalystIcon', () => ({
-  NimbalystIcon: () => null,
-}));
-
 // ---------------------------------------------------------------------------
 // Mock API
 // ---------------------------------------------------------------------------
@@ -128,10 +120,6 @@ beforeEach(() => {
     configurable: true,
     value: {
       invoke: mockInvoke,
-      nimbalyst: {
-        checkInstalled: vi.fn().mockResolvedValue({ success: true, data: false }),
-        openWorktree: vi.fn().mockResolvedValue({ success: true }),
-      },
     },
   });
 
