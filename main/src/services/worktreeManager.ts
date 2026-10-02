@@ -541,18 +541,6 @@ export class WorktreeManager {
     }
   }
 
-  // Deprecated: Use getProjectMainBranch instead
-  async detectMainBranch(projectPath: string): Promise<string> {
-    console.warn('[WorktreeManager] detectMainBranch is deprecated, use getProjectMainBranch instead');
-    return await this.getProjectMainBranch(projectPath);
-  }
-
-  // Deprecated: Use getProjectMainBranch instead
-  async getEffectiveMainBranch(project: { path: string; main_branch?: string }): Promise<string> {
-    console.warn('[WorktreeManager] getEffectiveMainBranch is deprecated, use getProjectMainBranch instead');
-    return await this.getProjectMainBranch(project.path);
-  }
-
   /**
    * Whether this worktree's branch appears to have ALREADY LANDED in the main
    * branch — the "the agent merged it for me in chat" case, which our own merge
