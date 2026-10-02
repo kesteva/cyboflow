@@ -2,7 +2,7 @@ import { IpcMain, BrowserWindow } from 'electron';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService } from '../services/database';
-import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
+import { CreatePanelRequest, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
 import type { AppServices } from './types';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { nonClaudeLaneOwner, resolvePanelLane, type PanelLane } from '../services/panelLane';
@@ -246,11 +246,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
     return false;
   });
   
-  // Event handlers
-  ipcMain.handle('panels:emitEvent', async (_, panelId: string, eventType: PanelEventType, data: unknown) => {
-    return panelManager.emitPanelEvent(panelId, eventType, data);
-  });
-
   // Clear unviewed content flag for AI panels
   ipcMain.handle('panels:clearUnviewedContent', async (event, panelId: string) => {
     try {

@@ -214,7 +214,6 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   'panels:update',
   'panels:initialize',
   'panels:checkInitialized',
-  'panels:emitEvent',
   'panels:clearUnviewedContent',
 
   // Terminal panel PTY bridge

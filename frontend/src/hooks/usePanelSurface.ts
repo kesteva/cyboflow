@@ -179,6 +179,23 @@ export function usePanelSurface(projectId: number | null): UsePanelSurfaceResult
       if (!effectiveSessionId) return;
       setActivePanelInStore(effectiveSessionId, panel.id);
       await panelApi.setActivePanel(effectiveSessionId, panel.id);
+
+      // Viewing a chat panel acknowledges its 'completed_unviewed' state: main
+      // sets that flag when a background panel's run exits (events.ts), and
+      // this is the only path that clears it — without it the tab's
+      // unviewed dot never goes away.
+      if (panel.type === 'claude') {
+        const customState = panel.state?.customState as
+          | { hasUnviewedContent?: boolean; panelStatus?: string }
+          | undefined;
+        if (customState?.hasUnviewedContent || customState?.panelStatus === 'completed_unviewed') {
+          try {
+            await panelApi.clearPanelUnviewedContent(panel.id);
+          } catch (err) {
+            console.error('[usePanelSurface] Failed to clear unviewed content:', err);
+          }
+        }
+      }
     },
     [effectiveSessionId, setActivePanelInStore],
   );

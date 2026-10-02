@@ -20,7 +20,11 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 111 handlers — down from 115 when four
+/** Frozen 2026-10-02 at 110 handlers — down from 111 when the caller-less
+ * `panels:emitEvent` (`ipc/panels.ts`) was deleted along with its
+ * generic-invoke allowlist entry; main-side code emits panel events directly.
+ *
+ * Earlier 2026-10-02: 111 handlers — down from 115 when four
  * caller-less Crystal session-scoped reads/continue were deleted from
  * `ipc/session.ts`: `sessions:continue`, `sessions:get-output`,
  * `sessions:get-conversation` and `sessions:get-conversation-messages` (the
@@ -79,7 +83,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/ideaAttachments.ts': 2,
   'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
-  'ipc/panels.ts': 16,
+  'ipc/panels.ts': 15,
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,

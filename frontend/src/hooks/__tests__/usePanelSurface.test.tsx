@@ -44,6 +44,7 @@ const {
   mockSessionStoreSubscribe,
   mockDisposeInteractiveTerminal,
   mockSessionStoreGetState,
+  mockClearPanelUnviewedContent,
 } = vi.hoisted(() => {
   const setActiveSessionStore = vi.fn();
   return {
@@ -58,6 +59,7 @@ const {
     mockGetOrCreateMainRepoSession: vi.fn(),
     mockSetActiveSessionStore: setActiveSessionStore,
     mockDisposeInteractiveTerminal: vi.fn(),
+    mockClearPanelUnviewedContent: vi.fn(),
     // Mutable subscribe spy — tests that need to capture the subscriber can
     // configure this via mockSessionStoreSubscribe.mockImplementation(...).
     mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined),
@@ -92,6 +94,7 @@ vi.mock('../../services/panelApi', () => ({
     setActivePanel: mockSetActivePanel,
     loadPanelsForSession: mockLoadPanelsForSession,
     deletePanel: mockDeletePanel,
+    clearPanelUnviewedContent: mockClearPanelUnviewedContent,
   },
 }));
 
@@ -191,6 +194,55 @@ describe('usePanelSurface — panel loading', () => {
     await flushAsync();
 
     expect(mockSetPanels).toHaveBeenCalledWith(MOCK_SESSION_ID, [TERMINAL_PANEL]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handlePanelSelect — viewing a chat panel clears its unviewed state
+// ---------------------------------------------------------------------------
+
+describe('usePanelSurface — handlePanelSelect clears unviewed content', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetOrCreateMainRepoSession.mockResolvedValue({
+      success: true,
+      data: MOCK_SESSION,
+    });
+    mockSetActiveSessionStore.mockResolvedValue(undefined);
+    mockLoadPanelsForSession.mockResolvedValue([TERMINAL_PANEL, CLAUDE_PANEL]);
+    mockSetPanels.mockReturnValue(undefined);
+    mockSetActivePanel.mockResolvedValue(undefined);
+    mockClearPanelUnviewedContent.mockResolvedValue(undefined);
+  });
+
+  it('clears a completed_unviewed claude panel when it is selected', async () => {
+    const { result } = renderHook(() => usePanelSurface(1));
+    await flushAsync();
+
+    const unviewed: ToolPanel = {
+      ...CLAUDE_PANEL,
+      state: { isActive: false, customState: { hasUnviewedContent: true, panelStatus: 'completed_unviewed' } },
+    };
+    await act(async () => { await result.current.handlePanelSelect(unviewed); });
+
+    expect(mockSetActivePanel).toHaveBeenCalledWith(MOCK_SESSION_ID, CLAUDE_PANEL.id);
+    expect(mockClearPanelUnviewedContent).toHaveBeenCalledWith(CLAUDE_PANEL.id);
+  });
+
+  it('does not clear a claude panel with nothing unviewed, nor a non-claude panel', async () => {
+    const { result } = renderHook(() => usePanelSurface(1));
+    await flushAsync();
+
+    await act(async () => { await result.current.handlePanelSelect(CLAUDE_PANEL); });
+    await act(async () => {
+      await result.current.handlePanelSelect({
+        ...TERMINAL_PANEL,
+        state: { isActive: false, customState: { hasUnviewedContent: true } },
+      });
+    });
+
+    expect(mockSetActivePanel).toHaveBeenCalledTimes(2);
+    expect(mockClearPanelUnviewedContent).not.toHaveBeenCalled();
   });
 });
 
