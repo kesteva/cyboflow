@@ -1505,8 +1505,9 @@ async function initializeServices(): Promise<boolean> {
   cliManagerFactory = CliManagerFactory.getInstance(logger, configManager);
 
   // Create default CLI manager (Claude). Permission gating runs in-process
-  // via the SDK's PreToolUse hook → ApprovalRouter (TASK-590).
-  // Skip validation during startup - tools will be validated when actually used
+  // via the SDK's PreToolUse hook → ApprovalRouter (TASK-590). The factory never
+  // probes the binary, so a missing `claude` never blocks startup; availability
+  // is checked lazily on first spawn.
   defaultCliManager = await cliManagerFactory.createManager('claude', {
     sessionManager,
     logger,
@@ -1514,14 +1515,12 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
 
   // Create the interactive (PTY) CLI manager (IDEA-013 S4 / TASK-809). Registered
   // as the 'claude-interactive' built-in tool by TASK-806. Constructed with the
-  // same db-in-additionalOptions + skipValidation contract as the SDK manager so a
-  // missing `claude` binary never blocks startup; availability is probed lazily on
-  // first interactive spawn. The SubstrateDispatchFacade routes per-run between this
+  // same db-in-additionalOptions contract as the SDK manager; availability is
+  // probed lazily on first interactive spawn. The SubstrateDispatchFacade routes per-run between this
   // and defaultCliManager based on workflow_runs.substrate.
   const interactiveCliManager = await cliManagerFactory.createManager('claude-interactive', {
     sessionManager,
@@ -1530,7 +1529,6 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true,
   });
   // Narrow the AbstractCliManager-typed factory return to the concrete class:
   // AppServices.interactiveCliManager exposes the persistent-REPL seams
@@ -1553,7 +1551,6 @@ async function initializeServices(): Promise<boolean> {
       db: databaseService.getDb(),
       appVersion: app.getVersion(),
     },
-    skipValidation: true,
   });
   // Structural, not `instanceof`: the demo factory returns a DemoCliManager
   // carrying the same seams, and requiring the concrete class is what used to
@@ -1566,7 +1563,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isCodexPtyManagerLike(createdCodexPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Codex PTY seams for codex-pty');
@@ -1580,7 +1576,6 @@ async function initializeServices(): Promise<boolean> {
     additionalOptions: {
       db: databaseService.getDb(),
     },
-    skipValidation: true,
   });
   // Structural, exactly like the Codex twins above — demo mode returns a
   // DemoCliManager carrying the seams rather than an OmpSdkManager.
@@ -1592,7 +1587,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isOmpPtyManagerLike(createdOmpPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the OMP PTY seams for omp-pty');
@@ -1603,7 +1597,6 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
     logger,
     configManager,
-    skipValidation: true,
   });
   if (!isPiPtyManagerLike(createdPiPtyManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Pi PTY seams for pi-pty');
@@ -1615,7 +1608,6 @@ async function initializeServices(): Promise<boolean> {
     logger,
     configManager,
     additionalOptions: { db: databaseService.getDb() },
-    skipValidation: true,
   });
   if (!isPiSdkManagerLike(createdPiSdkManager)) {
     throw new Error('[Main] cliManagerFactory returned a manager without the Pi SDK seams for pi-sdk');

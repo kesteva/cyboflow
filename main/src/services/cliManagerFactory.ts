@@ -13,9 +13,7 @@ import { PiPtyManager } from './panels/pi/piPtyManager';
 import { PiSdkManager } from './panels/pi/piSdkManager';
 import {
   CliToolRegistry,
-  CliToolDefinition,
-  CliManagerFactory as ManagerFactoryFunction,
-  CLI_OUTPUT_FORMATS
+  CliManagerFactory as ManagerFactoryFunction
 } from './cliToolRegistry';
 import { DemoCliManager } from './demo/demoCliManager';
 
@@ -242,17 +240,14 @@ export interface CliManagerFactoryConfig {
 
   /** Additional tool-specific options */
   additionalOptions?: Record<string, unknown>;
-
-  /** Skip tool availability validation (useful for startup) */
-  skipValidation?: boolean;
 }
 
 /**
  * Factory for creating CLI tool managers
- * 
- * This factory provides a centralized way to create and configure
- * CLI tool managers (Claude, Aider, Continue, etc.) with proper
- * dependency injection and configuration validation.
+ *
+ * Registers the built-in tools (Claude SDK + interactive, Codex, OMP, pi) and
+ * constructs their managers, substituting a scripted DemoCliManager in demo
+ * mode.
  */
 export class CliManagerFactory {
   private static instance: CliManagerFactory | null = null;
@@ -340,8 +335,7 @@ export class CliManagerFactory {
       const manager = await this.registry.createManager(
         toolId,
         config.sessionManager as SessionManager,
-        config.additionalOptions,
-        config.skipValidation
+        config.additionalOptions
       );
 
       this.logger?.info(`[CliManagerFactory] Created ${toolId} manager successfully`);
@@ -350,62 +344,6 @@ export class CliManagerFactory {
       this.logger?.error(`[CliManagerFactory] Failed to create ${toolId} manager:`, error instanceof Error ? error : undefined);
       throw error;
     }
-  }
-
-  /**
-   * Get an existing manager instance
-   */
-  public getManager(toolId: string): AbstractCliManager | undefined {
-    return this.registry.getManager(toolId);
-  }
-
-  /**
-   * Get the default CLI manager (first available tool)
-   */
-  public async getDefaultManager(config: CliManagerFactoryConfig): Promise<AbstractCliManager> {
-    const defaultTool = await this.registry.getDefaultTool();
-    
-    if (!defaultTool) {
-      throw new Error('No CLI tools are available on this system');
-    }
-
-    return this.createManager(defaultTool.id, config);
-  }
-
-  /**
-   * Get all available CLI tools
-   */
-  public async getAvailableTools(): Promise<CliToolDefinition[]> {
-    return this.registry.getAvailableTools();
-  }
-
-  /**
-   * Check if a specific tool is available
-   */
-  public async isToolAvailable(toolId: string): Promise<boolean> {
-    const result = await this.registry.checkToolAvailability(toolId);
-    return result.available;
-  }
-
-  /**
-   * Discover all available CLI tools on the system
-   */
-  public async discoverTools() {
-    return this.registry.discoverTools();
-  }
-
-  /**
-   * Register a custom CLI tool
-   */
-  public registerTool(definition: CliToolDefinition): void {
-    this.registry.registerTool(definition);
-  }
-
-  /**
-   * Clear availability cache
-   */
-  public clearCache(toolId?: string): void {
-    this.registry.clearAvailabilityCache(toolId);
   }
 
   /**
@@ -424,28 +362,19 @@ export class CliManagerFactory {
     this.registerClaudeTool();
 
     // Register Claude Code (Interactive PTY substrate — IDEA-013 / TASK-806).
-    // Registered with a LOWER priority than 'claude' (100) so getDefaultTool()
-    // still prefers the SDK path; the manager body is a stub until TASK-808/S3.
     this.registerInteractiveClaudeTool();
 
-    // Register Codex PTY quick-session runtime.
+    // Register the Codex SDK + PTY quick-session runtimes.
     this.registerCodexSdkTool();
     this.registerCodexPtyTool();
 
-    // Register the OMP (oh-my-pi) quick-session runtimes, priorities below
-    // Codex's so getDefaultTool() ordering is unchanged by their arrival.
+    // Register the OMP (oh-my-pi) quick-session runtimes.
     this.registerOmpSdkTool();
     this.registerOmpPtyTool();
 
-    // Register the Pi (@earendil-works/pi-coding-agent) quick-session runtime.
-    // Priority below OMP's so getDefaultTool() ordering is unchanged by its
-    // arrival; the provider toggle gates reachability anyway.
+    // Register the Pi (@earendil-works/pi-coding-agent) quick-session runtimes.
     this.registerPiPtyTool();
     this.registerPiSdkTool();
-
-    // this.registerAiderTool();
-    // this.registerContinueTool();
-    // this.registerCursorTool();
 
     this.logger?.info('[CliManagerFactory] Registered built-in CLI tools');
   }
@@ -482,49 +411,10 @@ export class CliManagerFactory {
       );
     };
 
-    const claudeDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'claude',
       name: 'Claude Code',
-      description: 'Anthropic\'s Claude AI coding assistant with advanced tool calling capabilities',
-      version: '1.0.0',
-      capabilities: {
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: true,
-        supportsStructuredOutput: true,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.TEXT,
-          CLI_OUTPUT_FORMATS.JSON,
-          CLI_OUTPUT_FORMATS.STREAM_JSON
-        ],
-        supportedPanelTypes: ['claude']
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [
-          'ANTHROPIC_API_KEY',
-          'MCP_DEBUG'
-        ],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [
-          'claudeExecutablePath',
-          'defaultPermissionMode',
-          'systemPromptAppend',
-          'verbose'
-        ],
-        defaultExecutable: 'claude',
-        alternativeExecutables: ['claude-code', 'claude.exe'],
-        minimumVersion: undefined // Claude doesn't expose version in a standard way
-      },
-      managerFactory: claudeManagerFactory
-    };
-
-    this.registry.registerTool(claudeDefinition, {
-      priority: 100, // Highest priority as it's the primary tool
-      validateOnRegister: false // Skip validation on startup for performance
+      managerFactory: claudeManagerFactory,
     });
   }
 
@@ -533,9 +423,7 @@ export class CliManagerFactory {
    *
    * Mirrors registerClaudeTool's db-guard exactly (same TypeError when
    * additionalOptions.db is missing or lacks .prepare). The managerFactory
-   * returns an InteractiveClaudeManager — a throw-on-call STUB this slice; the
-   * real PTY body lands in TASK-808/S3. Registered with priority < 100 so
-   * getDefaultTool() continues to prefer the SDK 'claude' tool.
+   * returns an InteractiveClaudeManager.
    */
   private registerInteractiveClaudeTool(): void {
     const interactiveManagerFactory: ManagerFactoryFunction = (
@@ -566,49 +454,10 @@ export class CliManagerFactory {
       );
     };
 
-    const interactiveDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'claude-interactive',
       name: 'Claude Code (Interactive)',
-      description: 'Claude Code running under the interactive PTY substrate (IDEA-013)',
-      version: '1.0.0',
-      capabilities: {
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: true,
-        supportsStructuredOutput: true,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.TEXT,
-          CLI_OUTPUT_FORMATS.JSON,
-          CLI_OUTPUT_FORMATS.STREAM_JSON
-        ],
-        supportedPanelTypes: ['claude']
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [
-          'ANTHROPIC_API_KEY',
-          'MCP_DEBUG'
-        ],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [
-          'claudeExecutablePath',
-          'defaultPermissionMode',
-          'systemPromptAppend',
-          'verbose'
-        ],
-        defaultExecutable: 'claude',
-        alternativeExecutables: ['claude-code', 'claude.exe'],
-        minimumVersion: undefined
-      },
-      managerFactory: interactiveManagerFactory
-    };
-
-    this.registry.registerTool(interactiveDefinition, {
-      priority: 50, // Below 'claude' (100) so getDefaultTool() prefers the SDK path
-      validateOnRegister: false // Stub body — never probe availability this slice
+      managerFactory: interactiveManagerFactory,
     });
   }
 
@@ -625,39 +474,10 @@ export class CliManagerFactory {
       );
     };
 
-    const codexPtyDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'codex-pty',
       name: 'Codex (PTY)',
-      description: 'OpenAI Codex running as an interactive PTY quick-session runtime',
-      version: '1.0.0',
-      capabilities: {
-        supportsResume: false,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: false,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.TEXT,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: 'codex',
-        alternativeExecutables: ['codex'],
-        minimumVersion: undefined,
-      },
       managerFactory: codexPtyManagerFactory,
-    };
-
-    this.registry.registerTool(codexPtyDefinition, {
-      priority: 40,
-      validateOnRegister: false,
     });
   }
 
@@ -696,40 +516,10 @@ export class CliManagerFactory {
       );
     };
 
-    const codexSdkDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'codex-sdk',
       name: 'Codex SDK',
-      description: 'OpenAI Codex running through the embedded SDK workflow runtime',
-      version: '1.0.0',
-      capabilities: {
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: true,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.JSON,
-          CLI_OUTPUT_FORMATS.STREAM_JSON,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: '@openai/codex-sdk',
-        alternativeExecutables: [],
-        minimumVersion: undefined,
-      },
       managerFactory: codexSdkManagerFactory,
-    };
-
-    this.registry.registerTool(codexSdkDefinition, {
-      priority: 45,
-      validateOnRegister: false,
     });
   }
 
@@ -746,41 +536,10 @@ export class CliManagerFactory {
       );
     };
 
-    const ompPtyDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'omp-pty',
       name: 'OMP (PTY)',
-      description: 'oh-my-pi running as an interactive PTY quick-session runtime',
-      version: '1.0.0',
-      capabilities: {
-        // `--continue` is a REAL per-cwd session resume (unlike codex-pty, which
-        // restarts blank), so this lane genuinely supports resume.
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: false,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.TEXT,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: 'omp',
-        alternativeExecutables: ['omp'],
-        minimumVersion: undefined,
-      },
       managerFactory: ompPtyManagerFactory,
-    };
-
-    this.registry.registerTool(ompPtyDefinition, {
-      priority: 30,
-      validateOnRegister: false,
     });
   }
 
@@ -797,43 +556,12 @@ export class CliManagerFactory {
       );
     };
 
-    const piPtyDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'pi-pty',
       name: 'Pi (PTY)',
-      description: 'pi (@earendil-works/pi-coding-agent) running as an interactive PTY quick-session runtime',
-      version: '1.0.0',
-      capabilities: {
-        // `--continue` is a REAL per-project session resume, like OMP's.
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: false,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: false,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.TEXT,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: 'pi',
-        alternativeExecutables: ['pi'],
-        minimumVersion: undefined,
-      },
       managerFactory: piPtyManagerFactory,
-    };
-
-    this.registry.registerTool(piPtyDefinition, {
-      priority: 25,
-      validateOnRegister: false,
     });
   }
-
 
   private registerPiSdkTool(): void {
     const piSdkManagerFactory: ManagerFactoryFunction = (
@@ -855,42 +583,10 @@ export class CliManagerFactory {
       );
     };
 
-    const piSdkDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'pi-sdk',
       name: 'Pi',
-      description: 'pi (@earendil-works/pi-coding-agent) structured json-events runtime (turn-spawn, --session-id resume)',
-      version: '1.0.0',
-      capabilities: {
-        // Resume is deterministic (--session-id), so this lane genuinely
-        // supports picking a conversation back up.
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: false,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: true,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.JSON,
-          CLI_OUTPUT_FORMATS.TEXT,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: 'pi',
-        alternativeExecutables: ['pi'],
-        minimumVersion: undefined,
-      },
       managerFactory: piSdkManagerFactory,
-    };
-
-    this.registry.registerTool(piSdkDefinition, {
-      priority: 26,
-      validateOnRegister: false,
     });
   }
 
@@ -923,52 +619,11 @@ export class CliManagerFactory {
       );
     };
 
-    const ompSdkDefinition: CliToolDefinition = {
+    this.registry.registerTool({
       id: 'omp-sdk',
       name: 'OMP',
-      description: 'oh-my-pi running as a persistent `omp --mode rpc-ui` child over NDJSON',
-      version: '1.0.0',
-      capabilities: {
-        supportsResume: true,
-        supportsMultipleModels: true,
-        supportsPermissions: true,
-        supportsFileOperations: true,
-        supportsGitIntegration: true,
-        supportsSystemPrompts: false,
-        supportsStructuredOutput: true,
-        outputFormats: [
-          CLI_OUTPUT_FORMATS.JSON,
-          CLI_OUTPUT_FORMATS.STREAM_JSON,
-        ],
-        supportedPanelTypes: ['claude'],
-      },
-      config: {
-        requiredEnvVars: [],
-        optionalEnvVars: [],
-        requiredConfigKeys: [],
-        optionalConfigKeys: [],
-        defaultExecutable: 'omp',
-        alternativeExecutables: ['omp'],
-        minimumVersion: undefined,
-      },
       managerFactory: ompSdkManagerFactory,
-    };
-
-    this.registry.registerTool(ompSdkDefinition, {
-      priority: 35,
-      validateOnRegister: false,
     });
-  }
-
-  /**
-   * Future: Register Aider CLI tool
-   *
-   * Example of how other tools would be registered:
-   */
-  private registerAiderTool(): void {
-    // Implementation would be similar to Claude but with Aider-specific capabilities
-    // const aiderDefinition: CliToolDefinition = { ... };
-    // this.registry.registerTool(aiderDefinition);
   }
 
   /**
@@ -978,34 +633,5 @@ export class CliManagerFactory {
     if (!config.sessionManager) {
       throw new Error('Session manager is required for CLI manager creation');
     }
-
-    // Additional validation can be added here
   }
 }
-
-/**
- * Convenience function to get the factory instance
- */
-export const getCliManagerFactory = (logger?: Logger, configManager?: ConfigManager) => 
-  CliManagerFactory.getInstance(logger, configManager);
-
-/**
- * Convenience function to create a Claude manager (backward compatibility)
- */
-export const createClaudeManager = async (config: CliManagerFactoryConfig): Promise<AbstractCliManager> => {
-  const factory = CliManagerFactory.getInstance(config.logger, config.configManager);
-  return factory.createManager('claude', config);
-};
-
-/**
- * Example of how future tools would be created:
- */
-export const createAiderManager = async (config: CliManagerFactoryConfig): Promise<AbstractCliManager> => {
-  const factory = CliManagerFactory.getInstance(config.logger, config.configManager);
-  return factory.createManager('aider', config);
-};
-
-export const createContinueManager = async (config: CliManagerFactoryConfig): Promise<AbstractCliManager> => {
-  const factory = CliManagerFactory.getInstance(config.logger, config.configManager);
-  return factory.createManager('continue', config);
-};

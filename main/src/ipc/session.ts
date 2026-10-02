@@ -289,7 +289,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     databaseService,
     taskQueue,
     worktreeManager,
-    cliManagerFactory,
     claudeCodeManager, // For backward compatibility
     interactiveCliManager, // PTY substrate sibling (quick-session relay/spawn)
     codexSdkManager, // Structured Codex app-server quick-session runtime
@@ -878,23 +877,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       })();
     });
   }
-
-  // Helper function to get CLI manager for a specific tool
-  // TODO: This will be used in the future to support multiple CLI tools
-  const getCliManager = async (toolId: string = 'claude') => {
-    try {
-      return await cliManagerFactory.createManager(toolId, {
-        sessionManager,
-        additionalOptions: {}
-      });
-    } catch (error) {
-      console.warn(`Failed to get CLI manager for ${toolId}, falling back to default:`, error);
-      return claudeCodeManager; // Fallback to default for backward compatibility
-    }
-  };
-
-  // NOTE: Current IPC handlers use claudeCodeManager directly for backward compatibility
-  // Future versions will use getCliManager() to support multiple CLI tools dynamically
 
   // Session management handlers
   ipcMain.handle('sessions:create', async (_event, request: CreateSessionRequest) => {

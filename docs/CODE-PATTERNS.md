@@ -42,7 +42,7 @@ to a canonical example — read those for the actual implementation.
 - **Path:** `main/src/services/simpleTaskQueue.ts`
 - **Use it for:** In-process job queue with concurrency limits. No Redis.
   Construct with `new SimpleQueue(name, concurrency)`, call `.process(n, handler)`, then `.add(data)`.
-- **Canonical example:** `main/src/services/cliManagerFactory.ts`
+- **Canonical example:** `main/src/services/taskQueue.ts`
 
 ### `main/src/utils/logger`
 

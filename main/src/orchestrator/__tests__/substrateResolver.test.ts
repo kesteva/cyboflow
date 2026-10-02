@@ -188,7 +188,6 @@ describe('CliManagerFactory — claude / claude-interactive dispatch', () => {
     const manager = await factory.createManager('claude-interactive', {
       sessionManager: mockSessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
 
     expect(manager).toBeInstanceOf(InteractiveClaudeManager);
@@ -204,7 +203,6 @@ describe('CliManagerFactory — claude / claude-interactive dispatch', () => {
     const manager = await factory.createManager('claude', {
       sessionManager: mockSessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
 
     expect(manager).toBeInstanceOf(ClaudeCodeManager);
@@ -218,12 +216,10 @@ describe('CliManagerFactory — claude / claude-interactive dispatch', () => {
     const sdkManager = await factory.createManager('claude', {
       sessionManager: mockSessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
     const interactiveManager = await factory.createManager('claude-interactive', {
       sessionManager: mockSessionManager,
       additionalOptions: { db },
-      skipValidation: true,
     });
 
     expect(sdkManager).toBeInstanceOf(ClaudeCodeManager);
@@ -238,7 +234,6 @@ describe('CliManagerFactory — claude / claude-interactive dispatch', () => {
       factory.createManager('claude-interactive', {
         sessionManager: mockSessionManager,
         additionalOptions: {},
-        skipValidation: true,
       }),
     ).rejects.toThrow(/requires `db`/);
   });
@@ -248,7 +243,6 @@ describe('CliManagerFactory — claude / claude-interactive dispatch', () => {
       factory.createManager('claude-interactive', {
         sessionManager: mockSessionManager,
         additionalOptions: { db: { foo: 'bar' } },
-        skipValidation: true,
       }),
     ).rejects.toThrow(/\.prepare\(\)/);
   });

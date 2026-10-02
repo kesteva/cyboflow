@@ -353,7 +353,6 @@ describe('CliManagerFactory claude tool — duck-type guard on additionalOptions
       factory.createManager('claude', {
         sessionManager: mockSessionManager,
         additionalOptions: {},
-        skipValidation: true,
       }),
     ).rejects.toThrow(/requires `db`/);
   });
@@ -363,7 +362,6 @@ describe('CliManagerFactory claude tool — duck-type guard on additionalOptions
       factory.createManager('claude', {
         sessionManager: mockSessionManager,
         additionalOptions: undefined,
-        skipValidation: true,
       }),
     ).rejects.toThrow(/requires `db`/);
   });
@@ -373,7 +371,6 @@ describe('CliManagerFactory claude tool — duck-type guard on additionalOptions
       factory.createManager('claude', {
         sessionManager: mockSessionManager,
         additionalOptions: { db: { foo: 'bar' } },
-        skipValidation: true,
       }),
     ).rejects.toThrow(/\.prepare\(\)/);
   });
@@ -383,7 +380,6 @@ describe('CliManagerFactory claude tool — duck-type guard on additionalOptions
       factory.createManager('claude', {
         sessionManager: mockSessionManager,
         additionalOptions: { db: 'not-a-db' },
-        skipValidation: true,
       }),
     ).rejects.toThrow(/\.prepare\(\)/);
   });
