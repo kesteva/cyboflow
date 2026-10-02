@@ -23,11 +23,13 @@ interface UnifiedChatViewStubProps {
   running?: boolean;
   liveTail?: ReactNode;
   bottomSlot?: ReactNode;
+  transcriptStartSlot?: ReactNode;
 }
 
 vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
-  UnifiedChatView: ({ mode, running, liveTail, bottomSlot }: UnifiedChatViewStubProps) => (
+  UnifiedChatView: ({ mode, running, liveTail, bottomSlot, transcriptStartSlot }: UnifiedChatViewStubProps) => (
     <div data-testid="unified-chat-view-stub" data-mode={mode} data-running={String(running)}>
+      <div data-testid="transcript-start-slot">{transcriptStartSlot}</div>
       <div data-testid="live-tail-slot">{liveTail}</div>
       {bottomSlot}
     </div>
@@ -35,8 +37,19 @@ vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
 }));
 
 let mockMessages: UnifiedMessage[] = [];
+let mockEarlierCount = 0;
+let mockIsLoadingEarlier = false;
+const mockLoadEarlier = vi.fn();
 vi.mock('../cyboflow/unified/useUnifiedAgentThreadMessages', () => ({
-  useUnifiedAgentThreadMessages: () => ({ messages: mockMessages, isLoading: false, loadError: null }),
+  useUnifiedAgentThreadMessages: () => ({
+    messages: mockMessages,
+    isLoading: false,
+    loadError: null,
+    hasEarlier: mockEarlierCount > 0,
+    earlierCount: mockEarlierCount,
+    isLoadingEarlier: mockIsLoadingEarlier,
+    loadEarlier: mockLoadEarlier,
+  }),
 }));
 
 // -- ProposalCardList stub: this file tests AgentThreadView's OWN wiring (the
@@ -132,6 +145,9 @@ beforeEach(() => {
   mockMessages = [];
   mockLiveEvents = [];
   mockQueuedTurn = null;
+  mockEarlierCount = 0;
+  mockIsLoadingEarlier = false;
+  mockLoadEarlier.mockClear();
 });
 
 describe('AgentThreadView — UnifiedChatView wiring', () => {
@@ -370,5 +386,32 @@ describe('AgentThreadView — model badge', () => {
     const AgentThreadView = await loadAgentThreadView();
     render(<AgentThreadView />);
     expect(screen.getByTestId('agent-model-badge')).toHaveTextContent('model · claude-sonnet-5');
+  });
+});
+
+describe('AgentThreadView — windowed history', () => {
+  it('renders no load-earlier control when the whole history is loaded', async () => {
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    expect(screen.queryByTestId('agent-thread-load-earlier')).not.toBeInTheDocument();
+  });
+
+  it('shows the earlier count at the top of the transcript and loads a page on click', async () => {
+    mockEarlierCount = 420;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    const button = screen.getByTestId('agent-thread-load-earlier');
+    expect(screen.getByTestId('transcript-start-slot')).toContainElement(button);
+    expect(button).toHaveTextContent('Load earlier messages (420 more)');
+    fireEvent.click(button);
+    expect(mockLoadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the control while a page is loading', async () => {
+    mockEarlierCount = 10;
+    mockIsLoadingEarlier = true;
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    expect(screen.getByTestId('agent-thread-load-earlier')).toBeDisabled();
   });
 });

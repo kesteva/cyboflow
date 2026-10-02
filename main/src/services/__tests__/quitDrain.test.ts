@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runQuitDrain, QUIT_DRAIN_TIMEOUT_MS } from '../quitDrain';
+import { runQuitDrain, QUIT_DRAIN_TIMEOUT_MS, QUIT_EXIT_WATCHDOG_MS } from '../quitDrain';
 
 /** A promise plus the handles to settle it from the test body. */
 function deferred<T = void>(): {
@@ -106,5 +106,52 @@ describe('runQuitDrain', () => {
     // after the teardown is already done — a visibly slow quit.
     await runQuitDrain({ drain: async () => {}, finish: vi.fn() });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('post-quit exit watchdog', () => {
+    it('is not armed at all without forceExit', async () => {
+      await runQuitDrain({ drain: async () => {}, finish: vi.fn() });
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('forces the exit only once the post-quit budget is exhausted, after finish', async () => {
+      // The drain deadline bounds our teardown; this bounds what Electron does
+      // AFTER the re-issued quit, where a post-will-quit hang was observed.
+      const finish = vi.fn();
+      const forceExit = vi.fn();
+      const warn = vi.fn();
+      await runQuitDrain({ drain: async () => {}, finish, forceExit, logger: { warn } });
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(forceExit).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(QUIT_EXIT_WATCHDOG_MS - 1);
+      expect(forceExit).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(forceExit).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('forcing exit'));
+    });
+
+    it('is armed on the deadline path too — a wedged teardown must not escape the backstop', async () => {
+      const forceExit = vi.fn();
+      const done = runQuitDrain({ drain: () => deferred().promise, finish: vi.fn(), forceExit });
+      await vi.advanceTimersByTimeAsync(QUIT_DRAIN_TIMEOUT_MS);
+      await done;
+      vi.advanceTimersByTime(QUIT_EXIT_WATCHDOG_MS);
+      expect(forceExit).toHaveBeenCalledTimes(1);
+    });
+
+    it('honours a caller-supplied budget', async () => {
+      const forceExit = vi.fn();
+      await runQuitDrain({ drain: async () => {}, finish: vi.fn(), forceExit, exitWatchdogMs: 50 });
+      vi.advanceTimersByTime(49);
+      expect(forceExit).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(forceExit).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves room for the Sentry will-quit session flush (bounded at 2s) before forcing', () => {
+      expect(QUIT_EXIT_WATCHDOG_MS).toBeGreaterThan(2_000);
+    });
   });
 });
