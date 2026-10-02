@@ -17,14 +17,16 @@ if (window.electronAPI?.telemetry?.isSentryActive?.()) {
   Sentry.init({});
 }
 
-// Global error handlers to catch errors that React error boundaries can't
+// Global error handlers to catch errors that React error boundaries can't.
+// A stray rejection is logged, never surfaced as a blocking modal: the console
+// reaches cyboflow-frontend-debug.log in dev, Sentry's own global handler
+// (registered by Sentry.init above, when active) still captures the event, and
+// failures the user must see go through errorStore / ErrorBoundary.
 window.addEventListener('unhandledrejection', (event) => {
   console.error('Unhandled promise rejection:', event.reason);
-  // Prevent default browser behavior (showing error in console)
+  // Suppress the default "Uncaught (in promise)" console line; the error above
+  // already logs it.
   event.preventDefault();
-
-  // Show a user-friendly error message
-  alert('An unexpected error occurred. The application may need to be restarted.\n\nError: ' + (event.reason?.message || String(event.reason)));
 });
 
 window.addEventListener('error', (event) => {
