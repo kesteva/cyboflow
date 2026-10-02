@@ -204,10 +204,9 @@ describe('abortRebaseAndUseClaude — no-op when not mid-rebase', () => {
 
     // The op must RESOLVE (the absent rebase is a no-op, not an error).
     // NOTE: the downstream Claude-panel spin-up goes through a dynamic
-    // require('./claudePanel') that vitest's vi.mock does NOT intercept (see the
-    // sibling fileGitExecuteProject test's note), so the final success value
-    // depends on the real panel module and is not asserted here — the no-op-on-abort
-    // behavior is the point.
+    // require('./claudePanel') that vitest's vi.mock does NOT intercept, so the
+    // final success value depends on the real panel module and is not asserted
+    // here — the no-op-on-abort behavior is the point.
     const result = (await ops.abortRebaseAndUseClaude({ sessionId: 's1' })) as {
       success: boolean;
     };

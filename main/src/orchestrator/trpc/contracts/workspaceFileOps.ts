@@ -13,9 +13,10 @@
  * Every method returns the EXACT envelope shape the legacy `file:*`/`git:*`
  * ipcMain.handle channels (main/src/ipc/file.ts, now deleted) returned, so
  * frontend call sites keep their existing shape — including the
- * inconsistent-on-purpose ones (`search`'s failure envelope carries
- * `files: []`; `readProject` returns `data: string | null`;
- * `gitExecuteProject` returns `{ output }`).
+ * inconsistent-on-purpose one (`search`'s failure envelope carries
+ * `files: []`). The project-directory `readProject`/`writeProject`/
+ * `gitExecuteProject` ops were later deleted with their only caller, the
+ * retired setup-tasks panel.
  *
  * `file:getPath` was NOT migrated (zero preload/frontend callers) — see
  * main/src/ipc/fileOps.ts for the containment helper it used, which other
@@ -51,34 +52,6 @@ export interface WorkspaceFileOpsLike {
     { success: true; files: FileItem[] } | (FileErrorResult & { files: [] })
   >;
 
-  /**
-   * Mirrors legacy `file:read-project`. Reads a file from a PROJECT's
-   * directory (not a session worktree). A missing file is `{ success: true,
-   * data: null }`, not a failure.
-   */
-  readProject(request: {
-    projectId: number;
-    filePath: string;
-  }): Promise<{ success: true; data: string | null } | FileErrorResult>;
-
-  /** Mirrors legacy `file:write-project`. Writes a file to a PROJECT's directory. */
-  writeProject(request: {
-    projectId: number;
-    filePath: string;
-    content: string;
-  }): Promise<{ success: true } | FileErrorResult>;
-
   /** Mirrors legacy `git:restore`. `reset --hard HEAD` + `clean -fd` in a session's worktree. */
   gitRestore(request: { sessionId: string }): Promise<{ success: true } | FileErrorResult>;
-
-  /**
-   * Mirrors legacy `git:execute-project`. Runs an allowlisted git subcommand
-   * (see PROJECT_GIT_SUBCOMMANDS in fileOps.ts — the SECURITY BOUNDARY) in a
-   * PROJECT's directory. The router only asserts input shape; the allowlist
-   * enforcement itself lives in the ops implementation.
-   */
-  gitExecuteProject(request: {
-    projectId: number;
-    args: string[];
-  }): Promise<{ success: true; output: string } | FileErrorResult>;
 }

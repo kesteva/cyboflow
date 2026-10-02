@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { glob } from 'glob';
-import { runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
+import { runGitCapture } from '../utils/runGit';
 import { normalizePathSeparators } from '../utils/posixPath';
 import type { AppServices } from './types';
 import type { WorkspaceFileOpsLike } from '../orchestrator/trpc/contracts/workspaceFileOps';
@@ -98,79 +98,6 @@ async function resolveWithinRoot(root: string, fullPath: string, label: string):
   return resolved;
 }
 
-// ===========================================================================
-// `git:execute-project` SUBCOMMAND ALLOWLIST — SECURITY BOUNDARY.
-//
-// This channel is the only renderer-facing handler that takes an arbitrary git
-// argv. Before TASK-680 it ran `execSync(\`git ${escapeShellArgs(args)}\`)`:
-// shell-escaped, so not injectable as a SHELL command, but still "any git
-// subcommand the renderer asks for" — `push`, `config --global`,
-// `-c core.pager=…`, `clone` of an attacker URL, and so on, all inside the
-// user's real project directory.
-//
-// The renderer's ACTUAL usage is two calls, both in
-// frontend/src/components/panels/SetupTasksPanel.tsx: staging `.gitignore`
-// (`['add', '.gitignore']`) and committing it (`['commit', '-m', <message>]`).
-// So the allowlist is not "read-only subcommands" but exactly those two argv
-// SHAPES — each entry validates its own arguments and returns the final argv
-// the runner executes, rather than passing the renderer's array through.
-//
-// Adding an entry means "a compromised renderer may run this git command in the
-// user's project". Prefer a purpose-built IPC channel over widening this.
-// ===========================================================================
-
-/** Validates one subcommand's renderer-supplied args and returns the argv to run. */
-type ProjectGitArgvBuilder = (args: readonly string[]) => string[];
-
-const PROJECT_GIT_SUBCOMMANDS: Readonly<Record<string, ProjectGitArgvBuilder>> = {
-  // `git add -- <pathspec…>`. END_OF_OPTIONS forces every pathspec into a value
-  // position, and assertNotOptionLike rejects an option-shaped one outright, so
-  // neither git's own parser nor a future git version can reinterpret one as a
-  // flag. Paths cannot escape the repo: git rejects a pathspec outside it.
-  add: (args) => {
-    const pathspecs = args.slice(1);
-    if (pathspecs.length === 0) {
-      throw new Error('git add requires at least one pathspec');
-    }
-    pathspecs.forEach((pathspec, i) => assertNotOptionLike(pathspec, `pathspec[${i}]`));
-    return ['add', END_OF_OPTIONS, ...pathspecs];
-  },
-
-  // `git commit -m <message>` and nothing else — no --amend, no --author, no
-  // -F <file>, no pathspecs. The message is bound to `-m`, which takes a
-  // required value, so git consumes the next argv element as that value even if
-  // it begins with `-`; there is no positional left for END_OF_OPTIONS to guard.
-  commit: (args) => {
-    const rest = args.slice(1);
-    if (rest.length !== 2 || rest[0] !== '-m') {
-      throw new Error('git commit is only permitted in the exact form: commit -m <message>');
-    }
-    return ['commit', '-m', rest[1]];
-  },
-};
-
-/**
- * Resolve a renderer-supplied argv to the argv that may actually run, or throw
- * with a message naming the offending subcommand and the permitted set.
- */
-function resolveProjectGitArgv(args: readonly string[]): string[] {
-  if (!Array.isArray(args) || args.length === 0) {
-    throw new Error('git args are required');
-  }
-  const subcommand = args[0];
-  const build = Object.prototype.hasOwnProperty.call(PROJECT_GIT_SUBCOMMANDS, subcommand)
-    ? PROJECT_GIT_SUBCOMMANDS[subcommand]
-    : undefined;
-  if (!build) {
-    throw new Error(
-      `git subcommand "${subcommand}" is not permitted on this channel. ` +
-        `Allowed: ${Object.keys(PROJECT_GIT_SUBCOMMANDS).join(', ')}. ` +
-        `See PROJECT_GIT_SUBCOMMANDS in main/src/ipc/fileOps.ts.`,
-    );
-  }
-  return build(args);
-}
-
 /**
  * Concrete implementation of {@link WorkspaceFileOpsLike}, backing the
  * `workspaceFiles` tRPC router (routers/workspaceFiles.ts). Method bodies are
@@ -178,7 +105,7 @@ function resolveProjectGitArgv(args: readonly string[]): string[] {
  * (ipc/file.ts, now deleted) — this file may freely import from
  * main/src/services/*, unlike the tRPC subtree itself. `file:getPath` was not
  * migrated (zero preload/frontend callers) — its containment helper
- * (resolveWithinRoot) is still used by the other methods below.
+ * (resolveWithinRoot) is still used by `search` below.
  */
 export function createFileOps(
   services: Pick<AppServices, 'sessionManager' | 'databaseService'>,
@@ -386,153 +313,6 @@ export function createFileOps(
           success: false,
           error: error instanceof Error ? error.message : 'Unknown error',
           files: [],
-        };
-      }
-    },
-
-    // Read file from project directory (not worktree)
-    async readProject(request) {
-      console.log('[file:read-project] Request:', request);
-      try {
-        const project = databaseService.getProject(request.projectId);
-        if (!project) {
-          console.error('[file:read-project] Project not found:', request.projectId);
-          throw new Error(`Project not found: ${request.projectId}`);
-        }
-
-        console.log('[file:read-project] Project path:', project.path);
-
-        // Ensure the file path is relative and safe
-        const normalizedPath = path.normalize(request.filePath);
-        if (normalizedPath.startsWith('..') || path.isAbsolute(normalizedPath)) {
-          throw new Error('Invalid file path');
-        }
-
-        const fullPath = path.join(project.path, normalizedPath);
-        console.log('[file:read-project] Full path:', fullPath);
-
-        // Containment is judged on the REALPATH: the `..`/absolute rejection is
-        // lexical only, so a
-        // symlink committed inside the project (`docs/out -> /Users/me/.ssh`)
-        // would otherwise read straight through it.
-        const resolvedPath = await resolveWithinRoot(project.path, fullPath, 'File path');
-
-        // Check if file exists
-        try {
-          await fs.access(resolvedPath);
-          console.log('[file:read-project] File exists');
-        } catch {
-          // File doesn't exist, return null
-          console.log('[file:read-project] File does not exist');
-          return { success: true, data: null };
-        }
-
-        // Read the file
-        const content = await fs.readFile(resolvedPath, 'utf-8');
-        console.log('[file:read-project] Read', content.length, 'bytes');
-        return { success: true, data: content };
-      } catch (error) {
-        console.error('[file:read-project] Error:', error);
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        };
-      }
-    },
-
-    // Write file to project directory (not worktree)
-    async writeProject(request) {
-      console.log('[file:write-project] Request:', { projectId: request.projectId, filePath: request.filePath, contentLength: request.content.length });
-      try {
-        const project = databaseService.getProject(request.projectId);
-        if (!project) {
-          console.error('[file:write-project] Project not found:', request.projectId);
-          throw new Error(`Project not found: ${request.projectId}`);
-        }
-
-        console.log('[file:write-project] Project path:', project.path);
-
-        // Ensure the file path is relative and safe
-        const normalizedPath = path.normalize(request.filePath);
-        if (normalizedPath.startsWith('..') || path.isAbsolute(normalizedPath)) {
-          throw new Error('Invalid file path');
-        }
-
-        const fullPath = path.join(project.path, normalizedPath);
-        console.log('[file:write-project] Full path:', fullPath);
-
-        // Containment on the REALPATH, BEFORE any mkdir/write side effect — and
-        // the write then goes to that same resolved path, so an existing symlink
-        // that escapes the project is rejected rather than written through.
-        // resolveForContainment also chases a DANGLING link chain, which matters
-        // here: writeFile through one creates the target wherever it points.
-        const resolvedTarget = await resolveWithinRoot(project.path, fullPath, 'File path');
-
-        // Ensure directory exists
-        await fs.mkdir(path.dirname(resolvedTarget), { recursive: true });
-
-        // Write the file
-        await fs.writeFile(resolvedTarget, request.content, 'utf-8');
-        console.log('[file:write-project] Successfully wrote', request.content.length, 'bytes to', resolvedTarget);
-
-        return { success: true };
-      } catch (error) {
-        console.error('[file:write-project] Error:', error);
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        };
-      }
-    },
-
-    // Execute git command in project directory
-    async gitExecuteProject(request) {
-      console.log('[git:execute-project] Request:', request);
-      try {
-        const project = databaseService.getProject(request.projectId);
-        if (!project) {
-          console.error('[git:execute-project] Project not found:', request.projectId);
-          throw new Error(`Project not found: ${request.projectId}`);
-        }
-
-        console.log('[git:execute-project] Project path:', project.path);
-
-        // Validate against the subcommand allowlist BEFORE anything runs, and use
-        // the argv it returns rather than the renderer's array — see
-        // PROJECT_GIT_SUBCOMMANDS above. argv form (execFile, no shell) also means
-        // no argument is ever parsed by a shell.
-        const argv = resolveProjectGitArgv(request.args);
-        console.log('[git:execute-project] Git command:', 'git', argv.join(' '));
-
-        const { stdout } = await runGitCapture(project.path, argv);
-
-        console.log('[git:execute-project] Command successful');
-        return { success: true, output: stdout };
-      } catch (error) {
-        console.error('[git:execute-project] Error:', error);
-
-        // Surface git's own output as the error. `git commit` reports "nothing to
-        // commit" on STDOUT with a non-zero exit, and SetupTasksPanel matches on
-        // that string, so the stderr-then-stdout fallback order is load-bearing —
-        // an empty stderr must fall through rather than win.
-        let errorMessage = 'Unknown error';
-        if (error instanceof Error) {
-          errorMessage = error.message;
-          interface ExecError extends Error {
-            stderr?: string | Buffer;
-            stdout?: string | Buffer;
-          }
-          const execError = error as ExecError;
-          if (execError.stderr) {
-            errorMessage = execError.stderr.toString();
-          } else if (execError.stdout) {
-            errorMessage = execError.stdout.toString();
-          }
-        }
-
-        return {
-          success: false,
-          error: errorMessage,
         };
       }
     },
