@@ -68,8 +68,7 @@ const { RUN_PANEL_RESOLVED_BASE, SESSION_PANEL_RESOLVED_BASE, RUN_PANEL_WORKTREE
   }));
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi — WorkflowProgressTimeline reads streamEvents from the store
-// which is seeded via subscribeToStreamEvents.
+// Mock cyboflowApi so rail children that import it never attempt real IPC.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../utils/cyboflowApi', () => ({
