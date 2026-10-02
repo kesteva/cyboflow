@@ -236,6 +236,23 @@ export function classify(
     return false;
   };
 
+  /**
+   * Nearest ancestor this app's own manager holds a handle for (e.g. the `claude`
+   * CLI whose MCP servers / npx wrappers hang off it). Its descendants are live
+   * children of a live owned process, not strays.
+   */
+  const ownedAncestor = (p: ProcessSnapshotRow): MarkedProcess | null => {
+    const seen = new Set<number>([p.pid]);
+    let cur = byPid.get(p.ppid);
+    for (let depth = 0; cur && depth < MAX_ANCESTRY_DEPTH && !seen.has(cur.pid); depth++) {
+      if (cur.marker && isLiveOther(cur.marker.instanceId)) return null;
+      if (cur.owner !== null) return cur;
+      seen.add(cur.pid);
+      cur = byPid.get(cur.ppid);
+    }
+    return null;
+  };
+
   const foreign = (p: MarkedProcess, foreignInstanceId: string | null): ForeignProcess => ({
     ...common(p),
     bucket: 'foreign',
@@ -273,6 +290,17 @@ export function classify(
         bucket: 'owned',
         process: p,
         owner: p.owner,
+        instanceId: liveInstances.selfInstanceId,
+      };
+    }
+    const parent = ownedAncestor(p);
+    if (parent !== null && parent.owner !== null) {
+      return {
+        ...base(p),
+        worktreePath: p.worktreePath ?? parent.worktreePath,
+        bucket: 'owned',
+        process: p,
+        owner: parent.owner,
         instanceId: liveInstances.selfInstanceId,
       };
     }

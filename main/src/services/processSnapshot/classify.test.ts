@@ -309,3 +309,28 @@ describe('buildLiveInstanceSet', () => {
     expect(selectSweepSet(res)).toEqual([]);
   });
 });
+
+describe('descendants of a live owned process', () => {
+  it('classifies MCP-server children of an owned CLI as owned, inheriting its owner and worktree', () => {
+    const cli = proc(500, 'claude --model x', {
+      processType: 'claude-cli',
+      worktreePath: '/wt/known',
+      owner: { kind: 'cli', panelId: 'p', sessionId: 's' },
+    });
+    const npm = proc(501, 'npm exec @playwright/mcp@latest', { ppid: 500 });
+    const mcp = proc(502, 'node playwright-mcp', { ppid: 501 });
+    const res = classify([cli, npm, mcp], live, truth);
+    expect(res.map((c) => c.bucket)).toEqual(['owned', 'owned', 'owned']);
+    expect(res[2].worktreePath).toBe('/wt/known');
+    expect(selectSweepSet(res)).toEqual([]);
+  });
+
+  it('does not claim a child of another live instance\'s process', () => {
+    const theirs = proc(600, 'claude', {
+      owner: { kind: 'cli', panelId: 'p', sessionId: 's' },
+      marker: { instanceId: OTHER_LIVE, worktree: null },
+    });
+    const child = proc(601, 'npm exec x', { ppid: 600 });
+    expect(classify([theirs, child], live, truth)[1].bucket).not.toBe('owned');
+  });
+});
