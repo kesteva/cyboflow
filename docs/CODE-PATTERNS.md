@@ -933,11 +933,10 @@ parallel opt-outs; do not collapse the two types or import one where the other i
 
 **Rules — grep-enforced:**
 
-1. **No UI surface may expose `'ignore'` as selectable.** The `BaseCliPanel.tsx` Permission Mode
-   dropdown must offer only `value="approve"`. (Settings.tsx no longer has a 2-mode picker at
-   all — it now exposes the separate 4-mode `defaultAgentPermissionMode` picker,
-   `SessionSettings.tsx`'s `PERMISSION_MODE_OPTIONS`, which has no `'ignore'` value to begin
-   with.) Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
+1. **No UI surface may expose `'ignore'` as selectable.** The live pickers are all 4-mode
+   agent pickers (`AgentPermissionModeSelector.tsx`'s `PERMISSION_MODE_OPTIONS` and the pickers
+   built on it, e.g. the session wizard and the composer's `PermissionModePill`), which have no
+   `'ignore'` value to begin with. Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
 
 2. **No default or fallback may resolve to `'ignore'`.** Use `DEFAULT_PERMISSION_MODE` (imported from `shared/types/permissionMode`) wherever a missing value must be filled in. Verification: `grep -rnE "\|\| 'ignore'" main/src/ frontend/src/ shared/` must return 0 matches.
 
