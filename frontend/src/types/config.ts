@@ -11,6 +11,15 @@ import type { VisualVerifyConfig } from '../../../shared/types/visualVerificatio
 import type { WebViewerConfig } from '../../../shared/types/webViewer';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
+/** Desktop-notification preferences (Settings → Notifications). */
+export interface NotificationPreferences {
+  enabled: boolean;
+  playSound: boolean;
+  notifyOnStatusChange: boolean;
+  notifyOnWaiting: boolean;
+  notifyOnComplete: boolean;
+}
+
 export interface AppConfig {
   verbose?: boolean;
   systemPromptAppend?: string;
@@ -143,13 +152,7 @@ export interface AppConfig {
     thresholdMinutes?: number;
   };
   theme?: 'paper' | 'light' | 'dark';
-  notifications?: {
-    enabled: boolean;
-    playSound: boolean;
-    notifyOnStatusChange: boolean;
-    notifyOnWaiting: boolean;
-    notifyOnComplete: boolean;
-  };
+  notifications?: NotificationPreferences;
   devMode?: boolean;
   // DEV-ONLY testing affordance: forces the next AskUserQuestion gate to fail so
   // the durable recovery gate can be exercised live. Only takes effect in dev

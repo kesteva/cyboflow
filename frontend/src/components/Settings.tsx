@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { NotificationSettings } from './NotificationSettings';
 import { UpdateSettings } from './UpdateSettings';
-import { useNotifications } from '../hooks/useNotifications';
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
@@ -270,13 +270,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
   const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState<number | ''>(5);
-  const [notificationSettings, setNotificationSettings] = useState({
-    enabled: true,
-    playSound: true,
-    notifyOnStatusChange: true,
-    notifyOnWaiting: true,
-    notifyOnComplete: true
-  });
+  const [notificationSettings, setNotificationSettings] = useState(DEFAULT_NOTIFICATION_PREFERENCES);
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Whether a `RunTypeOverrideDetail` draft is open (Session settings →
   // "Session type overrides" → Configure). That sub-screen's Save/Cancel are
@@ -289,7 +283,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [runTypeOverrideDetailOpen, setRunTypeOverrideDetailOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'general' | 'shortcuts' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
-  const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
 
@@ -381,8 +374,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       // Load notification settings
       if (data.notifications) {
         setNotificationSettings(data.notifications);
-        // Update the useNotifications hook with loaded settings
-        updateSettings(data.notifications);
       }
     } catch (err) {
       setError('Failed to load configuration');
@@ -529,13 +520,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         { errorReportingEnabled, usageMetricsEnabled },
       );
 
-      // Update the useNotifications hook with new settings
-      updateSettings(notificationSettings);
-
       // Refresh config from server
       await fetchConfig();
 
-      // Also refresh the global config store
+      // Also refresh the global config store (the notification hooks read
+      // their preferences from it, so a save applies without a reload)
       await refreshConfigStore();
 
       // Demo mode is applied at boot — offer a relaunch when it was toggled.

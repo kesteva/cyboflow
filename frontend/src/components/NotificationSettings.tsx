@@ -4,18 +4,11 @@ import { ToggleField } from './ui/Toggle';
 import { CollapsibleCard } from './ui/CollapsibleCard';
 import { SettingsSection } from './ui/SettingsSection';
 import { Bell, BellOff, Volume2, VolumeX, Zap, Shield } from 'lucide-react';
-
-interface NotificationSettings {
-  enabled: boolean;
-  playSound: boolean;
-  notifyOnStatusChange: boolean;
-  notifyOnWaiting: boolean;
-  notifyOnComplete: boolean;
-}
+import type { NotificationPreferences } from '../types/config';
 
 interface NotificationSettingsProps {
-  settings: NotificationSettings;
-  onUpdateSettings: (settings: Partial<NotificationSettings>) => void;
+  settings: NotificationPreferences;
+  onUpdateSettings: (settings: Partial<NotificationPreferences>) => void;
 }
 
 export function NotificationSettings({ settings, onUpdateSettings }: NotificationSettingsProps) {

@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 import { useReviewQueueSlice } from '../../stores/reviewQueueSlice';
+import type { AppConfig } from '../../types/config';
 
 // ---------------------------------------------------------------------------
 // Slice-driven emitter helper
@@ -54,28 +55,22 @@ vi.mock('../../trpc/client', () => {
   };
 });
 
-// Mutable mock for API.config.get — tests override `notificationsEnabled`.
-let notificationsEnabled = true;
-
-vi.mock('../../utils/api', () => ({
-  API: {
-    config: {
-      get: () =>
-        Promise.resolve({
-          success: true,
-          data: {
-            notifications: { enabled: notificationsEnabled },
-          },
-        }),
-    },
-  },
-}));
+// configStore imports the API wrapper; the hook only reads the store's state,
+// which each test seeds directly (see setNotificationsEnabled).
+vi.mock('../../utils/api', () => ({ API: {} }));
 
 // ---------------------------------------------------------------------------
 // Import under test (after mocks)
 // ---------------------------------------------------------------------------
 
 const { useStuckNotifications } = await import('../useStuckNotifications');
+const { useConfigStore } = await import('../../stores/configStore');
+
+function setNotificationsEnabled(enabled: boolean) {
+  useConfigStore.setState({
+    config: { notifications: { enabled } } as unknown as AppConfig,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,7 +96,7 @@ const MockNotification = vi.fn().mockImplementation((_title: string, _opts: Noti
 beforeEach(() => {
   MockNotification.mockClear();
   vi.stubGlobal('Notification', MockNotification);
-  notificationsEnabled = true;
+  setNotificationsEnabled(true);
   // Reset slice state before each test
   useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
 });
@@ -118,7 +113,7 @@ describe('useStuckNotifications', () => {
   it('fires a notification for the first stuck event for a runId', async () => {
     const { unmount } = renderHook(() => useStuckNotifications());
 
-    // Allow the settings useEffect to resolve
+    // Let the mount effects settle
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => {
@@ -219,11 +214,10 @@ describe('useStuckNotifications', () => {
   });
 
   it('does not fire a notification when notifications.enabled === false', async () => {
-    notificationsEnabled = false;
+    setNotificationsEnabled(false);
 
     const { unmount } = renderHook(() => useStuckNotifications());
 
-    // Wait for the settings useEffect to resolve and settings to update
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve(); // extra tick for setState + re-render

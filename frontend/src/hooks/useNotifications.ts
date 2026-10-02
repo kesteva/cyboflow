@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
-import { API } from '../utils/api';
+import { useConfigStore } from '../stores/configStore';
+import type { NotificationPreferences } from '../types/config';
 
 // Extend window interface for webkit audio context compatibility
 declare global {
@@ -9,25 +10,28 @@ declare global {
   }
 }
 
-interface NotificationSettings {
-  enabled: boolean;
-  playSound: boolean;
-  notifyOnStatusChange: boolean;
-  notifyOnWaiting: boolean;
-  notifyOnComplete: boolean;
-}
+/** Preferences in effect until config has loaded, or when it carries none. */
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  enabled: true,
+  playSound: true,
+  notifyOnStatusChange: true,
+  notifyOnWaiting: true,
+  notifyOnComplete: true,
+};
 
-export function useNotifications() {
+/**
+ * Desktop notifications for session status changes. Mount exactly once (App):
+ * every instance runs its own session diff, so a second one notifies twice.
+ *
+ * Preferences come from the shared config store, so a Settings save (which
+ * refetches it) takes effect without a reload.
+ */
+export function useNotifications(): void {
   const sessions = useSessionStore((state) => state.sessions);
+  const sessionsLoaded = useSessionStore((state) => state.isLoaded);
+  const settings =
+    useConfigStore((state) => state.config?.notifications) ?? DEFAULT_NOTIFICATION_PREFERENCES;
   const prevSessionsRef = useRef<typeof sessions>([]);
-  const [settings, setSettings] = useState<NotificationSettings>({
-    enabled: true,
-    playSound: true,
-    notifyOnStatusChange: true,
-    notifyOnWaiting: true,
-    notifyOnComplete: true,
-  });
-  const settingsLoaded = useRef(false);
   const initialLoadComplete = useRef(false);
 
   const requestPermission = async (): Promise<boolean> => {
@@ -122,17 +126,14 @@ export function useNotifications() {
 
   useEffect(() => {
     const prevSessions = prevSessionsRef.current;
-    
-    // If this is the initial load (prevSessions is empty and we have sessions),
-    // just update the ref without triggering notifications
-    if (!initialLoadComplete.current && prevSessions.length === 0 && sessions.length > 0) {
-      prevSessionsRef.current = sessions;
-      initialLoadComplete.current = true;
-      return;
-    }
-    
-    // Only process notifications after the initial load is complete
+
+    // The initial session list (and anything that arrived before it) is the
+    // baseline, not news: record it without notifying. Keyed on the store's
+    // isLoaded flag so an install that boots with zero sessions still treats
+    // its first real session as a change.
     if (!initialLoadComplete.current) {
+      prevSessionsRef.current = sessions;
+      if (sessionsLoaded) initialLoadComplete.current = true;
       return;
     }
     
@@ -183,31 +184,10 @@ export function useNotifications() {
 
     // Update the ref for next comparison
     prevSessionsRef.current = sessions;
-  }, [sessions, settings]);
+  }, [sessions, sessionsLoaded, settings]);
 
-  // Load settings on first mount
+  // Ask for notification permission once, on mount.
   useEffect(() => {
-    if (!settingsLoaded.current) {
-      settingsLoaded.current = true;
-      
-      API.config.get().then(response => {
-        if (response.success && response.data?.notifications) {
-          setSettings(response.data.notifications);
-        }
-      }).catch(error => {
-        console.error('Failed to load notification settings:', error);
-      });
-      
-      requestPermission();
-    }
+    requestPermission();
   }, []);
-
-  return {
-    settings,
-    updateSettings: (newSettings: Partial<NotificationSettings>) => {
-      setSettings(prev => ({ ...prev, ...newSettings }));
-    },
-    requestPermission,
-    showNotification,
-  };
 }

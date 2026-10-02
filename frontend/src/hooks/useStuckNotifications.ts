@@ -1,15 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
-import { API } from '../utils/api';
+import { useEffect, useRef } from 'react';
+import { useConfigStore } from '../stores/configStore';
 import { useReviewQueueSlice } from '../stores/reviewQueueSlice';
 import type { StuckReason } from '../../../shared/types/stuckDetection';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface NotificationSettings {
-  enabled: boolean;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,8 +33,9 @@ export function stuckReasonText(reason: StuckReason): string {
  * Mounted exactly once at the `App` top level — never inside a view component
  * so the suppression set is never reset by a view unmount.
  *
- * Gated by the `notifications.enabled` flag from the global config; if the
- * user has disabled notifications, stuck notifications are also suppressed.
+ * Gated by the `notifications.enabled` flag from the shared config store; if
+ * the user has disabled notifications, stuck notifications are also suppressed
+ * (a Settings save refetches the store, so the toggle applies immediately).
  *
  * The suppression set lives in a `useRef` (in-memory only).  It does NOT
  * persist to `localStorage` / `sessionStorage` — a fresh app launch resets
@@ -52,9 +45,7 @@ export function useStuckNotifications(): void {
   /** Runs that have already triggered a notification this app launch. */
   const notifiedRunsRef = useRef<Set<string>>(new Set());
 
-  const [settings, setSettings] = useState<NotificationSettings>({
-    enabled: true,
-  });
+  const enabled = useConfigStore((state) => state.config?.notifications?.enabled ?? true);
 
   // -- Permission helper ----------------------------------------------------
 
@@ -65,18 +56,9 @@ export function useStuckNotifications(): void {
     return Notification.requestPermission().then((p) => p === 'granted');
   };
 
-  // -- Load notification settings on first mount ----------------------------
+  // -- Ask for notification permission once, on mount ----------------------
 
   useEffect(() => {
-    API.config.get().then((response) => {
-      if (response.success && response.data?.notifications) {
-        const notifSettings = response.data.notifications as { enabled: boolean };
-        setSettings({ enabled: notifSettings.enabled });
-      }
-    }).catch((err: unknown) => {
-      console.warn('[useStuckNotifications] Failed to load notification settings:', err);
-    });
-
     requestPermission();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: runs once on mount only
   }, []);
@@ -102,7 +84,7 @@ export function useStuckNotifications(): void {
 
         // Per-app-launch suppression
         if (notifiedRunsRef.current.has(runId)) continue;
-        if (!settings.enabled) continue;
+        if (!enabled) continue;
         notifiedRunsRef.current.add(runId);
 
         const reason = state.runReasonMap[runId];
@@ -123,5 +105,5 @@ export function useStuckNotifications(): void {
     });
 
     return unsubscribe;
-  }, [settings.enabled]);
+  }, [enabled]);
 }
