@@ -11,7 +11,6 @@ import type { StuckInspectionResult } from '../../../../../shared/types/stuckIns
 import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState, PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
-import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { DatabaseLike } from '../../types';
 import type { WorkflowRunStatus } from '../../../../../shared/types/cyboflow';
@@ -24,7 +23,6 @@ import {
 import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler, isLatestRunTurnCompleted } from '../../runQueries';
-import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import { selectRunContextUsage, type RunContextUsage } from '../../runContextUsageListing';
@@ -3951,29 +3949,6 @@ export const runsRouter = router({
     }),
 
   /**
-   * Return the reconstructed chat history for a run.
-   *
-   * Reads from `raw_events` filtered to 'assistant' and 'user' event types,
-   * reconstructing user-text and assistant-text turns as ChatMessage[]. Tool-use
-   * and tool-result blocks are intentionally excluded — they surface via the
-   * approvals and questions channels.
-   *
-   * Uses `selectRunMessages` from runMessagesListing.ts which applies
-   * json_extract() at the SQL layer for efficient pre-filtering.
-   */
-  listMessages: protectedProcedure
-    .input(z.object({ runId: z.string() }))
-    .query(async ({ ctx, input }): Promise<ChatMessage[]> => {
-      if (!ctx.db) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: 'db not wired into tRPC context',
-        });
-      }
-      return selectRunMessages(ctx.db, input.runId);
-    }),
-
-  /**
    * Return the reconstructed chat history for a run as fully-correlated
    * `UnifiedMessage[]` — the SAME rich projection the quick-session path
    * produces (tool_use folded together with its matching tool_result, system
@@ -3982,10 +3957,6 @@ export const runsRouter = router({
    * Reads from `raw_events` and folds every stored event through the shared
    * `TypedEventNarrowing` + `MessageProjection` pipeline via
    * `selectRunUnifiedMessages` from runUnifiedMessagesListing.ts.
-   *
-   * This is the Phase-1 backend half of chat unification. `listMessages`
-   * (the legacy TEXT-ONLY reducer) is intentionally kept intact — a later
-   * phase will mark it `@cyboflow-hidden` once the renderer migrates here.
    */
   listUnifiedMessages: protectedProcedure
     .input(z.object({ runId: z.string() }))

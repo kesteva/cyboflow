@@ -14,8 +14,8 @@
  * database, so copying it into all seven retained daily backups is where the
  * backups directory's bulk comes from. But it is NOT disposable: the `messages`
  * table is empty by design and `raw_events` is the SOURCE OF TRUTH for
- * reconstructed chat history (see shared/types/chatMessage.ts), plus the
- * context-usage view, the run inspector, and Insights all read it. Dropping it
+ * reconstructed chat history (see orchestrator/runUnifiedMessagesListing.ts),
+ * plus the context-usage view, the run inspector, and Insights all read it. Dropping it
  * from backups would mean a restore that keeps your runs and silently loses
  * every conversation in them.
  *

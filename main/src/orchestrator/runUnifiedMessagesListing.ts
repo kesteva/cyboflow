@@ -7,8 +7,7 @@
  * `cyboflow.runs.listUnifiedMessages` procedure has a testable,
  * framework-free implementation.
  *
- * Source of truth: the raw_events table (same table `selectRunMessages` reads).
- * Where `selectRunMessages` is a TEXT-ONLY reducer, this helper normalizes every
+ * Source of truth: the raw_events table. This helper normalizes every
  * stored event into the Claude-compatible projection shape, then runs it through
  * the SAME projection pipeline the live stream uses — `TypedEventNarrowing` +
  * `MessageProjection` — producing the rich, correlated shape the renderer's
@@ -24,9 +23,7 @@
  * file `runEventBridge.ts` uses — the streamParser barrel only re-exports
  * classes whose own imports are limited to `shared/types` + the barrel's local
  * `./types`, so it does NOT pull in 'electron', 'better-sqlite3', or a concrete
- * service. The stricter "no services/* import" comment on `runMessagesListing.ts`
- * is per-file; this helper is deliberately a separate sibling so that file's
- * invariant stays intact.
+ * service.
  *
  * Logger note (per project CODE-PATTERNS.md): the optional `logger` is THREADED into
  * both `TypedEventNarrowing` and `MessageProjection` — omitting it would silently
@@ -34,7 +31,7 @@
  * the call site adapts `verbose` to the logger's `debug` channel, matching the
  * adaptation in `runEventBridge.ts`.
  *
- * Ordering: created_at ASC, id ASC (tiebreaker) — same as `selectRunMessages`.
+ * Ordering: created_at ASC, id ASC (tiebreaker).
  */
 import {
   agentStreamEventToClaudeStreamEvent,
