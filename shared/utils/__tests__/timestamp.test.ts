@@ -1,6 +1,6 @@
 /**
- * timestampUtils.parseTimestamp — the UTC normalization every raw SQLite
- * timestamp needs, and the boundary of what it does NOT cover.
+ * parseTimestamp — the UTC normalization every raw SQLite timestamp needs.
+ * main and the renderer both re-export this one implementation.
  *
  * SQLite's CURRENT_TIMESTAMP / datetime('now') write space-separated UTC with
  * no zone marker ("2026-08-24 19:12:52"); JS parses that shape as LOCAL time.
@@ -14,7 +14,7 @@
  * CI host as well as on a developer's machine.
  */
 import { describe, it, expect } from 'vitest';
-import { parseTimestamp, getTimeDifference } from '../timestampUtils';
+import { parseTimestamp } from '../timestamp';
 
 const UTC_INSTANT = Date.UTC(2026, 7, 24, 19, 12, 52); // 2026-08-24T19:12:52Z
 
@@ -44,12 +44,9 @@ describe('parseTimestamp', () => {
     expect(parseTimestamp(unzoned).getTime()).toBe(UTC_INSTANT);
   });
 
-  it('matches the frontend copy of parseTimestamp, which has always normalized', () => {
-    // The two timestampUtils files previously disagreed under the same name —
-    // the trap that made this easy to reintroduce on the main side.
-    const sqliteShape = '2026-08-24 19:12:52';
-    const frontendEquivalent = new Date(sqliteShape.replace(' ', 'T') + 'Z');
-    expect(parseTimestamp(sqliteShape).getTime()).toBe(frontendEquivalent.getTime());
+  it('returns a Date argument unchanged', () => {
+    const date = new Date(UTC_INSTANT);
+    expect(parseTimestamp(date)).toBe(date);
   });
 });
 
@@ -86,27 +83,5 @@ describe('parseTimestamp shape matrix', () => {
     for (const [, input] of SHAPES) {
       expect(Number.isNaN(parseTimestamp(input).getTime())).toBe(false);
     }
-  });
-});
-
-describe('getTimeDifference is unaffected when BOTH sides share a format', () => {
-  it('two unzoned SQLite values yield the correct interval even unnormalized', () => {
-    // A same-format pair cancels: both sides misparse by the identical offset,
-    // so the subtraction is right even unnormalized. Only a MIXED pair — one
-    // raw column against a `new Date()` — goes wrong.
-    const start = '2026-08-24 19:00:00';
-    const end = '2026-08-24 19:12:52';
-    expect(getTimeDifference(start, end)).toBe(12 * 60_000 + 52_000);
-  });
-
-  it('a mixed pair is what goes wrong (documents the real hazard)', () => {
-    // A raw column compared against an already-zoned value skews by the offset.
-    const offsetMs = new Date(UTC_INSTANT).getTimezoneOffset() * 60_000;
-    const skew = getTimeDifference('2026-08-24 19:12:52', new Date(UTC_INSTANT));
-    // On a UTC runner offsetMs is 0, so -offsetMs is -0 — and toBe
-    // distinguishes -0 from +0. Accept either zero: the hazard this
-    // documents is the NONZERO skew, not the sign of zero.
-    const expected = offsetMs === 0 ? 0 : -offsetMs;
-    expect(skew).toBe(expected);
   });
 });

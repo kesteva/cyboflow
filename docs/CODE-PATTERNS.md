@@ -643,8 +643,8 @@ zone marker — and `new Date()` reads that shape as LOCAL time, so every such v
 host's UTC offset in the future. The failure is quiet: "time ago" formatters fold a negative
 interval into their zero bucket, so the wrong clock renders as a confident "just now".
 
-- Parse DB-sourced timestamp strings with `parseTimestamp` (`main/src/utils/timestampUtils.ts`
-  or `frontend/src/utils/timestampUtils.ts`; the two copies must keep identical normalization).
+- Parse DB-sourced timestamp strings with `parseTimestamp` (`shared/utils/timestamp.ts`, also
+  re-exported by `main/src/utils/timestampUtils.ts` and `frontend/src/utils/timestampUtils.ts`).
   Never `new Date(row.some_at)`. `parseDbTimestampMs` in `frontend/src/utils/homeClassify.ts`
   is the other sanctioned parser.
 - The zone test is an allow-list on the UNZONED shape (`/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/`),

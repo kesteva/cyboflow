@@ -1,7 +1,6 @@
 import { Copy, Check } from 'lucide-react';
 import { useState } from 'react';
-import { formatDistanceToNow } from '../utils/formatters';
-import { formatDuration, getTimeDifference, isValidTimestamp, parseTimestamp } from '../utils/timestampUtils';
+import { formatDistanceToNow, formatDuration, getTimeDifference, isValidTimestamp, parseTimestamp } from '../utils/timestampUtils';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { IconButton } from './ui/IconButton';
 
@@ -67,7 +66,7 @@ export function PromptDetailModal({ prompt, promptIndex, onClose }: PromptDetail
               Prompt #{promptIndex + 1}
             </h2>
             <div className="flex items-center space-x-2 text-sm text-text-tertiary">
-              <span>{formatDistanceToNow(parseTimestamp(prompt.timestamp))} ago</span>
+              <span>{formatDistanceToNow(parseTimestamp(prompt.timestamp))}</span>
               <span className="text-text-tertiary">•</span>
               <span className="font-medium">{calculateDuration()}</span>
             </div>
