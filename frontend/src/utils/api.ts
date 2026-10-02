@@ -121,11 +121,6 @@ export class API {
       return trpc.cyboflow.sessions.get.query({ sessionId }) as Promise<IPCResponse<Session>>;
     },
 
-    async create(request: CreateSessionRequest) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.create(request);
-    },
-
     async createQuick(request: CreateSessionRequest) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.createQuick(request);
@@ -205,10 +200,6 @@ export class API {
     // unchanged; only the transport moved. No isElectron() guard, matching the
     // other trpc-backed statics below (the ipcLink transport is Electron-only
     // by construction).
-    async gitCommit(sessionId: string, message: string) {
-      return trpc.cyboflow.sessionGit.commit.mutate({ sessionId, message });
-    },
-
     async getCombinedDiff(
       sessionId: string,
       executionIds?: number[],
@@ -263,10 +254,6 @@ export class API {
 
     async rename(sessionId: string, newName: string) {
       return trpc.cyboflow.sessions.rename.mutate({ sessionId, newName });
-    },
-
-    async toggleFavorite(sessionId: string) {
-      return trpc.cyboflow.sessions.toggleFavorite.mutate({ sessionId });
     },
 
     async updateAgentPermissionMode(sessionId: string, mode: PermissionMode) {

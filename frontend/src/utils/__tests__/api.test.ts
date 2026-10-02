@@ -86,7 +86,6 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
 
 describe('API — happy path forwards args verbatim', () => {
   const stop = vi.fn();
-  const create = vi.fn();
   const providersDetect = vi.fn();
   const modelsGetAvailability = vi.fn();
   const modelsGetCatalog = vi.fn();
@@ -94,7 +93,6 @@ describe('API — happy path forwards args verbatim', () => {
 
   beforeEach(() => {
     stop.mockReset().mockResolvedValue({ success: true, data: { id: 's1' } });
-    create.mockReset().mockResolvedValue({ success: true });
     providersDetect.mockReset().mockResolvedValue({
       success: true,
       data: {
@@ -110,7 +108,7 @@ describe('API — happy path forwards args verbatim', () => {
     });
     modelsOnChanged.mockClear();
     setElectronAPI({
-      sessions: { stop, create },
+      sessions: { stop },
       providers: { detect: providersDetect },
       models: {
         getAvailability: modelsGetAvailability,
@@ -127,12 +125,6 @@ describe('API — happy path forwards args verbatim', () => {
     const res = await API.sessions.stop('sess-42');
     expect(stop).toHaveBeenCalledWith('sess-42');
     expect(res).toEqual({ success: true, data: { id: 's1' } });
-  });
-
-  it('sessions.create forwards the full request object', async () => {
-    const request = { prompt: 'hi', projectId: 3 } as never;
-    await API.sessions.create(request);
-    expect(create).toHaveBeenCalledWith(request);
   });
 
   it('providers.detect forwards the provider argument to the preload bridge', async () => {
