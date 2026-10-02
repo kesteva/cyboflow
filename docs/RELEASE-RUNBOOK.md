@@ -19,10 +19,12 @@ runner. Nothing is published until the artifacts are verified. **The R2 publish
 (§5) is what actually ships the update — the GitHub release is an archival
 mirror the app never reads.**
 
-> **Why per-arch, not universal.** `build:mac:universal` currently **fails**:
+> **Why per-arch, not universal.** There is no universal build script:
 > `@electron/universal` can't merge the bundled `claude` / `codex` binaries
 > (plain Mach-O executables not covered by `mac.x64ArchFiles`, which only lists
-> `.node`/`.dylib`). The release ships as **per-arch** DMGs instead. See
+> `.node`/`.dylib`). The release ships as **per-arch** DMGs. `build:mac` and
+> `build:mac:dev` simply run the arm64 then x64 recipes
+> (`build:mac:{arm64,x64}` / `build:mac:dev:{arm64,x64}`) in sequence. See
 > `docs/signing/APPLE_DEVELOPER_SETUP.md` for the signing contract.
 
 ## Prerequisites
@@ -493,6 +495,11 @@ Windows trio (`*.exe`, `*.exe.blockmap`, `latest.yml`) up from its §4 directory
 then upload with an explicit `PUBLISH_ONLY` allowlist so the mixed `dist-electron`
 doesn't cross-contaminate feeds. Dry-run first.
 
+> `pnpm release:mac` / `release:mac:dev` (both arch builds, then a bare
+> `publish:r2`) are convenience wrappers only: the bare publish uploads the whole
+> `dist-electron` and the second arch's `latest-mac.yml` overwrites the first.
+> For a real release use the merged-manifest + `PUBLISH_ONLY` recipe below.
+
 ```bash
 set -a; . ~/Developer/cyboflow/.envrc.local; set +a   # needs the 3 R2 vars
 
@@ -585,7 +592,7 @@ mirror, but not the channel the app or website depends on).
   first) before publishing, or one arch gets no updates.
 - **Publish with `PUBLISH_ONLY`** — `dist-electron` accumulates a mix of
   variants/arches/stale files; the bare glob cross-contaminates `stable/` ↔ `dev/`.
-- **Never run `build:mac:universal`** — it fails on the agent binaries (see top).
+- **Never build a universal macOS binary** — `electron-builder --universal` fails on the agent binaries (see top); there is no script for it.
 - **Windows ships from CI, from the release commit.** `windows.yml` needs a
   remote ref (`release-build/$V`) pointed at the `chore: release` commit — a
   dispatch on an older ref stamps the wrong `buildInfo.gitCommit`/version. Both

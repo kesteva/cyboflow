@@ -119,8 +119,8 @@ over `pnpm --filter` — filter recursion has broken bin PATH resolution in this
 `docs/ARCHITECTURE.md` → "Build & Run".
 
 Full test-tier and ABI mechanics: `docs/ARCHITECTURE.md` → "Build & Run".
-Packaging/releases: `docs/RELEASE-RUNBOOK.md` (per-arch DMGs — `build:mac:universal`
-currently fails).
+Packaging/releases: `docs/RELEASE-RUNBOOK.md` (per-arch DMGs; there is no
+universal build).
 
 ## Conventions
 

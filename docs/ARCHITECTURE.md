@@ -1417,7 +1417,7 @@ from which command last ran.
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.
 
-Packaging/releases: per-arch DMGs; `build:mac:universal` currently fails — see
+Packaging/releases: per-arch DMGs (no universal build) — see
 `docs/RELEASE-RUNBOOK.md`.
 
 ### asarUnpack contract

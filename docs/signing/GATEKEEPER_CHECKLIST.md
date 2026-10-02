@@ -7,7 +7,7 @@ record** — you don't commit results. If a step fails, fix it and note the caus
 `APPLE_DEVELOPER_SETUP.md` → "Known Build Pitfalls". Artifact hashes are captured automatically
 in the published `latest-mac.yml`; user-facing changes go in `CHANGELOG.md`.
 
-A release ships **four** DMGs, not a universal one (`build:mac:universal` fails — see
+A release ships **four** DMGs, not a universal one (a universal build fails — see
 `docs/RELEASE-RUNBOOK.md`). Run the full procedure below **once per row**:
 
 | Variant | DMG | App bundle | `appId` | Data dir |
