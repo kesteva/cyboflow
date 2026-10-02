@@ -5,9 +5,8 @@
  *
  *   provider  — claude | codex | omp. Session-wide (`sessions.agent_runtime`); a
  *               panel cannot disagree with its session about which vendor runs it.
- *   substrate — sdk | interactive. PER-PANEL: the Add-chat picker and
- *               claude-panels:set-substrate stamp `panels.substrate`, which wins
- *               over the session's.
+ *   substrate — sdk | interactive. PER-PANEL: the Add-chat picker stamps
+ *               `panels.substrate` at creation, which wins over the session's.
  *
  * The dispatch seams used to collapse both axes into one test against
  * `agent_runtime` — `=== 'codex-pty'` meant "Codex", `=== 'codex-sdk'` meant

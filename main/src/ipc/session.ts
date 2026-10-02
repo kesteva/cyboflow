@@ -336,9 +336,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   };
 
   /**
-   * The panel's EFFECTIVE substrate: a per-panel override (Add-chat picker /
-   * claude-panels:set-substrate) wins over the session's, mirroring
-   * ClaudePanelManager.getCliManager and ptyPanelDispatch. `env: {}` — panel
+   * The panel's EFFECTIVE substrate: a per-panel override (Add-chat picker)
+   * wins over the session's, mirroring ClaudePanelManager.getCliManager and
+   * ptyPanelDispatch. `env: {}` — panel
    * routing inherits only the session value, never the process environment.
    */
   const resolvePanelSubstrate = (panel: ToolPanel, dbSession: { substrate?: string | null } | undefined) =>
@@ -3380,6 +3380,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
+  // Test/diagnostic seam with no renderer caller (queued chips are tracked
+  // client-side): the IPC tests read the closure-private structured-lane queues
+  // through it.
   ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
     try {
       const panel = panelManager.getPanel(panelId);

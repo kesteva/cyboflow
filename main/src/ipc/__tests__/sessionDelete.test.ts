@@ -358,7 +358,7 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
 
   it('tears down a panel-level substrate override on its OWN manager, not the session-level one (composed with resolvePanelLane)', async () => {
     // Session substrate is 'sdk' (claudeCodeManager's lane), but this ONE
-    // panel overrides to 'interactive' (claude-panels:set-substrate) — the
+    // panel overrides to 'interactive' (the Add-chat picker) — the
     // exact mixed case claudePanelContinue.test.ts covers for the continue
     // seam. resolvePanelLane must resolve the PANEL's substrate, not the
     // session's, so the interactive-lane manager tears it down and the

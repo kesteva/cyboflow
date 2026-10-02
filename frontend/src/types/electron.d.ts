@@ -1,7 +1,7 @@
 // Type definitions for Electron preload API
 import type { Session, SessionOutput } from './session';
 import type { Project } from './project';
-import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
+import type { ToolPanel, CreatePanelRequest, FastModeStateNotice } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../../shared/types/ideaSession';
@@ -359,7 +359,6 @@ interface ElectronAPI {
     continue: (panelId: string, input: string, model?: string, interrupt?: boolean, pendingId?: string) => Promise<IPCResponse<{ queued?: boolean } | void>>;
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string) => Promise<IPCResponse<{ queued: boolean }>>;
-    listQueuedInput: (panelId: string) => Promise<IPCResponse<QueuedPanelInput[]>>;
     dequeueInput: (panelId: string, id: string) => Promise<IPCResponse<{ dequeued: boolean }>>;
     stop: (panelId: string) => Promise<IPCResponse<void>>;
     resizeTerminal: (panelId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
@@ -370,8 +369,6 @@ interface ElectronAPI {
   claudePanels: {
     getModel: (panelId: string) => Promise<IPCResponse<string>>;
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
-    getSubstrate: (panelId: string) => Promise<IPCResponse<'sdk' | 'interactive' | null>>;
-    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null) => Promise<IPCResponse<void>>;
     setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
     getFastMode: (panelId: string) => Promise<IPCResponse<boolean>>;
     /** Latest CLI-reported fast-mode state (null until a turn has reported). */

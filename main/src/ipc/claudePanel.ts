@@ -7,7 +7,6 @@ import { panelManager } from '../services/panelManager';
 import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
 import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import { isCliSubstrate, type CliSubstrate } from '../../../shared/types/substrate';
 import { DEFAULT_CODEX_MODEL, normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
@@ -251,33 +250,6 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       } catch (error) {
         console.error('Failed to set Claude panel fast mode:', error);
         return { success: false, error: 'Failed to set Claude panel fast mode' };
-      }
-    });
-
-    this.ipcMain.handle('claude-panels:get-substrate', async (_event, panelId: string) => {
-      try {
-        const panel = panelManager.getPanel(panelId);
-        return { success: true, data: panel?.substrate ?? null };
-      } catch (error) {
-        console.error('Failed to get Claude panel substrate:', error);
-        return { success: false, error: 'Failed to get Claude panel substrate' };
-      }
-    });
-
-    this.ipcMain.handle('claude-panels:set-substrate', async (_event, panelId: string, substrate: CliSubstrate | null) => {
-      try {
-        if (substrate !== null && !isCliSubstrate(substrate)) {
-          return { success: false, error: 'Invalid panel substrate' };
-        }
-        const panel = panelManager.getPanel(panelId);
-        if (!panel || panel.type !== 'claude') {
-          return { success: false, error: 'Claude panel not found' };
-        }
-        await panelManager.updatePanel(panelId, { substrate });
-        return { success: true };
-      } catch (error) {
-        console.error('Failed to set Claude panel substrate:', error);
-        return { success: false, error: 'Failed to set Claude panel substrate' };
       }
     });
 

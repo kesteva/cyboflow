@@ -94,10 +94,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const isOmpPtySession = substrateSession?.agentRuntime === 'omp-pty';
   const isVendorPtySession = isCodexPtySession || isOmpPtySession;
   // Effective substrate for THIS panel: a per-panel override (TASK-104 —
-  // panel.substrate, set at "Add chat" creation time via the picker, or later
-  // via claude-panels:set-substrate) wins over the session's substrate,
-  // mirroring the backend's resolveSubstrate precedence (ClaudePanelManager.
-  // getCliManager). Reading only substrateSession.substrate here (as before)
+  // panel.substrate, set at "Add chat" creation time via the picker) wins
+  // over the session's substrate, mirroring the backend's resolveSubstrate
+  // precedence (ClaudePanelManager.getCliManager). Reading only substrateSession.substrate here (as before)
   // meant an added chat with a PTY override on an otherwise-SDK session still
   // rendered the SDK transcript/composer — which then waits forever for SDK
   // stream events that never arrive, since the backend actually spawned a PTY

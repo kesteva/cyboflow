@@ -9,7 +9,6 @@ import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { OpenIdeaSessionRequest } from '../../../shared/types/ideaSession';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 import type { DiffGroupScope } from '../../../shared/types/runFiles';
 import type { AppConfig } from '../types/config';
@@ -572,11 +571,6 @@ export class API {
       return window.electronAPI.panels.queueInput(panelId, id, text);
     },
 
-    async listQueuedInput(panelId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.panels.listQueuedInput(panelId);
-    },
-
     async dequeueInput(panelId: string, id: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.panels.dequeueInput(panelId, id);
@@ -593,16 +587,6 @@ export class API {
     async setModel(panelId: string, model: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.claudePanels.setModel(panelId, model);
-    },
-
-    async getSubstrate(panelId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.claudePanels.getSubstrate(panelId);
-    },
-
-    async setSubstrate(panelId: string, substrate: CliSubstrate | null) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.claudePanels.setSubstrate(panelId, substrate);
     },
 
     async setFastMode(panelId: string, fastMode: boolean) {

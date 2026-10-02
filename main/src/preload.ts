@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
-import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { ProviderModelCatalogs } from '../../shared/types/agentModels';
@@ -647,8 +647,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Mid-turn input queue ("always allow messaging a running quick session").
     queueInput: (panelId: string, id: string, text: string): Promise<IPCResponse<{ queued: boolean }>> =>
       ipcRenderer.invoke('panels:queue-input', panelId, id, text),
-    listQueuedInput: (panelId: string): Promise<IPCResponse<QueuedPanelInput[]>> =>
-      ipcRenderer.invoke('panels:list-queued-input', panelId),
     dequeueInput: (panelId: string, id: string): Promise<IPCResponse<{ dequeued: boolean }>> =>
       ipcRenderer.invoke('panels:dequeue-input', panelId, id),
   },
@@ -656,9 +654,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude Panels - specific API for Claude panels
   claudePanels: {
     getModel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-model', panelId),
-    getSubstrate: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-substrate', panelId),
-    setSubstrate: (panelId: string, substrate: 'sdk' | 'interactive' | null): Promise<IPCResponse> =>
-      ipcRenderer.invoke('claude-panels:set-substrate', panelId, substrate),
     setModel: (panelId: string, model: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-model', panelId, model),
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
     getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),

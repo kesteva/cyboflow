@@ -16,8 +16,8 @@ export async function dispatchQuickSessionInput(
   interrupt?: boolean,
   pendingId?: string,
   /**
-   * The panel's OWN substrate override, when it has one (Add-chat picker /
-   * claude-panels:set-substrate). Absent means the panel inherits its session.
+   * The panel's OWN substrate override, when it has one (set by the Add-chat
+   * picker). Absent means the panel inherits its session.
    */
   panelSubstrate?: CliSubstrate | null,
 ): Promise<{ success: boolean; error?: string; queued?: boolean }> {
