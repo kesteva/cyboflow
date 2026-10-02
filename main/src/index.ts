@@ -234,6 +234,7 @@ import { installMainConsoleForwarding } from './mainConsoleForwarding';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
+import { composePermissionTrust } from './permissionTrustComposition';
 import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
@@ -2463,6 +2464,8 @@ async function initializeServices(): Promise<boolean> {
     sessionManager,
   };
 
+  // Migration-127 trust prompt: projects:create + first session/run launch in an undecided project.
+  const permissionTrust = composePermissionTrust({ databaseService, sessionManager, workflowRegistry, getMainWindow: () => mainWindow });
   runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
@@ -2472,7 +2475,7 @@ async function initializeServices(): Promise<boolean> {
     orchSocketProvider,
     bridgeScriptResolver,
     nodeResolver,
-    cyboflowPublisher,
+    permissionTrust.wrapRunPublisher(cyboflowPublisher),
     runExecutor,
     runQueues,
     taskChangeRouter,
@@ -2759,6 +2762,7 @@ async function initializeServices(): Promise<boolean> {
     getMainWindow: () => mainWindow,
     logger,
     archiveProgressManager,
+    permissionTrustPrompter: permissionTrust.prompter,
     cyboflow: {
       workflowRegistry,
       runLauncher,

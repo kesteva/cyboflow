@@ -54,7 +54,8 @@
  * Trust is decided PER PROJECT via `setProjectPermissionTrustResolver` (see
  * below) — the boot wiring in main/src/index.ts injects a resolver backed by
  * the `projects.permission_trust` column (migration 127), stamped by a
- * one-time dialog shown at project activation (main/src/ipc/project.ts).
+ * one-time dialog shown at project creation or the first session/run launch
+ * in the project (main/src/services/permissionTrustPrompt.ts).
  * `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1` remains a global override that
  * trusts every project regardless of its stamp — useful for CI/dev, but the
  * per-project resolver is the normal path.
@@ -362,7 +363,7 @@ export function setProjectPermissionTrustResolver(fn: (projectDir: string) => bo
  * True if either project settings file (`.claude/settings.json` or
  * `.claude/settings.local.json` under `projectDir`) declares a non-empty
  * `permissions.allow` array. Used to decide whether the per-project trust
- * prompt (main/src/ipc/project.ts) has anything to ask about — a repo with no
+ * prompt (main/src/services/permissionTrustPrompt.ts) has anything to ask about — a repo with no
  * allow rules never needs a trust decision.
  */
 export function projectSettingsContainAllowRules(projectDir: string): boolean {

@@ -1,8 +1,6 @@
-import { IpcMain, dialog } from 'electron';
+import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import type { CreateProjectRequest, UpdateProjectRequest } from '../../../frontend/src/types/project';
-import type { Project } from '../database/models';
-import type { DatabaseService } from '../database/database';
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
 import { logsManager } from '../services/panels/logPanel/logsManager';
@@ -10,57 +8,6 @@ import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import { makeLoggerLike } from '../orchestrator/loggerAdapter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
 import { seedDemoInsightsHistory } from '../services/demo/demoInsightsSeed';
-import { projectSettingsContainAllowRules } from '../orchestrator/permissionRules';
-
-/**
- * One-time per-project trust prompt for repo-supplied permission ALLOW rules
- * (migration 127). Shown at project creation, never more
- * than once — `permission_trust` is terminal once set, either answer. Skips
- * entirely when the project's `.claude/settings*` carries no `allow` rules,
- * since there is nothing to decide trust over.
- *
- * Fire-and-forget from the caller (not awaited): the dialog must not block
- * `projects:create` from returning to the renderer.
- * Fail-soft — any error here must never fail creation.
- */
-async function maybePromptPermissionTrust(
-  databaseService: DatabaseService,
-  getMainWindow: AppServices['getMainWindow'],
-  project: Project | undefined,
-): Promise<void> {
-  if (!project) return;
-  if (project.permission_trust != null) return; // already decided ('trusted' | 'untrusted')
-
-  try {
-    if (!projectSettingsContainAllowRules(project.path)) return; // nothing to trust
-
-    const mainWindow = getMainWindow();
-    const options: Electron.MessageBoxOptions = {
-      type: 'question',
-      title: 'Trust project permission rules?',
-      message: `"${project.name}" ships permission allow rules`,
-      detail:
-        `This project's .claude/settings.json (or settings.local.json) contains ` +
-        `permission "allow" rules. By default cyboflow only honors allow rules from your ` +
-        `personal ~/.claude/settings.json — a repo cannot grant itself auto-approval.\n\n` +
-        `Trusting this project lets commands matching ITS allow list run without an approval ` +
-        `prompt in sessions of this project, same as if they were in your personal settings. ` +
-        `Only do this for repos you trust.`,
-      buttons: ['Trust This Project', "Don't Trust"],
-      defaultId: 1, // "Don't Trust" — the safe choice, including on Escape/close.
-      cancelId: 1,
-      noLink: true,
-    };
-    const result = mainWindow
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options);
-
-    const permission_trust: NonNullable<Project['permission_trust']> = result.response === 0 ? 'trusted' : 'untrusted';
-    databaseService.updateProject(project.id, { permission_trust });
-  } catch (error) {
-    console.error('[Main] Permission-trust prompt failed (continuing):', error);
-  }
-}
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -132,7 +79,7 @@ async function isEstablishedRepo(projectPath: string): Promise<boolean> {
 }
 
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow, getMainWindow } = services;
+  const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow } = services;
   // (demo seeding below reads services.configManager directly)
 
   ipcMain.handle('projects:get-all', async () => {
@@ -224,7 +171,7 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Per-project permission-trust prompt — fire-and-forget, must
       // not delay the create response back to the renderer.
-      void maybePromptPermissionTrust(databaseService, getMainWindow, project);
+      void services.permissionTrustPrompter?.maybePrompt(project);
 
       // Demo mode: seed the tour backlog (idea + ready tasks) so the planner
       // and sprint pickers have content right after the project is added.
