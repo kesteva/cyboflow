@@ -104,13 +104,15 @@ function buildPath1Db() {
       //   UPDATE sessions SET permission_mode = 'approve' ...
       //   UPDATE projects SET default_permission_mode = 'approve' ...
       // The `sessions.permission_mode` column is materialized at runtime by
-      // database.ts (ALTER TABLE … ADD COLUMN, ~line 281) and the `projects`
-      // table itself is created imperatively (~lines 285-307) — neither is
-      // replayed by path-1. See FIND-SPRINT-030-4 for the root-cause analysis.
+      // database.ts's inline runMigrations() (ALTER TABLE … ADD COLUMN), and
+      // the `projects` table itself is created imperatively there too —
+      // neither is replayed by path-1. See FIND-SPRINT-030-4 for the
+      // root-cause analysis. The same `no such table: projects` cuts short any
+      // later migration that ends on projects statements (e.g. 135, 148).
       //
       // "duplicate column name" is tolerated to mirror the real migration
-      // runner (database.ts ~L1749), which treats a duplicate-column ALTER as a
-      // successful idempotent apply. Some migrations (e.g. 088's revision
+      // runner (database.ts runFileBasedMigrations), which treats a
+      // duplicate-column ALTER as a successful idempotent apply. Some migrations (e.g. 088's revision
       // "ensure" guard) DELIBERATELY re-ALTER a column that an earlier applied
       // migration/schema.sql already added; the runner self-heals, so the
       // parity check must not be stricter than the runtime it models.
@@ -138,7 +140,7 @@ function buildPath2Db() {
       // allow path-1 to silently skip a migration that path-2 throws on,
       // producing a confusing diff. See FIND-SPRINT-030-4. "duplicate column
       // name" is tolerated symmetrically with path-1 to mirror the migration
-      // runner's idempotent-ALTER self-heal (database.ts ~L1749).
+      // runner's idempotent-ALTER self-heal (database.ts runFileBasedMigrations).
       const msg = String(err.message || err);
       if (/no such (table|column)|duplicate column name/i.test(msg)) {
         if (verbose) console.warn(`[skip] migration ${f}: ${msg}`);
