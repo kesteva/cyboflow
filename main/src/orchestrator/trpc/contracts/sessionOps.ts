@@ -131,11 +131,9 @@ export interface ArchiveProgressPayload {
 
 /**
  * The `getStatistics` payload, mirroring the handler's object literal EXACTLY —
- * this is a wire shape the session meter and the Stats panel both read, so no
- * field may be added, dropped or renamed here without changing them too. The
- * renderer's twin is `SessionStatistics` in
- * frontend/src/components/panels/claude/SessionStats.tsx (and the narrower
- * runtime shape guard in frontend/src/hooks/useSessionMetrics.ts).
+ * this is a wire shape the session meter reads, so no field may be added,
+ * dropped or renamed here without changing it too. The renderer reads it through
+ * the narrower runtime shape guard in frontend/src/hooks/useSessionMetrics.ts.
  *
  * Two notes carried over from the handler: `session.model` comes from the
  * session's Claude PANEL settings (model is panel-level, not a session column),

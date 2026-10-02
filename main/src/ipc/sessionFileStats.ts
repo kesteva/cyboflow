@@ -1,7 +1,6 @@
 /**
  * Git-derived file/line stats for a session — what `sessions:get-statistics`
- * reports as `files.*` (the quick-session card's "files seen" + "+N −M" meter
- * and SessionStats' Files Modified / Lines Added / Lines Deleted).
+ * reports as `files.*` (the quick-session card's "files seen" + "+N −M" meter).
  *
  * These used to be summed from the `execution_diffs` table, which is written
  * ONLY by ExecutionTracker.endExecution — i.e. when the agent PROCESS EXITS.

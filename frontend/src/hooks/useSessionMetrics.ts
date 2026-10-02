@@ -10,10 +10,10 @@
  *     session is alive for as long as the node is shown, so the clock keeps
  *     running). Never animated — just a number — so it ignores reduced-motion.
  *   - tokens / filesSeen / diff / model / branch: snapshot-polled from
- *     `API.sessions.getStatistics` (the SAME aggregation SessionStats uses —
- *     session_outputs + run_usage token sums, and file/line stats git-derived
- *     from the worktree vs the session's branch point). Polled on a short
- *     cadence so the node tracks the running chat without a stream wire.
+ *     `API.sessions.getStatistics` (session_outputs + run_usage token sums, and
+ *     file/line stats git-derived from the worktree vs the session's branch
+ *     point). Polled on a short cadence so the node tracks the running chat
+ *     without a stream wire.
  *
  * TASK-278: filesSeen/diff follow the SAME comparison base as the Diff tab's
  * BaseSelector, not always the session's branch point — each poll re-reads
@@ -37,8 +37,8 @@ import type { Session } from '../types/session';
 
 // ---------------------------------------------------------------------------
 // getStatistics response — narrow to the fields this hook consumes. The IPC
-// surface is typed `unknown` (see frontend/src/types/electron.d.ts); SessionStats
-// casts the same way. We validate defensively before reading.
+// surface is typed `unknown` (see frontend/src/types/electron.d.ts), so we
+// validate defensively before reading.
 // ---------------------------------------------------------------------------
 
 interface StatisticsShape {
