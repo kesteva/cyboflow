@@ -34,34 +34,4 @@ export function registerUIStateHandlers(services: AppServices) {
       };
     }
   });
-
-  ipcMain.handle('ui-state:save-expanded-projects', async (_, projectIds: number[]) => {
-    try {
-      uiStateManager.saveExpandedProjects(projectIds);
-      return {
-        success: true
-      };
-    } catch (error) {
-      console.error('Error saving expanded projects:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
-    }
-  });
-
-  ipcMain.handle('ui-state:save-expanded-folders', async (_, folderIds: string[]) => {
-    try {
-      uiStateManager.saveExpandedFolders(folderIds);
-      return {
-        success: true
-      };
-    } catch (error) {
-      console.error('Error saving expanded folders:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
-    }
-  });
 }

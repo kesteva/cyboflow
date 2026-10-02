@@ -20,7 +20,13 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 144 handlers — down from 146 when the 2
+/** Frozen 2026-10-02 at 137 handlers — down from 140 when three dead granular
+ * channels were deleted: `sessions:add-log` (`ipc/logs.ts`; internal producers
+ * call `addSessionLog()` directly) and `ui-state:save-expanded-projects` /
+ * `ui-state:save-expanded-folders` (`ipc/uiState.ts`; superseded by the
+ * combined `ui-state:save-expanded`).
+ *
+ * Earlier 2026-10-02: 144 handlers — down from 146 when the 2
  * `dashboard:*` handlers (`ipc/dashboard.ts`) were deleted with the retired
  * per-project dashboard panel.
  *
@@ -48,14 +54,14 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/dialog.ts': 2,
   'ipc/folders.ts': 7,
   'ipc/ideaAttachments.ts': 2,
-  'ipc/logs.ts': 3,
+  'ipc/logs.ts': 2,
   'ipc/models.ts': 4,
   'ipc/panels.ts': 16,
   'ipc/project.ts': 13,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,
   'ipc/session.ts': 26,
-  'ipc/uiState.ts': 4,
+  'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,
 };
 

@@ -189,7 +189,6 @@ interface ElectronAPI {
     // Log operations
     getLogs: (sessionId: string) => Promise<IPCResponse<LogEntry[]>>;
     clearLogs: (sessionId: string) => Promise<IPCResponse<void>>;
-    addLog: (sessionId: string, entry: LogEntry) => Promise<IPCResponse<void>>;
 
     // Large text operations
     saveLargeText: (sessionId: string, text: string) => Promise<string>;
@@ -322,8 +321,6 @@ interface ElectronAPI {
   uiState: {
     getExpanded: () => Promise<IPCResponse<{ expandedProjects: number[]; expandedFolders: string[] }>>;
     saveExpanded: (projectIds: number[], folderIds: string[]) => Promise<IPCResponse<void>>;
-    saveExpandedProjects: (projectIds: number[]) => Promise<IPCResponse<void>>;
-    saveExpandedFolders: (folderIds: string[]) => Promise<IPCResponse<void>>;
   };
 
   // Event listeners for real-time updates

@@ -70,30 +70,6 @@ export function setupLogHandlers(sessionManager: SessionManager) {
       };
     }
   });
-
-  // Add a log entry
-  ipcMain.handle('sessions:add-log', async (_event, sessionId: string, entry: LogEntry) => {
-    try {
-      const logs = sessionLogs.get(sessionId) || [];
-      sessionLogs.set(sessionId, appendLogEntry(logs, entry));
-
-      // Send the log entry to the renderer
-      if (mainWindow) {
-        mainWindow.webContents.send('session-log', {
-          sessionId,
-          entry
-        });
-      }
-      
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to add log:', error);
-      return { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Failed to add log' 
-      };
-    }
-  });
 }
 
 // Helper function to add a log from internal sources
