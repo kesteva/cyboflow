@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { join, dirname } from 'path';
 import type { Project, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
@@ -552,35 +552,6 @@ export class DatabaseService {
         if (!hasProjectIdColumn) {
           this.db.prepare("ALTER TABLE sessions ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE").run();
           this.db.prepare("CREATE INDEX idx_sessions_project_id ON sessions(project_id)").run();
-        }
-
-        // Import existing config as default project if it exists
-        try {
-          const configManager = require('../services/configManager').configManager;
-          const gitRepoPath = configManager.getGitRepoPath();
-          
-          if (gitRepoPath) {
-            // basename, not split('/'): on Windows the repo path is
-            // backslash-separated, so splitting on '/' would name the project
-            // after the entire path.
-            const projectName = basename(gitRepoPath) || 'Default Project';
-            const result = this.db.prepare(`
-              INSERT INTO projects (name, path, active)
-              VALUES (?, ?, 1)
-            `).run(projectName, gitRepoPath);
-            
-            // Update existing sessions to use this project
-            if (result.lastInsertRowid) {
-              this.db.prepare(`
-                UPDATE sessions 
-                SET project_id = ?
-                WHERE project_id IS NULL
-              `).run(result.lastInsertRowid);
-            }
-          }
-        } catch {
-          // Config manager not available during initial setup
-          console.log('Skipping default project creation during initial setup');
         }
       });
     }
