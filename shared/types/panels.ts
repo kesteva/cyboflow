@@ -3,7 +3,7 @@ import type { CliSubstrate } from './substrate';
 export interface ToolPanel {
   id: string;                    // Unique panel instance ID (uuid)
   sessionId: string;             // Associated session/worktree
-  type: ToolPanelType;          // 'terminal' for now
+  type: ToolPanelType;
   title: string;                 // Display title (e.g., "Terminal 1" or "Chat 1")
   state: ToolPanelState;         // Panel-specific state
   metadata: ToolPanelMetadata;   // Creation time, position, etc.
@@ -17,41 +17,18 @@ export interface ToolPanelState {
   isActive: boolean;
   isPinned?: boolean;
   hasBeenViewed?: boolean;       // Track if panel has ever been viewed
-  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | Record<string, unknown>;
+  customState?: TerminalPanelState | ClaudePanelState | LogsPanelState | Record<string, unknown>;
 }
 
 export interface TerminalPanelState {
-  // Basic state (implemented in Phase 1-2)
   isInitialized?: boolean;       // Whether PTY process has been started
   cwd?: string;                  // Current working directory
   shellType?: string;            // bash, zsh, etc.
-  
-  // Enhanced persistence (can be added incrementally)
-  scrollbackBuffer?: string | string[];   // Full terminal output history (string for new format, array for legacy)
+  scrollbackBuffer?: string;     // Full terminal output history
   commandHistory?: string[];     // Commands entered by user
-  environmentVars?: Record<string, string>; // Modified env vars
   dimensions?: { cols: number; rows: number }; // Terminal size
   lastActiveCommand?: string;    // Command running when closed
-  cursorPosition?: { x: number; y: number }; // Cursor location
-  selectionText?: string;        // Any selected text
   lastActivityTime?: string;     // For "idle since" indicators
-  
-  // Advanced persistence options
-  tmuxSessionId?: string;        // For true session persistence via tmux
-  outputSizeLimit?: number;      // Max lines to persist (default: 10000)
-}
-
-export interface DiffPanelState {
-  lastRefresh?: string;            // Last time diff was refreshed
-  currentDiff?: string;             // Cached diff content
-  filesChanged?: number;            // Number of files changed
-  insertions?: number;              // Lines added
-  deletions?: number;               // Lines deleted
-  isDiffStale?: boolean;            // Needs refresh indicator
-  viewMode?: 'split' | 'unified';  // Diff view preference
-  showWhitespace?: boolean;         // Show whitespace changes
-  contextLines?: number;            // Lines of context
-  commitSha?: string;               // Specific commit being viewed
 }
 
 // Panel status type - mirrors session status but at panel level
@@ -146,15 +123,10 @@ export interface CreatePanelRequest {
   sessionId: string;
   type: ToolPanelType;
   title?: string;                // Optional custom title
-  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | LogsPanelState | { customState?: unknown };
+  initialState?: TerminalPanelState | ClaudePanelState | LogsPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
   /** Optional per-panel substrate override; absent inherits the session. */
   substrate?: CliSubstrate;
-}
-
-export interface UpdatePanelRequest {
-  panelId: string;
-  updates: Partial<ToolPanel>;
 }
 
 // Panel Event System Types
@@ -169,28 +141,14 @@ export interface PanelEvent {
   timestamp: string;
 }
 
-// ⚠️ IMPORTANT: Event Types Implementation Status
-// ================================================
-// For Phase 1-2, ONLY terminal events will be implemented.
-// The full list below shows the FUTURE event system design to demonstrate
-// how different panel types will communicate once migrated.
-//
-// IMPLEMENTED IN PHASE 1-2:
-//   - terminal:command_executed
-//   - terminal:exit  
-//   - files:changed (emitted by terminal when file operations detected)
-//
-// NOT IMPLEMENTED (shown for future reference only):
-//   - All claude:* events
-//   - All diff:* events
-//   - All git:* events
-
+// Panel events ride the main-process panelEventBus: terminalPanelManager emits
+// terminal:* / files:changed, logsManager emits process:*, and gitOps emits
+// git:operation_* (which AbstractAIPanelManager subscribes to).
 export type PanelEventType = 
-  // Terminal panel events (✅ IMPLEMENTED IN PHASE 1-2)
+  // Terminal panel events
   | 'terminal:command_executed'  // When a command is run in terminal
   | 'terminal:exit'              // When terminal process exits
   | 'files:changed'              // When terminal detects file system changes
-  | 'diff:refreshed'             // When diff panel refreshes its content
   // Logs panel events
   | 'process:started'            // When a script process starts
   | 'process:output'             // When process produces output
@@ -204,16 +162,6 @@ export interface PanelEventSubscription {
   panelId: string;
   eventTypes: PanelEventType[];
   callback: (event: PanelEvent) => void;
-}
-
-export interface PanelCapabilities {
-  canEmit: PanelEventType[];      // Events this panel type can produce
-  canConsume: PanelEventType[];   // Events this panel type listens to
-  requiresProcess?: boolean;       // Whether panel needs a background process
-  singleton?: boolean;             // Only one instance allowed per session
-  permanent?: boolean;             // Cannot be closed (for diff panel)
-  canAppearInProjects?: boolean;  // Whether panel can appear in project view
-  canAppearInWorktrees?: boolean; // Whether panel can appear in worktree sessions
 }
 
 /**
@@ -235,40 +183,3 @@ export function hasCwdString(
     ((state as Record<string, unknown>).cwd as string).length > 0
   );
 }
-
-// Panel Registry - Currently only terminal is implemented
-export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
-  terminal: {
-    canEmit: ['terminal:command_executed', 'terminal:exit', 'files:changed'],
-    canConsume: [], // Terminal doesn't consume events in Phase 1-2
-    requiresProcess: true,
-    singleton: false,
-    canAppearInProjects: true,       // Terminal can appear in projects
-    canAppearInWorktrees: true       // Terminal can appear in worktrees
-  },
-  claude: {
-    canEmit: ['files:changed'], // Claude can change files through tool calls
-    canConsume: [], // Claude doesn't consume events in initial implementation
-    requiresProcess: true,
-    singleton: false,
-    canAppearInProjects: true,       // Claude can appear in projects
-    canAppearInWorktrees: true       // Claude can appear in worktrees
-  },
-  diff: {
-    canEmit: ['diff:refreshed'],
-    canConsume: ['files:changed', 'terminal:command_executed'],
-    requiresProcess: false,           // No background process
-    singleton: true,                  // Only one diff panel
-    permanent: true,                  // Cannot be closed
-    canAppearInProjects: false,       // Diff not available in projects (no worktree)
-    canAppearInWorktrees: true        // Diff only in worktrees
-  },
-  logs: {
-    canEmit: ['process:started', 'process:output', 'process:ended'],
-    canConsume: [],                  // Logs doesn't listen to other panels
-    requiresProcess: true,           // Manages script processes
-    singleton: true,                 // ONLY ONE logs panel per session
-    canAppearInProjects: true,       // Logs can appear in projects
-    canAppearInWorktrees: true       // Logs can appear in worktrees
-  }
-};
