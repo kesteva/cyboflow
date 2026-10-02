@@ -60,8 +60,7 @@ Full index: `docs/README.md`. The load-bearing ones:
   lineages, and the restore procedure. Read before touching a backup: a daily backup alone
   has an EMPTY `raw_events`.
 - `docs/PROVENANCE.md` — fork lineage.
-- `docs/crystal-legacy/` and `docs/workflows-future/` — historical reference, not current
-  truth.
+- `docs/workflows-future/` — historical reference, not current truth.
 
 ## Gotchas
 

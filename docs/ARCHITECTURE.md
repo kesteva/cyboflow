@@ -42,7 +42,7 @@ dropped, its prose preserved under `docs/workflows-future/` for a future rebuild
 - **`frontend/`** — React renderer (Vite + Tailwind). UI panels, Zustand stores, and frontend
   utilities. Never touches the database or filesystem directly.
 - **`shared/`** — TypeScript types shared between `main/` and `frontend/`. The contract layer.
-- **`docs/`** — Product spec, research package, reference designs, Crystal legacy docs.
+- **`docs/`** — Product spec, research package, reference designs, archived plans.
 - **`tests/`** — Playwright E2E tests run against a live Electron instance.
 - **`scripts/`** — Build tooling: `inject-build-info.js`, `configure-build.js`.
 - **`build/`** — Electron Builder config files: `afterSign.js`, `entitlements.mac.plist`.
@@ -836,7 +836,7 @@ All procedures are consumed by their respective Zustand stores and React compone
 Both packages import from here via `../../../shared/types/...`. Changing types here is a
 cross-package concern.
 
-- **Crystal-baseline:** `models.ts`, `panels.ts`, `cliPanels.ts`, `aiPanelConfig.ts`.
+- **Inherited from Crystal:** `panels.ts`, `cliPanels.ts`, `aiPanelConfig.ts`.
 - **Cyboflow-era:** `cyboflow.ts`, `workflows.ts`, `approval.ts`, `approvals.ts`,
   `mcpHealth.ts`, `stuckDetection.ts`, `stuckInspection.ts`, `claudeStream.ts`,
   `unifiedMessage.ts`, `substrate.ts`, `tasks.ts` (the 3-table entity model: `IdeaRow` /
@@ -848,14 +848,14 @@ cross-package concern.
 
 ## Frameworks & External Dependencies
 
-- **Electron 37.6.0** — Desktop shell. `electron-builder` for packaging/signing; `@electron/rebuild`
+- **Electron 44** — Desktop shell. `electron-builder` for packaging/signing; `@electron/rebuild`
   for native module rebuilds against Electron's Node ABI.
 - **React 19 + Vite 6** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
 - **Zustand 5** — Renderer state. One slice per domain; no Redux.
-- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. Data-dir resolution is per-kind
+- **better-sqlite3 13** — SQLite, synchronous, WAL mode (N-API prebuild). Data-dir resolution is per-kind
   (`getCyboflowDirectory()`, `main/src/utils/cyboflowDirectory.ts`) — see `docs/UPDATES.md` for
   the full table. The legacy `~/.crystal/` path has already been removed.
-- **@anthropic-ai/claude-agent-sdk 0.3.224** — In-process Claude Code invocation via `query()`
+- **@anthropic-ai/claude-agent-sdk 0.3.x** (exact pin in `package.json`) — In-process Claude Code invocation via `query()`
   and `PreToolUse` hooks for approval routing. This is the live path; no `claude` CLI binary
   is spawned.
 - **@openai/codex 0.153.3** — Direct dependency (both root and `main/package.json`) that
@@ -912,7 +912,7 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
   code does not match. Authoring rules: `docs/CODE-PATTERNS.md` → "SQLite migrations:
   idempotence is per STATEMENT".
 
-Central tables (Crystal baseline): `sessions`, `panels`, `execution_diffs`, `projects`.
+Core tables inherited from Crystal: `sessions`, `tool_panels`, `execution_diffs`, `projects`.
 Cyboflow-era run-substrate tables (migration `006_cyboflow_schema.sql`): `workflows`,
 `workflow_runs`, `raw_events`, `messages`, `approvals` — designed in system design §5.
 
