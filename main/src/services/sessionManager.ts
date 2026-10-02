@@ -130,7 +130,6 @@ export class SessionManager extends EventEmitter {
       prompt: dbSession.initial_prompt,
       status: this.mapDbStatusToSessionStatus(dbSession.status, dbSession.last_viewed_at, dbSession.updated_at),
       statusMessage: dbSession.status_message,
-      pid: dbSession.pid,
       createdAt: parseTimestamp(dbSession.created_at),
       // The session's real last-ACTIVITY clock: idle_since (stamped at the
       // busy→resting transition, migration 119) when the session is at rest,

@@ -78,7 +78,6 @@ export interface Session {
   prompt: string;
   status: 'initializing' | 'ready' | 'running' | 'waiting' | 'stopped' | 'completed_unviewed' | 'error';
   statusMessage?: string;
-  pid?: number;
   createdAt: string;
   lastActivity?: string;
   output: string[];

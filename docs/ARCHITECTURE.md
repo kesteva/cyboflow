@@ -905,7 +905,8 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
 
 Core tables inherited from Crystal: `sessions`, `tool_panels`, `execution_diffs`, `projects`.
 Cyboflow-era run-substrate tables (migration `006_cyboflow_schema.sql`): `workflows`,
-`workflow_runs`, `raw_events`, `messages`, `approvals` — designed in system design §5.
+`workflow_runs`, `raw_events`, `approvals` — designed in system design §5. (006 also created a
+`messages` table that never had a writer; migration 148 dropped it.)
 
 #### Entity model — 3 tables + a single shared board (migration 015)
 

@@ -14,11 +14,8 @@ export interface Project {
   updated_at: string;
   default_permission_mode?: 'approve' | 'ignore';
   open_ide_command?: string | null;
-  /** Detected default branch, persisted at create time (runtime re-detects live). */
-  main_branch?: string | null;
   display_order?: number;
   worktree_folder?: string | null;
-  lastUsedModel?: string;
   /**
    * Per-project trust for repo-supplied permission ALLOW rules (migration 127).
    * NULL = undecided (the trust prompt — shown at projects:create or the first
@@ -59,9 +56,7 @@ export interface Session {
    * `updated_at`, which is the pre-migration behavior.
    */
   idle_since?: string | null;
-  last_output?: string;
   exit_code?: number;
-  pid?: number;
   archived?: boolean;
   last_viewed_at?: string;
   project_id?: number;
@@ -202,9 +197,7 @@ export interface UpdateSessionData {
   name?: string;
   status?: Session['status'];
   status_message?: string;
-  last_output?: string;
   exit_code?: number;
-  pid?: number;
   folder_id?: string | null;
   // null clears the column — used to invalidate a now-stale interactive resume id
   // when a fork-resume spawn's transcript never bound (avoids a silent rewind).

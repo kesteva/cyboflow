@@ -317,16 +317,16 @@ describe('006_cyboflow_schema — fresh-install migration runner integration', (
     const logSpy = vi.spyOn(console, 'log');
     svc1.initialize();
 
-    // (a) All 5 Cyboflow tables must exist
+    // (a) The 4 surviving 006 tables must exist (148 drops 006's `messages`)
     const rawDb1 = new Database(dbPath);
     const tableRows = rawDb1
       .prepare(
         `SELECT name FROM sqlite_master
          WHERE type = 'table'
-           AND name IN ('workflows','workflow_runs','raw_events','messages','approvals')`
+           AND name IN ('workflows','workflow_runs','raw_events','approvals')`
       )
       .all() as Array<{ name: string }>;
-    expect(tableRows).toHaveLength(5);
+    expect(tableRows).toHaveLength(4);
 
     // (b) The ledger marker for 006 must be present
     const ledgerRow = rawDb1
@@ -484,15 +484,15 @@ describe('006_cyboflow_schema — existing-install migration runner integration'
       .get() as { value: string } | undefined;
     expect(flag006?.value).toBe('true');
 
-    // (c) All 5 Cyboflow tables must exist
+    // (c) The 4 surviving 006 tables must exist (148 drops 006's `messages`)
     const tableRows = rawDb2
       .prepare(
         `SELECT name FROM sqlite_master
          WHERE type = 'table'
-           AND name IN ('workflows','workflow_runs','raw_events','messages','approvals')`
+           AND name IN ('workflows','workflow_runs','raw_events','approvals')`
       )
       .all() as Array<{ name: string }>;
-    expect(tableRows).toHaveLength(5);
+    expect(tableRows).toHaveLength(4);
 
     rawDb2.close();
 

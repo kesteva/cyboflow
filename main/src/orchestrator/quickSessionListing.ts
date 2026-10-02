@@ -55,7 +55,7 @@ export interface QuickSessionCandidateRow {
    * IdleSessionDetector's IN_SCOPE_PREDICATE.
    */
   unviewed: number;
-  /** sessions.exit_code — usually null on the SDK substrate; the PTY substrate writes it. */
+  /** sessions.exit_code — written per turn by the Claude SDK substrate's exit; null on the interactive PTY substrate. */
   exit_code: number | null;
   /** sessions.agent_provider ('claude'/'codex'/'omp'/…); NOT NULL in schema but read defensively. */
   agent_provider: string | null;

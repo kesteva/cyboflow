@@ -8,9 +8,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_output TEXT,
   exit_code INTEGER,
-  pid INTEGER,
   claude_session_id TEXT
 );
 

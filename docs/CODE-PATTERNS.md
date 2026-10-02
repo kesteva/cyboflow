@@ -874,8 +874,8 @@ on a separate `"test:watch"` key instead of overloading `"test"`.
 
 ### Canonical DDL Source
 
-The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`, `raw_events`,
-`messages`) live in TWO files that MUST stay in sync:
+The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`, `raw_events`)
+live in TWO files that MUST stay in sync:
 
 - `main/src/database/schema.sql` — fresh-install fast path. Run once on a new DB.
 - `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
