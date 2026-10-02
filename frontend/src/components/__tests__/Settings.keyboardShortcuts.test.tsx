@@ -55,7 +55,6 @@ const platform = getShortcutPlatform();
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     ...over,
   };
 }

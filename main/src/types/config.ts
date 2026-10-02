@@ -41,10 +41,7 @@ export const IDLE_SESSION_REVIEW_DEFAULTS: ResolvedIdleSessionReviewConfig = {
 
 export interface AppConfig {
   verbose?: boolean;
-  // Legacy fields for backward compatibility
-  gitRepoPath?: string;
   systemPromptAppend?: string;
-  runScript?: string[];
   // Custom claude executable path (for when it's not in PATH)
   claudeExecutablePath?: string;
   // Permission mode for all sessions

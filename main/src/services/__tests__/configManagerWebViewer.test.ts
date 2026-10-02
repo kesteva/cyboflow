@@ -92,12 +92,12 @@ describe('webViewer type parity', () => {
 
 describe('ConfigManager.getWebViewerConfig floors', () => {
   it('is not seeded into constructor defaults', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().webViewer).toBeUndefined();
   });
 
   it('floors human browsing ON and every agent capability OFF', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getWebViewerConfig()).toEqual({
       enabled: true,
       agentObserve: false,
@@ -111,7 +111,7 @@ describe('ConfigManager.getWebViewerConfig floors', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().webViewer).toBeUndefined();
@@ -127,7 +127,7 @@ describe('ConfigManager.getWebViewerConfig floors', () => {
         2,
       ),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     // The stored values say true; the resolved block must not.
@@ -143,7 +143,7 @@ describe('ConfigManager.getWebViewerConfig floors', () => {
 
 describe('webViewer partial updates (deep merge at the config boundary)', () => {
   it('a partial write PRESERVES an explicit enabled:false', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
@@ -165,14 +165,14 @@ describe('webViewer partial updates (deep merge at the config boundary)', () => 
   });
 
   it('accumulates members across successive partial writes and round-trips off disk', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
     await ops.updateConfig({ webViewer: { agentObserve: true } });
     await ops.updateConfig({ webViewer: { persistLogin: false } });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().webViewer).toEqual({
       agentObserve: true,
@@ -187,7 +187,7 @@ describe('webViewer partial updates (deep merge at the config boundary)', () => 
   });
 
   it('null clears one member back to its floor without touching the others', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
@@ -200,7 +200,7 @@ describe('webViewer partial updates (deep merge at the config boundary)', () => 
   });
 
   it('stores an emptied block as absent rather than {}', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
@@ -216,7 +216,7 @@ describe('webViewer partial updates (deep merge at the config boundary)', () => 
 
 describe('webViewer boundary rejection', () => {
   it('rejects a non-boolean member instead of persisting it', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
@@ -231,7 +231,7 @@ describe('webViewer boundary rejection', () => {
   });
 
   it('rejects an unknown key instead of persisting it', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 
@@ -244,7 +244,7 @@ describe('webViewer boundary rejection', () => {
   });
 
   it('rejects a non-object payload', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     const ops = configOpsFor(mgr);
 

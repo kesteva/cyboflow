@@ -108,7 +108,7 @@ beforeEach(async () => {
   vi.mocked(panelManager.getPanel).mockReturnValue(panel);
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cyboflow-claude-panel-model-default-'));
   setCyboflowDirectory(tempDir);
-  configManager = new ConfigManager('/tmp/test-git-path');
+  configManager = new ConfigManager();
   await configManager.initialize();
 });
 

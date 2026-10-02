@@ -50,7 +50,7 @@ afterEach(async () => {
 
 describe('ConfigManager.getVisualVerifyEnabled', () => {
   it('floors to false on a fresh instance (block not seeded)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().visualVerify).toBeUndefined();
     expect(mgr.getVisualVerifyEnabled()).toBe(false);
   });
@@ -60,7 +60,7 @@ describe('ConfigManager.getVisualVerifyEnabled', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().visualVerify).toBeUndefined();
@@ -68,12 +68,12 @@ describe('ConfigManager.getVisualVerifyEnabled', () => {
   });
 
   it('reflects an explicit enabled override and persists it across a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ visualVerify: { enabled: true } });
     expect(mgr.getVisualVerifyEnabled()).toBe(true);
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getVisualVerifyEnabled()).toBe(true);
   });
@@ -81,7 +81,7 @@ describe('ConfigManager.getVisualVerifyEnabled', () => {
 
 describe('ConfigManager.getVisualVerifyConfig', () => {
   it('returns the full default block on a fresh instance (every member floored)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getVisualVerifyConfig()).toEqual(VISUAL_VERIFY_DEFAULTS);
   });
 
@@ -90,7 +90,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     const cfg = mgr.getVisualVerifyConfig();
@@ -104,7 +104,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
   });
 
   it('applies defaults per-member for a partial override (only set members replaced)', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({
       visualVerify: { enabled: true, queuedAgeCeilingMs: 120_000 },
@@ -123,21 +123,21 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
   });
 
   it('the runbook bootstrap is its own switch, opted OUT of independently (F9: default ON)', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ visualVerify: { enabled: true, autoBootstrapRunbook: false } });
     expect(mgr.getVisualVerifyConfig().autoBootstrapRunbook).toBe(false);
   });
 
   it('floors an empty devServerPorts array to the default pool', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ visualVerify: { devServerPorts: [] } });
     expect(mgr.getVisualVerifyConfig().devServerPorts).toEqual([...DEFAULT_VERIFY_DEV_PORTS]);
   });
 
   it('honors and round-trips a full override (all advanced fields)', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({
       visualVerify: {
@@ -147,7 +147,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       },
     });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getVisualVerifyConfig()).toEqual({
       enabled: true,
@@ -181,7 +181,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', visualVerify: { enabled: true } }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     const cfg = mgr.getVisualVerifyConfig();
@@ -195,7 +195,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
   });
 
   it('honors an explicit override of each mobile knob', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({
       visualVerify: {
@@ -206,7 +206,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       },
     });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     const cfg = reloaded.getVisualVerifyConfig();
     expect(cfg.mobileSimSlots).toBe(3);
@@ -220,7 +220,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
   });
 
   it('honors an explicit agentSlots override and floors it when absent', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     expect(mgr.getVisualVerifyConfig().agentSlots).toBe(2);
 
@@ -229,7 +229,7 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
   });
 
   it('returns fresh array copies (mutating the result does not leak into config or defaults)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     const cfg = mgr.getVisualVerifyConfig();
     cfg.devServerPorts.push(9999);
     // Defaults are untouched; a second read is pristine.
@@ -249,7 +249,7 @@ describe('ConfigManager.getVisualVerifyConfig — the runbook-optional knobs', (
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', visualVerify }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     return mgr;
   }
@@ -263,13 +263,13 @@ describe('ConfigManager.getVisualVerifyConfig — the runbook-optional knobs', (
   });
 
   it('honors and round-trips an explicit override of each', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({
       visualVerify: { requireProvenRunbook: true, exploreDeadlineFloorMs: 18 * 60 * 1000, mobileDriveEngine: 'xcode' },
     });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     const cfg = reloaded.getVisualVerifyConfig();
     expect(cfg.requireProvenRunbook).toBe(true);
@@ -278,7 +278,7 @@ describe('ConfigManager.getVisualVerifyConfig — the runbook-optional knobs', (
   });
 
   it('accepts every MobileDriveEngine member', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     for (const engine of MOBILE_DRIVE_ENGINES) {
       await mgr.updateConfig({ visualVerify: { mobileDriveEngine: engine } });

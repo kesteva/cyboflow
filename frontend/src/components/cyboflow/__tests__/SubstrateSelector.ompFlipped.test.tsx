@@ -32,7 +32,7 @@ import type { AgentProviderAccess } from '../../../../../shared/types/agentRunti
 
 function setProviderAccess(access: AgentProviderAccess | undefined): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+    config: { agentProviderAccess: access } as AppConfig,
   });
 }
 

@@ -42,7 +42,6 @@ vi.mock('../../stores/configStore', () => ({
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     assistantEnabled: true,
     ...over,
   };

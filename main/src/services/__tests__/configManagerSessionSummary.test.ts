@@ -34,7 +34,7 @@ afterEach(async () => {
 
 describe('ConfigManager.isSessionSummaryEnabled', () => {
   it('floors to true on a fresh instance (field not seeded)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().sessionSummaryEnabled).toBeUndefined();
     expect(mgr.isSessionSummaryEnabled()).toBe(true);
   });
@@ -44,7 +44,7 @@ describe('ConfigManager.isSessionSummaryEnabled', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().sessionSummaryEnabled).toBeUndefined();
@@ -52,27 +52,27 @@ describe('ConfigManager.isSessionSummaryEnabled', () => {
   });
 
   it('persists false and round-trips through a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ sessionSummaryEnabled: false });
 
     expect(mgr.getConfig().sessionSummaryEnabled).toBe(false);
     expect(mgr.isSessionSummaryEnabled()).toBe(false);
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.isSessionSummaryEnabled()).toBe(false);
   });
 
   it('persists an explicit true and round-trips through a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ sessionSummaryEnabled: false });
     await mgr.updateConfig({ sessionSummaryEnabled: true });
 
     expect(mgr.isSessionSummaryEnabled()).toBe(true);
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.isSessionSummaryEnabled()).toBe(true);
   });

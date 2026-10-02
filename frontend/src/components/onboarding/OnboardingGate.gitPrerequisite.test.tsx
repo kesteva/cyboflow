@@ -96,7 +96,7 @@ const openExternal = vi.fn();
 
 beforeEach(() => {
   projectsGetAll.mockReset().mockResolvedValue({ success: true, data: [] });
-  configGet.mockReset().mockResolvedValue({ success: true, data: { gitRepoPath: '/repo' } });
+  configGet.mockReset().mockResolvedValue({ success: true, data: {} });
   configUpdate.mockReset().mockResolvedValue({ success: true });
   gitDetect.mockReset();
   gitSetIdentity.mockReset();

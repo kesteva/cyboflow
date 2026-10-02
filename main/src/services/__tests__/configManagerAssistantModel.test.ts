@@ -34,7 +34,7 @@ afterEach(async () => {
 
 describe('ConfigManager.getAssistantModel', () => {
   it('floors to null on a fresh instance (field not seeded)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().assistantModel).toBeUndefined();
     expect(mgr.getAssistantModel()).toBeNull();
   });
@@ -44,7 +44,7 @@ describe('ConfigManager.getAssistantModel', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().assistantModel).toBeUndefined();
@@ -52,14 +52,14 @@ describe('ConfigManager.getAssistantModel', () => {
   });
 
   it('floors a blank / whitespace-only override to null', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ assistantModel: '   ' });
     expect(mgr.getAssistantModel()).toBeNull();
   });
 
   it('persists a real override, trims it on read, and round-trips through a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ assistantModel: '  opus  ' });
 
@@ -67,7 +67,7 @@ describe('ConfigManager.getAssistantModel', () => {
     expect(mgr.getConfig().assistantModel).toBe('  opus  ');
     expect(mgr.getAssistantModel()).toBe('opus');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getAssistantModel()).toBe('opus');
   });

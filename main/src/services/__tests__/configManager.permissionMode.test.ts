@@ -12,7 +12,7 @@ describe('ConfigManager permissionMode default', () => {
     // Settings.tsx fetches config via API.config.get() and falls back with
     // data.defaultPermissionMode || 'approve'.  Regression guard: the
     // constructor DEFAULT_CONFIG must not ship 'ignore' as the stored default.
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     const config = mgr.getConfig();
     expect(config.defaultPermissionMode).toBe('approve');
   });
@@ -22,13 +22,13 @@ describe('ConfigManager getDefaultAgentPermissionMode', () => {
   it('floors to "default" when defaultAgentPermissionMode is unset', () => {
     // Additive pattern: the constructor must NOT seed defaultAgentPermissionMode,
     // so a fresh instance has it undefined and the getter floors to 'default'.
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().defaultAgentPermissionMode).toBeUndefined();
     expect(mgr.getDefaultAgentPermissionMode()).toBe('default');
   });
 
   it('returns the configured value when defaultAgentPermissionMode is set', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     (
       mgr as unknown as { config: { defaultAgentPermissionMode: 'acceptEdits' } }
     ).config.defaultAgentPermissionMode = 'acceptEdits';

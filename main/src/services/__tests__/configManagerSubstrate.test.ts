@@ -34,12 +34,12 @@ afterEach(async () => {
 
 describe('ConfigManager.defaultSubstrate', () => {
   it("getDefaultSubstrate() returns 'sdk' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getDefaultSubstrate()).toBe('sdk');
   });
 
   it("defaultSubstrate is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     // The field is intentionally absent — the accessor floors instead.
     expect(mgr.getConfig().defaultSubstrate).toBeUndefined();
     expect(mgr.getDefaultSubstrate()).toBe('sdk');
@@ -52,7 +52,7 @@ describe('ConfigManager.defaultSubstrate', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().defaultSubstrate).toBeUndefined();
@@ -60,26 +60,26 @@ describe('ConfigManager.defaultSubstrate', () => {
   });
 
   it("updateConfig({ defaultSubstrate: 'interactive' }) persists and round-trips through a fresh initialize()", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ defaultSubstrate: 'interactive' });
 
     expect(mgr.getDefaultSubstrate()).toBe('interactive');
 
     // A brand-new instance on the SAME config dir must read the persisted value.
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().defaultSubstrate).toBe('interactive');
     expect(reloaded.getDefaultSubstrate()).toBe('interactive');
   });
 
   it("flipping back to 'sdk' persists and round-trips (rollback of the global default)", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ defaultSubstrate: 'interactive' });
     await mgr.updateConfig({ defaultSubstrate: 'sdk' });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getDefaultSubstrate()).toBe('sdk');
   });
@@ -87,18 +87,18 @@ describe('ConfigManager.defaultSubstrate', () => {
 
 describe('ConfigManager.interactivePtyOnly (global PTY-only lock)', () => {
   it('isInteractivePtyOnly() floors to false on a fresh instance (field not seeded)', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.isInteractivePtyOnly()).toBe(false);
     expect(mgr.getConfig().interactivePtyOnly).toBeUndefined();
   });
 
   it('getForcedSubstrate() returns null when neither demo nor the lock is set', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getForcedSubstrate()).toBeNull();
   });
 
   it("getForcedSubstrate() returns 'interactive' when interactivePtyOnly is on", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ interactivePtyOnly: true });
 
@@ -107,7 +107,7 @@ describe('ConfigManager.interactivePtyOnly (global PTY-only lock)', () => {
   });
 
   it("demo mode wins: getForcedSubstrate() stays 'sdk' even when the PTY-only lock is on", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     // Both on simultaneously — demo's 'sdk' pin MUST take precedence so the
     // scripted DemoCliManager keeps handling spawns (the interactive manager is
@@ -120,11 +120,11 @@ describe('ConfigManager.interactivePtyOnly (global PTY-only lock)', () => {
   });
 
   it('interactivePtyOnly persists and round-trips through a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ interactivePtyOnly: true });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().interactivePtyOnly).toBe(true);
     expect(reloaded.getForcedSubstrate()).toBe('interactive');

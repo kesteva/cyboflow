@@ -33,7 +33,7 @@ afterEach(async () => {
 
 describe('ConfigManager.getAssistantContextRetention', () => {
   it("floors to 'clear-daily' on a fresh instance (field not seeded)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().assistantContextRetention).toBeUndefined();
     expect(mgr.getAssistantContextRetention()).toBe('clear-daily');
   });
@@ -43,7 +43,7 @@ describe('ConfigManager.getAssistantContextRetention', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     expect(mgr.getAssistantContextRetention()).toBe('clear-daily');
   });
@@ -53,19 +53,19 @@ describe('ConfigManager.getAssistantContextRetention', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', assistantContextRetention: 'weekly' }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     expect(mgr.getAssistantContextRetention()).toBe('clear-daily');
   });
 
   it('persists each valid mode and round-trips through a fresh initialize()', async () => {
     for (const mode of ['compact-daily', 'auto-compact', 'clear-daily'] as const) {
-      const mgr = new ConfigManager('/tmp/test-git-path');
+      const mgr = new ConfigManager();
       await mgr.initialize();
       await mgr.updateConfig({ assistantContextRetention: mode });
       expect(mgr.getAssistantContextRetention()).toBe(mode);
 
-      const reloaded = new ConfigManager('/tmp/test-git-path');
+      const reloaded = new ConfigManager();
       await reloaded.initialize();
       expect(reloaded.getAssistantContextRetention()).toBe(mode);
     }

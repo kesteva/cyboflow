@@ -55,7 +55,6 @@ import {
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'path';
-import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
@@ -117,15 +116,13 @@ export class ConfigManager extends EventEmitter {
   private configPath: string;
   private configDir: string;
 
-  constructor(defaultGitPath?: string) {
+  constructor() {
     super();
     this.configDir = getCyboflowDirectory();
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = {
-      gitRepoPath: defaultGitPath || os.homedir(),
       verbose: false,
       systemPromptAppend: undefined,
-      runScript: undefined,
       defaultPermissionMode: 'approve',
       defaultModel: 'sonnet',
       notifications: {
@@ -208,10 +205,6 @@ export class ConfigManager extends EventEmitter {
     return this.getConfig();
   }
 
-  getGitRepoPath(): string {
-    return this.config.gitRepoPath || '';
-  }
-
   isVerbose(): boolean {
     return this.config.verbose || false;
   }
@@ -226,16 +219,8 @@ export class ConfigManager extends EventEmitter {
     return this.config.demoMode || false;
   }
 
-  getDatabasePath(): string {
-    return path.join(this.configDir, 'sessions.db');
-  }
-
   getSystemPromptAppend(): string | undefined {
     return this.config.systemPromptAppend;
-  }
-
-  getRunScript(): string[] | undefined {
-    return this.config.runScript;
   }
 
   getDefaultModel(): string {

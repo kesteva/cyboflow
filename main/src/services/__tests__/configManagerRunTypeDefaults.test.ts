@@ -56,7 +56,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('reads sparse entries raw and keeps launch floors separate from defaultModel', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     expect(manager.getConfig().runTypeDefaults).toBeUndefined();
@@ -82,7 +82,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('returns the previous value and applies sparse merge deletion', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const prior = { model: 'opus' as const };
     await manager.updateConfig({ runTypeDefaults: { quick: prior } });
@@ -99,7 +99,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('creates a sparse key when merging an override that did not previously exist', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     const created = await manager.applyRunTypeDefault('quick', {
@@ -112,7 +112,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('a key of "__proto__" is stored as a genuine own entry, not the object prototype (prototype-pollution guard)', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     await manager.updateConfig({ runTypeDefaults: { quick: { model: 'opus' } } });
 
@@ -148,7 +148,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('returns undefined when the key did not exist and supports replace', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     const created = await manager.applyRunTypeDefault('workflow:flow-a', {
@@ -180,7 +180,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('preserves unrelated sparse fields across merge patches before deleting the empty key', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     await manager.updateConfig({
       runTypeDefaults: {
@@ -220,7 +220,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('deletes a key when replace receives an empty object and returns the whole updated config', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     await manager.updateConfig({ runTypeDefaults: { quick: { model: 'opus' } } });
 
@@ -235,7 +235,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('the cyboflow.config.applyRunTypeDefault procedure delegates valid input and rejects invalid input', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const caller = callerFor(manager);
 
@@ -262,7 +262,7 @@ describe('ConfigManager run-type defaults', () => {
   });
 
   it('the generic cyboflow.config.update channel cannot clobber runTypeDefaults (the "two write channels cannot race" invariant)', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const caller = callerFor(manager);
 

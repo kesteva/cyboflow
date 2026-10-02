@@ -37,12 +37,12 @@ afterEach(async () => {
 
 describe('ConfigManager.quickSessionDefaultSubstrate', () => {
   it("getQuickSessionDefaultSubstrate() returns 'interactive' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getQuickSessionDefaultSubstrate()).toBe('interactive');
   });
 
   it("quickSessionDefaultSubstrate is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().quickSessionDefaultSubstrate).toBeUndefined();
     expect(mgr.getQuickSessionDefaultSubstrate()).toBe('interactive');
   });
@@ -53,7 +53,7 @@ describe('ConfigManager.quickSessionDefaultSubstrate', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().quickSessionDefaultSubstrate).toBeUndefined();
@@ -61,25 +61,25 @@ describe('ConfigManager.quickSessionDefaultSubstrate', () => {
   });
 
   it("updateConfig({ quickSessionDefaultSubstrate: 'sdk' }) persists and round-trips through a fresh initialize()", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ quickSessionDefaultSubstrate: 'sdk' });
 
     expect(mgr.getQuickSessionDefaultSubstrate()).toBe('sdk');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().quickSessionDefaultSubstrate).toBe('sdk');
     expect(reloaded.getQuickSessionDefaultSubstrate()).toBe('sdk');
   });
 
   it("flipping back to 'interactive' persists and round-trips (rollback of the global default)", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ quickSessionDefaultSubstrate: 'sdk' });
     await mgr.updateConfig({ quickSessionDefaultSubstrate: 'interactive' });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getQuickSessionDefaultSubstrate()).toBe('interactive');
   });
@@ -91,7 +91,7 @@ describe('ConfigManager.quickSessionDefaultSubstrate', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', quickSessionDefaultSubstrate: 'telepathy' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     // The raw (untrusted) value survives the deep-merge onto config (read via an

@@ -85,7 +85,7 @@ describe('AppConfig.keyboardShortcuts type parity', () => {
 
 describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   it('round-trips a valid override through config:update -> config:get -> a fresh load off disk', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -105,7 +105,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
     });
 
     // A relaunch reads the same values (config is a plain JSON file).
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().keyboardShortcuts).toEqual({
       newSession: 'mod+shift+n',
@@ -114,7 +114,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('rejects a non-object payload instead of persisting it', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -132,7 +132,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('rejects a member whose value is not a valid keybinding', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -147,7 +147,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('rejects a modifier-less binding even though it parses', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -178,7 +178,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('drops a stray/unknown key from the payload instead of persisting it', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -193,7 +193,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('drops a cleared member so the action falls back to its built-in default', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -205,7 +205,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('an EMPTY cleaned map leaves config.json without the key (every save carries the field)', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -220,7 +220,7 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
   });
 
   it('clearing the LAST override removes the key rather than leaving {}', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const configOps = configOpsFor(manager);
 
@@ -237,13 +237,13 @@ describe('configOps.updateConfig — keyboardShortcuts validation', () => {
     expect(manager.getConfig().keyboardShortcuts).toBeUndefined();
 
     // …and a relaunch off disk agrees.
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().keyboardShortcuts).toBeUndefined();
   });
 
   it('with the field absent, config.json stays free of the key and the defaults hold', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     expect(manager.getConfig().keyboardShortcuts).toBeUndefined();

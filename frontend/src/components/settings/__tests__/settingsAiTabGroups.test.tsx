@@ -94,7 +94,6 @@ const SESSION_SETTINGS = [
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     ...over,
   };
 }

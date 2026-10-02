@@ -227,7 +227,7 @@ async function renderList(
   entries: WorkflowFixtureEntry[] = WORKFLOW_ENTRIES,
 ): Promise<void> {
   setWorkflowFixture(entries);
-  liveConfig = { gitRepoPath: '/repo', ...over };
+  liveConfig = { ...over };
   await useConfigStore.getState().fetchConfig();
   render(<RunTypeOverridesSection />);
   await waitForWorkflowsSettled();
@@ -241,7 +241,7 @@ async function renderList(
 async function renderInParentForm(over: Partial<AppConfig> = {}): Promise<Mock> {
   const onSubmit = vi.fn((e: React.FormEvent) => e.preventDefault());
   setWorkflowFixture(WORKFLOW_ENTRIES);
-  liveConfig = { gitRepoPath: '/repo', ...over };
+  liveConfig = { ...over };
   await useConfigStore.getState().fetchConfig();
   render(
     <form onSubmit={onSubmit}>
@@ -399,7 +399,7 @@ describe('RunTypeOverridesSection — grouped list', () => {
   describe('workflow enumeration failure', () => {
     it('renders a visible error instead of presenting a partial list as complete', async () => {
       projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
-      liveConfig = { gitRepoPath: '/repo' };
+      liveConfig = {};
       await useConfigStore.getState().fetchConfig();
       render(<RunTypeOverridesSection />);
       await waitForWorkflowsSettled();
@@ -414,7 +414,7 @@ describe('RunTypeOverridesSection — grouped list', () => {
 
     it('never surfaces the rejection as an unhandled promise rejection', async () => {
       projectsGetAll.mockRejectedValue(new Error('fan-out failed'));
-      liveConfig = { gitRepoPath: '/repo' };
+      liveConfig = {};
       await useConfigStore.getState().fetchConfig();
       // Rendering (and awaiting settlement) must not throw.
       render(<RunTypeOverridesSection />);
@@ -423,7 +423,7 @@ describe('RunTypeOverridesSection — grouped list', () => {
 
     it('lets the user retry, clearing the error once the retry succeeds', async () => {
       projectsGetAll.mockRejectedValueOnce(new Error('fan-out failed'));
-      liveConfig = { gitRepoPath: '/repo' };
+      liveConfig = {};
       await useConfigStore.getState().fetchConfig();
       render(<RunTypeOverridesSection />);
       await waitForWorkflowsSettled();
@@ -444,7 +444,7 @@ describe('RunTypeOverridesSection — grouped list', () => {
         if (projectId === 3) return Promise.reject(new Error('project 3 unreachable'));
         return Promise.resolve(workflowsForProject(WORKFLOW_ENTRIES, projectId));
       });
-      liveConfig = { gitRepoPath: '/repo' };
+      liveConfig = {};
       await useConfigStore.getState().fetchConfig();
       render(<RunTypeOverridesSection />);
       await waitForWorkflowsSettled();

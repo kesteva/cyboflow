@@ -103,7 +103,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
   });
 
   it('round-trips both fields through cyboflow.config.update → .get → a fresh load off disk', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     const caller = callerFor(manager);
 
@@ -130,7 +130,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
     expect(persisted.defaultLaunchModel).toBe('sonnet');
     expect(persisted.defaultAgentRuntime).toBe('codex-sdk');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().defaultLaunchModel).toBe('sonnet');
     expect(reloaded.getConfig().defaultAgentRuntime).toBe('codex-sdk');
@@ -138,7 +138,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
   });
 
   it('getDefaultLaunchModel: per-type override → defaultLaunchModel → the per-kind floor', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     // Rung 3 (nothing set anywhere): the per-kind floor.
@@ -160,7 +160,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
   });
 
   it('getDefaultLaunchModel NEVER returns the legacy defaultModel, at any rung', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     await manager.updateConfig({ defaultModel: 'legacy-assistant-model' });
@@ -179,7 +179,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
   });
 
   it('a blank defaultLaunchModel falls through to the floor rather than launching an empty model', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     await manager.updateConfig({ defaultLaunchModel: '   ' });
@@ -190,7 +190,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
   });
 
   it('getDefaultLaunchAgentRuntime: per-type override → defaultAgentRuntime → undefined (no floor)', async () => {
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     expect(manager.getDefaultAgentRuntime()).toBeUndefined();
@@ -215,7 +215,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
         2,
       ),
     );
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
 
     // Stored raw (config.json is the user's file) but never handed to a launch.
@@ -226,7 +226,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
 
   it('with both fields absent, nothing changes: no seeding, no config.json rewrite, same resolutions', async () => {
     // Neither field is seeded into the constructor defaults...
-    const fresh = new ConfigManager('/tmp/test-git-path');
+    const fresh = new ConfigManager();
     expect(fresh.getConfig().defaultLaunchModel).toBeUndefined();
     expect(fresh.getConfig().defaultAgentRuntime).toBeUndefined();
 
@@ -247,7 +247,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
     const configPath = path.join(tempDir, 'config.json');
     await fs.writeFile(configPath, existing);
 
-    const manager = new ConfigManager('/tmp/test-git-path');
+    const manager = new ConfigManager();
     await manager.initialize();
     expect(await fs.readFile(configPath, 'utf8')).toBe(existing);
 

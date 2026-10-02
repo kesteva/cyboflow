@@ -55,7 +55,6 @@ vi.mock('../../stores/configStore', () => ({
 
 function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    gitRepoPath: '/repo',
     telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: true },
     ...over,
   };

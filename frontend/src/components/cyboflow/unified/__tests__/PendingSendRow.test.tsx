@@ -23,7 +23,7 @@ function entry(over: Partial<PendingSend>): PendingSend {
 /** Drive the row's live provider-access read through the real config store. */
 function setProviderAccess(access: { claude: boolean; codex: boolean } | undefined): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+    config: { agentProviderAccess: access } as AppConfig,
   });
 }
 

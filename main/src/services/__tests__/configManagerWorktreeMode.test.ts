@@ -36,12 +36,12 @@ afterEach(async () => {
 
 describe('ConfigManager.quickSessionWorktreeMode', () => {
   it("getQuickSessionWorktreeMode() returns 'worktree' on a fresh instance (floor, before initialize)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getQuickSessionWorktreeMode()).toBe('worktree');
   });
 
   it("quickSessionWorktreeMode is NOT seeded into the constructor defaults (config.json stays byte-identical)", () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().quickSessionWorktreeMode).toBeUndefined();
     expect(mgr.getQuickSessionWorktreeMode()).toBe('worktree');
   });
@@ -52,7 +52,7 @@ describe('ConfigManager.quickSessionWorktreeMode', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().quickSessionWorktreeMode).toBeUndefined();
@@ -60,25 +60,25 @@ describe('ConfigManager.quickSessionWorktreeMode', () => {
   });
 
   it("updateConfig({ quickSessionWorktreeMode: 'in-place' }) persists and round-trips through a fresh initialize()", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ quickSessionWorktreeMode: 'in-place' });
 
     expect(mgr.getQuickSessionWorktreeMode()).toBe('in-place');
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().quickSessionWorktreeMode).toBe('in-place');
     expect(reloaded.getQuickSessionWorktreeMode()).toBe('in-place');
   });
 
   it("flipping back to 'worktree' persists and round-trips (rollback of the global default)", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ quickSessionWorktreeMode: 'in-place' });
     await mgr.updateConfig({ quickSessionWorktreeMode: 'worktree' });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getQuickSessionWorktreeMode()).toBe('worktree');
   });
@@ -90,7 +90,7 @@ describe('ConfigManager.quickSessionWorktreeMode', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', quickSessionWorktreeMode: 'sideways' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     // The raw (untrusted) value survives the deep-merge onto config (read via an

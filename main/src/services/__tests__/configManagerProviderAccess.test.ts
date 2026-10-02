@@ -34,7 +34,7 @@ afterEach(async () => {
 
 describe('ConfigManager.agentProviderAccess', () => {
   it('floors each provider to its OWN default on a fresh instance, without seeding the field', () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     expect(mgr.getConfig().agentProviderAccess).toBeUndefined();
     expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: false, pi: false });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
@@ -50,7 +50,7 @@ describe('ConfigManager.agentProviderAccess', () => {
       JSON.stringify({ gitRepoPath: '/some/repo', defaultModel: 'sonnet' }, null, 2),
     );
 
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getConfig().agentProviderAccess).toBeUndefined();
@@ -59,7 +59,7 @@ describe('ConfigManager.agentProviderAccess', () => {
   });
 
   it('disables just the named provider and leaves its sibling enabled', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ agentProviderAccess: { claude: true, codex: false } });
 
@@ -68,7 +68,7 @@ describe('ConfigManager.agentProviderAccess', () => {
   });
 
   it("floors a PARTIAL map's absent member to enabled", async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ agentProviderAccess: { codex: false } });
 
@@ -78,7 +78,7 @@ describe('ConfigManager.agentProviderAccess', () => {
   });
 
   it('degrades an all-off map to all-enabled (never brick every launch seam)', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     // Bypasses the IPC normalization (a hand-edited config.json can do this).
     await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false, omp: false } });
@@ -91,11 +91,11 @@ describe('ConfigManager.agentProviderAccess', () => {
   });
 
   it('persists and round-trips through a fresh initialize()', async () => {
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
     await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: true } });
 
-    const reloaded = new ConfigManager('/tmp/test-git-path');
+    const reloaded = new ConfigManager();
     await reloaded.initialize();
     expect(reloaded.getConfig().agentProviderAccess).toEqual({ claude: false, codex: true });
     expect(reloaded.isAgentProviderEnabled('claude')).toBe(false);
@@ -116,7 +116,7 @@ describe('ConfigManager Aria-mode provider gate', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', agentProviderAccess: { pi: true } }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getAriaMode()).toBe(false);
@@ -136,7 +136,7 @@ describe('ConfigManager Aria-mode provider gate', () => {
         2,
       ),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.isAgentProviderSurfaced('pi')).toBe(true);
@@ -155,7 +155,7 @@ describe('ConfigManager Aria-mode provider gate', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', agentProviderAccess: { pi: true } }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(mgr.getAgentProviderAccess().pi).toBe(false);
@@ -174,7 +174,7 @@ describe('ConfigManager Aria-mode provider gate', () => {
         2,
       ),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     expect(isAgentProviderEnabled(mgr.getAgentProviderAccess(), 'pi')).toBe(true);
@@ -185,7 +185,7 @@ describe('ConfigManager Aria-mode provider gate', () => {
       path.join(tempDir, 'config.json'),
       JSON.stringify({ gitRepoPath: '/some/repo', ariaMode: true }, null, 2),
     );
-    const mgr = new ConfigManager('/tmp/test-git-path');
+    const mgr = new ConfigManager();
     await mgr.initialize();
 
     // Surfaced (the card renders) but still switched off until the user says so.
