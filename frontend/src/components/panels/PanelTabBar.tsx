@@ -1,5 +1,5 @@
 import React, { useCallback, memo, useState, useRef, useEffect } from 'react';
-import { X, Terminal, MessageSquare, GitBranch, FileCode, MoreVertical, Edit2, Plus, ChevronDown } from 'lucide-react';
+import { X, Terminal, MessageSquare, FileCode, Edit2, Plus, ChevronDown } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
@@ -10,7 +10,6 @@ import {
   type SessionAgentRuntime,
 } from '../../../../shared/types/agentRuntime';
 import { providerForRuntime } from '../cyboflow/agentRuntimeUi';
-import { Button } from '../ui/Button';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
 import { useSession } from '../../contexts/SessionContext';
 import { StatusDot } from '../ui/StatusDot';
@@ -48,7 +47,6 @@ function addChatSubstrateItems(
 }
 
 function getPanelDisplayTitle(panel: ToolPanel): string {
-  if (panel.type === 'diff') return 'Diff';
   if (panel.type !== 'claude') return panel.title;
 
   const legacyDefaultTitle = /^(?:Claude|Codex)(\s+\d+)?$/.exec(panel.title);
@@ -62,12 +60,10 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   activePanel,
   onPanelSelect,
   onPanelClose,
-  context = 'worktree',  // Default to worktree for backward compatibility
   onAddTerminal,
   onAddChat,
 }) => {
   const sessionContext = useSession();
-  const { gitBranchActions, isMerging } = sessionContext || {};
   const [editingPanelId, setEditingPanelId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -94,9 +90,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   
   const handleStartRename = useCallback((e: React.MouseEvent, panel: ToolPanel) => {
     e.stopPropagation();
-    if (panel.type === 'diff') {
-      return;
-    }
     setEditingPanelId(panel.id);
     setEditingTitle(getPanelDisplayTitle(panel));
   }, []);
@@ -104,23 +97,18 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   const handleRenameSubmit = useCallback(async () => {
     if (editingPanelId && editingTitle.trim()) {
       try {
-        // Update the panel title via IPC
+        // Persist the title; main's 'panel:updated' broadcast refreshes panelStore
+        // (useIPCEvents → updatePanelState).
         await window.electron?.invoke('panels:update', editingPanelId, {
           title: editingTitle.trim()
         });
-        
-        // Update the local panel in the store
-        const panel = panels.find(p => p.id === editingPanelId);
-        if (panel) {
-          panel.title = editingTitle.trim();
-        }
       } catch (error) {
         console.error('Failed to rename panel:', error);
       }
     }
     setEditingPanelId(null);
     setEditingTitle('');
-  }, [editingPanelId, editingTitle, panels]);
+  }, [editingPanelId, editingTitle]);
   
   const handleRenameCancel = useCallback(() => {
     setEditingPanelId(null);
@@ -178,8 +166,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
         return <Terminal className="w-4 h-4" />;
       case 'claude':
         return <MessageSquare className="w-4 h-4" />;
-      case 'diff':
-        return <GitBranch className="w-4 h-4" />;
       case 'logs':
         return <FileCode className="w-4 h-4" />;
       // Add more icons as panel types are added
@@ -239,7 +225,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
         {panels.map((panel) => {
           const isPermanent = panel.metadata?.permanent === true;
           const isEditing = editingPanelId === panel.id;
-          const isDiffPanel = panel.type === 'diff';
           const displayTitle = getPanelDisplayTitle(panel);
           const statusConfig = getPanelStatusConfig(panel);
 
@@ -293,7 +278,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
               ) : (
                 <>
                   <span className="ml-2 text-sm">{displayTitle}</span>
-                  {!isPermanent && !isDiffPanel && (
+                  {!isPermanent && (
                     <button
                       className="ml-1 p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity transition-colors text-text-muted hover:bg-surface-hover hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
                       onClick={(e) => handleStartRename(e, panel)}
@@ -353,28 +338,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
               items={addChatItems}
               position="auto"
               width="sm"
-            />
-          </div>
-        )}
-
-        {/* Branch Actions stay at the far right (worktree only). */}
-        {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
-          <div className="ml-auto flex items-center pr-2 h-8">
-            <Dropdown
-              trigger={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="flex items-center gap-2 px-3 py-1 h-7"
-                  disabled={isMerging}
-                >
-                  <GitBranch className="w-4 h-4" />
-                  <span className="text-sm">Git Branch Actions</span>
-                  <MoreVertical className="w-3 h-3" />
-                </Button>
-              }
-              items={gitBranchActions}
-              position="bottom-right"
             />
           </div>
         )}

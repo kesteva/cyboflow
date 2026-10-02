@@ -42,7 +42,6 @@ describe('PanelTabBar chat labels', () => {
         activePanel={panels[0]}
         onPanelSelect={vi.fn()}
         onPanelClose={vi.fn()}
-        context="project"
       />,
     );
 
@@ -61,7 +60,6 @@ describe('PanelTabBar chat labels', () => {
         activePanel={customPanel}
         onPanelSelect={vi.fn()}
         onPanelClose={vi.fn()}
-        context="project"
       />,
     );
 

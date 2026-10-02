@@ -150,7 +150,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         activePanel={currentActivePanel}
         onPanelSelect={handlePanelSelect}
         onPanelClose={handlePanelClose}
-        context="project"
         onAddTerminal={handleAddTerminal}
         onAddChat={handleAddChat}
       />
