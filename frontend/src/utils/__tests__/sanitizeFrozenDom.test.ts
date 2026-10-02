@@ -182,8 +182,7 @@ describe('sanitizeFrozenDom — visual fidelity is preserved', () => {
         '<span aria-label="Close">×</span></div></body>',
     );
     // The whole stylesheet survives verbatim — a frozen capture is judged on how
-    // it LOOKS, so no per-property filtering (contrast frontend/src/utils/sanitizer.ts,
-    // which filters style props for chat-message HTML in the APP's own document).
+    // it LOOKS, so no per-property filtering.
     expect(doc.querySelector('style')?.textContent).toBe('.card { color: rgb(1, 2, 3); position: absolute; }');
     const card = doc.querySelector('.card');
     expect(card?.getAttribute('style')).toBe('position: fixed; top: 4px');
