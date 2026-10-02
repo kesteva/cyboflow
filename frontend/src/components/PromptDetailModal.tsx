@@ -2,7 +2,7 @@ import { Copy, Check } from 'lucide-react';
 import { useState } from 'react';
 import { formatDistanceToNow, formatDuration, getTimeDifference, isValidTimestamp, parseTimestamp } from '../utils/timestampUtils';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
-import { IconButton } from './ui/IconButton';
+import { IconButton } from './ui/Button';
 
 interface PromptMarker {
   id: number;
@@ -75,6 +75,7 @@ export function PromptDetailModal({ prompt, promptIndex, onClose }: PromptDetail
             onClick={handleCopy}
             variant="ghost"
             size="sm"
+            className="h-8 w-8"
             aria-label="Copy prompt"
             icon={copied ? <Check className="h-4 w-4 text-status-success" /> : <Copy className="h-4 w-4" />}
           />

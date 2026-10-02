@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { GitCommit } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
-import { Textarea } from './ui/Textarea';
+import { Textarea } from './ui/Input';
 
 interface CommitDialogProps {
   isOpen: boolean;
@@ -87,6 +87,8 @@ export const CommitDialog: React.FC<CommitDialogProps> = ({
           placeholder="Enter commit message..."
           rows={4}
           error={error}
+          fullWidth
+          className="resize-y"
         />
         
         <p className="mt-2 text-xs text-text-tertiary">
