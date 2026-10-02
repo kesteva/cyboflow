@@ -16,22 +16,12 @@
  * Every method returns the EXACT envelope shape the legacy `sessions:*` /
  * `git:*` ipcMain.handle channels (main/src/ipc/git.ts, now deleted) returned,
  * so frontend call sites keep their existing shape — INCLUDING the irregular
- * ones, which are load-bearing for the merge/dismiss/create-PR dialogs:
- *   • `squashAndRebaseToMain` / `rebaseToMain` failures carry `needsRebase`
- *     (main advanced past the branch — rebase first) and `alreadyUpToDate`
- *     (the branch had nothing left to give main, so the dialog offers Mark
- *     complete instead of an error) alongside a `commands`-shaped `gitError`.
- *   • `rebaseMainIntoWorktree`'s failure `gitError` carries the conflict
- *     detail (`hasConflicts` / `conflictingFiles` / `conflictingCommits`).
- *   • `pull`'s failure can carry `isMergeConflict`.
- *   • `getGitStatus`'s SUCCESS envelope is `{ success: true, gitStatus }` —
- *     `gitStatus`, NOT `data` — optionally with `backgroundRefresh`.
- *
- * `sessions:check-rebase-conflicts` was NOT migrated (zero preload/frontend
- * callers). Its logic lives on via WorktreeManager.checkForRebaseConflicts,
- * which `rebaseMainIntoWorktree` calls directly.
+ * one the merge dialog depends on: `squashAndRebaseToMain` / `rebaseToMain`
+ * failures carry `needsRebase` (main advanced past the branch — rebase first)
+ * and `alreadyUpToDate` (the branch had nothing left to give main, so the
+ * dialog offers Mark complete instead of an error) alongside a
+ * `commands`-shaped `gitError`.
  */
-import type { GitStatus } from '../../../types/session';
 import type { ComparisonBases, WorktreeStatusPayload, DiffGroupScope } from '../../../../../shared/types/runFiles';
 
 /** The failure half every one of these envelopes shares. */
@@ -59,9 +49,9 @@ export interface SessionGitDiffStats {
  * its own base and reintroduce a live bug. `resolvedBase` is the concrete SHA
  * (never a branch name) the response was actually computed against, `null`
  * only for the working-dir-vs-HEAD rung (no base to anchor on). `worktree` is
- * the same `getWorktreeStatus` + `getDiffGroups` (TASK-209/210) payload every
- * one of these three methods assembles, for the grouped Diff-tab view
- * alongside whichever single diff blob the method itself returns.
+ * the `getWorktreeStatus` + `getDiffGroups` (TASK-209/210) payload
+ * getCombinedDiff assembles, for the grouped Diff-tab view alongside the
+ * single diff blob it returns.
  */
 export interface SessionGitDiffResult {
   diff: string;
@@ -73,44 +63,6 @@ export interface SessionGitDiffResult {
   worktree: WorktreeStatusPayload;
 }
 
-/**
- * One row of `getLastCommits`. Its `timestamp` is WorktreeManager's raw commit
- * date (`string | Date`), passed through unconverted exactly as the legacy
- * handler did.
- */
-export interface SessionLastCommitRow {
-  id: number;
-  session_id: string;
-  commit_message: string;
-  execution_sequence: number;
-  stats_additions: number;
-  stats_deletions: number;
-  stats_files_changed: number;
-  commit_hash: string;
-  timestamp: string | Date;
-  author: string;
-  history_limit_reached: boolean;
-}
-
-/**
- * The `gitError` detail on a rebase-from-main failure. Two producers share it:
- * the pre-flight conflict short-circuit (which fills `hasConflicts` /
- * `conflictingFiles` / `conflictingCommits` from
- * WorktreeManager.checkForRebaseConflicts — source of truth for those three)
- * and the catch arm (which fills `command` / `workingDirectory` /
- * `originalError` off the thrown GitError). Every field is optional because
- * neither producer fills all of them.
- */
-export interface RebaseFromMainGitError {
-  command?: string;
-  output?: string;
-  workingDirectory?: string;
-  hasConflicts?: boolean;
-  conflictingFiles?: string[];
-  conflictingCommits?: { ours: string[]; theirs: string[] };
-  originalError?: string;
-}
-
 /** The `gitError` detail on a merge-to-main failure (squash or rebase). */
 export interface MergeToMainGitError {
   commands?: string[];
@@ -120,7 +72,7 @@ export interface MergeToMainGitError {
   originalError?: string;
 }
 
-/** The `gitError` detail on a pull/push failure. */
+/** The `gitError` detail on a push failure. */
 export interface PullPushGitError {
   output?: string;
   workingDirectory: string;
@@ -144,26 +96,11 @@ export type MergeToMainResult =
     };
 
 export interface SessionGitOpsLike {
-  /**
-   * Mirrors legacy `sessions:get-execution-diff`. `executionId` is the 1-based
-   * execution row id as a STRING (the legacy wire type — it is parseInt'd
-   * inside).
-   */
-  getExecutionDiff(request: {
-    sessionId: string;
-    executionId: string;
-  }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError>;
-
   /** Mirrors legacy `sessions:git-commit`. Stages all changes and commits in the session worktree. */
   commit(request: {
     sessionId: string;
     message: string;
   }): Promise<{ success: true } | SessionGitError>;
-
-  /** Mirrors legacy `sessions:git-diff`. The session worktree's working-directory diff. */
-  diff(request: {
-    sessionId: string;
-  }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError>;
 
   /**
    * Mirrors legacy `sessions:get-combined-diff`. `executionIds` selects what to
@@ -185,27 +122,6 @@ export interface SessionGitOpsLike {
     scope?: DiffGroupScope;
   }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError>;
 
-  /**
-   * Mirrors legacy `sessions:rebase-main-into-worktree`. Short-circuits on a
-   * pre-flight conflict WITHOUT mutating the worktree, reporting the conflict
-   * detail in `gitError`.
-   */
-  rebaseMainIntoWorktree(request: {
-    sessionId: string;
-  }): Promise<
-    | { success: true; data: { message: string } }
-    | { success: false; error: string; gitError?: RebaseFromMainGitError }
-  >;
-
-  /**
-   * Mirrors legacy `sessions:abort-rebase-and-use-claude`. Aborts an in-progress
-   * rebase (a no-op when there is none) and spins up a Claude panel primed to
-   * do the rebase and resolve conflicts.
-   */
-  abortRebaseAndUseClaude(request: {
-    sessionId: string;
-  }): Promise<{ success: true; data: { message: string; panelId: string } } | SessionGitError>;
-
   /** Mirrors legacy `sessions:squash-and-rebase-to-main`. See {@link MergeToMainResult}. */
   squashAndRebaseToMain(request: {
     sessionId: string;
@@ -214,17 +130,6 @@ export interface SessionGitOpsLike {
 
   /** Mirrors legacy `sessions:rebase-to-main`. See {@link MergeToMainResult}. */
   rebaseToMain(request: { sessionId: string }): Promise<MergeToMainResult>;
-
-  /**
-   * Mirrors legacy `sessions:git-pull`. A merge conflict is reported as
-   * `isMergeConflict: true` rather than as a plain failure.
-   */
-  pull(request: {
-    sessionId: string;
-  }): Promise<
-    | { success: true; data: { output: string } }
-    | { success: false; error: string; isMergeConflict?: boolean; gitError?: PullPushGitError }
-  >;
 
   /**
    * Mirrors legacy `sessions:git-push`. On success this ALSO runs the Create-PR
@@ -291,22 +196,11 @@ export interface SessionGitOpsLike {
   /**
    * Mirrors legacy `sessions:get-branch-commit-subjects`. Subjects of the
    * branch's OWN commits (`mainBranch..HEAD`), newest first — never main-branch
-   * history, unlike {@link getLastCommits}.
+   * history.
    */
   getBranchCommitSubjects(request: {
     sessionId: string;
   }): Promise<{ success: true; data: { subjects: string[] } } | SessionGitError>;
-
-  /** Mirrors legacy `sessions:get-last-commits`. `count` defaults to 50 in the ops impl. */
-  getLastCommits(request: {
-    sessionId: string;
-    count?: number;
-  }): Promise<{ success: true; data: SessionLastCommitRow[] } | SessionGitError>;
-
-  /** Mirrors legacy `sessions:has-changes-to-rebase`. */
-  hasChangesToRebase(request: {
-    sessionId: string;
-  }): Promise<{ success: true; data: boolean } | SessionGitError>;
 
   /**
    * Mirrors legacy `sessions:get-git-commands`. The copy-pasteable git command
@@ -349,21 +243,6 @@ export interface SessionGitOpsLike {
   getRemoteUrl(request: {
     sessionId: string;
   }): Promise<{ success: true; data: { remoteUrl: string; branchName: string } } | SessionGitError>;
-
-  /**
-   * Mirrors legacy `sessions:get-git-status`. NOTE the irregular success
-   * envelope: the status rides on `gitStatus`, NOT `data`. `isInitialLoad`
-   * takes the queued path and `nonBlocking` kicks a background refresh — both
-   * return the CACHED status plus `backgroundRefresh: true`; neither makes this
-   * a mutation (it is semantically a read).
-   */
-  getGitStatus(request: {
-    sessionId: string;
-    nonBlocking?: boolean;
-    isInitialLoad?: boolean;
-  }): Promise<
-    { success: true; gitStatus: GitStatus | null; backgroundRefresh?: boolean } | SessionGitError
-  >;
 
   /**
    * Mirrors legacy `git:cancel-status-for-project`. Cancels in-flight git-status

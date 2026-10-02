@@ -21,7 +21,6 @@ import type { DatabaseService } from '../database/database';
 import type { LoggerLike } from '../orchestrator/types';
 import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
 import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
-import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
 import { panelEventBus } from '../services/panelEventBus';
 import { PanelEventType, ToolPanelType, PanelEvent } from '../../../shared/types/panels';
@@ -30,7 +29,6 @@ import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
 import { readUntrackedFileContent, createUntrackedFileDiffBlock } from '../services/gitDiffManager';
 import { WorktreeChangeNotifier } from '../services/worktreeChangeNotifier';
-import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
@@ -102,16 +100,6 @@ interface ProcessError {
   stdout?: string;
   stderr?: string;
   message?: string;
-}
-
-// Interface for generic error objects with git-related properties
-interface ErrorWithGitContext {
-  gitCommand?: string;
-  gitCommands?: string[];
-  gitOutput?: string;
-  workingDirectory?: string;
-  originalError?: Error;
-  [key: string]: unknown;
 }
 
 // Interface for raw commit data from worktreeManager
@@ -929,38 +917,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
-  const getExecutionDiff = async ({ sessionId, executionId }: OpsInput<'getExecutionDiff'>): Promise<OpsResult<'getExecutionDiff'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      const { commits } = await getSessionCommitHistory(session, 50);
-      const executionIndex = parseInt(executionId) - 1;
-
-      if (executionIndex < 0 || executionIndex >= commits.length) {
-        return { success: false, error: 'Invalid execution ID' };
-      }
-
-      // Get diff for the specific commit
-      const commit = commits[executionIndex];
-      const uncommittedDiff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
-      // getCommitDiff's own beforeHash is `${commitHash}~1` — a valid rev
-      // expression but not a resolved SHA (the wire contract requires one).
-      // Resolve it through the TASK-208 resolver; null (e.g. the commit has no
-      // parent) falls back to the working-dir-vs-HEAD null rung rather than
-      // leaking an unresolved rev string.
-      const resolvedBase = await resolveSessionDiffBaseRef(session.worktreePath, [`${commit.hash}~1`]);
-      const worktree = await buildWorktreeStatus(session.worktreePath, resolvedBase);
-      return { success: true, data: { ...uncommittedDiff, resolvedBase, worktree } };
-    } catch (error) {
-      console.error('Failed to get execution diff:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get execution diff';
-      return { success: false, error: errorMessage };
-    }
-  };
-
   const commit = async ({ sessionId, message }: OpsInput<'commit'>): Promise<OpsResult<'commit'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -1015,34 +971,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     } catch (error: unknown) {
       console.error('Failed to commit changes:', error);
       const errorMessage = (error instanceof Error ? error.message : '') || (error && typeof error === 'object' && 'stderr' in error ? (error as ProcessError).stderr : '') || 'Failed to commit changes';
-      return { success: false, error: errorMessage };
-    }
-  };
-
-  const diff = async ({ sessionId }: OpsInput<'diff'>): Promise<OpsResult<'diff'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-      
-      // Check if session is archived - worktree won't exist
-      if (session.archived) {
-        return { success: false, error: 'Cannot access git diff for archived session' };
-      }
-
-      const uncommittedDiff = await gitDiffManager.getGitDiff(session.worktreePath);
-      // getGitDiff is the working-dir-vs-HEAD rung by definition — resolvedBase
-      // is null here (see SessionGitDiffResult's doc comment), so Committed
-      // comes back unavailable rather than anchored on a stand-in.
-      const worktree = await buildWorktreeStatus(session.worktreePath, null);
-      return { success: true, data: { ...uncommittedDiff, resolvedBase: null, worktree } };
-    } catch (error) {
-      // Don't log errors for expected failures
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get git diff';
-      if (!errorMessage.includes('archived session')) {
-        console.error('Failed to get git diff:', error);
-      }
       return { success: false, error: errorMessage };
     }
   };
@@ -1263,259 +1191,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       console.error('Failed to get combined diff:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to get combined diff';
       return { success: false, error: errorMessage };
-    }
-  };
-
-  // Git rebase operations
-  const rebaseMainIntoWorktree = async ({ sessionId }: OpsInput<'rebaseMainIntoWorktree'>): Promise<OpsResult<'rebaseMainIntoWorktree'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        return { success: false, error: 'Session not found' };
-      }
-
-      if (!session.worktreePath) {
-        return { success: false, error: 'Session has no worktree path' };
-      }
-
-      // Get the project to find the main branch
-      const project = sessionManager.getProjectForSession(sessionId);
-      if (!project) {
-        return { success: false, error: 'Project not found for session' };
-      }
-
-      // Get the main branch from the project directory's current branch
-      const mainBranch = await Promise.race([
-        worktreeManager.getProjectMainBranch(project.path),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('getProjectMainBranch timeout')), 30000))
-      ]) as string;
-
-      // Check for conflicts before attempting rebase
-      const conflictCheck = await worktreeManager.checkForRebaseConflicts(session.worktreePath, mainBranch);
-      
-      if (conflictCheck.hasConflicts) {
-        
-        // Build detailed error message
-        let errorMessage = `Rebase would result in conflicts. Cannot proceed automatically.\n\n`;
-        
-        if (conflictCheck.conflictingFiles && conflictCheck.conflictingFiles.length > 0) {
-          errorMessage += `Conflicting files:\n`;
-          conflictCheck.conflictingFiles.forEach(file => {
-            errorMessage += `  • ${file}\n`;
-          });
-          errorMessage += '\n';
-        }
-        
-        if (conflictCheck.conflictingCommits) {
-          if (conflictCheck.conflictingCommits.ours.length > 0) {
-            errorMessage += `Your commits:\n`;
-            conflictCheck.conflictingCommits.ours.slice(0, 5).forEach(commit => {
-              errorMessage += `  ${commit}\n`;
-            });
-            if (conflictCheck.conflictingCommits.ours.length > 5) {
-              errorMessage += `  ... and ${conflictCheck.conflictingCommits.ours.length - 5} more\n`;
-            }
-            errorMessage += '\n';
-          }
-          
-          if (conflictCheck.conflictingCommits.theirs.length > 0) {
-            errorMessage += `Incoming commits from ${mainBranch}:\n`;
-            conflictCheck.conflictingCommits.theirs.slice(0, 5).forEach(commit => {
-              errorMessage += `  ${commit}\n`;
-            });
-            if (conflictCheck.conflictingCommits.theirs.length > 5) {
-              errorMessage += `  ... and ${conflictCheck.conflictingCommits.theirs.length - 5} more\n`;
-            }
-          }
-        }
-        
-        // Emit git operation failed event for conflict detection
-        const conflictMessage = `✗ Rebase aborted: Conflicts detected\n\n${errorMessage}`;
-        emitGitOperationToProject(sessionId, 'git:operation_failed', conflictMessage, {
-          operation: 'rebase_from_main',
-          mainBranch,
-          hasConflicts: true,
-          conflictingFiles: conflictCheck.conflictingFiles
-        });
-        
-        // Return detailed conflict information
-        return {
-          success: false,
-          error: 'Rebase would result in conflicts',
-          gitError: {
-            command: `git rebase ${mainBranch}`,
-            output: errorMessage,
-            workingDirectory: session.worktreePath,
-            hasConflicts: true,
-            conflictingFiles: conflictCheck.conflictingFiles,
-            conflictingCommits: conflictCheck.conflictingCommits
-          }
-        };
-      }
-
-      // Emit git operation started event to all sessions in project
-      const startMessage = `🔄 GIT OPERATION\nRebasing from ${mainBranch}...`;
-      emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
-        operation: 'rebase_from_main',
-        mainBranch
-      });
-
-      await Promise.race([
-        worktreeManager.rebaseMainIntoWorktree(session.worktreePath, mainBranch),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('rebaseMainIntoWorktree timeout')), 120000))
-      ]);
-
-      // Emit git operation completed event to all sessions in project
-      const successMessage = `✓ Successfully rebased ${mainBranch} into worktree`;
-      emitGitOperationToProject(sessionId, 'git:operation_completed', successMessage, {
-        operation: 'rebase_from_main',
-        mainBranch
-      });
-
-      // Update git status directly after rebasing from main (more efficient than refresh)
-      // Don't let this block the response - run it in background
-      gitStatusManager.updateGitStatusAfterRebase(sessionId, 'from_main').catch(error => {
-        console.error(`[IPC:git] Failed to update git status for session ${sessionId}:`, error);
-      });
-
-      return { success: true, data: { message: `Successfully rebased ${mainBranch} into worktree` } };
-    } catch (error: unknown) {
-      console.error(`[IPC:git] Failed to rebase main into worktree for session ${sessionId}:`, error);
-
-      // Emit git operation failed event
-      const errorMessage = `✗ Rebase failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
-                          (error && typeof error === 'object' && 'gitOutput' in error && (error as GitError).gitOutput ? `\n\nGit output:\n${(error as GitError).gitOutput}` : '');
-      
-      // Don't let this block the error response either
-      try {
-        emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
-          operation: 'rebase_from_main',
-          error: error instanceof Error ? error.message : String(error),
-          gitOutput: error && typeof error === 'object' && 'gitOutput' in error ? (error as GitError).gitOutput : undefined
-        });
-      } catch (outputError) {
-        console.error(`[IPC:git] Failed to emit git error event for session ${sessionId}:`, outputError);
-      }
-
-      // Pass detailed git error information to frontend
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to rebase main into worktree',
-        gitError: {
-          command: error && typeof error === 'object' && 'gitCommand' in error ? (error as ErrorWithGitContext).gitCommand : undefined,
-          output: error && typeof error === 'object' && 'gitOutput' in error ? (error as ErrorWithGitContext).gitOutput : (error instanceof Error ? error.message : String(error)),
-          workingDirectory: error && typeof error === 'object' && 'workingDirectory' in error ? (error as ErrorWithGitContext).workingDirectory : undefined,
-          originalError: error && typeof error === 'object' && 'originalError' in error ? (error as ErrorWithGitContext).originalError?.message : undefined
-        }
-      };
-    }
-  };
-
-  const abortRebaseAndUseClaude = async ({ sessionId }: OpsInput<'abortRebaseAndUseClaude'>): Promise<OpsResult<'abortRebaseAndUseClaude'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        return { success: false, error: 'Session not found' };
-      }
-
-      if (!session.worktreePath) {
-        return { success: false, error: 'Session has no worktree path' };
-      }
-
-      // Get the project to find the main branch
-      const project = sessionManager.getProjectForSession(sessionId);
-      if (!project) {
-        return { success: false, error: 'Project not found for session' };
-      }
-
-      // Get the main branch from the project directory's current branch
-      const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-
-      // Check if we're actually in a rebase state (could have been pre-detected conflicts)
-      // Try to abort any existing rebase, but don't fail if there isn't one
-      try {
-        const statusOutput = runGit(session.worktreePath, ['status', '--porcelain=v1']);
-        if (statusOutput.includes('rebase')) {
-          await worktreeManager.abortRebase(session.worktreePath);
-          
-          // Emit git operation event about aborting the rebase
-          const abortMessage = `🔄 GIT OPERATION\nAborted rebase successfully`;
-          emitGitOperationToProject(sessionId, 'git:operation_completed', abortMessage, {
-            operation: 'abort_rebase'
-          });
-        }
-      } catch (abortError: unknown) {
-        // Not in a rebase state or already clean - that's fine
-      }
-
-      // Create a new Claude panel to handle the rebase and conflicts
-      const prompt = `Please rebase the local ${mainBranch} branch (not origin/${mainBranch}) into this branch and resolve all conflicts`;
-      
-      try {
-        // Create a new Claude panel
-        const panel = await panelManager.createPanel({
-          sessionId: sessionId,
-          type: 'claude',
-          title: 'Chat - Resolve Conflicts'
-        });
-        
-        // Get the claudePanelManager from the claudePanel module
-        const { claudePanelManager } = require('./claudePanel');
-        
-        // Register the panel with the Claude panel manager
-        claudePanelManager.registerPanel(panel.id, sessionId, panel.state.customState);
-        
-        // Start Claude in the new panel with the rebase prompt
-        await claudePanelManager.startPanel(
-          panel.id,
-          session.worktreePath,
-          prompt,
-          session.permissionMode,
-          session.model
-        );
-        
-        // Add message to session output
-        const message = `🤖 CLAUDE CODE\nCreated new Claude panel to handle rebase and resolve conflicts\nPrompt: ${prompt}`;
-        sessionManager.addSessionOutput(sessionId, {
-          type: 'stdout',
-          data: message,
-          timestamp: new Date()
-        });
-        
-        return { 
-          success: true, 
-          data: { 
-            message: 'Claude Code panel created to handle rebase and resolve conflicts',
-            panelId: panel.id
-          } 
-        };
-      } catch (error: unknown) {
-        console.error('[IPC:git] Failed to create Claude panel:', error);
-        console.error('[IPC:git] Error details:', {
-          sessionId,
-          worktreePath: session.worktreePath,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          errorStack: error instanceof Error ? error.stack : undefined
-        });
-        
-        // Provide more specific error messages
-        let errorMessage = 'Failed to create Claude panel';
-        if (error instanceof Error && error.message?.includes('API key')) {
-          errorMessage = 'Failed to create Claude panel: API key not configured';
-        } else if (error instanceof Error && error.message?.includes('not found')) {
-          errorMessage = 'Failed to create Claude panel: Session or worktree not found';
-        } else if (error instanceof Error && error.message) {
-          errorMessage = `Failed to create Claude panel: ${error.message}`;
-        }
-        
-        return { success: false, error: errorMessage };
-      }
-    } catch (error: unknown) {
-      console.error('[IPC:git] Failed to abort rebase and use Claude:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to abort rebase and use Claude'
-      };
     }
   };
 
@@ -1765,83 +1440,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           workingDirectory: gitError.workingDirectory,
           projectPath: gitError.projectPath,
           originalError: gitError.originalError?.message
-        }
-      };
-    }
-  };
-
-  // Git pull/push operations for main repo sessions
-  const pull = async ({ sessionId }: OpsInput<'pull'>): Promise<OpsResult<'pull'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        return { success: false, error: 'Session not found' };
-      }
-
-      if (!session.worktreePath) {
-        return { success: false, error: 'Session has no worktree path' };
-      }
-
-      // Emit git operation started event to all sessions in project
-      const startMessage = `🔄 GIT OPERATION\nPulling latest changes from remote...`;
-      emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
-        operation: 'pull'
-      });
-
-      // Run git pull
-      const result = await worktreeManager.gitPull(session.worktreePath);
-
-      // Emit git operation completed event to all sessions in project
-      const successMessage = `✓ Successfully pulled latest changes` +
-                            (result.output ? `\n\nGit output:\n${result.output}` : '');
-      emitGitOperationToProject(sessionId, 'git:operation_completed', successMessage, {
-        operation: 'pull',
-        output: result.output
-      });
-
-      // Check if this is a main repo session pulling main branch updates
-      if (session.isMainRepo && session.projectId !== undefined) {
-        // If pulling to main repo, all worktrees might be affected
-        await refreshGitStatusForProject(session.projectId);
-      } else {
-        // If pulling to a worktree, only this session is affected
-        await refreshGitStatusForSession(sessionId);
-      }
-
-      return { success: true, data: result };
-    } catch (error: unknown) {
-      console.error('Failed to pull from remote:', error);
-
-      // Emit git operation failed event
-      const gitError = error as GitError;
-      
-      const errorMessage = `✗ Pull failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
-                          (gitError.gitOutput ? `\n\nGit output:\n${gitError.gitOutput}` : '');
-      emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
-        operation: 'pull',
-        error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
-      });
-
-      // Check if it's a merge conflict
-      if ((error instanceof Error && error.message?.includes('CONFLICT')) || (gitError.gitOutput?.includes('CONFLICT'))) {
-        return {
-          success: false,
-          error: 'Merge conflicts detected. Please resolve conflicts manually or ask Claude to help.',
-          isMergeConflict: true,
-          gitError: {
-            output: gitError.gitOutput || (error instanceof Error ? error.message : String(error)),
-            workingDirectory: gitError.workingDirectory || ''
-          }
-        };
-      }
-
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to pull from remote',
-        gitError: {
-          output: gitError.gitOutput || (error instanceof Error ? error.message : String(error)),
-          workingDirectory: gitError.workingDirectory || ''
         }
       };
     }
@@ -2170,70 +1768,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
-  const getLastCommits = async ({ sessionId, count = 50 }: OpsInput<'getLastCommits'>): Promise<OpsResult<'getLastCommits'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        return { success: false, error: 'Session not found' };
-      }
-
-      if (!session.worktreePath) {
-        return { success: false, error: 'Session has no worktree path' };
-      }
-
-      // Get the last N commits from the repository
-      const commits = await worktreeManager.getLastCommits(session.worktreePath, count);
-      const limitReached = commits.length === count;
-
-      // Transform commits to match ExecutionDiff format
-      const executionDiffs = commits.map((commit, index) => ({
-        id: index + 1,
-        session_id: sessionId,
-        commit_message: commit.message,
-        execution_sequence: index + 1,
-        stats_additions: commit.additions || 0,
-        stats_deletions: commit.deletions || 0,
-        stats_files_changed: commit.filesChanged || 0,
-        commit_hash: commit.hash,
-        timestamp: commit.date,
-        author: commit.author || 'Unknown',
-        history_limit_reached: limitReached
-      }));
-
-      return { success: true, data: executionDiffs };
-    } catch (error: unknown) {
-      console.error('Failed to get last commits:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to get last commits'
-      };
-    }
-  };
-
-  // Git operation helpers
-  const hasChangesToRebase = async ({ sessionId }: OpsInput<'hasChangesToRebase'>): Promise<OpsResult<'hasChangesToRebase'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      const project = sessionManager.getProjectForSession(sessionId);
-      if (!project) {
-        return { success: false, error: 'Project not found for session' };
-      }
-
-      // Get the effective main branch (override or auto-detected)
-      const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-      const hasChanges = await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch);
-
-      return { success: true, data: hasChanges };
-    } catch (error) {
-      console.error('Failed to check for changes to rebase:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to check for changes to rebase' };
-    }
-  };
-
   const getGitCommands = async ({ sessionId }: OpsInput<'getGitCommands'>): Promise<OpsResult<'getGitCommands'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -2473,55 +2007,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
-  const getGitStatus = async ({ sessionId, nonBlocking, isInitialLoad }: OpsInput<'getGitStatus'>): Promise<OpsResult<'getGitStatus'>> => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      if (session.archived) {
-        return { success: false, error: 'Cannot get git status for archived session' };
-      }
-
-      // For initial loads, use the queued approach to prevent UI lock
-      if (isInitialLoad) {
-        const cachedStatus = await gitStatusManager.queueInitialLoad(sessionId);
-        return { 
-          success: true, 
-          gitStatus: cachedStatus,
-          backgroundRefresh: true 
-        };
-      }
-
-      // If nonBlocking is true, start refresh in background and return immediately
-      if (nonBlocking) {
-        // Start the refresh in background
-        setImmediate(() => {
-          gitStatusManager.refreshSessionGitStatus(sessionId, true).catch(error => {
-            console.error(`[Git] Background git status refresh failed for session ${sessionId}:`, error);
-          });
-        });
-        
-        // Return the cached status if available, or indicate background refresh started
-        const cachedStatus = await gitStatusManager.getGitStatus(sessionId);
-        return { 
-          success: true, 
-          gitStatus: cachedStatus,
-          backgroundRefresh: true 
-        };
-      } else {
-        // Use refreshSessionGitStatus with user-initiated flag
-        // This is called when user clicks on a session, so show loading state
-        const gitStatus = await gitStatusManager.refreshSessionGitStatus(sessionId, true);
-        return { success: true, gitStatus };
-      }
-    } catch (error) {
-      console.error('Error getting git status:', error);
-      return { success: false, error: (error as Error).message };
-    }
-  };
-
   const cancelStatusForProject = async ({ projectId }: OpsInput<'cancelStatusForProject'>): Promise<OpsResult<'cancelStatusForProject'>> => {
     try {
       // Get all sessions for the project
@@ -2540,25 +2025,17 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   return {
-    getExecutionDiff,
     commit,
-    diff,
     getCombinedDiff,
-    rebaseMainIntoWorktree,
-    abortRebaseAndUseClaude,
     squashAndRebaseToMain,
     rebaseToMain,
-    pull,
     push,
     getDeliveryState,
     markComplete,
     getBranchCommitSubjects,
-    getLastCommits,
-    hasChangesToRebase,
     getGitCommands,
     getCurrentBranch,
     getRemoteUrl,
-    getGitStatus,
     cancelStatusForProject,
     getComparisonBases,
     subscribeWorktreeChanges,

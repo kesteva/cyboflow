@@ -32,7 +32,6 @@ function makeFakeOps(): FakeOps {
   return {
     getAll: vi.fn().mockResolvedValue({ success: true, data: [] }),
     get: vi.fn().mockResolvedValue({ success: true, data: { id: 's1' } }),
-    getAllWithProjects: vi.fn().mockResolvedValue({ success: true, data: [] }),
     getSummary: vi.fn().mockResolvedValue({
       success: true,
       data: { enabled: true, summary: null, updatedAt: null, entries: [] },

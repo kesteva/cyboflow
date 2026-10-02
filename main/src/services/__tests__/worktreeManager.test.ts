@@ -707,90 +707,6 @@ describe('WorktreeManager.removeWorktree (integration)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// checkForRebaseConflicts / rebaseMainIntoWorktree / abortRebase — the
-// pre-merge conflict gate and the mid-rebase recovery path.
-// ---------------------------------------------------------------------------
-
-describe('WorktreeManager rebase-conflict gate (integration)', () => {
-  it('checkForRebaseConflicts reports the conflicting file for same-file divergent edits', async () => {
-    await withTempDir('worktree-cfc-conflict-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'cfc');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'shared.txt', 'branch line', 'w1');
-      commitFile(tmpDir, 'shared.txt', 'main line', 'm1'); // main advances on the same file
-
-      const res = await manager.checkForRebaseConflicts(worktreePath, main);
-      expect(res.hasConflicts).toBe(true);
-      expect(res.conflictingFiles).toContain('shared.txt');
-      expect(res.canAutoMerge).toBe(false);
-    });
-  });
-
-  it('checkForRebaseConflicts reports NO conflicts for divergent edits to different files', async () => {
-    await withTempDir('worktree-cfc-clean-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'cfnc');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'branch.txt', 'b', 'w1');
-      commitFile(tmpDir, 'mainonly.txt', 'm', 'm1'); // main advances on a DIFFERENT file
-
-      const res = await manager.checkForRebaseConflicts(worktreePath, main);
-      expect(res.hasConflicts).toBe(false);
-      expect(res.canAutoMerge).toBe(true);
-    });
-  });
-
-  it('rebaseMainIntoWorktree replays main\'s commits into the worktree on a clean divergence', async () => {
-    await withTempDir('worktree-rebase-ok-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'rbok');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'branch.txt', 'b', 'w1');
-      commitFile(tmpDir, 'mainonly.txt', 'mmm', 'm1');
-
-      await manager.rebaseMainIntoWorktree(worktreePath, main);
-
-      // The worktree now contains main's file AND its own, and both commits appear.
-      expect(existsSync(join(worktreePath, 'mainonly.txt'))).toBe(true);
-      expect(existsSync(join(worktreePath, 'branch.txt'))).toBe(true);
-      const log = execSync('git log --format=%s', { cwd: worktreePath }).toString();
-      expect(log).toContain('m1');
-      expect(log).toContain('w1');
-    });
-  });
-
-  it('leaves the worktree mid-rebase on conflict; abortRebase restores the pre-rebase HEAD cleanly', async () => {
-    await withTempDir('worktree-rebase-abort-', async (tmpDir) => {
-      initRepo(tmpDir);
-      const main = headBranch(tmpDir);
-      const manager = new WorktreeManager();
-      const { worktreePath } = await manager.createWorktree(tmpDir, 'rbconf');
-      ensureUser(worktreePath);
-      commitFile(worktreePath, 'shared.txt', 'branch', 'w1');
-      commitFile(tmpDir, 'shared.txt', 'main', 'm1');
-      const preHead = shaOf(worktreePath, 'HEAD');
-
-      // rebaseMainIntoWorktree does NOT self-abort — it leaves the rebase in progress.
-      await expect(manager.rebaseMainIntoWorktree(worktreePath, main)).rejects.toThrow(/Failed to rebase/);
-      expect(() => execSync('git rev-parse --verify REBASE_HEAD', { cwd: worktreePath, stdio: 'pipe' })).not.toThrow();
-
-      await manager.abortRebase(worktreePath);
-
-      expect(shaOf(worktreePath, 'HEAD')).toBe(preHead);
-      expect(execSync('git status --porcelain', { cwd: worktreePath }).toString().trim()).toBe('');
-      expect(() => execSync('git rev-parse --verify REBASE_HEAD', { cwd: worktreePath, stdio: 'pipe' })).toThrow();
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
 // createWorktree / initializeProject — placement, base-branch selection,
 // name collision, and idempotent bootstrap.
 // ---------------------------------------------------------------------------
@@ -853,7 +769,7 @@ describe('WorktreeManager.createWorktree / initializeProject (integration)', () 
 });
 
 // ---------------------------------------------------------------------------
-// gitPull / gitPush / getLastCommits — remote sync surfacing + commit shape.
+// gitPush / getLastCommits — remote sync surfacing + commit shape.
 // Each test stands up its own bare remote + one or two clones.
 // ---------------------------------------------------------------------------
 
@@ -882,34 +798,6 @@ function initRemoteAndClone(tmp: string): { remote: string; a: string; b: string
 }
 
 describe('WorktreeManager remote sync (integration)', () => {
-  it('gitPull fast-forwards local to a commit pushed by another clone', async () => {
-    await withTempDir('worktree-pull-ff-', async (tmpDir) => {
-      const { a, b } = initRemoteAndClone(tmpDir);
-      commitFile(b, 'fromb.txt', 'B', 'fromb');
-      execSync('git push', { cwd: b, stdio: 'pipe' });
-
-      const manager = new WorktreeManager();
-      const res = await manager.gitPull(a);
-
-      expect(res.output).toBeTruthy();
-      expect(existsSync(join(a, 'fromb.txt'))).toBe(true); // FF pulled the remote commit
-    });
-  });
-
-  it('gitPull surfaces a diverged/conflicting pull as a rejection', async () => {
-    await withTempDir('worktree-pull-diverge-', async (tmpDir) => {
-      const { a, b } = initRemoteAndClone(tmpDir);
-      // Remote advances shared.txt one way…
-      commitFile(b, 'shared.txt', 'B', 'fromb');
-      execSync('git push', { cwd: b, stdio: 'pipe' });
-      // …local commits shared.txt a different way (unpushed) → divergence.
-      commitFile(a, 'shared.txt', 'A', 'froma');
-
-      const manager = new WorktreeManager();
-      await expect(manager.gitPull(a)).rejects.toThrow();
-    });
-  });
-
   it('gitPush advances the remote branch to the local HEAD on success', async () => {
     await withTempDir('worktree-push-ok-', async (tmpDir) => {
       const { a, remote } = initRemoteAndClone(tmpDir);

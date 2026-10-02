@@ -117,10 +117,6 @@ export class API {
       return trpc.cyboflow.sessions.getAll.query() as Promise<IPCResponse<Session[]>>;
     },
 
-    async getAllWithProjects() {
-      return trpc.cyboflow.sessions.getAllWithProjects.query();
-    },
-
     async get(sessionId: string): Promise<IPCResponse<Session>> {
       return trpc.cyboflow.sessions.get.query({ sessionId }) as Promise<IPCResponse<Session>>;
     },
@@ -209,16 +205,8 @@ export class API {
     // unchanged; only the transport moved. No isElectron() guard, matching the
     // other trpc-backed statics below (the ipcLink transport is Electron-only
     // by construction).
-    async getExecutionDiff(sessionId: string, executionId: string) {
-      return trpc.cyboflow.sessionGit.getExecutionDiff.query({ sessionId, executionId });
-    },
-
     async gitCommit(sessionId: string, message: string) {
       return trpc.cyboflow.sessionGit.commit.mutate({ sessionId, message });
-    },
-
-    async gitDiff(sessionId: string) {
-      return trpc.cyboflow.sessionGit.diff.query({ sessionId });
     },
 
     async getCombinedDiff(
@@ -234,15 +222,6 @@ export class API {
     async getOrCreateMainRepoSession(projectId: number) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getOrCreateMainRepoSession(projectId);
-    },
-
-    // Git rebase operations
-    async rebaseMainIntoWorktree(sessionId: string) {
-      return trpc.cyboflow.sessionGit.rebaseMainIntoWorktree.mutate({ sessionId });
-    },
-
-    async abortRebaseAndUseClaude(sessionId: string) {
-      return trpc.cyboflow.sessionGit.abortRebaseAndUseClaude.mutate({ sessionId });
     },
 
     /**
@@ -282,11 +261,6 @@ export class API {
       return trpc.cyboflow.sessionGit.rebaseToMain.mutate({ sessionId });
     },
 
-    // Git operation helpers
-    async hasChangesToRebase(sessionId: string) {
-      return trpc.cyboflow.sessionGit.hasChangesToRebase.query({ sessionId });
-    },
-
     async rename(sessionId: string, newName: string) {
       return trpc.cyboflow.sessions.rename.mutate({ sessionId, newName });
     },
@@ -321,11 +295,6 @@ export class API {
       return trpc.cyboflow.sessionGit.getCurrentBranch.query({ sessionId });
     },
 
-    // Git pull/push operations
-    async gitPull(sessionId: string) {
-      return trpc.cyboflow.sessionGit.pull.mutate({ sessionId });
-    },
-
     async gitPush(sessionId: string) {
       return trpc.cyboflow.sessionGit.push.mutate({ sessionId });
     },
@@ -334,16 +303,8 @@ export class API {
       return trpc.cyboflow.sessionGit.getRemoteUrl.query({ sessionId });
     },
 
-    async getGitStatus(sessionId: string) {
-      return trpc.cyboflow.sessionGit.getGitStatus.query({ sessionId });
-    },
-
     async getBranchCommitSubjects(sessionId: string) {
       return trpc.cyboflow.sessionGit.getBranchCommitSubjects.query({ sessionId });
-    },
-
-    async getLastCommits(sessionId: string, count: number = 20) {
-      return trpc.cyboflow.sessionGit.getLastCommits.query({ sessionId, count });
     },
 
     async openIDE(sessionId: string) {

@@ -44,35 +44,6 @@ import type { SessionSummaryPayload } from '../../../../../shared/types/sessionS
 export type SessionOpsError = { success: false; error: string };
 
 /**
- * Structural mirror of the `projects` row (source of truth:
- * main/src/database/models.ts `Project`) — what `getAllWithProjects` spreads
- * into each entry before attaching its sessions.
- */
-export interface SessionProjectRow {
-  id: number;
-  name: string;
-  path: string;
-  system_prompt?: string | null;
-  run_script?: string | null;
-  build_script?: string | null;
-  active: boolean;
-  created_at: string;
-  updated_at: string;
-  default_permission_mode?: 'approve' | 'ignore';
-  open_ide_command?: string | null;
-  main_branch?: string | null;
-  display_order?: number;
-  worktree_folder?: string | null;
-  lastUsedModel?: string;
-  permission_trust?: 'trusted' | 'untrusted' | null;
-}
-
-/** One entry of `getAllWithProjects`: a project plus its sessions. */
-export type ProjectWithSessions = SessionProjectRow & {
-  sessions: Session[];
-};
-
-/**
  * What `rename` echoes back: the updated row DatabaseService.updateSession
  * returns — the snake_case `sessions` DB row (source of truth:
  * main/src/database/models.ts `Session`), NOT the camelCase renderer
@@ -180,12 +151,6 @@ export interface SessionOpsLike {
 
   /** Mirrors legacy `sessions:get`. A missing session is `'Session not found'`, not a throw. */
   get(request: { sessionId: string }): Promise<{ success: true; data: Session } | SessionOpsError>;
-
-  /**
-   * Mirrors legacy `sessions:get-all-with-projects`. Every project with its
-   * sessions attached.
-   */
-  getAllWithProjects(): Promise<{ success: true; data: ProjectWithSessions[] } | SessionOpsError>;
 
   /**
    * Mirrors legacy `sessions:get-summary`. `catchUp` DEFAULTS TO TRUE in the ops

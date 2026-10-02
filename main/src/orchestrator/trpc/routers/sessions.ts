@@ -51,7 +51,6 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
 import type {
   ArchiveProgressPayload,
-  ProjectWithSessions,
   RenamedSessionRow,
   SessionOpsError,
   SessionStatisticsPayload,
@@ -85,12 +84,6 @@ export const sessionsRouter = router({
     .query(async ({ ctx, input }): Promise<{ success: true; data: Session } | SessionOpsError> => {
       return requireOps(ctx.sessionOps).get(input);
     }),
-
-  getAllWithProjects: protectedProcedure.query(
-    async ({ ctx }): Promise<{ success: true; data: ProjectWithSessions[] } | SessionOpsError> => {
-      return requireOps(ctx.sessionOps).getAllWithProjects();
-    },
-  ),
 
   getSummary: protectedProcedure
     // The legacy channel took `(sessionId, opts?: { catchUp?: boolean })`;

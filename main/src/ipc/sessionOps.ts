@@ -92,23 +92,6 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     }
   };
 
-  const getAllWithProjects = async (): Promise<OpsResult<'getAllWithProjects'>> => {
-    try {
-      const allProjects = databaseService.getAllProjects();
-      const projectsWithSessions = allProjects.map(project => {
-        const sessions = sessionManager.getSessionsForProject(project.id);
-        return {
-          ...project,
-          sessions,
-        };
-      });
-      return { success: true, data: projectsWithSessions };
-    } catch (error) {
-      console.error('Failed to get sessions with projects:', error);
-      return { success: false, error: 'Failed to get sessions with projects' };
-    }
-  };
-
   // catch-up kick — fire-and-forget, bounded by the scheduler's own cooldown so
   // the renderer's 30s poll cannot become a hot retry loop. `catchUp`
   // (default true, matching every existing caller) can be set to `false` to
@@ -670,7 +653,6 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
   return {
     getAll,
     get,
-    getAllWithProjects,
     getSummary,
     listQuick,
     getStatistics,
