@@ -20,7 +20,12 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 88 handlers — down from 90 when Crystal's
+/** Frozen 2026-10-02 at 87 handlers — down from 88 when Crystal's
+ * `sessions:open-ide` (`ipc/script.ts`) was deleted along with the project
+ * "Open IDE Command" setting: its only trigger, the session header, was
+ * gone, so the setting configured nothing.
+ *
+ * Earlier 2026-10-02: 88 handlers — down from 90 when Crystal's
  * 'active project' channels were deleted from `ipc/project.ts`:
  * `projects:get-active` (no caller) and `projects:activate` (its only caller,
  * ProjectSelector, was already gone). Every session/run carries an explicit
@@ -118,7 +123,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/panels.ts': 11,
   'ipc/project.ts': 11,
   'ipc/providerDetection.ts': 3,
-  'ipc/script.ts': 2,
+  'ipc/script.ts': 1,
   'ipc/session.ts': 20,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,

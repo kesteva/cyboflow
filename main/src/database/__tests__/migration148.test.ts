@@ -22,6 +22,7 @@ const DEAD_PROJECT_COLS = [
   'commit_mode',
   'commit_structured_prompt_template',
   'commit_checkpoint_prefix',
+  'open_ide_command',
 ];
 const DEAD_TABLES = ['project_run_commands', 'app_opens', 'messages'];
 
@@ -61,7 +62,7 @@ function expectDeadSchemaGone(db: Database.Database): void {
   for (const t of DEAD_TABLES) expect(tables(db)).not.toContain(t);
   // The live neighbours survive.
   expect(sessionCols).toEqual(expect.arrayContaining(['exit_code', 'status_message', 'run_started_at']));
-  expect(projectCols).toEqual(expect.arrayContaining(['run_script', 'open_ide_command', 'worktree_folder']));
+  expect(projectCols).toEqual(expect.arrayContaining(['run_script', 'build_script', 'worktree_folder']));
 }
 
 describe('migration 148 — drop dead Crystal schema', () => {

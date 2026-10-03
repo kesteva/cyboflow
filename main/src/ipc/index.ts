@@ -32,7 +32,7 @@ export function registerIpcHandlers(services: AppServices): void {
   registerSessionHandlers(ipcMain, services);
   registerProjectHandlers(ipcMain, services);
   registerDialogHandlers(ipcMain, services);
-  registerScriptHandlers(ipcMain, services);
+  registerScriptHandlers(ipcMain);
   registerUIStateHandlers(services);
   setupLogHandlers(services.sessionManager);
   registerPanelHandlers(ipcMain, services);

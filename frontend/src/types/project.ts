@@ -8,7 +8,6 @@ export interface Project {
   active: boolean;
   created_at: string;
   updated_at: string;
-  open_ide_command?: string | null;
   displayOrder?: number;
   worktree_folder?: string | null;
   /**
@@ -39,7 +38,6 @@ export interface CreateProjectRequest {
   systemPrompt?: string;
   runScript?: string;
   buildScript?: string;
-  openIdeCommand?: string;
 }
 
 export interface UpdateProjectRequest {
@@ -49,7 +47,6 @@ export interface UpdateProjectRequest {
   run_script?: string | null;
   build_script?: string | null;
   active?: boolean;
-  open_ide_command?: string | null;
   worktree_folder?: string | null;
   permission_trust?: 'trusted' | 'untrusted' | null;
 }
