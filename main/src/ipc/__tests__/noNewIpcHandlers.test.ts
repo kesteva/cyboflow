@@ -92,13 +92,18 @@ import * as path from 'node:path';
  * `ui-state:save-expanded-folders` (`ipc/uiState.ts`; superseded by the
  * combined `ui-state:save-expanded`).
  *
- * Earlier 2026-10-02: 144 handlers — down from 146 when the 2
+ * Earlier 2026-10-02: 140 handlers — down from 142 when the 2
  * `dashboard:*` handlers (`ipc/dashboard.ts`) were deleted with the retired
  * per-project dashboard panel.
  *
- * Earlier 2026-10-02: 146 handlers — down from 150 when the unreachable
+ * Earlier 2026-10-02: 142 handlers — down from 146 when the unreachable
  * `ipc/editorPanel.ts` (4 `editor:*` handlers, never exposed in preload) was
  * deleted with the hidden Monaco editor panel.
+ *
+ * Earlier 2026-10-02: 146 handlers — down from 148 when `ipc/nimbalyst.ts`
+ * (`nimbalyst:check-installed` / `nimbalyst:open-worktree`) was deleted with
+ * the Nimbalyst integration. (The map summed to 148, not the 150 recorded
+ * below, when this cleanup began: two earlier decreases went unrecorded.)
  *
  * Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
  * handlers left the raw surface in batch 1 of the session-surface IPC→tRPC
