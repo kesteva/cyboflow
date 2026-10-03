@@ -18,7 +18,6 @@ import {
   collectDescendantPidsAsync,
   describeProcesses,
   firstCommandToken,
-  forceKillPids,
   killTree,
   killTreeImmediate,
   signalTree,
@@ -348,42 +347,6 @@ describe('killTree — the injected logger', () => {
     } finally {
       consoleWarn.mockRestore();
     }
-  });
-});
-
-describe('forceKillPids', () => {
-  it('issues one kill per pid, in the command form that platform uses', async () => {
-    const posix: string[] = [];
-    await forceKillPids([11, 22], {
-      platform: 'linux',
-      execCommand: (command) => {
-        posix.push(command);
-        return Promise.resolve({ stdout: '' });
-      },
-    });
-    expect(posix).toEqual(['kill -9 11', 'kill -9 22']);
-
-    const win: string[] = [];
-    await forceKillPids([11, 22], {
-      platform: 'win32',
-      execCommand: (command) => {
-        win.push(command);
-        return Promise.resolve({ stdout: '' });
-      },
-    });
-    expect(win).toEqual(['taskkill /PID 11 /F', 'taskkill /PID 22 /F']);
-  });
-
-  it('reports only the kills that did not throw, and never stops early', async () => {
-    const onKilled = vi.fn<(pid: number) => void>();
-    await forceKillPids([11, 22, 33], {
-      platform: 'linux',
-      execCommand: (command) =>
-        command.endsWith('22') ? Promise.reject(new Error('no such process')) : Promise.resolve({ stdout: '' }),
-      onKilled,
-    });
-
-    expect(onKilled.mock.calls.map(([pid]) => pid)).toEqual([11, 33]);
   });
 });
 

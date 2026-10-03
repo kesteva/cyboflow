@@ -5,12 +5,11 @@
  * 1. escapeShellArg correctly handles empty string, simple ASCII, and embedded single quotes.
  * 2. escapeShellArg wraps double quotes, backticks, and command substitution patterns safely.
  * 3. escapeShellArg handles adversarial injection strings (semicolons, operators, newlines).
- * 4. escapeShellArgs joins multiple escaped tokens with spaces.
  *
  * All assertions are on the produced string only — no actual shell is invoked.
  */
 import { describe, it, expect } from 'vitest';
-import { escapeShellArg, escapeShellArgs } from '../shellEscape';
+import { escapeShellArg } from '../shellEscape';
 
 // ---------------------------------------------------------------------------
 // escapeShellArg
@@ -96,31 +95,6 @@ describe('escapeShellArg', () => {
 
   it('wraps a git refspec safely', () => {
     expect(escapeShellArg('origin/main')).toBe("'origin/main'");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// escapeShellArgs (array variant)
-// ---------------------------------------------------------------------------
-
-describe('escapeShellArgs', () => {
-  it('returns empty string for an empty array', () => {
-    expect(escapeShellArgs([])).toBe('');
-  });
-
-  it('escapes a single argument', () => {
-    expect(escapeShellArgs(['simple'])).toBe("'simple'");
-  });
-
-  it('joins multiple escaped tokens with spaces', () => {
-    const result = escapeShellArgs(['--message', 'has spaces and "quotes"', 'and `backticks`']);
-    expect(result).toBe("'--message' 'has spaces and \"quotes\"' 'and `backticks`'");
-  });
-
-  it('handles a mix of plain flags and adversarial strings', () => {
-    // "'; evil; #" has a leading single quote → after escaping: ''\''; evil; #'
-    const result = escapeShellArgs(['log', '--oneline', "'; evil; #"]);
-    expect(result).toBe("'log' '--oneline' ''\\''; evil; #'");
   });
 });
 

@@ -21,12 +21,3 @@ export function escapeShellArg(arg: string): string {
   // by ending the quote, adding an escaped single quote, and starting a new quote
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
-
-/**
- * Escape an array of shell arguments
- * @param args The arguments to escape
- * @returns The escaped arguments joined with spaces
- */
-export function escapeShellArgs(args: string[]): string {
-  return args.map(escapeShellArg).join(' ');
-}

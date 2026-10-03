@@ -292,33 +292,6 @@ export function killPidSync(pid: number, opts: PlatformProcessOptions = {}): voi
 export type SignalTreeOutcome = 'signaled' | 'gone' | 'failed';
 
 /**
- * Force-kill each pid outright, one command per pid, best effort: win32
- * `taskkill /PID <pid> /F`, POSIX `kill -9 <pid>`. No tree walk and no grace —
- * for a caller that has already decided exactly which processes must die.
- */
-export async function forceKillPids(
-  pids: number[],
-  opts: PlatformProcessOptions & {
-    /** Shell runner. Defaults to `exec` wrapped with `windowsHide: true`. */
-    execCommand?: (command: string) => Promise<{ stdout: string }>;
-    /** Called after each kill command that did not throw. */
-    onKilled?: (pid: number) => void;
-  } = {},
-): Promise<void> {
-  const win32 = (opts.platform ?? process.platform) === 'win32';
-  const execCommand =
-    opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
-  for (const pid of pids) {
-    try {
-      await execCommand(win32 ? `taskkill /PID ${pid} /F` : `kill -9 ${pid}`);
-      opts.onKilled?.(pid);
-    } catch (error) {
-      // Already dead / no permission — the sweep is best effort by contract.
-    }
-  }
-}
-
-/**
  * The first token of a Windows command line, quote-aware. A CommandLine
  * whose executable path was quoted for an embedded space — e.g.
  * `"C:\Program Files\node.exe" server.js` — must not be split on whitespace
