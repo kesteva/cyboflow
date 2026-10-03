@@ -828,8 +828,9 @@ export class AgentEngine {
       return { work: null };
     }
 
-    // Cancel-safe transition (mirrors processRow's markLeased guard): a cancel sweep
-    // during the lease awaits above makes this a 0-change no-op → release + skip.
+    // Cancel-safe transition (markAgentLeased's `AND status = 'queued'` guard): a
+    // cancel sweep during the lease awaits above makes this a 0-change no-op →
+    // release + skip.
     const leasedChanges = this.markAgentLeased(row.id);
     if (leasedChanges === 0) {
       portLease?.release();

@@ -8,9 +8,8 @@
  * registration of a channel handler taking `(_event, a, b)` became
  * `const <method> = async ({ a, b }) => {…}` with the same body, and the
  * closures are returned as one object at the end. `sessions:check-rebase-conflicts`
- * was dropped (zero preload/frontend callers); the conflict probe itself lives
- * on in WorktreeManager.checkForRebaseConflicts, which rebaseMainIntoWorktree
- * still calls directly.
+ * was dropped (zero preload/frontend callers), and the rebaseMainIntoWorktree op
+ * and WorktreeManager.checkForRebaseConflicts were later deleted with it.
  *
  * Unlike the router and contract, this file is SERVICES-SIDE and may import
  * anything — the panel manager, the main window, the orchestrator routers, the

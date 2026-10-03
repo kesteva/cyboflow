@@ -1666,7 +1666,7 @@ export interface ResolvedVisualVerifyConfig {
  *
  * Deliberately NOT the common dev ports (5173/3000/4173/8080/4321): since the
  * scheduler owns + binds these directly (the per-port lease guards the logical
- * slot, NOT the OS socket — see verificationScheduler.poolCandidatesFor), a port
+ * slot, NOT the OS socket — see acquireModalityLeases in verify/mobileGates.ts), a port
  * a user already has Vite/Next/etc. squatting would make the spawned dev server
  * fail to bind or the readiness probe answer the WRONG server. So this is an
  * intentionally-uncommon block (mnemonic: CYBO → 2926 on a phone keypad → 2926x)
