@@ -13,7 +13,9 @@
  *     (RunDiffTabPanel; flow runs are keyed by runId since workflow_runs.session_id
  *     is NULL, so it fetches cyboflow.runs.gitDiff, worktree_path-resolved). With no
  *     active run but a selected session it falls back to the session-scoped combined
- *     diff (SessionDiffTabPanel) — the at-rest experience.
+ *     diff (SessionDiffTabPanel) — the at-rest experience. Its header row
+ *     carries BaseSelector plus an Open in IDE button (OpenInIdeButton), shown
+ *     only when the session's project has an open_ide_command configured.
  *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel); lists
  *     every artifact the run produced so closed center-pane tabs can be reopened.
  *     Two scopes, mirroring the Diff tab:
@@ -45,6 +47,7 @@ import { RunDiffTabPanel } from './RunDiffTabPanel';
 import { SessionDiffTabPanel } from './SessionDiffTabPanel';
 import { BaseSelector } from './BaseSelector';
 import { WorktreeStrip } from './WorktreeStrip';
+import { OpenInIdeButton } from './OpenInIdeButton';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -361,19 +364,14 @@ export function RunRightRail({
     },
     [comparisonBaseKey],
   );
-  // BaseSelector's projectId: the active run's project when a run is active,
+  // The Diff tab's project: the active run's project when a run is active,
   // else the selected session's project (`sessionProjectId`, set for EVERY
   // session incl. the main-repo one — not the layout-gated
-  // `quickSessionProjectId`), else null — converted to a string
-  // (BaseSelector's projectId prop is `string | null`).
-  const baseSelectorProjectId =
-    activeRunId !== null
-      ? activeRunProjectId !== null
-        ? String(activeRunProjectId)
-        : null
-      : sessionProjectId != null
-        ? String(sessionProjectId)
-        : null;
+  // `quickSessionProjectId`), else null. BaseSelector takes it as a string
+  // (its projectId prop is `string | null`); OpenInIdeButton as a number.
+  const diffProjectId: number | null =
+    activeRunId !== null ? activeRunProjectId : (sessionProjectId ?? null);
+  const baseSelectorProjectId = diffProjectId !== null ? String(diffProjectId) : null;
 
   // Whether a tabbed center pane exists to render a file tab into: an active
   // run (RunCenterPane) or a worktree-backed quick session
@@ -547,15 +545,23 @@ export function RunRightRail({
           // arm); it renders disabled when that's null, which BaseSelector
           // already handles.
           <div className="flex h-full flex-col overflow-hidden">
-            <div className="shrink-0 border-b border-border-primary p-2">
-              <BaseSelector
-                sessionId={selectedSessionId}
-                projectId={baseSelectorProjectId}
-                selectedRef={selectedComparisonRef}
-                onChange={handleComparisonBaseChange}
-                resolvedDefaultBase={defaultBaseBySession[selectedSessionId ?? ''] ?? null}
-                resolvedSelectedBase={resolvedBaseBySession[selectedSessionId ?? ''] ?? null}
-              />
+            {/* Header row: BaseSelector, plus Open in IDE when the session's
+                project has an open_ide_command (OpenInIdeButton renders
+                nothing otherwise). Keyed on selectedSessionId for BOTH arms —
+                during a run that is the run's parent session, the same
+                worktree WorktreeStrip acts on; a parentless run shows none. */}
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-border-primary p-2">
+              <div className="min-w-0 flex-1">
+                <BaseSelector
+                  sessionId={selectedSessionId}
+                  projectId={baseSelectorProjectId}
+                  selectedRef={selectedComparisonRef}
+                  onChange={handleComparisonBaseChange}
+                  resolvedDefaultBase={defaultBaseBySession[selectedSessionId ?? ''] ?? null}
+                  resolvedSelectedBase={resolvedBaseBySession[selectedSessionId ?? ''] ?? null}
+                />
+              </div>
+              <OpenInIdeButton sessionId={selectedSessionId} projectId={diffProjectId} />
             </div>
             <div className="shrink-0 border-b border-border-primary p-2">
               <WorktreeStrip
