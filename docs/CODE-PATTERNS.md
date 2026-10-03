@@ -8,7 +8,7 @@ to a canonical example — read those for the actual implementation.
 - **Naming:** Components: `PascalCase.tsx`. Services/utils/stores: `camelCase.ts`.
   IPC handlers: `camelCase.ts` per domain (e.g. `session.ts`, `git.ts`).
 - **Test colocation:** Unit tests live in `__tests__/` subdirectories next to the file
-  under test (e.g. `main/src/services/__tests__/gitStatusManager.test.ts`). E2E tests
+  under test (e.g. `main/src/services/__tests__/gitDiffManager.test.ts`). E2E tests
   are top-level in `tests/`.
 - **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
   `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
@@ -158,7 +158,6 @@ Types in `shared/types/` are imported by both `main/` and `frontend/`. When addi
 domain concept that spans both, define its type in `shared/types/` first. Never duplicate
 type definitions across packages.
 
-- `shared/types/models.ts` — database-layer model types
 - `shared/types/panels.ts` — panel configuration and state types
 - `shared/types/cliSpawn.ts` — the CLI-manager spawn contract (`CliSpawnOutcome`, `LaneSpawnEnv`)
 
