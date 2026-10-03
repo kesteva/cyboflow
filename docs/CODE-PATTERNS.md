@@ -804,7 +804,7 @@ All outbound telemetry is anonymized and gated in `main/src/services/telemetry/`
 
 ### macOS signing posture (`scripts/configure-build.js`)
 
-`scripts/configure-build.js` runs as a `prebuild:mac*` / `prerelease:mac` step and is the
+`scripts/configure-build.js` runs inside every `build:mac*` recipe and is the
 **single canonical writer** of `build.mac.notarize`, `hardenedRuntime`, and `gatekeeperAssess`.
 Do not edit these keys directly in `package.json` — `configure-build.js` overwrites them on
 every build. Decision is driven by env vars (`CSC_LINK`, `APPLE_ID`, `APPLE_TEAM_ID`,

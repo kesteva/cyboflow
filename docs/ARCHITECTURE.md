@@ -710,7 +710,7 @@ Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`init
 **Environment gating** (`telemetry/environment.ts`, `TelemetryEnvironment = 'local' | 'dev' | 'stable'`)
 resolves from `app.isPackaged` + the stamp in `buildInfo.json`. `scripts/inject-build-info.js`
 stamps **every** packaged build: `CYBOFLOW_BUILD_ENV` (`stable`/`dev`/`local`) wins when set
-(the release pipeline sets it: `release:mac` → `stable`, `release:mac:dev` → `dev`); otherwise
+(e.g. the Windows installer workflow sets it to the variant); otherwise
 the stamp follows the build **variant** (`build:mac:dev*` → `dev`, every other `build:mac*` →
 `stable`) — so a hand-built `.dmg` handed to a tester reports a filterable environment instead
 of hiding under `local` (pre-fix `build:mac` artifacts, e.g. 0.1.14, still report `local`).
@@ -722,8 +722,8 @@ telemetry. This `environment` is telemetry-only and **distinct from the `variant
 |---|---|---|---|
 | `pnpm dev` (unpackaged) | `local` | off | off |
 | explicit `CYBOFLOW_BUILD_ENV=local` `.dmg` (or pre-fix unstamped) | `local` | on (tagged `local`) | on |
-| any `build:mac*` `.dmg` / stable release (`release:mac`) | `stable` | on (tagged `stable`) | on |
-| `build:mac:dev*` `.dmg` / Cyboflow Dev release (`release:mac:dev`) | `dev` | on (tagged `dev`) | on |
+| any `build:mac*` `.dmg` (stable release) | `stable` | on (tagged `stable`) | on |
+| `build:mac:dev*` `.dmg` (Cyboflow Dev release) | `dev` | on (tagged `dev`) | on |
 
 Credentials come from env (`SENTRY_DSN`, `APTABASE_APP_KEY`, e.g. `.envrc.local`); a missing key
 disables that SDK. Opt-out lives in config (`telemetry.errorReportingEnabled` /

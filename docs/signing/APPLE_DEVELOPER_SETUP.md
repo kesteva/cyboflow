@@ -391,7 +391,7 @@ table under "Build-Time Environment Variables"); `package.json` is the pristine
 source and is never rewritten.
 
 **Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:arm64`
-/ `pnpm run build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` / `release:mac` run both arches in sequence).
+/ `pnpm run build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` runs both arches in sequence).
 Skipping the npm script skips `configure-build.js`, leaving the signed/unsigned
 posture determined by whatever is committed in `package.json` rather than by
 the env vars in your shell.
@@ -553,7 +553,7 @@ present at build time are what actually drive the credentials and notarization
 posture. A contributor invoking `electron-builder` directly (bypassing the npm
 `build:mac:*` scripts) will not get configure-build.js's rewrite and may get
 unexpected behavior. Always use `pnpm run build:mac:arm64` / `pnpm run
-build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` / `release:mac` run both arches in sequence). See the
+build:mac:x64` (or another per-arch `build:mac:*` script; `build:mac` runs both arches in sequence). See the
 "configure-build.js contract" subsection under Build-Time Environment
 Variables for the full field list.
 

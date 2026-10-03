@@ -5,8 +5,8 @@
  *
  *   - 'local'  — `pnpm dev` (unpackaged), an explicit CYBOFLOW_BUILD_ENV=local
  *                build, or a pre-fix .dmg built before the variant-based stamp.
- *   - 'dev'    — a "Cyboflow Dev" variant .dmg (build:mac:dev* / release:mac:dev).
- *   - 'stable' — a stable-variant .dmg (build:mac* / release:mac).
+ *   - 'dev'    — a "Cyboflow Dev" variant .dmg (build:mac:dev*).
+ *   - 'stable' — a stable-variant .dmg (build:mac*).
  *
  * scripts/inject-build-info.js stamps EVERY packaged build: CYBOFLOW_BUILD_ENV
  * ('stable' | 'dev' | 'local') wins when set (the release pipeline sets it),

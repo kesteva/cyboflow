@@ -50,9 +50,8 @@ const buildInfo = {
   variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable',
   // Telemetry environment. Resolution:
   //   1. CYBOFLOW_BUILD_ENV ('stable' | 'dev' | 'local') — explicit override.
-  //      The release pipeline sets it (release:mac -> 'stable',
-  //      release:mac:dev -> 'dev'); set 'local' by hand for a throwaway build
-  //      that must not pollute release telemetry.
+  //      The Windows installer workflow sets it to the variant; set 'local'
+  //      by hand for a throwaway build that must not pollute release telemetry.
   //   2. Otherwise the build VARIANT: 'dev' for build:mac:dev*, else 'stable'.
   // Every packaged .dmg is distributable in practice, so it must report a
   // filterable environment. The old default ('local' unless the release

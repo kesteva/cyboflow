@@ -495,10 +495,10 @@ Windows trio (`*.exe`, `*.exe.blockmap`, `latest.yml`) up from its §4 directory
 then upload with an explicit `PUBLISH_ONLY` allowlist so the mixed `dist-electron`
 doesn't cross-contaminate feeds. Dry-run first.
 
-> `pnpm release:mac` / `release:mac:dev` (both arch builds, then a bare
-> `publish:r2`) are convenience wrappers only: the bare publish uploads the whole
-> `dist-electron` and the second arch's `latest-mac.yml` overwrites the first.
-> For a real release use the merged-manifest + `PUBLISH_ONLY` recipe below.
+> There is deliberately no one-shot `release:mac` wrapper: a bare `publish:r2`
+> after both arch builds would upload the second arch's (x64-only) `latest-mac.yml`
+> and steer arm64 Macs onto the x64 build. Always use the merged-manifest +
+> `PUBLISH_ONLY` recipe below.
 
 ```bash
 set -a; . ~/Developer/cyboflow/.envrc.local; set +a   # needs the 3 R2 vars

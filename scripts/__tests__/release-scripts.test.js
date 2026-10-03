@@ -308,8 +308,8 @@ test('inject-build-info stamps environment from CYBOFLOW_BUILD_ENV, else the var
     // [CYBOFLOW_BUILD_ENV, BUILD_VARIANT, expected environment, expected variant]
     ['', '', 'stable', 'stable'], // build:mac — the fixed case
     ['', 'dev', 'dev', 'dev'], // build:mac:dev
-    ['stable', '', 'stable', 'stable'], // release:mac
-    ['dev', 'dev', 'dev', 'dev'], // release:mac:dev
+    ['stable', '', 'stable', 'stable'], // explicit stable stamp
+    ['dev', 'dev', 'dev', 'dev'], // explicit dev stamp (Windows dev workflow)
     ['local', '', 'local', 'stable'], // explicit throwaway-build opt-out
   ];
 
