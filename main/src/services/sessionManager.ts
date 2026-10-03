@@ -154,7 +154,6 @@ export class SessionManager extends EventEmitter {
       isMainRepo: dbSession.is_main_repo,
       inPlace: !!dbSession.in_place,
       projectId: dbSession.project_id, // Add the missing projectId field
-      folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
       isFavorite: dbSession.is_favorite,
       // Model is now managed at panel level
@@ -247,7 +246,6 @@ export class SessionManager extends EventEmitter {
     permissionMode: 'approve' | 'ignore' | undefined,
     projectId: number,
     isMainRepo?: boolean,
-    folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
@@ -266,7 +264,6 @@ export class SessionManager extends EventEmitter {
         permissionMode,
         projectId,
         isMainRepo,
-        folderId,
         toolType,
         baseCommit,
         baseBranch,
@@ -287,7 +284,6 @@ export class SessionManager extends EventEmitter {
     permissionMode: 'approve' | 'ignore' | undefined,
     projectId: number,
     isMainRepo?: boolean,
-    folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
@@ -320,7 +316,6 @@ export class SessionManager extends EventEmitter {
       worktree_name: worktreeName,
       worktree_path: worktreePath,
       project_id: targetProject.id,
-      folder_id: folderId,
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
       in_place: inPlace,
@@ -378,7 +373,6 @@ export class SessionManager extends EventEmitter {
         project.default_permission_mode || DEFAULT_PERMISSION_MODE,
         projectId,
         true, // isMainRepo = true
-        undefined, // folderId
         'claude', // tool_type
         undefined, // baseCommit
         undefined // baseBranch

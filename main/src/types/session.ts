@@ -32,12 +32,10 @@ export interface Session {
   inPlace?: boolean;
   displayOrder?: number;
   projectId?: number;
-  folderId?: string;
   isFavorite?: boolean;
   model?: string;
   toolType?: 'claude' | 'none';
   archived?: boolean;
-  gitStatus?: GitStatus;
   baseCommit?: string;
   baseBranch?: string;
   runId?: string | null;
@@ -215,13 +213,11 @@ export interface CreateSessionRequest {
    */
   designIdeaId?: string;
   projectId?: number;
-  folderId?: string;
   baseBranch?: string;
   toolType?: 'claude' | 'none';
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
-    ultrathink?: boolean;
     /** Per-launch opt-in for Anthropic fast mode (premium, Opus-only). Default off. */
     fastMode?: boolean;
     /**
@@ -241,7 +237,6 @@ export interface SessionUpdate {
   error?: string;
   run_started_at?: string | null;
   model?: string;
-  gitStatus?: GitStatus;
   skip_continue_next?: boolean;
 }
 

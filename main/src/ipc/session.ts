@@ -934,7 +934,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           request.baseBranch,
           request.toolType,
           normalizedClaudeConfig,
-          request.folderId,
           requestedAgentProvider,
           projectedAgentRuntime,
           normalizedAgentModel
@@ -949,7 +948,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           worktreeTemplate: request.worktreeTemplate || '',
           permissionMode: request.permissionMode,
           projectId: targetProject.id,
-          folderId: request.folderId,
           baseBranch: request.baseBranch,
           toolType: request.toolType,
           claudeConfig: normalizedClaudeConfig,
@@ -1261,7 +1259,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           projectId: targetProject.id,
           nameHint: branchName,
           baseBranch: request.baseBranch,
-          folderId: request.folderId,
           toolType,
           claudeConfig: quickAgentProviderForLaunch === 'claude' ? normalizedClaudeConfig : undefined,
           requestedSubstrate: quickRequestedSubstrateForLaunch,

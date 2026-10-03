@@ -47,7 +47,6 @@ export interface QuickSessionJobData {
   prompt: string;
   worktreeTemplate: string;
   projectId: number;
-  folderId?: string;
   baseBranch?: string;
   baseCommittish?: string;
   toolType?: 'claude' | 'none';
@@ -56,7 +55,7 @@ export interface QuickSessionJobData {
   agentModel?: string | null;
   /** Work directly in the project checkout — no dedicated worktree (migration 047). */
   inPlace?: boolean;
-  claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore'; ultrathink?: boolean };
+  claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore' };
 }
 
 /** The collaborators the core needs — structural so both IPC + boot wiring inject them. */
@@ -114,13 +113,12 @@ export interface CreateQuickSessionCoreOptions {
   /** SHA-pin the worktree branch to an exact commit (A/B arms). */
   baseCommittish?: string;
   baseBranch?: string;
-  folderId?: string;
   toolType?: 'claude' | 'none';
   /** Persist ownership on the initial session INSERT, before session-created fires. */
   agentProvider?: AgentProvider;
   agentRuntime?: SessionAgentRuntime;
   agentModel?: string | null;
-  claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore'; ultrathink?: boolean };
+  claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore' };
   /** Per-run substrate/permission choice threaded into the sentinel createRun (quick handler). */
   requestedSubstrate?: CliSubstrate;
   requestedAgentMode?: PermissionMode;
@@ -201,7 +199,6 @@ export async function createQuickSessionCore(
     prompt: '',
     worktreeTemplate: branchName,
     projectId: opts.projectId,
-    folderId: opts.folderId,
     baseBranch: opts.baseBranch,
     baseCommittish: opts.baseCommittish,
     toolType: opts.toolType ?? 'claude',

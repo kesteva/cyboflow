@@ -58,7 +58,6 @@ interface CreateSessionJob {
   index?: number;
   permissionMode?: 'approve' | 'ignore';
   projectId: number;
-  folderId?: string;
   baseBranch?: string;
   /**
    * A/B experiments (migration 049): pin the session worktree's branch to an
@@ -81,7 +80,6 @@ interface CreateSessionJob {
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
-    ultrathink?: boolean;
   };
 }
 
@@ -217,7 +215,6 @@ export class TaskQueue {
           permissionMode,
           targetProject.id,
           false, // isMainRepo = false for regular sessions
-          job.data.folderId,
           toolType,
           baseCommit,
           actualBaseBranch,
@@ -396,9 +393,7 @@ export class TaskQueue {
     claudeConfig?: {
       model?: string;
       permissionMode?: 'approve' | 'ignore';
-      ultrathink?: boolean;
     },
-    folderId?: string,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
     agentModel?: string | null
@@ -420,7 +415,6 @@ export class TaskQueue {
         index: i,
         permissionMode,
         projectId,
-        folderId,
         baseBranch,
         toolType,
         claudeConfig,
