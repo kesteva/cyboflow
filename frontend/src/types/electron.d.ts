@@ -154,9 +154,6 @@ interface ElectronAPI {
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;
 
-    // IDE operations
-    openIDE: (sessionId: string) => Promise<IPCResponse<void>>;
-
     // Image operations
     saveImages: (sessionId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => Promise<string[]>;
 
