@@ -21,8 +21,9 @@
  *
  * Cost rules (docs/design/process-worktree-monitor.md): reclaim bytes come from a
  * FRESH `du` of exactly the target paths (the disk service's serial queue, jumping
- * the TTL backlog), never the ambient cache; git state comes from the
- * `GitStatusManager` cache only (no new git spawns); descendant counts reuse the
+ * the TTL backlog), never the ambient cache; git state comes from a fresh
+ * `probeWorktreeGit` read, falling back to the `GitStatusManager` cache when the
+ * probe is unavailable; descendant counts reuse the
  * platform process helpers. Every dependency is injected, so this is unit-testable
  * without Electron or IPC.
  *

@@ -13,8 +13,8 @@
  *                 dashed tier ({@link SuspectedTier}, reused by the Orphans section).
  *
  * Destructive affordances (Kill tree / Kill all / Prune) render only when the
- * caller supplies the matching handler — the manifest-confirm wiring is a later
- * task's job, and a control that does nothing is worse than none.
+ * caller supplies the matching handler (SystemView wires them to the
+ * manifest-confirm flow) — a control that does nothing is worse than none.
  *
  * The By-worktree grouping leaves orphan-bucket processes and orphan-tag
  * worktrees to the Orphans section; By-process-type shows every process.

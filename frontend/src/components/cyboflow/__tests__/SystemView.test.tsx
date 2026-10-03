@@ -115,7 +115,7 @@ describe('SystemView', () => {
   it('measured: shows the summed value', () => {
     mockSnapshot(snap([wt('/a', measured(5 * MB)), wt('/b', measured(MB))]));
     render(<SystemView />);
-    expect(screen.getByTestId('system-disk-measured')).toHaveTextContent('6.0 MB');
+    expect(screen.getByTestId('system-disk-measured')).toHaveTextContent('6 MB');
   });
 
   it('measuring: shows a spinner, no value, and never "0 MB"', () => {

@@ -101,7 +101,7 @@ fix-verification runs.
 
 Selector: `[data-testid=system-rail-item]` clicked over CDP → `[data-testid=system-view]` present.
 `01-system-view.png`, `01-system-view-innertext.txt` (first 300 lines; the rest is ~760 foreign read-only rows from
-this machine). Head of the dump:
+this machine; captured before `isUnrelatedHostProcess` began dropping unrelated host processes before the wire, so a current run no longer shows them). Head of the dump:
 
 ```
 SYSTEM · LIVE PROCESS & WORKTREE MONITOR

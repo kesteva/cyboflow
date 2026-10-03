@@ -3,9 +3,8 @@
  *
  * A full-width center pane over `cyboflow.system.snapshot`, polled by
  * {@link useSystemSnapshot}. This is the shell: the header plus the toolbar
- * strip of four stat tiles (Worktrees, Processes, Disk used, Orphans). The
- * grouped body, ports and orphan sections mount beneath the toolbar in their
- * own tasks.
+ * strip of four stat tiles (Worktrees, Processes, Disk used, Orphans), with the
+ * ports, orphans and grouped-body sections mounted beneath the toolbar.
  *
  * The Disk-used tile renders exactly one of three states, because disk sizing
  * runs off the poll loop (lazy, staggered, concurrency 1) and a figure is never
@@ -33,6 +32,7 @@ import {
   type SystemActionableProcess,
   type SystemSortKey,
 } from '../System/SystemGroupedBody';
+import { formatManifestBytes } from '../System/formatManifestBytes';
 import { SystemOrphansSection } from '../System/SystemOrphansSection';
 import { useProcessReap } from '../System/useProcessReap';
 import { useWorktreeReap, WorktreeReapError } from '../System/useWorktreeReap';
@@ -68,19 +68,8 @@ export function summarizeDisk(snapshot: SystemSnapshotData): DiskTileState {
   return { state: measuring ? 'measuring' : 'queued', done, of };
 }
 
-const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
-
 /** Human-readable size (1024-based). Only ever called with a measured value. */
-export function formatDiskBytes(bytes: number): string {
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < UNITS.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const digits = unit === 0 || value >= 100 ? 0 : 1;
-  return `${value.toFixed(digits)} ${UNITS[unit]}`;
-}
+export const formatDiskBytes = formatManifestBytes;
 
 interface StatTileProps {
   testId: string;
