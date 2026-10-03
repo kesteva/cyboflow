@@ -859,9 +859,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const fastMode = settings?.fastMode === true;
           const rawEffort = settings?.reasoningEffort;
           const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
-          const conversationHistory = sessionManager.getPanelConversationMessages
-            ? await sessionManager.getPanelConversationMessages(panelId)
-            : await sessionManager.getConversationMessages(panel.sessionId);
+          const conversationHistory = sessionManager.getPanelConversationMessages(panelId);
           await claudePanelManager.continuePanel(
             panelId,
             session.worktreePath,
@@ -2881,9 +2879,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             }
 
             // Otherwise continue; ClaudeCodeManager enforces strict --resume behavior
-            const conversationHistory = sessionManager.getPanelConversationMessages
-              ? await sessionManager.getPanelConversationMessages(panelId)
-              : await sessionManager.getConversationMessages(panel.sessionId);
+            const conversationHistory = sessionManager.getPanelConversationMessages(panelId);
 
             // Model is now managed at panel level in Claude panel settings
             await claudePanelManager.continuePanel(
