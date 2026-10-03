@@ -167,10 +167,6 @@ export interface ChatTranscriptProps {
   copiedMessageId: string | null;
   onCopyMessage: (message: UnifiedMessage) => void;
 
-  /** Settings panel controls (panel-only; presentational here). */
-  showSettings?: boolean;
-  onSettingsChange?: (settings: RichOutputSettings) => void;
-
   /** Imperative scroll plumbing owned by the caller. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
@@ -1480,8 +1476,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   onToggleToolExpand,
   copiedMessageId,
   onCopyMessage,
-  showSettings,
-  onSettingsChange,
   scrollContainerRef,
   messagesEndRef,
   userMessageRefs,
@@ -1549,41 +1543,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
   return (
     <div className="h-full flex flex-col bg-bg-primary relative">
-      {/* Settings Panel */}
-      {showSettings && onSettingsChange && (
-        <div className="px-4 py-3 border-b border-border-primary bg-surface-secondary">
-          <div className="flex flex-wrap gap-4 text-xs">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.showToolCalls}
-                onChange={(e) => onSettingsChange({ ...settings, showToolCalls: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Show Tool Calls</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.compactMode}
-                onChange={(e) => onSettingsChange({ ...settings, compactMode: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Compact Mode</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={settings.showThinking}
-                onChange={(e) => onSettingsChange({ ...settings, showThinking: e.target.checked })}
-                className="rounded border-border-primary"
-              />
-              <span>Show Thinking</span>
-            </label>
-          </div>
-        </div>
-      )}
-
       {/* Messages */}
       <div
         className="flex-1 overflow-y-auto relative scrollbar-thin scrollbar-thumb-border-secondary scrollbar-track-transparent hover:scrollbar-thumb-border-primary"

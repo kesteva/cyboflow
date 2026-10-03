@@ -44,27 +44,18 @@ import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdenti
 import type { RichOutputSettings } from '../../panels/ai/AbstractAIPanel';
 
 // ---------------------------------------------------------------------------
-// Settings — read once from localStorage, identical to the prior hosts.
+// Settings — fixed display settings. The chat has no settings UI, so nothing
+// writes the legacy `richOutputSettings` localStorage key any more and it is
+// no longer read (a stale saved value could never be changed back).
 // ---------------------------------------------------------------------------
 
-const RICH_OUTPUT_SETTINGS_KEY = 'richOutputSettings';
-
-const defaultSettings: RichOutputSettings = {
+const CHAT_SETTINGS: RichOutputSettings = {
   showToolCalls: true,
   compactMode: false,
   collapseTools: true,
   showThinking: true,
   showSessionInit: false,
 };
-
-function readSettings(): RichOutputSettings {
-  try {
-    const saved = localStorage.getItem(RICH_OUTPUT_SETTINGS_KEY);
-    return saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
-  } catch {
-    return defaultSettings;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -173,8 +164,7 @@ export function UnifiedChatView({
 }: UnifiedChatViewProps): ReactElement {
   const isInteractive = transport === 'interactive';
 
-  // Settings are read once (shared key); the chat has no in-view settings UI.
-  const settings = useMemo<RichOutputSettings>(() => readSettings(), []);
+  const settings = CHAT_SETTINGS;
 
   // -- ChatTranscript presentational state (owned here for both hosts) -----
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
