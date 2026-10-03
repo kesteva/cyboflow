@@ -176,9 +176,9 @@ and relaunch the host process.
 
 ### Pre-flight: confirm the Electron renderer is actually running
 
-`pnpm dev`'s `concurrently` + `wait-on` parents can survive in `ps` after the
-Electron renderer has exited — `pgrep -lf "electron"` then matches the
-`concurrently` command line and falsely suggests a live window. A capture
+`pnpm dev`'s `concurrently` + `node scripts/dev-electron.mjs` parents can survive
+in `ps` after the Electron renderer has exited — `pgrep -lf "electron"` then
+matches those command lines and falsely suggests a live window. A capture
 attempt against a windowless run fails with `-3811` audio/video errors or
 returns 0 windows.
 

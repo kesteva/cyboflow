@@ -31,6 +31,22 @@ _(none — see Removed dependencies below)_
   Was declared in BOTH root `package.json` and `main/package.json` with zero
   importers anywhere in the repo. Both declarations removed.
 
+- Crystal-baseline leftovers with zero importers, removed in the Crystal-fork
+  cleanup (re-verified by repo-wide grep of every specifier, config files and
+  scripts included):
+  - root `devDependencies`: `vite-plugin-electron`, `vite-plugin-electron-renderer`
+    (never wired into any Vite config) and `wait-on` (replaced by
+    `scripts/dev-electron.mjs`'s own `waitOnVite()`).
+  - `main/package.json` `devDependencies`: `mkdirp` (its last use, the old
+    `copy:assets` script, became `scripts/copy-assets.js`) and `@types/glob`
+    (a deprecated stub — `glob@11` ships its own types).
+  - `frontend/package.json`: `@radix-ui/react-{alert-dialog,checkbox,dialog,label,slot,tabs}`,
+    `class-variance-authority`, `date-fns`, `react-diff-viewer-continued`,
+    `react-json-view-lite`, `tailwindcss-animate` (never registered as a Tailwind
+    plugin), `@xterm/addon-search`, `uuid` and `@types/uuid` (the renderer uses
+    `crypto.randomUUID`; main's `uuid` imports resolve from the root declaration,
+    which stays).
+
 ## When to revisit
 
 If a future packaged build emits MODULE_NOT_FOUND for a workspace-only dep,
