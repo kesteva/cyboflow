@@ -881,14 +881,6 @@ export class SessionManager extends EventEmitter {
     return this.db.createExecutionDiff(data);
   }
 
-  getExecutionDiffs(sessionId: string): ExecutionDiff[] {
-    return this.db.getExecutionDiffs(sessionId);
-  }
-
-  getExecutionDiff(id: number): ExecutionDiff | undefined {
-    return this.db.getExecutionDiff(id);
-  }
-
   getNextExecutionSequence(sessionId: string): number {
     return this.db.getNextExecutionSequence(sessionId);
   }

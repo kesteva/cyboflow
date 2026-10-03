@@ -1167,7 +1167,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           const commit = commits[commitIndex];
           const uncommittedDiff = await gitDiffManager.getCommitDiff(worktreePath, commit.hash);
           // getCommitDiff's own beforeHash (`${commitHash}~1`) is not a
-          // resolved SHA — resolve it the same way getExecutionDiff does.
+          // resolved SHA — resolve it through resolveSessionDiffBaseRef.
           const resolvedBase = await resolveSessionDiffBaseRef(worktreePath, [`${commit.hash}~1`]);
           const worktree = await buildWorktreeStatus(worktreePath, resolvedBase);
           return { success: true, data: { ...uncommittedDiff, resolvedBase, worktree } };

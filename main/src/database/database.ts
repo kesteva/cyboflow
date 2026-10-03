@@ -2428,18 +2428,8 @@ export class DatabaseService {
     return this.convertDbExecutionDiff(diff);
   }
 
-  getExecutionDiffs(sessionId: string): ExecutionDiff[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM execution_diffs 
-      WHERE session_id = ? 
-      ORDER BY execution_sequence ASC
-    `).all(sessionId) as ExecutionDiffRow[];
-    
-    return rows.map(this.convertDbExecutionDiff.bind(this));
-  }
-
   /**
-   * Stats-only projection of getExecutionDiffs — for pollers (e.g. the
+   * Stats-only projection of execution_diffs — for pollers (e.g. the
    * session-statistics IPC handler) that only fold stats_* / files_changed and
    * would otherwise materialize every multi-MB git_diff blob just to discard it.
    */
@@ -2461,11 +2451,6 @@ export class DatabaseService {
       before_commit_hash: row.before_commit_hash ?? null,
       after_commit_hash: row.after_commit_hash ?? null,
     }));
-  }
-
-  getExecutionDiff(id: number): ExecutionDiff | undefined {
-    const row = this.db.prepare('SELECT * FROM execution_diffs WHERE id = ?').get(id) as ExecutionDiffRow | undefined;
-    return row ? this.convertDbExecutionDiff(row) : undefined;
   }
 
   getNextExecutionSequence(sessionId: string): number {

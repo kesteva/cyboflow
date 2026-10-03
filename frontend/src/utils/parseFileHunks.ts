@@ -108,8 +108,8 @@ function parseBlock(block: string): ParsedFileDiff | null {
     }
     // Any other line (including a wholly-empty '') is a no-op: git unified diffs
     // prefix every context line with a single space, so a truly-empty line is
-    // never a content row — it is only the blank-line separator that
-    // `combineDiffs` inserts between file blocks (`join('\n\n')`) or the trailing
+    // never a content row — it is only a blank-line separator between file
+    // blocks (diffs joined with `'\n\n'`) or the trailing
     // newline appended after an untracked diff. Treating '' as context here
     // produced phantom blank rows with line numbers past EOF on the last hunk of
     // every non-final file. Fall through and ignore it.
