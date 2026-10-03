@@ -552,6 +552,13 @@ export class DatabaseService {
       this.db.prepare("ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT 'approve' CHECK(default_permission_mode IN ('approve', 'ignore'))").run();
     }
 
+    // Add open_ide_command column to projects table if it doesn't exist
+    const hasOpenIdeCommandColumn = projectsTableInfo.some((col: SqliteTableInfo) => col.name === 'open_ide_command');
+    
+    if (!hasOpenIdeCommandColumn) {
+      this.db.prepare("ALTER TABLE projects ADD COLUMN open_ide_command TEXT").run();
+    }
+
     // Check if display_order columns exist
     const projectsTableInfo2 = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
     const sessionsTableInfo2 = this.db.prepare("PRAGMA table_info(sessions)").all() as SqliteTableInfo[];
@@ -1556,7 +1563,7 @@ export class DatabaseService {
   }
 
   // Project operations
-  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore'): Project {
+  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string): Project {
     // Get the max display_order for projects
     const maxOrderResult = this.db.prepare(`
       SELECT MAX(display_order) as max_order
@@ -1566,9 +1573,9 @@ export class DatabaseService {
     const displayOrder = (maxOrderResult?.max_order ?? -1) + 1;
 
     const result = this.db.prepare(`
-      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, display_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, displayOrder);
+      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, display_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, displayOrder);
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
@@ -1689,6 +1696,10 @@ export class DatabaseService {
     if (updates.default_permission_mode !== undefined) {
       fields.push('default_permission_mode = ?');
       values.push(updates.default_permission_mode);
+    }
+    if (updates.open_ide_command !== undefined) {
+      fields.push('open_ide_command = ?');
+      values.push(updates.open_ide_command);
     }
     if (updates.worktree_folder !== undefined) {
       fields.push('worktree_folder = ?');

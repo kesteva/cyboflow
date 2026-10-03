@@ -146,7 +146,9 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         projectData.path,
         projectData.systemPrompt,
         projectData.runScript,
-        projectData.buildScript
+        projectData.buildScript,
+        undefined, // default_permission_mode
+        projectData.openIdeCommand
       );
 
       console.log('[Main] Project created successfully:', project);

@@ -20,10 +20,16 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-10-02 at 87 handlers — down from 88 when Crystal's
- * `sessions:open-ide` (`ipc/script.ts`) was deleted along with the project
- * "Open IDE Command" setting: its only trigger, the session header, was
- * gone, so the setting configured nothing.
+/** Frozen 2026-10-02 at 88 handlers — back UP from 87: `sessions:open-ide`
+ * (`ipc/script.ts`) was briefly deleted as dead (nothing in the renderer
+ * triggered it once the session header was gone) and then deliberately
+ * restored, because the project "Open IDE Command" setting is kept and now
+ * drives the "Open in IDE" button in the right-rail Diff tab header. The
+ * one-handler increase is a sanctioned exception to the shrink-only rule, not
+ * a new raw channel.
+ *
+ * Earlier 2026-10-02: 87 handlers — down from 88 when `sessions:open-ide`
+ * was deleted (reverted above).
  *
  * Earlier 2026-10-02: 88 handlers — down from 90 when Crystal's
  * 'active project' channels were deleted from `ipc/project.ts`:
@@ -128,7 +134,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/panels.ts': 11,
   'ipc/project.ts': 11,
   'ipc/providerDetection.ts': 3,
-  'ipc/script.ts': 1,
+  'ipc/script.ts': 2,
   'ipc/session.ts': 20,
   'ipc/uiState.ts': 2,
   'ipc/updater.ts': 4,

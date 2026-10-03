@@ -14,10 +14,6 @@
 --   commit_structured_prompt_template / commit_checkpoint_prefix
 --       main_branch was written at create time and never read (the runtime
 --       always re-detects the branch); the rest had no reader or writer.
---   projects.open_ide_command
---       Crystal's "Open IDE Command" setting. Its only consumer was the
---       sessions:open-ide handler, whose trigger (the session header) was
---       deleted, so the setting configured nothing; handler and field are gone.
 --   project_run_commands
 --       Write-only duplicate of projects.run_script; its manager is gone.
 --   app_opens
@@ -66,5 +62,3 @@ ALTER TABLE projects ADD COLUMN commit_structured_prompt_template TEXT;
 ALTER TABLE projects DROP COLUMN commit_structured_prompt_template;
 ALTER TABLE projects ADD COLUMN commit_checkpoint_prefix TEXT;
 ALTER TABLE projects DROP COLUMN commit_checkpoint_prefix;
-ALTER TABLE projects ADD COLUMN open_ide_command TEXT;
-ALTER TABLE projects DROP COLUMN open_ide_command;

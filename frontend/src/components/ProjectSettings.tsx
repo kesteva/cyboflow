@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { Save, Trash2, FolderIcon, GitBranch, Settings, Code2, BrainCircuit, ShieldCheck } from 'lucide-react';
 import { API } from '../utils/api';
+import { isApplePlatform } from '../utils/platform';
 import type { Project } from '../types/project';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
-import { Textarea } from './ui/Input';
+import { Input, Textarea } from './ui/Input';
 import { Button } from './ui/Button';
 import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
@@ -11,6 +12,11 @@ import { Card } from './ui/Card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/Select';
 
 type PermissionTrustValue = 'undecided' | 'trusted' | 'untrusted';
+
+/** Full-path editor example for the "command not found" troubleshooting note. */
+const EDITOR_FULL_PATH_EXAMPLE = isApplePlatform()
+  ? '/usr/local/bin/code .'
+  : '"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" .';
 
 /** NULL/undefined on the wire means "undecided" — the Select needs a concrete value. */
 function toSelectValue(trust: Project['permission_trust']): PermissionTrustValue {
@@ -32,6 +38,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
   const [runScript, setRunScript] = useState('');
   const [buildScript, setBuildScript] = useState('');
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
+  const [openIdeCommand, setOpenIdeCommand] = useState('');
   const [worktreeFolder, setWorktreeFolder] = useState('');
   const [permissionTrust, setPermissionTrust] = useState<PermissionTrustValue>('undecided');
   const [isSaving, setIsSaving] = useState(false);
@@ -53,6 +60,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
           }
         });
       }
+      setOpenIdeCommand(project.open_ide_command || '');
       setWorktreeFolder(project.worktree_folder || '');
       setPermissionTrust(toSelectValue(project.permission_trust));
       setError(null);
@@ -70,6 +78,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
         system_prompt: systemPrompt || null,
         run_script: runScript || null,
         build_script: buildScript || null,
+        open_ide_command: openIdeCommand || null,
         worktree_folder: worktreeFolder || null,
         permission_trust: permissionTrust === 'undecided' ? null : permissionTrust
       };
@@ -272,6 +281,44 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
                 <p className="text-sm text-text-tertiary">Commands and scripts that run during Claude sessions</p>
               </div>
             </div>
+
+            <FieldWithTooltip
+              label="Open IDE Command"
+              tooltip="Command the Diff tab's Open in IDE button runs to open a session's worktree in your editor. It runs inside the worktree directory. Leave empty to hide the button."
+            >
+              <Input
+                value={openIdeCommand}
+                onChange={(e) => setOpenIdeCommand(e.target.value)}
+                placeholder='code .'
+                className="font-mono text-sm"
+              />
+              <p className="mt-1 text-xs text-text-tertiary">
+                <span className="text-text-secondary font-semibold">Common Examples:</span>
+                <br />
+                <span className="font-mono text-text-secondary">• code . </span><span className="text-text-tertiary">(VS Code)</span>
+                <br />
+                <span className="font-mono text-text-secondary">• cursor . </span><span className="text-text-tertiary">(Cursor)</span>
+                <br />
+                <span className="font-mono text-text-secondary">• subl . </span><span className="text-text-tertiary">(Sublime Text)</span>
+                <br />
+                <span className="font-mono text-text-secondary">• idea . </span><span className="text-text-tertiary">(IntelliJ IDEA)</span>
+                <br />
+                <span className="font-mono text-text-secondary">• open -a "PyCharm" . </span><span className="text-text-tertiary">(PyCharm on macOS)</span>
+                <br />
+                <br />
+                <span className="text-text-secondary font-semibold">Troubleshooting:</span>
+                <br />
+                <span className="text-text-tertiary">• If the command is not found, use the full path (e.g., </span><span className="font-mono text-text-secondary">{EDITOR_FULL_PATH_EXAMPLE}</span><span className="text-text-tertiary">)</span>
+                <br />
+                <span className="text-text-tertiary">• For VS Code and Cursor, install the shell command from the Command Palette:</span>
+                <br />
+                <span className="text-text-tertiary ml-2">→ VS Code: "Shell Command: Install 'code' command in PATH"</span>
+                <br />
+                <span className="text-text-tertiary ml-2">→ Cursor: "Shell Command: Install 'cursor' command in PATH"</span>
+                <br />
+                <span className="text-text-tertiary">• The command runs with your shell's environment, inheriting your PATH</span>
+              </p>
+            </FieldWithTooltip>
 
             <FieldWithTooltip
               label="Project permission rules"

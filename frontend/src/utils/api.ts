@@ -294,6 +294,11 @@ export class API {
       return trpc.cyboflow.sessionGit.getBranchCommitSubjects.query({ sessionId });
     },
 
+    async openIDE(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.openIDE(sessionId);
+    },
+
     async reorder(sessionOrders: Array<{ id: string; displayOrder: number }>) {
       return trpc.cyboflow.sessions.reorder.mutate({ sessionOrders });
     },
