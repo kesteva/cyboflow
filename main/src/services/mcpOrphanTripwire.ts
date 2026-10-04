@@ -61,6 +61,7 @@
  */
 import { execFile } from 'node:child_process';
 import { execWindowsProcessTable } from './winProcessTable';
+import { parseEtime } from './processTable';
 import { resolveMcpServerScriptPath } from '../orchestrator/mcpServer/scriptPath';
 import { PARENT_WATCHDOG_INTERVAL_MS } from '../orchestrator/mcpServer/parentWatchdog';
 import type { LoggerLike } from '../orchestrator/types';
@@ -128,33 +129,9 @@ interface OrphanSighting {
   firstSeenMs: number;
 }
 
-/**
- * Parse one `ps` `etime=` field into seconds. macOS emits exactly three shapes:
- * `mm:ss`, `hh:mm:ss`, and `dd-hh:mm:ss` (the `dd-` prefix appears only once
- * elapsed time crosses 24h). Returns null for anything that does not match one
- * of those shapes — an unparseable age is never guessed at, it is simply not
- * counted (see {@link McpOrphanTripwire.scan}).
- */
-export function parseEtime(raw: string): number | null {
-  const s = raw.trim();
-  const dayMatch = /^(\d+)-(.+)$/.exec(s);
-  const days = dayMatch ? Number.parseInt(dayMatch[1], 10) : 0;
-  const rest = dayMatch ? dayMatch[2] : s;
-
-  const parts = rest.split(':');
-  // dd- form must carry hh:mm:ss (3 fields); the bare form is mm:ss or hh:mm:ss.
-  if (dayMatch && parts.length !== 3) return null;
-  if (!dayMatch && parts.length !== 2 && parts.length !== 3) return null;
-  if (parts.some((p) => !/^\d{1,2}$/.test(p))) return null;
-
-  const nums = parts.map((p) => Number.parseInt(p, 10));
-  const [hours, minutes, seconds] =
-    nums.length === 3 ? nums : [0, nums[0], nums[1]];
-  // Defensive: a genuine ps etime field never carries an out-of-range mm/ss.
-  if (minutes >= 60 || seconds >= 60) return null;
-
-  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
-}
+// `parseEtime` lives in ./processTable (one implementation); re-exported so
+// this module's public surface is unchanged.
+export { parseEtime };
 
 /**
  * Parse `ps -axo pid=,ppid=,etime=,command=` output into rows.

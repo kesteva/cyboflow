@@ -5,6 +5,7 @@ import type { DatabaseService } from '../database/database';
 import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { collectDescendantPidsAsync, forceKillPids, killTree } from '../utils/platformProcess';
@@ -105,7 +106,7 @@ export class RunCommandManager extends EventEmitter {
               cols: 80,
               rows: 30,
               cwd: worktreePath,
-              env: env
+              env: stampSpawnMarker(env, worktreePath)
             });
 
             const runProcess: RunProcess = {

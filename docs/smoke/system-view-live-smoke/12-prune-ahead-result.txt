@@ -1,0 +1,7 @@
+ls: /private/tmp/cf-smoke261/repo/worktrees/ahead: No such file or directory
+/private/tmp/cf-smoke261/repo                 2dc92d5 [main]
+/private/tmp/cf-smoke261/repo/worktrees/clean 2dc92d5 [smoke-clean]
+/private/tmp/cf-smoke261/repo/worktrees/proc  2dc92d5 [smoke-proc]
+  smoke-ahead
++ smoke-clean
++ smoke-proc

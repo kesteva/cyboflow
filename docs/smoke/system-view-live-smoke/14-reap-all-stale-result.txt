@@ -1,0 +1,6 @@
+/private/tmp/cf-smoke261/repo/worktrees/locked
+/private/tmp/cf-smoke261/repo 2dc92d5 [main]
+  smoke-ahead
+  smoke-clean
+  smoke-locked
+  smoke-proc

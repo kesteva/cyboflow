@@ -23,6 +23,10 @@ beforeEach(() => {
   vi.resetModules();
 });
 
+// Each test cold-imports the WHOLE appRouter after resetModules (~3s standalone);
+// under full-suite load that alone can blow vitest's 5s default.
+const COLD_ROUTER_IMPORT_TIMEOUT_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -40,7 +44,7 @@ describe('cyboflow.health.mcpServer — fallback', () => {
     expect(result).toEqual(HEALTH_STARTING);
     expect(result.status).toBe('starting');
     expect(result.restartAttempts).toBe(0);
-  });
+  }, COLD_ROUTER_IMPORT_TIMEOUT_MS);
 });
 
 describe('cyboflow.health.mcpServer — setHealthProvider delegation', () => {
@@ -62,5 +66,5 @@ describe('cyboflow.health.mcpServer — setHealthProvider delegation', () => {
 
     expect(result).toEqual(mockStatus);
     expect(mockHealth.getMcpServerStatus).toHaveBeenCalledOnce();
-  });
+  }, COLD_ROUTER_IMPORT_TIMEOUT_MS);
 });

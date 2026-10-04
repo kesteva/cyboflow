@@ -24,6 +24,7 @@
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
+import { stampSpawnMarker } from '../../utils/spawnMarker';
 import {
   VerificationAgentQueryError,
   type VerificationAgentQueryArgs,
@@ -479,7 +480,7 @@ export function makeVerificationAgentQuery(
   logger?: LoggerLike,
   timeoutMs: number = VERIFICATION_AGENT_TIMEOUT_MS,
 ): VerificationAgentQueryFn {
-  return async ({ prompt, systemPrompt, cwd, model, allowedTools, env, timeoutMs: requestTimeoutMs, signal, guards }) => {
+  return async ({ prompt, systemPrompt, cwd, markerWorktreePath, model, allowedTools, env, timeoutMs: requestTimeoutMs, signal, guards }) => {
     // The scheduler's effective per-request deadline wins over the module default
     // (adversarial-review fix) — else a task deadline above 10 min is silently cut.
     const effectiveTimeoutMs = requestTimeoutMs ?? timeoutMs;
@@ -510,7 +511,7 @@ export function makeVerificationAgentQuery(
           // would bypass the handler's per-call MCP deny arm (inert today).
           allowedTools: allowedTools.filter((t) => t !== 'Bash' && !t.startsWith('mcp__')),
           // The agent's Bash inherits these so `$VERIFY_DRIVER` / VERIFY_PORT resolve.
-          env: { ...process.env, ...env },
+          env: stampSpawnMarker({ ...process.env, ...env }, markerWorktreePath ?? cwd),
           // Hermetic sandbox — an edited agent prompt cannot widen it.
           settingSources: [],
           strictMcpConfig: true,

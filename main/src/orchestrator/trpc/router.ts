@@ -33,7 +33,9 @@ import { sessionGitRouter } from './routers/sessionGit';
 import { sessionsRouter } from './routers/sessions';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
+import { systemRouter } from './routers/system';
 import { monitorRouter } from './routers/monitor';
+import { monitorReapRouter } from './routers/monitorReap';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
 import { variantsRouter } from './routers/variants';
@@ -43,6 +45,7 @@ import { ompRouter } from './routers/omp';
 import { ompCommandRouter } from './routers/ompCommand';
 import { webViewerRouter } from './routers/webViewer';
 import { workspaceFilesRouter } from './routers/workspaceFiles';
+import { worktreeMonitorRouter } from './routers/worktreeMonitor';
 
 export const appRouter = router({
   cyboflow: router({
@@ -66,6 +69,7 @@ export const appRouter = router({
     insights: insightsRouter,
     mcps: mcpsRouter,
     monitor: monitorRouter,
+    monitorReap: monitorReapRouter,
     plugins: pluginsRouter,
     providerUsage: providerUsageRouter,
     questions: questionsRouter,
@@ -74,6 +78,7 @@ export const appRouter = router({
     sessionGit: sessionGitRouter,
     sessions: sessionsRouter,
     substrates: substratesRouter,
+    system: systemRouter,
     tasks: tasksRouter,
     tracker: trackerRouter,
     variants: variantsRouter,
@@ -83,6 +88,7 @@ export const appRouter = router({
     omp: ompRouter,
     ompCommand: ompCommandRouter,
     workspaceFiles: workspaceFilesRouter,
+    worktreeMonitor: worktreeMonitorRouter,
   }),
 });
 

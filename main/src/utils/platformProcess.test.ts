@@ -14,8 +14,10 @@
  *  - 'enumerate': runCommandManager — pgid resolved BEFORE any signal, group
  *    members the tree walk missed swept into the per-descendant kills.
  */
+import { execSync, spawn } from 'node:child_process';
 import { describe, it, expect, vi } from 'vitest';
 import {
+  collectDescendantPids,
   collectDescendantPidsAsync,
   describeProcesses,
   firstCommandToken,
@@ -214,6 +216,90 @@ describe('killTree POSIX — group resolution shapes', () => {
     expect(sweepCalls).toEqual([]);
     expect(stopped).toBe(true);
     warnSpy.mockRestore();
+  });
+});
+
+describe('killTree POSIX — posixTermDescendants', () => {
+  /** Non-group-leader root 4242 with out-of-group descendants 5001/5002. */
+  async function run(extra: { posixTermDescendants?: boolean }) {
+    const events: string[] = [];
+    const alive = new Set([4242, 5001, 5002]);
+    const opts = baseOpts();
+    opts.descendantPids = [5001, 5002];
+    // A pid exits once TERMed, so the grace poll ends early when all get one.
+    const termed = new Set<number>();
+    opts.sendSignal = vi.fn((signalPid, signal) => {
+      events.push(`signal:${signalPid}:${signal}`);
+      if (signal === 'SIGTERM') termed.add(signalPid);
+    });
+    opts.isPidAlive = vi.fn((probePid: number) => {
+      if (probePid < 0) return false;
+      return !termed.has(probePid) && alive.has(probePid);
+    });
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(`exec:${command}`);
+      return Promise.resolve({ stdout: '' });
+    });
+    await killTree(4242, {
+      ...opts,
+      execCommand,
+      graceMs: 1000,
+      pollIntervalMs: 5,
+      posixGroupMode: 'root',
+      ...extra,
+    });
+    return events;
+  }
+
+  it('SIGTERMs every descendant before the grace wait and before any kill -9 on them', async () => {
+    const events = await run({ posixTermDescendants: true });
+    expect(events).toEqual([
+      'signal:4242:SIGTERM',
+      'exec:kill -TERM -4242',
+      'signal:5001:SIGTERM',
+      'signal:5002:SIGTERM',
+      'signal:4242:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:kill -9 5001',
+      'exec:kill -9 5002',
+      'exec:pkill -9 -P 4242',
+    ]);
+  });
+
+  it('holds the grace window while a descendant is still alive, and still escalates after it', async () => {
+    const opts = baseOpts();
+    opts.descendantPids = [5001];
+    const events: string[] = [];
+    opts.sendSignal = vi.fn((signalPid, signal) => {
+      events.push(`signal:${signalPid}:${signal}`);
+    });
+    // Root and group are dead from the start; only the descendant lingers.
+    opts.isPidAlive = vi.fn((probePid: number) => probePid === 5001);
+    const start = Date.now();
+    await killTree(4242, {
+      ...opts,
+      execCommand: vi.fn(() => Promise.resolve({ stdout: '' })),
+      graceMs: 60,
+      pollIntervalMs: 5,
+      posixGroupMode: 'root',
+      posixTermDescendants: true,
+    });
+    expect(Date.now() - start).toBeGreaterThanOrEqual(60);
+    expect(events).toContain('signal:5001:SIGTERM');
+  });
+
+  it('default (flag unset) keeps the old sequence: no per-descendant SIGTERM', async () => {
+    const events = await run({});
+    expect(events.filter((e) => e.endsWith(':SIGTERM'))).toEqual(['signal:4242:SIGTERM']);
+    expect(events).toEqual([
+      'signal:4242:SIGTERM',
+      'exec:kill -TERM -4242',
+      'signal:4242:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:kill -9 5001',
+      'exec:kill -9 5002',
+      'exec:pkill -9 -P 4242',
+    ]);
   });
 });
 
@@ -533,6 +619,40 @@ describe('collectDescendantPidsAsync', () => {
     await expect(collectDescendantPidsAsync(0, { platform: 'linux' })).resolves.toEqual([]);
     await expect(collectDescendantPidsAsync(-5, { platform: 'linux' })).resolves.toEqual([]);
     await expect(collectDescendantPidsAsync(1.5, { platform: 'linux' })).resolves.toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('default POSIX child lister (real process tree)', () => {
+  it('finds a real process tree with the un-injected lister, sync and async', async () => {
+    const root = spawn('sh', ['-c', 'sleep 30 & sleep 30 & wait'], { stdio: 'ignore' });
+    try {
+      const rootPid = root.pid as number;
+      // Let the shell fork both sleeps.
+      for (let i = 0; i < 50; i++) {
+        if ((await collectDescendantPidsAsync(rootPid)).length >= 2) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const viaAsync = await collectDescendantPidsAsync(rootPid);
+      const viaSync = collectDescendantPids(rootPid);
+      expect(viaAsync.length).toBeGreaterThanOrEqual(2);
+      expect([...viaSync].sort()).toEqual([...viaAsync].sort());
+
+      if (process.platform === 'darwin') {
+        // Negative control: the GNU-only `ps --ppid` command the default used to run
+        // lists nothing for the same live tree on macOS — the pre-fix behaviour.
+        const gnu = execSync(`ps -o pid= --ppid ${rootPid} 2>/dev/null || true`, { encoding: 'utf8' });
+        expect(gnu.trim()).toBe('');
+      }
+    } finally {
+      const pids = [root.pid as number, ...(await collectDescendantPidsAsync(root.pid as number))];
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
   });
 });
 

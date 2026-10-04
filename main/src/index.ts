@@ -63,7 +63,7 @@ import {
 } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
-import { resolvePanelLane, type PanelLane } from './services/panelLane';
+import { isPtyLane, resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { listRunAgentTargets, createRunEffectiveAgentsResolver } from './services/panels/claude/agentOverlayWriter';
@@ -148,6 +148,7 @@ import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain, consoleQuitDrainLogger } from './services/quitDrain';
 import { terminalPanelManager } from './services/terminalPanelManager';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
+import { diskUsageService } from './services/diskUsageService';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
 import { TrackerSyncService } from './services/trackerSync/trackerSyncService';
@@ -156,6 +157,7 @@ import { setTrackerSyncFacade } from './orchestrator/trackerSyncBridge';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { execFileSync } from 'node:child_process';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
+import { composeSystemView } from './systemViewComposition';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
 import { ProviderUsagePoller } from './services/providerUsage/providerUsagePoller';
@@ -243,6 +245,7 @@ import { composeVerification } from './verifyComposition';
 import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
+import { stripInheritedRunEnv } from './utils/inheritedRunEnv';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -255,30 +258,8 @@ export let mainWindow: BrowserWindow | null = null;
 // every createWindow (the previous controller disposes itself on 'closed').
 let windowStatePersistence: WindowStatePersistence | null = null;
 
-// Strip PER-RUN cyboflow env inherited from a HOSTING cyboflow session
-// (dogfooding: `pnpm dev` launched from a shell inside another cyboflow
-// instance). These vars are only meaningful when stamped per spawned agent by
-// the panel managers; inherited values are ALWAYS stale here — and because dev
-// instances share ~/.cyboflow_dev, a leaked CYBOFLOW_RUN_ID can even RESOLVE
-// (to the hosting session's run), silently misdirecting any child process that
-// spreads process.env without re-stamping (e.g. terminal panels, shell hooks).
-// runShellManager.ts deletes CYBOFLOW_RUN_ID for its own spawns for exactly
-// this reason; this boot-time strip closes every other path at the source.
-// Deliberately NOT stripped: user-facing config/kill-switch vars
-// (CYBOFLOW_DIR, CYBOFLOW_DISABLE_WARM_SDK, CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED).
-for (const key of [
-  'CYBOFLOW_RUN_ID',
-  'CYBOFLOW_SESSION_ID',
-  'CYBOFLOW_ORCH_SOCKET',
-  // A hosting instance's bearer token is not only stale here, it is a live
-  // credential for ANOTHER app instance's run — strip it hardest of all.
-  'CYBOFLOW_ORCH_TOKEN',
-  'CYBOFLOW_RUN_ARTIFACTS_DIR',
-  'CYBOFLOW_SUBSTRATE',
-  'CYBOFLOW_EXECUTION_MODEL',
-]) {
-  delete process.env[key];
-}
+// Strip PER-RUN cyboflow env inherited from a HOSTING cyboflow session (see utils/inheritedRunEnv.ts).
+stripInheritedRunEnv(process.env);
 stripInheritedLaneEnv(process.env); // Same reason for a hosting lane's build-slot env (laneBuildSlots.ts).
 
 // Set by the boot-time schema-version gate when the user picked "Check for
@@ -1554,8 +1535,7 @@ async function initializeServices(): Promise<boolean> {
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  // Create worktree manager
-  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper);
+  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper, diskUsageService);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();
@@ -2239,6 +2219,18 @@ async function initializeServices(): Promise<boolean> {
   const managerByLane = new Map<PanelLane, AbstractCliManager>(
     laneManagers.map(({ lane, manager }) => [lane, manager]),
   );
+
+  // System view providers (IDEA-037): worktree registry, one-ps-scan snapshot over the
+  // interactive (PTY) lanes, and the reap gate. Lazy — nothing polls without a subscriber.
+  composeSystemView({
+    databaseService,
+    worktreeManager,
+    gitStatusManager,
+    codexBrokerReaper,
+    orchSocketServer,
+    ptyCliManagers: laneManagers.filter(({ lane }) => isPtyLane(lane)).map(({ manager }) => manager),
+    getRunShellManager: () => runShellManager,
+  });
 
   const resolvePanelOwner = (panelId: string): AbstractCliManager | undefined => {
     const panel = panelManager.getPanel(panelId);

@@ -697,6 +697,65 @@ Kill switch: `AppConfig.webViewer` `{ enabled, agentObserve, agentDrive, persist
 resolved by `ConfigManager.getWebViewerConfig()` and read live per call. Human browsing ships on;
 every agent capability ships off.
 
+### System view (`cyboflow.system` / `cyboflow.monitorReap` / `cyboflow.worktreeMonitor`)
+
+A top-level Sidebar view ("System · live process & worktree monitor"; `systemOpen` in
+`navigationStore.ts`, `SystemView` in `frontend/src/components/cyboflow/`, rail item absent on
+Windows) whose job is **reaping**: killing runaway processes and pruning stale worktrees. Design
+and measured cost budget: `docs/design/process-worktree-monitor.md`; live macOS smoke evidence:
+`docs/smoke/system-view-live-smoke.md`. It was designed as "Monitor" — `cyboflow.monitor`
+(`routers/monitor.ts`) is the unrelated per-run supervisor-chat router, hence the System names.
+
+- **Read side — `cyboflow.system.snapshot`** (`routers/system.ts`, setter-injected provider like
+  `health.ts`; concrete provider `services/systemSnapshotProvider.ts`, wired at boot). One query
+  returns processes, the worktree registry + disk-usage tri-state, and ports/sockets
+  (`orchestrator/systemTypes.ts`). Processes come from ONE `ps` scan per snapshot
+  (`services/processSnapshot/processSnapshotService.ts`), unioned with the managers' owned-handle
+  lists and classified by `classify.ts` into **owned / foreign / orphan / suspected**. Only
+  `orphan` is ever sweep-eligible; `foreign` is read-only and `suspected` (cyboflow-shaped
+  ancestry, no spawn marker) is a distinct result variant that cannot be promoted. Ownership
+  rests on the spawn marker (`CYBOFLOW_INSTANCE` / `CYBOFLOW_WORKTREE`, stamped at every spawn
+  site by `utils/spawnMarker.ts` and enforced by `utils/__tests__/spawnMarkerCoverage.test.ts`);
+  the marker reader only exists on linux. On macOS/Windows a process this app holds a manager
+  handle for still classifies `owned`, marker-less cyboflow-shaped processes classify
+  `suspected` and everything else `foreign`; `orphan` needs a marker naming a dead instance, so
+  no sweep-eligible orphans appear on those platforms. Unrelated host processes (`foreign` with
+  no instance id) are classified but dropped before the wire, so the snapshot never carries the
+  whole host `ps` table; another live instance's children stay, read-only. The worktree registry (`services/worktreeRegistry.ts`, served by
+  `cyboflow.worktreeMonitor`) is a derived read model — `sessions` ∪ `workflow_runs` ∪
+  `WorktreeManager.listWorktrees()` — with no table of its own. On win32 the router stays
+  registered; only `du` sizing is reported `unsupported`.
+- **Write side — `cyboflow.monitorReap`: resolve → confirm → execute.** Every destructive action
+  (Prune, Kill tree, Kill all of a type — scoped to the selected project's worktrees, Reap all
+  stale — orphan processes are machine-wide by design) first calls `resolve`, which builds a
+  `ReapManifest` server-side (`services/monitor/reapManifest.ts`: targets, fresh target-scoped
+  `du`, dirty/ahead counts from a fresh one-shot `probeWorktreeGit` read — the `GitStatusManager`
+  cache is only the fallback when the probe yields nothing — and descendant PID counts) and stashes
+  it in memory (~60 s TTL) under a server-minted id. The renderer shows exactly that manifest in
+  `ManifestConfirmDialog` / `KillProcessConfirmDialog`, then calls `execute` with **only the
+  id**. A fabricated, expired, replayed or drifted id is rejected (`NOT_FOUND` /
+  `CONFLICT` with a `MANIFEST_STALE` prefix) with zero destructive effect — the client can never
+  execute something it did not see. The branch-delete choice ("Also delete branch", default off)
+  is locked at resolve time. `reap-all-stale` only ever targets `orphan` worktrees/processes.
+  Execution (`services/monitor/reapExecutor.ts`, `worktreePruner.ts`) kills the descendant tree
+  via `killTree` (SIGTERM → SIGKILL after the 5 s grace), reaps Codex brokers, then removes the
+  worktree through `WorktreeManager.removeWorktreeByPath`; owner session/run rows are left
+  untouched, and a worktree is kept in place if any associated kill failed or survived.
+  Survivors come back in the response's `errors`, never as a bare success.
+- **Disk-sampling cadence — never the poll loop.** `ps` is ~free per tick, but `du -sk` costs
+  ~0.5 s per worktree. `services/diskUsageService.ts` therefore measures lazily, **serially
+  (concurrency 1)** and staggered, with a ~5 min TTL (`DISK_USAGE_TTL_MS`), eager `invalidate`
+  from `WorktreeManager`'s removal paths, and `requestFresh` (jumps the queue) used only by the
+  manifest gate. Status is a tri-state — `measured | measuring | queued` — and the UI never
+  renders an unmeasured value as "0 MB". `node_modules` is deliberately included in the
+  measurement (it is the reclaim). No timer lives in the router or provider: the renderer's
+  `useSystemSnapshot` hook polls every 2.5 s only while the view is mounted (`enabled` gate), so
+  with the view closed no `ps` or `du` runs.
+- **`in_place` / `is_main_repo` prune guard.** The project's own checkout is never prunable. The
+  registry tags such entries `prunable: false` in the returned shape itself; `buildReapManifest`
+  rejects them (`not_prunable`), `worktreePruner` refuses them again at execution, and the UI
+  renders Prune disabled with a stated reason on both the card footer and the `⋯` menu.
+
 ### Telemetry (`main/src/services/telemetry/`)
 
 Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`initTelemetry` in

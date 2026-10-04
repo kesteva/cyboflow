@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 
 interface TerminalProcess {
   pty: pty.IPty;
@@ -38,7 +39,7 @@ export class TerminalPanelManager {
       cols: 80,
       rows: 30,
       cwd: cwd,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: enhancedPath,
         TERM: 'xterm-256color',
@@ -52,7 +53,7 @@ export class TerminalPanelManager {
         // shell scripts. TODO(post-v1): remove after deprecation window.
         CRYSTAL_SESSION_ID: panel.sessionId,
         CRYSTAL_PANEL_ID: panel.id
-      }
+      }, cwd)
     });
     
     // Create terminal process object

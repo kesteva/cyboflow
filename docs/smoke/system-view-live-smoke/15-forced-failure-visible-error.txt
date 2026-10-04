@@ -1,0 +1,2 @@
+1 target could not be removed.
+locked: Failed to remove worktree: error: failed to delete '/private/tmp/cf-smoke261/repo/worktrees/locked': Operation not permitted

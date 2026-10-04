@@ -1,0 +1,33 @@
+{
+  "cards": [
+    {
+      "path": "/private/tmp/cf-smoke261/repo/worktrees/ahead",
+      "text": "WORKTREE | ahead | SESSION | branch smoke-ahead | disk 3 MB | Open session | Kill all processes | Prune worktree"
+    },
+    {
+      "path": "/private/tmp/cf-smoke261/repo/worktrees/dirty",
+      "text": "WORKTREE | dirty | SESSION | branch smoke-dirty | disk 3 MB | Open session | Kill all processes | Prune worktree"
+    },
+    {
+      "path": "/private/tmp/cf-smoke261/repo",
+      "text": "WORKTREE | repo | MAIN REPO | branch main | disk 260 KB | Your real checkout — it can never be pruned | Kill all processes | Prune worktree"
+    }
+  ],
+  "mainPrune": [
+    {
+      "disabled": true,
+      "ariaDisabled": null,
+      "outerHTML": "<button type=\"button\" data-testid=\"wt-prune\" class=\"inline-flex items-center rounded-button border border-status-error/50 bg-status-error/10 px-2 py-1 font-mono text-[11px] text-status-error transition-colors hover:bg-status-error/20 disabled:cursor-not-allowed disabled:opacity-50\" disabled=\"\" title=\"Your real checkout — it can never be pruned\">Prune worktree</button>",
+      "reason": "Your real checkout — it can never be pruned"
+    }
+  ],
+  "orphanCleanCard": [
+    "WORKTREE | /private/tmp/cf-smoke261/repo/worktrees/clean | ORPHAN"
+  ],
+  "procRows": [
+    "PROCESS | cd | SUSPECTED | No owning worktree | PID | 32221 | CPU | 0.0% | MEM | 0.0% | UP | 1m | Kill tree",
+    "PROCESS | cd | SUSPECTED | No owning worktree | PID | 32223 | CPU | 0.0% | MEM | 0.0% | UP | 1m | Kill tree",
+    "PROCESS | sleep | SUSPECTED | No owning worktree | PID | 32224 | CPU | 0.0% | MEM | 0.0% | UP | 1m | Kill tree",
+    "PROCESS | sleep | SUSPECTED | No owning worktree | PID | 32225 | CPU | 0.0% | MEM | 0.0% | UP | 1m | Kill tree"
+  ]
+}

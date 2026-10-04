@@ -6,6 +6,7 @@ import {
   buildCodexAppServerThreadStartParams,
   buildCodexAppServerTurnOptions,
 } from './runConfig';
+import { getInstanceId } from '../../../../utils/spawnMarker';
 import { orchTokenRegistry } from '../../../../orchestrator/orchAuthToken';
 
 const runtimeConfig = {
@@ -47,6 +48,8 @@ describe('Codex app-server run configuration', () => {
               // Randomly minted per run — asserted for shape here and for
               // correctness by the dedicated bearer-token test below.
               CYBOFLOW_ORCH_TOKEN: expect.any(String),
+              CYBOFLOW_INSTANCE: getInstanceId(),
+              CYBOFLOW_WORKTREE: '/tmp/worktree',
             },
             required: true,
             default_tools_approval_mode: 'approve',
@@ -208,7 +211,7 @@ describe('Codex app-server run configuration', () => {
     // win32) — build the expectation the same way instead of hardcoding ':'.
     const d = path.delimiter;
     const shellPath = '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin';
-    expect(buildCodexAppServerEnvironment('run-1', runtimeConfig, {
+    expect(buildCodexAppServerEnvironment('run-1', '/tmp/worktree', runtimeConfig, {
       CODEX_HOME: '/home/user/.codex',
       PATH: '/usr/local/bin',
     }, () => shellPath)).toEqual({
@@ -222,7 +225,35 @@ describe('Codex app-server run configuration', () => {
       // Marks the tree as agent-spawned so the project gate self-governs its
       // vitest fork pool instead of taking the whole box per sprint lane.
       CYBOFLOW_MANAGED_TEST_CONCURRENCY: '1',
+      CYBOFLOW_INSTANCE: getInstanceId(),
+      CYBOFLOW_WORKTREE: '/tmp/worktree',
     });
+  });
+
+  it('stamps the spawn marker on the app-server env and the cyboflow MCP bridge env, overriding inherited values', () => {
+    const inherited = { CYBOFLOW_INSTANCE: 'hosting-instance', CYBOFLOW_WORKTREE: '/hosting/worktree' };
+    const appServerEnv = buildCodexAppServerEnvironment('run-m', '/tmp/marked', runtimeConfig, inherited, () => '');
+    expect(appServerEnv.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+    expect(appServerEnv.CYBOFLOW_WORKTREE).toBe('/tmp/marked');
+    // Input untouched (stampSpawnMarker returns a new object).
+    expect(inherited.CYBOFLOW_INSTANCE).toBe('hosting-instance');
+
+    for (const isolation of [undefined, 'agent' as const]) {
+      const params = buildCodexAppServerThreadStartParams('run-m', {
+        panelId: 'run-m',
+        sessionId: 'run-m',
+        worktreePath: '/tmp/marked',
+        prompt: 'go',
+        model: 'gpt-5.5',
+        ...(isolation ? { isolation } : {}),
+      }, runtimeConfig);
+      const mcpEnv = (params.config as {
+        mcp_servers: { cyboflow: { env: Record<string, string> } };
+      }).mcp_servers.cyboflow.env;
+      expect(mcpEnv.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+      expect(mcpEnv.CYBOFLOW_WORKTREE).toBe('/tmp/marked');
+      expect(mcpEnv.CYBOFLOW_RUN_ID).toBe('run-m');
+    }
   });
 
   it('mints one bearer token per run and puts the SAME value on both channels', () => {
@@ -236,7 +267,7 @@ describe('Codex app-server run configuration', () => {
     const mcp = (params.config as {
       mcp_servers: { cyboflow: { env: Record<string, string> } };
     }).mcp_servers.cyboflow.env;
-    const appServerEnv = buildCodexAppServerEnvironment('run-tok', runtimeConfig, {}, () => '');
+    const appServerEnv = buildCodexAppServerEnvironment('run-tok', '/tmp/worktree', runtimeConfig, {}, () => '');
 
     // The MCP subprocess and the shell hook (which inherits the app-server env)
     // are two clients of one run — a mismatch would get one of them refused.
@@ -251,6 +282,7 @@ describe('Codex app-server run configuration', () => {
     const d = path.delimiter;
     const env = buildCodexAppServerEnvironment(
       'run-1',
+      '/tmp/worktree',
       runtimeConfig,
       { PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(d) },
       () => ['/opt/homebrew/bin', '/usr/bin', '/bin'].join(d),
@@ -263,6 +295,7 @@ describe('Codex app-server run configuration', () => {
   it('creates PATH from the login shell when the inherited environment has none', () => {
     const env = buildCodexAppServerEnvironment(
       'run-1',
+      '/tmp/worktree',
       runtimeConfig,
       {},
       () => '/opt/homebrew/bin',
@@ -326,6 +359,8 @@ describe('Codex app-server run configuration', () => {
               CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
               CYBOFLOW_ORCH_TOKEN: expect.any(String),
               CYBOFLOW_MCP_SCOPE: 'global-agent',
+              CYBOFLOW_INSTANCE: getInstanceId(),
+              CYBOFLOW_WORKTREE: '/Users/me',
             },
             required: true,
             default_tools_approval_mode: 'approve',

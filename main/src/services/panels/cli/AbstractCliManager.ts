@@ -12,6 +12,7 @@ import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../../../
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { stampSpawnMarker } from '../../../utils/spawnMarker';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
@@ -23,6 +24,19 @@ import {
 
 interface CliProcess {
   process: pty.IPty;
+  panelId: string;
+  sessionId: string;
+  worktreePath: string;
+  /** Set as soon as the pty's exit event fires — the record itself lingers in
+   *  `processes` until exit cleanup finishes, so readers must skip exited ones. */
+  exited?: boolean;
+}
+
+/** One live panel process, as exposed to the process snapshot service. */
+export interface OwnedCliProcess {
+  pid: number;
+  /** Vendor behind the owning manager — lets the classifier tell Claude from Codex. */
+  provider: AgentProvider;
   panelId: string;
   sessionId: string;
   worktreePath: string;
@@ -424,6 +438,28 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
+   * Read-only snapshot of every live panel process (pid + owning panel/session/
+   * worktree), for the process snapshot service to union with its ONE shared `ps`
+   * scan. Performs no I/O. Entries whose pty already exited (or that never got a
+   * real pid) are skipped.
+   */
+  listOwnedProcesses(): OwnedCliProcess[] {
+    const owned: OwnedCliProcess[] = [];
+    for (const entry of this.processes.values()) {
+      const pid = entry.process.pid;
+      if (entry.exited || !Number.isInteger(pid) || pid <= 0) continue;
+      owned.push({
+        pid,
+        provider: this.getAgentProvider(),
+        panelId: entry.panelId,
+        sessionId: entry.sessionId,
+        worktreePath: entry.worktreePath,
+      });
+    }
+    return owned;
+  }
+
+  /**
    * Check if a panel is running
    */
   isPanelRunning(panelId: string): boolean {
@@ -783,6 +819,11 @@ export abstract class AbstractCliManager extends EventEmitter {
     this.logger?.verbose(`Executing ${this.getCliToolName()} command: ${fullCommand}`);
     this.logger?.verbose(`Working directory: ${cwd}`);
 
+    // Spawn-marker chokepoint: every interactive-substrate PTY (Claude, Codex, pi,
+    // OMP) reaches pty.spawn through here — subclass overrides call super — and
+    // this is the one place that holds both the final env and the real cwd.
+    const markedEnv = stampSpawnMarker(env, cwd);
+
     let ptyProcess: pty.IPty;
     let spawnAttempt = 0;
     let lastError: unknown;
@@ -800,7 +841,7 @@ export abstract class AbstractCliManager extends EventEmitter {
             cols: 80,
             rows: 30,
             cwd,
-            env
+            env: markedEnv
           });
         } else {
           // Second attempt or if we know we need Node.js: use Node.js directly
@@ -838,8 +879,8 @@ export abstract class AbstractCliManager extends EventEmitter {
           // re-booting the whole Electron app. Scope this to the execPath branch only;
           // a real external `node` never needs (or wants) this flag.
           const nodeEnv = nodePath === process.execPath
-            ? { ...env, ELECTRON_RUN_AS_NODE: '1' }
-            : env;
+            ? { ...markedEnv, ELECTRON_RUN_AS_NODE: '1' }
+            : markedEnv;
 
           ptyProcess = pty.spawn(nodePath, nodeArgs, {
             name: 'xterm-color',
@@ -938,6 +979,8 @@ export abstract class AbstractCliManager extends EventEmitter {
     });
 
     ptyProcess.onExit(async ({ exitCode, signal }) => {
+      const exitedRecord = this.processes.get(panelId);
+      if (exitedRecord && exitedRecord.process === ptyProcess) exitedRecord.exited = true;
       // Check for and kill any child processes
       const pid = ptyProcess.pid;
       if (pid) {

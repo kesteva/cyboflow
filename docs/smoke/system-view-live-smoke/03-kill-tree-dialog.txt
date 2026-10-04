@@ -1,0 +1,14 @@
+Kill process tree
+
+1 target
+
+This process is not tagged as cyboflow's — killing it may affect other software
+cd
+pid 32221
+0 descendant PIDs
+
+This cannot be undone
+
+Esc to cancel
+Cancel
+Kill anyway

@@ -43,6 +43,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { signalTree as signalTreeShared } from '../../utils/platformProcess';
+import { stampSpawnMarker } from '../../utils/spawnMarker';
 import type { DeliverableVerifyConfig } from '../../../../shared/types/visualVerification';
 import type {
   DevServerHandle,
@@ -155,7 +156,7 @@ export class DevServerManager implements DevServerProvider {
       // so a readyWhen token could never arrive. POSIX behavior is unchanged.
       detached: process.platform !== 'win32',
       windowsHide: true,
-      env: { ...process.env, PORT: String(port) },
+      env: stampSpawnMarker({ ...process.env, PORT: String(port) }, cwd),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -205,7 +206,7 @@ export class DevServerManager implements DevServerProvider {
         // taskkill-based, and detached severs the build's stdio pipes there.
         detached: process.platform !== 'win32',
         windowsHide: true,
-        env: { ...process.env, PORT: String(port) },
+        env: stampSpawnMarker({ ...process.env, PORT: String(port) }, cwd),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let settled = false;

@@ -1,0 +1,16 @@
+Prune ahead?
+
+1 target · 3 MB disk reclaimable
+
+1 target has commits ahead of main that is not merged.
+ahead
+/private/tmp/cf-smoke261/repo/worktrees/ahead
+1 ahead of main
+3 MB disk
+Also delete branch
+
+This cannot be undone
+
+Esc to cancel
+Cancel
+Prune

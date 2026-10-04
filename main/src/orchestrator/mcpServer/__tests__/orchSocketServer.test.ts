@@ -341,6 +341,95 @@ describe('OrchSocketServer', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 4b. getConnectionCount / getRunBindingCounts (system snapshot getters)
+  // -------------------------------------------------------------------------
+
+  /** Poll until `read()` equals `expected` (the server-side handlers run a tick after the client sees connect/close). */
+  async function waitForValue<T>(read: () => T, expected: T, timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    while (JSON.stringify(read()) !== JSON.stringify(expected)) {
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(`timed out: expected ${JSON.stringify(expected)}, got ${JSON.stringify(read())}`);
+      }
+      await new Promise<void>((r) => setTimeout(r, 10));
+    }
+  }
+
+  /** Connect a client and bind it to `runId` by sending one token-bearing envelope. */
+  async function connectAndBind(runId: string): Promise<net.Socket> {
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+    client.write(
+      JSON.stringify({ type: 'mcp-list-pending-approvals', requestId: `req-${runId}-${openClients.length}`, runId, token: tokens.mint(runId) }) + '\n',
+    );
+    await waitForLines(1);
+    return client;
+  }
+
+  it('getConnectionCount() tracks 0 then N real connections and drops on close', async () => {
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
+    await server.start();
+    expect(server.getConnectionCount()).toBe(0);
+
+    const clients: net.Socket[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { client } = connectClient(socketPath);
+      openClients.push(client);
+      clients.push(client);
+      await waitForConnect(client);
+    }
+    await waitForValue(() => server.getConnectionCount(), 3);
+
+    clients[0].destroy();
+    await waitForValue(() => server.getConnectionCount(), 2);
+  });
+
+  it('getRunBindingCounts() reports per-run live socket counts and drops entries on close', async () => {
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
+    await server.start();
+    expect(server.getRunBindingCounts()).toEqual({});
+
+    // A connection that has not bound a run contributes no entry.
+    const { client: unbound } = connectClient(socketPath);
+    openClients.push(unbound);
+    await waitForConnect(unbound);
+    await waitForValue(() => server.getConnectionCount(), 1);
+    expect(server.getRunBindingCounts()).toEqual({});
+
+    const first = await connectAndBind('run-x');
+    expect(server.getRunBindingCounts()).toEqual({ 'run-x': 1 });
+
+    const second = await connectAndBind('run-x');
+    expect(server.getRunBindingCounts()).toEqual({ 'run-x': 2 });
+
+    await connectAndBind('run-y');
+    expect(server.getRunBindingCounts()).toEqual({ 'run-x': 2, 'run-y': 1 });
+
+    first.destroy();
+    await waitForValue(() => server.getRunBindingCounts(), { 'run-x': 1, 'run-y': 1 });
+
+    second.destroy();
+    await waitForValue(() => server.getRunBindingCounts(), { 'run-y': 1 });
+    expect(server.hasClientForRun('run-x')).toBe(false);
+  });
+
+  it('getRunBindingCounts() returns a copy — mutating it does not affect the server', async () => {
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
+    await server.start();
+    await connectAndBind('run-copy');
+
+    const snapshot = server.getRunBindingCounts();
+    snapshot['run-copy'] = 99;
+    snapshot['run-forged'] = 5;
+    delete snapshot['run-copy'];
+
+    expect(server.getRunBindingCounts()).toEqual({ 'run-copy': 1 });
+    expect(server.hasClientForRun('run-forged')).toBe(false);
+    expect(server.getRunBindingCounts()).not.toBe(server.getRunBindingCounts());
+  });
+
+  // -------------------------------------------------------------------------
   // 5. start() unlinks stale socket + creates dir; stop() closes the server
   // -------------------------------------------------------------------------
 
