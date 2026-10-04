@@ -84,6 +84,8 @@ describe('cyboflow.system.snapshot — nested worktree disk usage', () => {
     loadProcesses: async () => [],
     orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
     probePort: async (port, label) => ({ port, label, inUse: false }),
+    // du sizing is POSIX-only; pin it so the win32 CI host measures too.
+    platform: 'darwin',
   });
 
   it('subtracts the worktrees nested under a checkout so their bytes are counted once', async () => {
@@ -123,6 +125,7 @@ describe('cyboflow.system.snapshot — delegation', () => {
         getRunBindingCounts: vi.fn(() => ({ 'run-1': 2 })),
       },
       probePort: probe,
+      platform: 'darwin',
     };
     setSystemProvider(provider);
 
@@ -228,7 +231,8 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
       getSelfInstanceId: () => 'self',
       probePort: async (port: number, label: string) => ({ port, label, inUse: false }),
     });
-    return { provider, listProcesses, runDu, readMarkers };
+    // du sizing is POSIX-only; pin it so the win32 CI host runs du too.
+    return { provider: { ...provider, platform: 'darwin' as const }, listProcesses, runDu, readMarkers };
   }
 
   beforeEach(() => {

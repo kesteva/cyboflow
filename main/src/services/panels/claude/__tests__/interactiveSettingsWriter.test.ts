@@ -94,9 +94,11 @@ function legacyCyboflowGroup(command: string): HookMatcherGroup {
 // ---------------------------------------------------------------------------
 
 describe('resolveInlineGatingHooks', () => {
-  const hookPath = resolveShellHookScriptPath(HOOK_DIR);
-  const stopHookPath = resolveStopHookScriptPath(HOOK_DIR);
-  const questionHookPath = resolveQuestionHookScriptPath(HOOK_DIR);
+  // Run through hookCommand: on a win32 host path.join yields backslashes, which the
+  // pinned-darwin command quotes.
+  const hookPath = hookCommand(resolveShellHookScriptPath(HOOK_DIR), 'darwin');
+  const stopHookPath = hookCommand(resolveStopHookScriptPath(HOOK_DIR), 'darwin');
+  const questionHookPath = hookCommand(resolveQuestionHookScriptPath(HOOK_DIR), 'darwin');
 
   // Every fragment below is built with platform: 'posix-ish' pinned to 'darwin'
   // so the expected command is a literal path, not whatever this host produces.

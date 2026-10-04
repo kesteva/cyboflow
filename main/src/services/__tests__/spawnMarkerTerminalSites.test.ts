@@ -91,7 +91,8 @@ describe('spawn marker at inline-env spawn sites', () => {
     expect(childSpawns[0].env.CYBOFLOW_WORKTREE).toBe(wt);
   });
 
-  it('SessionManager.execWithShellPath stamps a real exec child with its cwd', async () => {
+  // POSIX shell syntax ($VAR, printf); cmd.exe would echo the names unexpanded.
+  it.skipIf(process.platform === 'win32')('SessionManager.execWithShellPath stamps a real exec child with its cwd', async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marker-exec-')));
     try {
       const sm = new SessionManager({} as unknown as DatabaseService);
