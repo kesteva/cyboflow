@@ -360,3 +360,28 @@ describe('monitorReap.ts standalone-typecheck invariant', () => {
     for (const spec of specs) expect(spec).not.toMatch(/^electron$|better-sqlite3|services\//);
   });
 });
+
+describe('overlapping manifests serialize per target', () => {
+  it('lets only one of two distinct manifests on the same target execute', async () => {
+    const h = harness(base);
+    const sel = { kind: 'reap-all-stale' } as const;
+    const a = await h.service.resolve(1, sel);
+    const b = await h.service.resolve(1, sel);
+    if (!a.ok || !b.ok) throw new Error('resolve failed');
+    expect(a.manifest.id).not.toBe(b.manifest.id);
+
+    let release: () => void = () => {};
+    h.execute.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve([]); }));
+    const first = h.service.execute(a.manifest.id);
+    const second = await h.service.execute(b.manifest.id);
+    expect(second).toMatchObject({ ok: false, code: 'stale' });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+
+    release();
+    await expect(first).resolves.toMatchObject({ ok: true });
+    // Released: a fresh manifest on the same targets is no longer blocked.
+    const c = await h.service.resolve(1, sel);
+    if (!c.ok) throw new Error('resolve failed');
+    await expect(h.service.execute(c.manifest.id)).resolves.toMatchObject({ ok: true });
+  });
+});

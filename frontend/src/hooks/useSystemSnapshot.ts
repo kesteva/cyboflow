@@ -64,7 +64,10 @@ export function useSystemSnapshot({
   refetchIntervalMs = DEFAULT_REFETCH_INTERVAL_MS,
   enabled = true,
 }: UseSystemSnapshotArgs): UseSystemSnapshotResult {
-  const [snapshot, setSnapshot] = useState<SystemSnapshotData | null>(null);
+  // Tagged with the project it was fetched for, so a project switch can never
+  // surface (or let the user act on) the previous project's rows.
+  const [tagged, setTagged] = useState<{ projectId: number; data: SystemSnapshotData } | null>(null);
+  const snapshot = tagged !== null && tagged.projectId === projectId ? tagged.data : null;
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -74,7 +77,7 @@ export function useSystemSnapshot({
   useEffect(() => {
     if (projectId === null || !enabled) {
       fetchRef.current = null;
-      setSnapshot(null);
+      setTagged(null);
       setIsLoading(false);
       setError(null);
       setLastUpdatedAt(null);
@@ -83,6 +86,7 @@ export function useSystemSnapshot({
 
     // `cancelled` guards async fetches from landing after a dep change/unmount.
     let cancelled = false;
+    setTagged((prev) => (prev !== null && prev.projectId !== projectId ? null : prev));
     setIsLoading(true);
     setError(null);
 
@@ -91,7 +95,11 @@ export function useSystemSnapshot({
         .query({ projectId })
         .then((next) => {
           if (cancelled) return;
-          setSnapshot((prev) => (prev !== null && snapshotEqual(prev, next) ? prev : next));
+          setTagged((prev) =>
+            prev !== null && prev.projectId === projectId && snapshotEqual(prev.data, next)
+              ? prev
+              : { projectId, data: next },
+          );
           setLastUpdatedAt(Date.now());
           setError(null);
           if (firstLoad) setIsLoading(false);

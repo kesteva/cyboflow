@@ -198,4 +198,18 @@ describe('useSystemSnapshot', () => {
     expect(result.current.snapshot).toBe(first);
     expect(result.current.lastUpdatedAt).toBe(2_000);
   });
+
+  it('drops the previous project\'s snapshot immediately on a project switch', async () => {
+    snapshotQuerySpy.mockResolvedValueOnce(snap(1, 5));
+    const { result, rerender } = renderHook(
+      ({ projectId }: { projectId: number }) => useSystemSnapshot({ projectId }),
+      { initialProps: { projectId: 1 } },
+    );
+    await waitFor(() => expect(result.current.snapshot?.ports.orchSocket.connectionCount).toBe(5));
+
+    // Project 2's fetch never resolves: project 1's rows must not linger meanwhile.
+    snapshotQuerySpy.mockReturnValue(new Promise(() => {}));
+    rerender({ projectId: 2 });
+    expect(result.current.snapshot).toBeNull();
+  });
 });

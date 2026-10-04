@@ -21,8 +21,9 @@
  * nor extend its expiry.
  */
 import { randomUUID } from 'node:crypto';
-import type {
-  ReapExecutionResult,
+import {
+  reapTargetKey,
+  type ReapExecutionResult,
   ReapExecutor,
   ReapManifest,
   ReapSelection,
@@ -95,6 +96,8 @@ export interface MonitorReapServiceDeps {
 export class MonitorReapService {
   private readonly stash: ReapManifestStash;
   private executor: ReapExecutor | undefined;
+  /** Target keys ({@link reapTargetKey}) of executions currently in flight. */
+  private readonly inFlightTargets = new Set<string>();
 
   constructor(private readonly deps: MonitorReapServiceDeps) {
     this.stash = deps.stash ?? new ReapManifestStash();
@@ -142,6 +145,32 @@ export class MonitorReapService {
     }
     const { manifest, projectId, selection, fingerprint } = taken.entry;
 
+    // Claim every target SYNCHRONOUSLY (before the first await): single-use ids stop
+    // replay of one manifest, but two distinct manifests may overlap on a target and
+    // would otherwise both pass the fresh-snapshot check below before either acts.
+    const claimed = manifest.targets.map(reapTargetKey);
+    if (claimed.some((key) => this.inFlightTargets.has(key))) {
+      return {
+        ok: false,
+        code: 'stale',
+        message: 'Another reap is already acting on one of these targets; wait for it to finish, then resolve a new manifest.',
+      };
+    }
+    for (const key of claimed) this.inFlightTargets.add(key);
+    try {
+      return await this.executeClaimed(executor, manifest, projectId, selection, fingerprint);
+    } finally {
+      for (const key of claimed) this.inFlightTargets.delete(key);
+    }
+  }
+
+  private async executeClaimed(
+    executor: ReapExecutor,
+    manifest: ReapManifest,
+    projectId: number,
+    selection: ReapSelection,
+    fingerprint: ReapIdentityFingerprint,
+  ): Promise<MonitorReapExecuteOutcome> {
     let current: ReapIdentityFingerprint;
     try {
       const snapshot = await this.deps.loadSnapshot(projectId);
