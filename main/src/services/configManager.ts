@@ -4,6 +4,8 @@ import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
 import type { ResolvedWebViewerConfig } from '../../../shared/types/webViewer';
 import { WEB_VIEWER_DEFAULTS } from '../../../shared/types/webViewer';
+import { REMOTE_SYNC_STAGING_ORIGIN } from '../../../shared/types/remoteSync';
+import { isDevBuild } from '../utils/buildChannel';
 import {
   DEFAULT_RUN_TYPE_MODEL_FLOORS,
   type RunTypeDefaults,
@@ -59,7 +61,6 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
-import { isDevBuild } from '../utils/buildChannel';
 import { resolveCloudOrigin } from '../../../shared/types/cloudOrigins';
 
 /** cloud.origin overrides already warned about (one warning per distinct rejected value per process). */
@@ -926,4 +927,27 @@ export class ConfigManager extends EventEmitter {
     };
   }
 
+  /**
+   * Whether cross-machine backlog sync exists in this build at all: dev builds
+   * only (`pnpm dev` or the packaged "Cyboflow Dev" variant; see isDevBuild,
+   * which fails closed). In a release build this is false and nothing about the
+   * feature is reachable — no facade, no engine, no UI, no config write.
+   */
+  isRemoteSyncAvailable(): boolean {
+    return isDevBuild();
+  }
+
+  /**
+   * THE remote-sync gate: `isDevBuild && remoteSync.enabled`. Every consumer
+   * (engine start, tRPC facade, UI) reads this, never the raw config flag, so a
+   * flag left on in a config.json a release build later opens stays inert.
+   */
+  isRemoteSyncEnabled(): boolean {
+    return this.isRemoteSyncAvailable() && this.config.remoteSync?.enabled === true;
+  }
+
+  /** The cyboflow-sync origin. Dev builds always talk to staging. */
+  getRemoteSyncServerOrigin(): string {
+    return REMOTE_SYNC_STAGING_ORIGIN;
+  }
 }

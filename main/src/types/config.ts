@@ -10,6 +10,7 @@ import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 import type { WebViewerConfig } from '../../../shared/types/webViewer';
+import type { RemoteSyncConfig } from '../../../shared/types/remoteSync';
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 /**
@@ -229,6 +230,13 @@ export interface AppConfig {
   // config boundary (ipc/configOps.ts). NOT seeded into constructor defaults,
   // so existing config.json files stay byte-identical.
   systemWatchedPorts?: number[];
+  // Cross-machine backlog sync (see shared/types/remoteSync.ts). DEV BUILDS ONLY:
+  // `enabled` is the feature flag, effective only when isDevBuild() — read it via
+  // ConfigManager.isRemoteSyncEnabled(), never directly. Partial updates
+  // deep-merge at the config boundary (ipc/configOps.ts), and the boundary
+  // rejects the write outright in a release build. NOT seeded into constructor
+  // defaults, so existing config.json files stay byte-identical.
+  remoteSync?: RemoteSyncConfig;
   // Auto-surface idle PTY quick sessions into the human review queue (see
   // IdleSessionReviewConfig). A blocking human_task is minted for an interactive
   // quick session that finished a turn and has sat unviewed longer than
@@ -377,6 +385,8 @@ export interface UpdateConfigRequest {
   webViewer?: WebViewerConfig;
   // System view watched ports (see AppConfig.systemWatchedPorts).
   systemWatchedPorts?: number[];
+  // Cross-machine backlog sync flag (see AppConfig.remoteSync).
+  remoteSync?: RemoteSyncConfig;
   // Idle PTY quick-session auto-review settings (see AppConfig.idleSessionReview).
   idleSessionReview?: IdleSessionReviewConfig;
   // Agents & Environments gate (see AppConfig.agents). Dev builds only; configOps rejects it in release.

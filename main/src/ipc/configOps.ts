@@ -21,6 +21,7 @@ import {
 } from '../../../shared/types/webViewer';
 import { normalizeSystemWatchedPorts } from '../../../shared/types/systemWatchedPorts';
 import { AGENTS_CONFIG_KEYS, type AgentsConfig } from '../../../shared/types/persistentAgents';
+import { REMOTE_SYNC_CONFIG_KEYS, type RemoteSyncConfig } from '../../../shared/types/remoteSync';
 
 /**
  * Concrete implementation of {@link ConfigOpsLike}, backing the `config`
@@ -238,6 +239,44 @@ export function createConfigOps(
             return { success: false, error: 'Invalid systemWatchedPorts: expected up to 32 ports in 1-65535' };
           }
           normalized = { ...normalized, systemWatchedPorts: ports };
+        }
+
+        // Remote sync: dev builds only. A release build rejects the write
+        // outright (rather than storing an inert flag), so the feature has no
+        // reachable surface there at all. Same strict validate-then-merge as the
+        // web-viewer block above: booleans only, unknown keys rejected, merged
+        // over the STORED block, an empty block stored as absent.
+        if (updates.remoteSync !== undefined) {
+          if (!configManager.isRemoteSyncAvailable()) {
+            return { success: false, error: 'Remote sync is not available in this build' };
+          }
+          const patch: unknown = updates.remoteSync;
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            return { success: false, error: 'Invalid remoteSync payload' };
+          }
+          const raw = patch as Record<string, unknown>;
+          for (const key of Object.keys(raw)) {
+            if (!(REMOTE_SYNC_CONFIG_KEYS as readonly string[]).includes(key)) {
+              return { success: false, error: `Unknown remoteSync key: ${key}` };
+            }
+          }
+          const merged: RemoteSyncConfig = { ...(oldConfig.remoteSync ?? {}) };
+          for (const key of REMOTE_SYNC_CONFIG_KEYS) {
+            if (!(key in raw)) continue;
+            const value = raw[key];
+            if (value === undefined || value === null) {
+              delete merged[key];
+              continue;
+            }
+            if (typeof value !== 'boolean') {
+              return { success: false, error: `Invalid remoteSync.${key}: expected a boolean` };
+            }
+            merged[key] = value;
+          }
+          normalized = {
+            ...normalized,
+            remoteSync: Object.keys(merged).length === 0 ? undefined : merged,
+          };
         }
 
         await configManager.updateConfig(normalized);

@@ -29,6 +29,7 @@ import { providerUsageRouter } from './routers/providerUsage';
 import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { trackerRouter } from './routers/tracker';
+import { remoteSyncRouter } from './routers/remoteSync';
 import { reviewItemsRouter } from './routers/reviewItems';
 import { sessionGitRouter } from './routers/sessionGit';
 import { sessionsRouter } from './routers/sessions';
@@ -77,6 +78,7 @@ export const appRouter = router({
     plugins: pluginsRouter,
     providerUsage: providerUsageRouter,
     questions: questionsRouter,
+    remoteSync: remoteSyncRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,
     sessionGit: sessionGitRouter,
