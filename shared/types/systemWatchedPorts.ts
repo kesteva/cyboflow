@@ -1,6 +1,6 @@
 /**
  * The TCP ports the System view's "Ports & sockets" section probes — a user
- * setting (`AppConfig.systemWatchedPorts`, Settings → General → Advanced).
+ * setting (`AppConfig.systemWatchedPorts`), edited in place via the gear on that section.
  *
  * Defaults to common local dev-server ports rather than cyboflow's own: the
  * section answers "what is bound on this machine that I care about", and
@@ -9,7 +9,7 @@
  *
  * Lives in `shared/` because BOTH the main and frontend `AppConfig`
  * declarations carry the field (docs/CODE-PATTERNS.md → IPC / type-parity
- * rules), and the Settings form parses with the same rules the IPC boundary
+ * rules), and the inline editor parses with the same rules the IPC boundary
  * enforces.
  */
 
@@ -53,7 +53,7 @@ export function isDefaultSystemWatchedPorts(ports: readonly number[]): boolean {
 }
 
 /**
- * Parse the Settings text field (ports separated by commas and/or whitespace).
+ * Parse the inline editor's text field (ports separated by commas and/or whitespace).
  * `invalid` lists every token that is not a port, so the form can name them.
  */
 export function parseSystemWatchedPortsText(text: string): { ports: number[]; invalid: string[] } {

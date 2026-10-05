@@ -373,7 +373,7 @@ export function SystemView(): ReactElement {
               </button>
             </div>
             {snapshot !== null && (
-              <SystemPortsSection ports={snapshot.ports} />
+              <SystemPortsSection ports={snapshot.ports} onWatchedPortsSaved={refetch} />
             )}
             {snapshot !== null && <SystemOrphansSection snapshot={snapshot} onKillTree={processReap.handlers.onKillTree} />}
             {snapshot !== null && (

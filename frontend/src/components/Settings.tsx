@@ -29,11 +29,6 @@ import {
 } from '../../../shared/types/sprintBatch';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../shared/types/visualVerification';
 import { WEB_VIEWER_DEFAULTS } from '../../../shared/types/webViewer';
-import {
-  DEFAULT_SYSTEM_WATCHED_PORTS,
-  parseSystemWatchedPortsText,
-  SYSTEM_WATCHED_PORTS_MAX,
-} from '../../../shared/types/systemWatchedPorts';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
@@ -50,10 +45,9 @@ import {
   FolderOpen,
   Compass,
   Bot,
-  History,
-  Network
+  History
 } from 'lucide-react';
-import { Input, Textarea, Checkbox } from './ui/Input';
+import { Textarea, Checkbox } from './ui/Input';
 import { Switch } from './ui/Switch';
 import { Button } from './ui/Button';
 import { useTheme } from '../contexts/ThemeContext';
@@ -169,8 +163,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Demo mode is hidden in the stable DMG (it's a dev/internal affordance).
   const [buildVariant, setBuildVariant] = useState<'stable' | 'dev' | undefined>(undefined);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
-  // System view watched ports, as typed (comma/space separated).
-  const [watchedPortsText, setWatchedPortsText] = useState(DEFAULT_SYSTEM_WATCHED_PORTS.join(', '));
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   // Model alias for the global cyboflow assistant (the agent-rail chat). '' =
   // follow the app's default model (defaultModel / getDefaultModel()).
@@ -387,7 +379,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       // Load additional paths
       const paths = data.additionalPaths || [];
       setAdditionalPathsText(paths.join('\n'));
-      setWatchedPortsText((data.systemWatchedPorts ?? DEFAULT_SYSTEM_WATCHED_PORTS).join(', '));
       
       // Load notification settings
       if (data.notifications) {
@@ -406,14 +397,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
     setError(null);
 
     try {
-      const watchedPorts = parseSystemWatchedPortsText(watchedPortsText);
-      if (watchedPorts.invalid.length > 0) {
-        throw new Error(`Watched ports: not a port (1-65535): ${watchedPorts.invalid.join(', ')}`);
-      }
-      if (watchedPorts.ports.length > SYSTEM_WATCHED_PORTS_MAX) {
-        throw new Error(`Watched ports: at most ${SYSTEM_WATCHED_PORTS_MAX} ports`);
-      }
-
       // Parse the additional paths text into an array
       const parsedPaths = additionalPathsText
         .split('\n')
@@ -517,9 +500,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               : 5,
         },
         additionalPaths: parsedPaths,
-        // Explicit array (possibly empty = watch nothing); the IPC boundary drops
-        // the key when it equals the defaults.
-        systemWatchedPorts: watchedPorts.ports,
         notifications: notificationSettings,
         // Spread the existing telemetry first so the persisted installId is
         // preserved; fall back to '' (never undefined) if it was never set.
@@ -882,21 +862,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   rows={4}
                   fullWidth
                   helperText="Enter one directory path per line. These will be added to PATH for all tools.\nUse forward slashes (/path). The tilde (~) expands to your home directory.\nNote: Changes require restarting Cyboflow to take full effect."
-                />
-              </SettingsSection>
-
-              <SettingsSection
-                title="Watched Ports"
-                description="TCP ports the System view's Ports & sockets section checks"
-                icon={<Network className="w-4 h-4" />}
-              >
-                <Input
-                  value={watchedPortsText}
-                  onChange={(e) => setWatchedPortsText(e.target.value)}
-                  placeholder={DEFAULT_SYSTEM_WATCHED_PORTS.join(', ')}
-                  fullWidth
-                  data-testid="settings-watched-ports"
-                  helperText="Separate ports with commas or spaces. Leave empty to watch none."
                 />
               </SettingsSection>
 
