@@ -13,16 +13,12 @@
  * partial payload (missing `ports`, or a missing member) renders an empty state
  * instead of crashing.
  */
-import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react';
+import { useState, type KeyboardEvent, type ReactElement } from 'react';
 import { Settings as GearIcon } from 'lucide-react';
 import type { SystemSnapshotData } from '../../hooks/useSystemSnapshot';
 import { API } from '../../utils/api';
 import { useConfigStore } from '../../stores/configStore';
-import {
-  parseSystemWatchedPortsText,
-  resolveSystemWatchedPorts,
-  SYSTEM_WATCHED_PORTS_MAX,
-} from '../../../../shared/types/systemWatchedPorts';
+import { parseSystemWatchedPortsText, SYSTEM_WATCHED_PORTS_MAX } from '../../../../shared/types/systemWatchedPorts';
 
 type PortsData = SystemSnapshotData['ports'];
 
@@ -74,29 +70,21 @@ function buildRows(ports: Partial<PortsData> | null | undefined): PortRow[] {
 const SMALL_BUTTON_CLASS =
   'rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 font-mono text-xs text-text-secondary transition-colors hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50';
 
-/** Inline editor for the watched-port list; loads the stored list fresh when opened. */
-function WatchedPortsEditor({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }): ReactElement {
-  const [text, setText] = useState<string | null>(null);
+interface WatchedPortsEditorProps {
+  /** The ports the snapshot currently probes — the effective list, defaults included. */
+  initialPorts: readonly number[];
+  onClose: () => void;
+  onSaved?: () => void;
+}
+
+/** Inline editor for the watched-port list, prefilled with what the section shows. */
+function WatchedPortsEditor({ initialPorts, onClose, onSaved }: WatchedPortsEditorProps): ReactElement {
+  const [text, setText] = useState(() => initialPorts.join(', '));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Load the stored list on open (absent ⇒ the defaults).
-  useEffect(() => {
-    let cancelled = false;
-    const show = (stored: unknown): void => {
-      if (!cancelled) setText(resolveSystemWatchedPorts(stored).join(', '));
-    };
-    API.config
-      .get()
-      .then((response) => show(response.success ? response.data?.systemWatchedPorts : undefined))
-      .catch(() => show(undefined));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const save = async (): Promise<void> => {
-    if (text === null || saving) return;
+    if (saving) return;
     const parsed = parseSystemWatchedPortsText(text);
     if (parsed.invalid.length > 0) {
       setError(`Not a port (1-65535): ${parsed.invalid.join(', ')}`);
@@ -141,8 +129,8 @@ function WatchedPortsEditor({ onClose, onSaved }: { onClose: () => void; onSaved
           data-testid="system-ports-editor-input"
           aria-label="Watched ports"
           autoFocus
-          disabled={text === null || saving}
-          value={text ?? ''}
+          disabled={saving}
+          value={text}
           placeholder="e.g. 3000, 5000, 8080"
           onChange={(e) => {
             setText(e.target.value);
@@ -154,7 +142,7 @@ function WatchedPortsEditor({ onClose, onSaved }: { onClose: () => void; onSaved
         <button
           type="button"
           data-testid="system-ports-editor-save"
-          disabled={text === null || saving}
+          disabled={saving}
           onClick={() => void save()}
           className={SMALL_BUTTON_CLASS}
         >
@@ -197,7 +185,13 @@ export function SystemPortsSection({ ports, onWatchedPortsSaved }: SystemPortsSe
           <GearIcon className="h-3 w-3" aria-hidden="true" />
         </button>
       </div>
-      {editing && <WatchedPortsEditor onClose={() => setEditing(false)} onSaved={onWatchedPortsSaved} />}
+      {editing && (
+        <WatchedPortsEditor
+          initialPorts={Array.isArray(ports?.tcp) ? ports.tcp.map((p) => p.port) : []}
+          onClose={() => setEditing(false)}
+          onSaved={onWatchedPortsSaved}
+        />
+      )}
       {rows.length === 0 ? (
         <div data-testid="system-ports-empty" className="text-sm text-text-tertiary">
           No ports or sockets reported.

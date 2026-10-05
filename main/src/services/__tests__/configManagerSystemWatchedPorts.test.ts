@@ -2,10 +2,10 @@
  * System view watched ports — ConfigManager.getSystemWatchedPorts floors and the
  * config:update boundary (ipc/configOps.ts) that validates and normalizes the list.
  *
- * The contracts that matter: an absent key reads the defaults (3000, 5000, 8080)
- * and stays absent on disk; an explicit [] means "watch nothing"; a malformed
- * payload is rejected rather than coerced; and saving the defaults back drops the
- * key, so a Settings save that never touched the field leaves config.json alone.
+ * The contracts that matter: an absent key reads undefined (the caller applies the
+ * build's defaults) and stays absent on disk; an explicit [] means "watch nothing";
+ * a malformed payload is rejected rather than coerced; and a saved list is stored
+ * explicitly, even when it matches a default, because defaults differ by build.
  *
  * Hermetic: each test points ConfigManager at a unique temp dir.
  */
@@ -62,17 +62,17 @@ describe('ConfigManager.getSystemWatchedPorts', () => {
     expect(parity).toBe(true);
   });
 
-  it('defaults to 3000, 5000, 8080 and is not seeded into the constructor defaults', () => {
+  it('reads undefined when unset and is not seeded into the constructor defaults', () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     expect(mgr.getConfig().systemWatchedPorts).toBeUndefined();
-    expect(mgr.getSystemWatchedPorts()).toEqual([3000, 5000, 8080]);
+    expect(mgr.getSystemWatchedPorts()).toBeUndefined();
   });
 
-  it('floors a hand-edited malformed value to the defaults', async () => {
+  it('reads a hand-edited malformed value as unset', async () => {
     await fs.writeFile(path.join(tempDir, 'config.json'), JSON.stringify({ systemWatchedPorts: ['3000', 99999] }));
     const mgr = new ConfigManager('/tmp/test-git-path');
     await mgr.initialize();
-    expect(mgr.getSystemWatchedPorts()).toEqual([3000, 5000, 8080]);
+    expect(mgr.getSystemWatchedPorts()).toBeUndefined();
   });
 });
 
@@ -93,13 +93,11 @@ describe('config:update systemWatchedPorts boundary', () => {
     expect(mgr.getSystemWatchedPorts()).toEqual([]);
   });
 
-  it('drops the key when the saved list equals the defaults', async () => {
+  it('stores a list matching the packaged defaults explicitly', async () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     await mgr.initialize();
-    const ops = configOpsFor(mgr);
-    await ops.updateConfig({ systemWatchedPorts: [8080] });
-    await ops.updateConfig({ systemWatchedPorts: [3000, 5000, 8080] });
-    expect('systemWatchedPorts' in (await readPersisted(tempDir))).toBe(false);
+    await configOpsFor(mgr).updateConfig({ systemWatchedPorts: [3000, 5000, 8080] });
+    expect((await readPersisted(tempDir)).systemWatchedPorts).toEqual([3000, 5000, 8080]);
     expect(mgr.getSystemWatchedPorts()).toEqual([3000, 5000, 8080]);
   });
 

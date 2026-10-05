@@ -9,18 +9,16 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { SystemSnapshotData } from '../../../hooks/useSystemSnapshot';
 import { SystemPortsSection } from '../SystemPortsSection';
 
-const { getSpy, updateSpy, fetchConfigSpy } = vi.hoisted(() => ({
-  getSpy: vi.fn(),
+const { updateSpy, fetchConfigSpy } = vi.hoisted(() => ({
   updateSpy: vi.fn(),
   fetchConfigSpy: vi.fn(),
 }));
-vi.mock('../../../utils/api', () => ({ API: { config: { get: getSpy, update: updateSpy } } }));
+vi.mock('../../../utils/api', () => ({ API: { config: { update: updateSpy } } }));
 vi.mock('../../../stores/configStore', () => ({
   useConfigStore: { getState: () => ({ fetchConfig: fetchConfigSpy }) },
 }));
 
 beforeEach(() => {
-  getSpy.mockReset().mockResolvedValue({ success: true, data: {} });
   updateSpy.mockReset().mockResolvedValue({ success: true });
   fetchConfigSpy.mockReset();
 });
@@ -100,19 +98,18 @@ describe('SystemPortsSection', () => {
     expect(Array.from(buttons).map((b) => b.getAttribute('data-testid'))).toEqual(['system-ports-configure']);
   });
 
-  it('the gear opens an editor prefilled with the defaults when nothing is stored', async () => {
+  it('the gear opens an editor prefilled with the ports the section shows', () => {
     render(<SystemPortsSection ports={ports()} />);
     expect(screen.queryByTestId('system-ports-editor')).toBeNull();
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    await waitFor(() => expect(screen.getByTestId('system-ports-editor-input')).toHaveValue('3000, 5000, 8080'));
+    expect(screen.getByTestId('system-ports-editor-input')).toHaveValue('3000, 8080');
   });
 
-  it('prefills the stored list, saves the parsed ports, and re-probes', async () => {
-    getSpy.mockResolvedValue({ success: true, data: { systemWatchedPorts: [4000] } });
+  it('saves the parsed ports and re-probes', async () => {
     const onSaved = vi.fn();
-    render(<SystemPortsSection ports={ports()} onWatchedPortsSaved={onSaved} />);
+    render(<SystemPortsSection ports={ports({ tcp: [{ port: 4000, label: 'watched', inUse: false }] })} onWatchedPortsSaved={onSaved} />);
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    const input = await screen.findByDisplayValue('4000');
+    const input = screen.getByDisplayValue('4000');
     fireEvent.change(input, { target: { value: '4000 6006, 4000' } });
     fireEvent.keyDown(input, { key: 'Enter' });
 
@@ -125,7 +122,7 @@ describe('SystemPortsSection', () => {
   it('names invalid tokens and saves nothing', async () => {
     render(<SystemPortsSection ports={ports()} />);
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    const input = await screen.findByDisplayValue('3000, 5000, 8080');
+    const input = screen.getByDisplayValue('3000, 8080');
     fireEvent.change(input, { target: { value: '3000, abc, 70000' } });
     fireEvent.click(screen.getByTestId('system-ports-editor-save'));
 
@@ -137,7 +134,7 @@ describe('SystemPortsSection', () => {
     updateSpy.mockResolvedValue({ success: false, error: 'Invalid systemWatchedPorts' });
     render(<SystemPortsSection ports={ports()} />);
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    await screen.findByDisplayValue('3000, 5000, 8080');
+    screen.getByDisplayValue('3000, 8080');
     fireEvent.click(screen.getByTestId('system-ports-editor-save'));
 
     expect(await screen.findByTestId('system-ports-editor-error')).toHaveTextContent('Invalid systemWatchedPorts');
@@ -147,12 +144,12 @@ describe('SystemPortsSection', () => {
   it('Escape and Cancel close the editor without saving', async () => {
     render(<SystemPortsSection ports={ports()} />);
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    const input = await screen.findByDisplayValue('3000, 5000, 8080');
+    const input = screen.getByDisplayValue('3000, 8080');
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(screen.queryByTestId('system-ports-editor')).toBeNull();
 
     fireEvent.click(screen.getByTestId('system-ports-configure'));
-    await screen.findByDisplayValue('3000, 5000, 8080');
+    screen.getByDisplayValue('3000, 8080');
     fireEvent.click(screen.getByTestId('system-ports-editor-cancel'));
     expect(screen.queryByTestId('system-ports-editor')).toBeNull();
     expect(updateSpy).not.toHaveBeenCalled();

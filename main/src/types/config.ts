@@ -224,12 +224,12 @@ export interface AppConfig {
   // shallow spread would let `{ agentDrive: true }` drop an explicit
   // `enabled: false` and silently re-enable a feature the user turned off.
   webViewer?: WebViewerConfig;
-  // TCP ports the System view's "Ports & sockets" section probes. Absent ⇒
-  // DEFAULT_SYSTEM_WATCHED_PORTS (common dev-server ports); an explicit [] ⇒
-  // watch nothing. Read via getSystemWatchedPorts(); validated and stored
-  // normalized at the config boundary (ipc/configOps.ts), which drops the key
-  // when it equals the defaults. NOT seeded into constructor defaults, so
-  // existing config.json files stay byte-identical.
+  // TCP ports the System view's "Ports & sockets" section probes, edited via the
+  // section's gear. Absent ⇒ the build's defaults (3000/5000/8080, plus
+  // cyboflow's own dev ports in a dev build); an explicit [] ⇒ watch nothing.
+  // Read via getSystemWatchedPorts(); validated and stored normalized at the
+  // config boundary (ipc/configOps.ts). NOT seeded into constructor defaults,
+  // so existing config.json files stay byte-identical.
   systemWatchedPorts?: number[];
   // Auto-surface idle PTY quick sessions into the human review queue (see
   // IdleSessionReviewConfig). A blocking human_task is minted for an interactive
