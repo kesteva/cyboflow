@@ -37,6 +37,8 @@ export interface SystemSnapshotProviderDeps {
   processSnapshot: { snapshot(): Promise<SnapshottedProcess[]> };
   worktrees: Pick<WorktreeMonitorProvider, 'loadRegistry' | 'getDiskUsage'>;
   orchSocket: SystemOrchSocketSource;
+  /** The TCP ports each snapshot probes; read per call. Absent ⇒ none. */
+  watchedPorts?: SystemSnapshotProvider['watchedPorts'];
   /** Port probe seam; defaults to the real `probePort`. */
   probePort?: SystemSnapshotProvider['probePort'];
   /** Platform seam; defaults to the host platform. */
@@ -170,6 +172,7 @@ export function createSystemSnapshotProvider(deps: SystemSnapshotProviderDeps): 
     loadWorktrees: (projectId) => deps.worktrees.loadRegistry(projectId),
     getDiskUsage: (p) => deps.worktrees.getDiskUsage(p),
     orchSocket: deps.orchSocket,
+    watchedPorts: deps.watchedPorts,
     probePort: deps.probePort,
     platform: deps.platform,
     async loadProcesses(knownWorktreePaths) {

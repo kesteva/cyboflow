@@ -140,6 +140,9 @@ export interface AppConfig {
   // floor to FALSE. The main side applies the floors — read the resolved block
   // rather than these raw members.
   webViewer?: WebViewerConfig;
+  // TCP ports the System view probes (see shared/types/systemWatchedPorts.ts).
+  // Absent ⇒ the defaults (3000, 5000, 8080); [] ⇒ watch nothing.
+  systemWatchedPorts?: number[];
   // Auto-surface idle PTY quick sessions into the human review queue. A blocking
   // human_task is minted for an interactive quick session that finished a turn
   // and has sat unviewed longer than thresholdMinutes. Absent members floor to

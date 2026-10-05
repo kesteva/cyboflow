@@ -42,8 +42,7 @@ describe('cyboflow.system wiring', () => {
     expect(snap.processes).toEqual([]);
     expect(snap.worktrees).toEqual([]);
     expect(snap.ports.orchSocket).toEqual({ connectionCount: 0, runBindings: {} });
-    expect(snap.ports.devRenderer).toMatchObject({ port: 4521, inUse: false });
-    expect(snap.ports.cdp).toMatchObject({ port: 9223, inUse: false });
+    expect(snap.ports.tcp).toEqual([]);
   });
 });
 
@@ -115,7 +114,7 @@ describe('cyboflow.system.snapshot — nested worktree disk usage', () => {
 
 describe('cyboflow.system.snapshot — delegation', () => {
   it('composes process + worktree/disk + ports/sockets data in one call', async () => {
-    const probe = vi.fn(async (port: number, label: string) => ({ port, label, inUse: port === 9223 }));
+    const probe = vi.fn(async (port: number, label: string) => ({ port, label, inUse: port === 8080 }));
     const provider: SystemSnapshotProvider = {
       loadWorktrees: vi.fn(async () => [WORKTREE]),
       getDiskUsage: vi.fn(() => ({ status: 'measuring' as const })),
@@ -124,6 +123,10 @@ describe('cyboflow.system.snapshot — delegation', () => {
         getConnectionCount: vi.fn(() => 3),
         getRunBindingCounts: vi.fn(() => ({ 'run-1': 2 })),
       },
+      watchedPorts: () => [
+        { port: 3000, label: 'watched' },
+        { port: 8080, label: 'watched' },
+      ],
       probePort: probe,
       platform: 'darwin',
     };
@@ -138,11 +141,47 @@ describe('cyboflow.system.snapshot — delegation', () => {
     expect(snap.processes).toEqual([PROCESS]);
     expect(snap.worktrees).toEqual([{ ...WORKTREE, usage: { status: 'measuring' } }]);
     expect(snap.ports).toEqual({
-      devRenderer: { port: 4521, label: 'dev renderer', inUse: false },
-      cdp: { port: 9223, label: 'CDP', inUse: true },
+      tcp: [
+        { port: 3000, label: 'watched', inUse: false },
+        { port: 8080, label: 'watched', inUse: true },
+      ],
       orchSocket: { connectionCount: 3, runBindings: { 'run-1': 2 } },
     });
     expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('probes nothing when the provider supplies no watched ports', async () => {
+    const probe = vi.fn(async (port: number, label: string) => ({ port, label, inUse: true }));
+    setSystemProvider({
+      loadWorktrees: vi.fn(async () => []),
+      getDiskUsage: vi.fn(() => ({ status: 'measuring' as const })),
+      loadProcesses: vi.fn(async () => []),
+      orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
+      probePort: probe,
+      platform: 'darwin',
+    });
+
+    const snap = await caller().snapshot({ projectId: 7 });
+
+    expect(snap.ports.tcp).toEqual([]);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the watched ports on every snapshot', async () => {
+    let configured = [3000];
+    setSystemProvider({
+      loadWorktrees: vi.fn(async () => []),
+      getDiskUsage: vi.fn(() => ({ status: 'measuring' as const })),
+      loadProcesses: vi.fn(async () => []),
+      orchSocket: { getConnectionCount: () => 0, getRunBindingCounts: () => ({}) },
+      watchedPorts: () => configured.map((port) => ({ port, label: 'watched' })),
+      probePort: async (port, label) => ({ port, label, inUse: false }),
+      platform: 'darwin',
+    });
+
+    expect((await caller().snapshot({ projectId: 7 })).ports.tcp.map((p) => p.port)).toEqual([3000]);
+    configured = [5000, 8080];
+    expect((await caller().snapshot({ projectId: 7 })).ports.tcp.map((p) => p.port)).toEqual([5000, 8080]);
   });
 });
 

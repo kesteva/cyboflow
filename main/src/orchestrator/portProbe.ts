@@ -1,6 +1,6 @@
 /**
- * Standalone TCP connect-probe for the fixed ports the System view's
- * "Ports & sockets" section reports on (:4521 dev renderer, :9223 CDP).
+ * Standalone TCP connect-probe for the watched ports the System view's
+ * "Ports & sockets" section reports on (AppConfig.systemWatchedPorts).
  *
  * Imports only Node's `net` — no `electron`, `better-sqlite3`, or
  * `main/src/services/*` — so the system router can import it under the

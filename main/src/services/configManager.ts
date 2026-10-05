@@ -36,6 +36,7 @@ import {
   isFanOutDispatch,
   type FanOutDispatch,
 } from '../../../shared/types/fanOutDispatch';
+import { resolveSystemWatchedPorts } from '../../../shared/types/systemWatchedPorts';
 import {
   type QuickSessionWorktreeMode,
   DEFAULT_QUICK_SESSION_WORKTREE_MODE,
@@ -731,6 +732,16 @@ export class ConfigManager extends EventEmitter {
   getDefaultExecutionModel(): ExecutionModel {
     const value = this.config.defaultExecutionModel;
     return isExecutionModel(value) ? value : 'programmatic';
+  }
+
+  /**
+   * TCP ports the System view's "Ports & sockets" section probes. Floors to
+   * DEFAULT_SYSTEM_WATCHED_PORTS when unset OR malformed (config.json is
+   * user-editable); an explicit [] means watch nothing. NOT seeded into the
+   * constructor defaults, so existing config.json files stay byte-identical.
+   */
+  getSystemWatchedPorts(): number[] {
+    return resolveSystemWatchedPorts(this.config.systemWatchedPorts);
   }
 
   /**

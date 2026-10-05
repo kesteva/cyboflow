@@ -12,8 +12,10 @@ import { SystemPortsSection } from '../SystemPortsSection';
 type Ports = SystemSnapshotData['ports'];
 
 const ports = (over: Partial<Ports> = {}): Ports => ({
-  devRenderer: { port: 4521, label: 'dev renderer', inUse: true },
-  cdp: { port: 9223, label: 'CDP', inUse: false },
+  tcp: [
+    { port: 3000, label: 'watched', inUse: true },
+    { port: 8080, label: 'watched', inUse: false },
+  ],
   orchSocket: { connectionCount: 3, runBindings: { 'run-a': 2, 'run-b': 1 } },
   ...over,
 });
@@ -21,8 +23,8 @@ const ports = (over: Partial<Ports> = {}): Ports => ({
 describe('SystemPortsSection', () => {
   it('renders a row per port/socket from the snapshot', () => {
     render(<SystemPortsSection ports={ports()} />);
-    expect(screen.getByTestId('system-port-port-4521')).toHaveAttribute('data-bound', 'true');
-    expect(screen.getByTestId('system-port-port-9223')).toHaveAttribute('data-bound', 'false');
+    expect(screen.getByTestId('system-port-port-3000')).toHaveAttribute('data-bound', 'true');
+    expect(screen.getByTestId('system-port-port-8080')).toHaveAttribute('data-bound', 'false');
     const sock = screen.getByTestId('system-port-orch-sock');
     expect(sock).toHaveTextContent('orch.sock');
     expect(sock).toHaveTextContent('3 clients · 2 runs bound');
@@ -32,9 +34,9 @@ describe('SystemPortsSection', () => {
 
   it('never asserts an owner or conflict for a bound port (no authoritative mapping)', () => {
     render(<SystemPortsSection ports={ports()} />);
-    expect(screen.getByTestId('system-port-port-4521-owner')).toHaveTextContent('owner not identified');
-    expect(screen.queryByTestId('system-port-port-4521-conflict')).toBeNull();
-    expect(screen.queryByTestId('system-port-port-9223-owner')).toBeNull();
+    expect(screen.getByTestId('system-port-port-3000-owner')).toHaveTextContent('owner not identified');
+    expect(screen.queryByTestId('system-port-port-3000-conflict')).toBeNull();
+    expect(screen.queryByTestId('system-port-port-8080-owner')).toBeNull();
   });
 
   it('does not report orch.sock as free when it has zero clients', () => {
@@ -44,6 +46,22 @@ describe('SystemPortsSection', () => {
     expect(sock).toHaveTextContent('0 clients · 0 runs bound');
     expect(sock).toHaveTextContent('listening state not reported');
     expect(sock).not.toHaveTextContent('free');
+  });
+
+  it('renders every watched port in order, with its label', () => {
+    render(
+      <SystemPortsSection
+        ports={ports({
+          tcp: [
+            { port: 5000, label: 'watched', inUse: false },
+            { port: 4521, label: 'cyboflow dev renderer', inUse: true },
+          ],
+        })}
+      />,
+    );
+    const rows = screen.getAllByTestId(/^system-port-port-\d+$/);
+    expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual(['system-port-port-5000', 'system-port-port-4521']);
+    expect(rows[1]).toHaveTextContent('cyboflow dev renderer');
   });
 
   it('renders the empty state when the snapshot reports no ports or sockets', () => {
@@ -56,8 +74,8 @@ describe('SystemPortsSection', () => {
     expect(screen.getByTestId('system-ports-empty')).toBeInTheDocument();
     rerender(<SystemPortsSection ports={null} />);
     expect(screen.getByTestId('system-ports-empty')).toBeInTheDocument();
-    rerender(<SystemPortsSection ports={{ cdp: { port: 9223, label: 'CDP', inUse: true } }} />);
-    expect(screen.getByTestId('system-port-port-9223')).toBeInTheDocument();
+    rerender(<SystemPortsSection ports={{ tcp: [{ port: 5000, label: 'watched', inUse: true }] }} />);
+    expect(screen.getByTestId('system-port-port-5000')).toBeInTheDocument();
   });
 
   it('is read-only: no buttons in the section', () => {

@@ -19,6 +19,10 @@ import {
   WEB_VIEWER_CONFIG_KEYS,
   type WebViewerConfig,
 } from '../../../shared/types/webViewer';
+import {
+  isDefaultSystemWatchedPorts,
+  normalizeSystemWatchedPorts,
+} from '../../../shared/types/systemWatchedPorts';
 
 /**
  * Concrete implementation of {@link ConfigOpsLike}, backing the `config`
@@ -184,6 +188,20 @@ export function createConfigOps(
           normalized = {
             ...normalized,
             webViewer: Object.keys(merged).length === 0 ? undefined : merged,
+          };
+        }
+
+        // System view watched ports: reject a malformed list outright and store it
+        // deduplicated. A list equal to the defaults is stored as absent, so a
+        // settings save that never touched the field leaves config.json alone.
+        if (updates.systemWatchedPorts !== undefined) {
+          const ports = normalizeSystemWatchedPorts(updates.systemWatchedPorts);
+          if (ports === null) {
+            return { success: false, error: 'Invalid systemWatchedPorts: expected up to 32 ports in 1-65535' };
+          }
+          normalized = {
+            ...normalized,
+            systemWatchedPorts: isDefaultSystemWatchedPorts(ports) ? undefined : ports,
           };
         }
 

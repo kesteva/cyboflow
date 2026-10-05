@@ -38,6 +38,8 @@ import type { RunShellManager } from './services/runShellManager';
 import type { WorktreeManager } from './services/worktreeManager';
 import type { GitStatusManager } from './services/gitStatusManager';
 import type { DatabaseService } from './database/database';
+import type { ConfigManager } from './services/configManager';
+import type { WatchedPort } from './orchestrator/systemTypes';
 
 export interface SystemViewCompositionDeps {
   databaseService: DatabaseService;
@@ -49,6 +51,38 @@ export interface SystemViewCompositionDeps {
   ptyCliManagers: AbstractCliManager[];
   /** Read lazily: the run-shell manager is constructed later in boot. */
   getRunShellManager: () => RunShellManager | null;
+  /** Source of the user's watched-port list, read per snapshot. */
+  configManager: Pick<ConfigManager, 'getSystemWatchedPorts'>;
+  /** Dev build: cyboflow's own dev renderer + CDP ports are watched too. */
+  isDevelopment: boolean;
+}
+
+const WATCHED_PORT_LABEL = 'watched';
+
+/**
+ * The ports one snapshot probes: the user's configured list, then — in a dev build
+ * only — cyboflow's own dev renderer and CDP ports, resolved from the same env vars
+ * `pnpm dev` binds them from (a verify instance runs on leased ports). A configured
+ * port that is also one of cyboflow's keeps its slot but takes the specific label.
+ */
+export function resolveWatchedPorts(
+  configured: readonly number[],
+  isDevelopment: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): WatchedPort[] {
+  const ports: WatchedPort[] = configured.map((port) => ({ port, label: WATCHED_PORT_LABEL }));
+  if (!isDevelopment) return ports;
+  const own: WatchedPort[] = [
+    { port: Number(env.CYBOFLOW_VITE_PORT ?? 4521), label: 'cyboflow dev renderer' },
+    { port: Number(env.CYBOFLOW_CDP_PORT ?? 9223), label: 'cyboflow CDP' },
+  ];
+  for (const entry of own) {
+    if (!Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) continue;
+    const existing = ports.find((p) => p.port === entry.port);
+    if (existing) existing.label = entry.label;
+    else ports.push(entry);
+  }
+  return ports;
 }
 
 export function composeSystemView(deps: SystemViewCompositionDeps): void {
@@ -69,6 +103,7 @@ export function composeSystemView(deps: SystemViewCompositionDeps): void {
     }),
     worktrees: buildWorktreeProvider(),
     orchSocket: deps.orchSocketServer,
+    watchedPorts: () => resolveWatchedPorts(deps.configManager.getSystemWatchedPorts(), deps.isDevelopment),
   });
   setSystemProvider(systemSnapshotProvider);
   console.log('[Main] system deps wired');

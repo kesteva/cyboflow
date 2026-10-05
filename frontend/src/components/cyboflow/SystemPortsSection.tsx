@@ -3,8 +3,9 @@
  * view (design IDEA-037). Kept as its own top-level section rather than folded
  * into owning worktree cards: it answers "what's bound on this machine".
  *
- * Sourced from `snapshot.ports` (the :4521 dev renderer, :9223 CDP and
- * `orch.sock` occupancy). The snapshot carries no authoritative port→owner
+ * Sourced from `snapshot.ports`: the watched TCP ports (Settings → General →
+ * Watched Ports; cyboflow's own dev ports are added in a dev build) and
+ * `orch.sock` occupancy. The snapshot carries no authoritative port→owner
  * mapping and no listening flag for `orch.sock`, so neither is asserted: a bound
  * TCP port shows its owner as unidentified, and `orch.sock` shows its client
  * count without claiming bound/free (a listening socket can have zero clients).
@@ -36,22 +37,13 @@ interface PortRow {
 function buildRows(ports: Partial<PortsData> | null | undefined): PortRow[] {
   const rows: PortRow[] = [];
   if (ports === null || ports === undefined) return rows;
-  const { devRenderer, cdp, orchSocket } = ports;
-  if (devRenderer) {
+  const { tcp, orchSocket } = ports;
+  for (const probe of Array.isArray(tcp) ? tcp : []) {
     rows.push({
-      id: 'port-4521',
-      title: `:${devRenderer.port}`,
-      sub: devRenderer.label,
-      bound: devRenderer.inUse,
-      tcp: true,
-    });
-  }
-  if (cdp) {
-    rows.push({
-      id: 'port-9223',
-      title: `:${cdp.port}`,
-      sub: cdp.label,
-      bound: cdp.inUse,
+      id: `port-${probe.port}`,
+      title: `:${probe.port}`,
+      sub: probe.label,
+      bound: probe.inUse,
       tcp: true,
     });
   }
