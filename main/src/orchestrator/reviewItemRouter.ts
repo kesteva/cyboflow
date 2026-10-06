@@ -130,7 +130,9 @@ export type ReviewActor =
   | 'linear'
   | 'plane'
   | 'dart'
-  | 'beads';
+  | 'beads'
+  /** A write applied from another machine by cross-machine backlog sync. Not a TrackerProvider. */
+  | 'cyboflow-remote';
 
 /** Create a new review item. Omit `reviewItemId` (it is minted). */
 export interface ReviewItemCreate {
