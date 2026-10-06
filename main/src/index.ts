@@ -246,6 +246,7 @@ import { composeEvalWorkers } from './evalComposition';
 import { composeWebViewer } from './webViewerComposition';
 import { stripInheritedLaneEnv } from './orchestrator/programmatic/laneBuildSlotsWiring';
 import { stripInheritedRunEnv } from './utils/inheritedRunEnv';
+import { formatProcessWarning } from './utils/processWarning';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -639,9 +640,7 @@ process.on('unhandledRejection', (reason) => {
 process.removeAllListeners('warning');
 process.on('warning', (warning: Error & { code?: string; detail?: string }) => {
   try {
-    const code = warning.code ? ` [${warning.code}]` : '';
-    const detail = warning.detail ? `\n${warning.detail}` : '';
-    console.warn(`(node:${process.pid})${code} ${warning.name}: ${warning.message}${detail}`);
+    console.warn(formatProcessWarning(warning, process.pid));
   } catch {
     // swallow — a broken console must not turn a warning into a crash
   }

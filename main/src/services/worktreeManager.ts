@@ -1,4 +1,5 @@
 import { join, dirname } from 'path';
+import { existsSync } from 'fs';
 import { mkdir } from 'fs/promises';
 import { withLock } from '../utils/mutex';
 import { appendCommitFooter } from '../utils/commitFooter';
@@ -636,6 +637,11 @@ export class WorktreeManager {
     mainBranch: string,
   ): Promise<{ landed: boolean; ownCommits: number; commitsAhead: number }> {
     const notLanded = { landed: false, ownCommits: 0, commitsAhead: 0 };
+    // A worktree directory deleted out-of-band (session still in the app) is an
+    // expected state, not a fault: spawning git with a missing cwd fails as
+    // `spawn /usr/bin/git ENOENT`, which logs at ERROR and misnames the binary
+    // as the thing that is missing.
+    if (!existsSync(worktreePath)) return notLanded;
     try {
       const branch = assertNotOptionLike(mainBranch, 'main branch');
 

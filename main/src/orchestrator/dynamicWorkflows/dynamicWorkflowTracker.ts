@@ -35,7 +35,7 @@ import { DynamicWorkflowDetector } from './dynamicWorkflowDetector';
 import type { DynamicWorkflowLaunchInfo, DynamicWorkflowNotification } from './dynamicWorkflowDetector';
 import { JournalTailer, readCompletionRecord } from './journalTailer';
 import type { DynamicWorkflowCompletionRecord } from './journalTailer';
-import { parseScriptMeta } from './scriptMeta';
+import { parseScriptMeta, type ParsedScriptMeta } from './scriptMeta';
 import { DYNAMIC_WORKFLOW_REVIEW_SOURCE } from '../../../../shared/types/dynamicWorkflows';
 import type {
   DynamicWorkflowAgent,
@@ -94,6 +94,14 @@ interface DynamicWorkflowTrackerOptions {
   rollupUsage?: typeof rollupRunUsage;
 }
 
+/**
+ * Back-off for re-reading a workflow script whose launch was observed before the
+ * file was readable. The CLI's launch signal can beat the script's write by a few
+ * ms (smoke runs caught a read 5 ms before the file's birthtime), and a single
+ * failed read used to leave the card on its filename fallback with no phases.
+ */
+const SCRIPT_META_RETRY_DELAYS_MS = [100, 500, 2_000] as const;
+
 export class DynamicWorkflowTracker {
   private static instance: DynamicWorkflowTracker | null = null;
 
@@ -109,6 +117,8 @@ export class DynamicWorkflowTracker {
   private readonly scriptWatchers = new Map<string, WorkflowScriptWatcher>();
   /** Demo-mode scripted-timeline timers (injectDemoWorkflow), cleared on dispose. */
   private readonly demoTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** wfRunId -> pending script-meta re-read (see SCRIPT_META_RETRY_DELAYS_MS). */
+  private readonly metaRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * wfRunIds the operator has dismissed — handleLaunch refuses to re-track them.
    * The script-watcher dedups on its own `seen` set, but the stream detector
@@ -506,7 +516,8 @@ export class DynamicWorkflowTracker {
       if (this.dismissedWfRunIds.has(info.wfRunId)) return; // dismissed — never resurrect
 
       const { sessionName, projectId } = this.lookupSession(ctx.sessionId);
-      const meta = this.readScriptMeta(info.scriptPath);
+      const readMeta = this.readScriptMeta(info.scriptPath, false);
+      const meta = readMeta ?? { name: null, description: null, phases: [] };
       // Fallback name: script filename minus the trailing `-wf_<id>` suffix.
       const fallbackName = path.basename(info.scriptPath, '.js').replace(/-wf_[A-Za-z0-9-]+$/, '');
 
@@ -548,6 +559,9 @@ export class DynamicWorkflowTracker {
       this.enforceSessionCap(ctx.sessionId);
       tailer.start();
       this.emitChanged(state);
+      if (readMeta === null) {
+        this.scheduleMetaRetry(state, info.scriptPath, 0);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn(`[dynamicWorkflowTracker] launch handling failed for ${info.wfRunId}: ${message}`);
@@ -576,15 +590,47 @@ export class DynamicWorkflowTracker {
     }
   }
 
-  /** Read + parse the persisted script's meta literal. Fail-soft on fs errors. */
-  private readScriptMeta(scriptPath: string): ReturnType<typeof parseScriptMeta> {
+  /**
+   * Read + parse the persisted script's meta literal. Fail-soft: null on an fs
+   * error, logged only when `logFailure` (the last retry) — an early miss is the
+   * expected launch/write race, not a fault.
+   */
+  private readScriptMeta(scriptPath: string, logFailure: boolean): ParsedScriptMeta | null {
     try {
       return parseScriptMeta(readFileSync(scriptPath, 'utf8'));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger?.warn(`[dynamicWorkflowTracker] could not read workflow script ${scriptPath}: ${message}`);
-      return { name: null, description: null, phases: [] };
+      if (logFailure) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger?.warn(`[dynamicWorkflowTracker] could not read workflow script ${scriptPath}: ${message}`);
+      }
+      return null;
     }
+  }
+
+  /**
+   * Re-read a launch's script meta after a back-off and patch the card in place.
+   * Stops once the meta resolves, the retries run out, or the state is no longer
+   * the tracked one (dismissed, evicted, disposed).
+   */
+  private scheduleMetaRetry(state: DynamicWorkflowRunState, scriptPath: string, attempt: number): void {
+    const delay = SCRIPT_META_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) return;
+    const timer = setTimeout(() => {
+      this.metaRetryTimers.delete(state.wfRunId);
+      if (this.states.get(state.wfRunId) !== state) return;
+      const isLast = attempt === SCRIPT_META_RETRY_DELAYS_MS.length - 1;
+      const meta = this.readScriptMeta(scriptPath, isLast);
+      if (meta === null) {
+        this.scheduleMetaRetry(state, scriptPath, attempt + 1);
+        return;
+      }
+      if (meta.name !== null) state.name = meta.name;
+      state.description = meta.description ?? undefined;
+      state.phases = meta.phases;
+      this.emitChanged(state);
+    }, delay);
+    timer.unref?.();
+    this.metaRetryTimers.set(state.wfRunId, timer);
   }
 
   /**
@@ -848,6 +894,8 @@ export class DynamicWorkflowTracker {
   dispose(): void {
     for (const timer of this.demoTimers.values()) clearTimeout(timer);
     this.demoTimers.clear();
+    for (const timer of this.metaRetryTimers.values()) clearTimeout(timer);
+    this.metaRetryTimers.clear();
     for (const watcher of this.scriptWatchers.values()) watcher.stop();
     this.scriptWatchers.clear();
     for (const tailer of this.tailers.values()) tailer.stop();

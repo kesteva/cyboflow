@@ -223,3 +223,21 @@ describe('gitOps.getDeliveryState — completedNoCode wiring', () => {
     expect(res.data.completedNoCode).toBe(true);
   });
 });
+
+describe('gitOps.getGitCommands — worktree deleted out-of-band', () => {
+  it('returns a clean failure without spawning git or logging an ERROR', async () => {
+    const { services } = makeServices({ worktreePath: '/nonexistent/deleted-worktree' });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const ops = createGitOps(services);
+      const res = await ops.getGitCommands({ sessionId: SID });
+
+      expect(res).toEqual({ success: false, error: 'Worktree directory no longer exists' });
+      expect(errorSpy).not.toHaveBeenCalled();
+      // Bailed before any git work — the main-branch probe is never reached.
+      expect(services.worktreeManager.getProjectMainBranch).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
