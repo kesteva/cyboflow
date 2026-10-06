@@ -91,6 +91,16 @@ export function parseBrokerCwd(command: string): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * Pure predicate: is this `ps` row a Codex app-server broker daemon? Exported so
+ * the process snapshot service can classify rows from its ONE shared scan instead
+ * of the reaper spawning a second `ps`. Same criterion the reap path uses
+ * ({@link parseBrokerCwd} non-null: literal marker AND a `--cwd` arg).
+ */
+export function isBrokerProcess(row: Pick<CodexBrokerProcess, 'command'>): boolean {
+  return parseBrokerCwd(row.command) !== null;
+}
+
 /** Default killer: SIGTERM the PID. May throw (dead/reparented PID) — caller guards. */
 function defaultKillPid(pid: number): void {
   process.kill(pid, 'SIGTERM');
@@ -224,9 +234,9 @@ export class CodexBrokerReaper {
 
     const rootPids: number[] = [];
     for (const proc of processes) {
+      if (!isBrokerProcess(proc)) continue;
       const cwd = parseBrokerCwd(proc.command);
-      if (cwd === null) continue;
-      if (matchesCwd(cwd)) rootPids.push(proc.pid);
+      if (cwd !== null && matchesCwd(cwd)) rootPids.push(proc.pid);
     }
 
     if (rootPids.length === 0) {

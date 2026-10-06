@@ -527,11 +527,11 @@ describe('sessions:delete — fail-soft close-out', () => {
     await invoke(handlers, 'sessions:delete', 's1');
 
     const sweepSql = made.preparedSql.find(
-      (sql) => sql.includes('FROM review_items ri') && sql.includes("ri.status = 'pending'"),
+      (sql) => sql.includes('JOIN review_items ri') && sql.includes("ri.status = 'pending'"),
     );
     expect(sweepSql).toBeDefined();
-    expect(sweepSql).toContain('r.session_id = ?');
-    expect(sweepSql).toContain('s.run_id = r.id');
+    expect(sweepSql).toContain('FROM workflow_runs WHERE session_id = ?');
+    expect(sweepSql).toContain('SELECT run_id FROM sessions WHERE id = ?');
     const sweepPrepareIndex = made.preparedSql.indexOf(sweepSql!);
     expect(made.archiveSession.mock.invocationCallOrder[0]).toBeLessThan(
       made.prepare.mock.invocationCallOrder[sweepPrepareIndex],

@@ -106,6 +106,7 @@ import { McpServerLifecycle } from '../mcpServerLifecycle';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
 // These resolve to the hoisted mocks above; used to drive/inspect the spawn.
 import { spawn } from 'child_process';
+import { getInstanceId } from '../../../utils/spawnMarker';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,22 @@ describe('McpServerLifecycle — fork-bomb guard', () => {
     expect(spawnCallCount).toBe(1);
     expect(vi.mocked(spawn).mock.calls[0][0]).toBe('/opt/homebrew/bin/node');
     expect(envOfSpawn(0).ELECTRON_RUN_AS_NODE).toBeUndefined();
+  });
+});
+
+describe('McpServerLifecycle — spawn marker', () => {
+  it('stamps CYBOFLOW_INSTANCE and CYBOFLOW_WORKTREE onto the bridge env alongside the run vars', async () => {
+    vi.useFakeTimers();
+    const lifecycle = new McpServerLifecycle(SOCKET_PATH, makeSpyLogger(), () => 'orchestrator', '/app/root');
+    const startPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    const env = (vi.mocked(spawn).mock.calls[0][2] as { env: Record<string, string> }).env;
+    expect(env.CYBOFLOW_INSTANCE).toBe(getInstanceId());
+    expect(env.CYBOFLOW_WORKTREE).toBe('/app/root');
+    expect(env.CYBOFLOW_RUN_ID).toBe('orchestrator');
+    expect(env.CYBOFLOW_ORCH_SOCKET).toBe(SOCKET_PATH);
   });
 });
 

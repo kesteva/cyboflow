@@ -1,0 +1,14 @@
+## cleanup
+fatal: 'worktrees/locked' is not a working tree
+git worktree list:
+/private/tmp/cf-smoke261/repo 2dc92d5 [main]
+  smoke-ahead
+  smoke-clean
+  smoke-locked
+  smoke-proc
+fixture dir exists? ls: /tmp/cf-smoke261: No such file or directory
+data dir exists? ls: /Users/raimundoesteva/.cyboflow_smoke261: No such file or directory
+leftover fixture pids:
+(none)
+dev app procs on 9457:
+(none)

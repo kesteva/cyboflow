@@ -15,6 +15,7 @@ import { execSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { WorktreeManager, MergeConflictError, isMergeConflictError } from '../worktreeManager';
+import { DiskUsageService } from '../diskUsageService';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // The `(integration)` suites below each drive real `git` subprocesses against a
@@ -702,6 +703,127 @@ describe('WorktreeManager.removeWorktree (integration)', () => {
       await manager.removeWorktreeByPath(tmpDir, worktreePath);
       expect(existsSync(worktreePath)).toBe(false);
       await expect(manager.removeWorktreeByPath(tmpDir, worktreePath)).resolves.toBeUndefined();
+    });
+  });
+});
+
+describe('WorktreeManager disk-usage invalidation hook (integration)', () => {
+  it('invalidates the absolute worktree path on removeWorktree — success and idempotent paths', async () => {
+    await withTempDir('worktree-rm-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, { invalidate });
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv1');
+      invalidate.mockClear();
+
+      await manager.removeWorktree(tmpDir, 'inv1');
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      // Already gone → idempotent early-return branch still invalidates.
+      await manager.removeWorktree(tmpDir, 'inv1');
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+    });
+  });
+
+  it('invalidates the path on removeWorktreeByPath — success and idempotent paths', async () => {
+    await withTempDir('worktree-rmpath-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, { invalidate });
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv2');
+      invalidate.mockClear();
+
+      await manager.removeWorktreeByPath(tmpDir, worktreePath);
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      await manager.removeWorktreeByPath(tmpDir, worktreePath);
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+    });
+  });
+
+  it('invalidates on creation so a nested worktree expires its cached ancestor measurements', async () => {
+    await withTempDir('worktree-create-inval-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, { invalidate });
+
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'inv-create');
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate).toHaveBeenLastCalledWith(worktreePath);
+
+      const deterministic = await manager.createDeterministicWorktree(tmpDir, 'task', 'c'.repeat(32));
+      expect(invalidate).toHaveBeenCalledTimes(2);
+      expect(invalidate).toHaveBeenLastCalledWith(deterministic.worktreePath);
+    });
+  });
+
+  it('does not invalidate when creation fails', async () => {
+    await withTempDir('worktree-create-inval-fail-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, { invalidate });
+      await expect(manager.createWorktree(tmpDir, 'bad-base', undefined, 'no-such-branch')).rejects.toThrow(/Failed to create worktree/);
+      expect(invalidate).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a parent checkout measured before a nested worktree existed re-measures after creation (real DiskUsageService)', async () => {
+    await withTempDir('worktree-create-parent-du-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const svc = new DiskUsageService({ runDu: async () => 1024, sleep: async () => {}, staggerMs: 0 });
+      const manager = new WorktreeManager(undefined, svc);
+      // Prime the parent's cache: measured before the child exists.
+      svc.getUsage(tmpDir);
+      await vi.waitFor(() => expect(svc.getUsage(tmpDir).status).toBe('measured'));
+
+      await manager.createWorktree(tmpDir, 'nested-child');
+
+      expect(svc.getUsage(tmpDir).status).not.toBe('measured');
+
+      // Negative control: without the hook the parent's stale measurement survives creation.
+      await vi.waitFor(() => expect(svc.getUsage(tmpDir).status).toBe('measured'));
+      await new WorktreeManager().createWorktree(tmpDir, 'nested-unhooked');
+      expect(svc.getUsage(tmpDir).status).toBe('measured');
+    });
+  });
+
+  it('a throwing or rejecting hook never fails a removal', async () => {
+    await withTempDir('worktree-rm-inval-throw-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const throwing = new WorktreeManager(undefined, {
+          invalidate: () => { throw new Error('boom'); },
+        });
+        const rejecting = new WorktreeManager(undefined, {
+          invalidate: () => Promise.reject(new Error('nope')),
+        });
+        const a = await throwing.createWorktree(tmpDir, 'inv3');
+        const b = await rejecting.createWorktree(tmpDir, 'inv4');
+
+        await expect(throwing.removeWorktreeByPath(tmpDir, a.worktreePath)).resolves.toBeUndefined();
+        await expect(rejecting.removeWorktree(tmpDir, 'inv4')).resolves.toBeUndefined();
+        expect(existsSync(a.worktreePath)).toBe(false);
+        expect(existsSync(b.worktreePath)).toBe(false);
+        // Idempotent branch is fail-soft too.
+        await expect(throwing.removeWorktree(tmpDir, 'inv3')).resolves.toBeUndefined();
+        expect(warn).toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  it('does not invalidate when removal fails with an unrelated git error', async () => {
+    await withTempDir('worktree-rm-inval-fail-', async (tmpDir) => {
+      const invalidate = vi.fn();
+      const manager = new WorktreeManager(undefined, { invalidate });
+      await expect(manager.removeWorktree(tmpDir, 'whatever')).rejects.toThrow(/Failed to remove worktree/);
+      expect(invalidate).not.toHaveBeenCalled();
     });
   });
 });

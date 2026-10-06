@@ -486,6 +486,29 @@ export class OrchSocketServer {
   }
 
   /**
+   * Number of client connections currently open on this server (bound to a run
+   * or not). Read-only snapshot for the system view's Ports & sockets section.
+   */
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
+
+  /**
+   * Live socket count per bound `runId`. Returns a fresh plain object on every
+   * call — never the live Map/Set or any `net.Socket` — so a caller can hold or
+   * mutate it without affecting the server. A run with no live sockets is absent
+   * (the same cleanup `clientsByRun` performs when a bound socket closes). The
+   * same lazy-binding caveats as `hasClientForRun` apply.
+   */
+  getRunBindingCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const [runId, sockets] of this.clientsByRun) {
+      if (sockets.size > 0) counts[runId] = sockets.size;
+    }
+    return counts;
+  }
+
+  /**
    * Deny-and-close every in-flight shell-approval socket for `runId`. Public
    * boot-wired affordance (IDEA-030 / TASK-819): the interactive manager's
    * teardown seam (setShellApprovalCanceller) invokes this BEFORE killing the

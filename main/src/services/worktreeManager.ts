@@ -1,4 +1,5 @@
 import { join, dirname } from 'path';
+import { existsSync } from 'fs';
 import { mkdir } from 'fs/promises';
 import { withLock } from '../utils/mutex';
 import { runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
@@ -39,6 +40,16 @@ function alreadyUpToDate(message: string): Error & { code: string } {
  */
 export interface WorktreeBrokerReaper {
   reapForWorktree(worktreePath: string): Promise<void>;
+}
+
+/**
+ * Narrow seam for the disk-usage cache (see DiskUsageService.invalidate). A removed
+ * worktree's cached size is stale the instant the tree is gone, so removal calls this
+ * hook on every path. Minimal interface so WorktreeManager stays decoupled from the
+ * concrete service and unit-testable with a fake.
+ */
+export interface WorktreeDiskUsageInvalidator {
+  invalidate(worktreePath: string): void | Promise<void>;
 }
 
 /**
@@ -84,6 +95,7 @@ export class WorktreeManager {
 
   constructor(
     private codexBrokerReaper?: WorktreeBrokerReaper,
+    private diskUsageInvalidator?: WorktreeDiskUsageInvalidator,
   ) {
     // No longer initialized with a single repo path
   }
@@ -100,6 +112,20 @@ export class WorktreeManager {
       await this.codexBrokerReaper.reapForWorktree(worktreePath);
     } catch (error) {
       console.warn(`[WorktreeManager] Codex broker reap failed for ${worktreePath}:`, error);
+    }
+  }
+
+  /**
+   * Best-effort eager expiry of a created/removed worktree's cached disk size (and its ancestors'). Fail-soft
+   * for the same reason as {@link reapCodexBrokers}: a throwing/rejecting hook must
+   * never turn a successful removal into an error.
+   */
+  private async invalidateDiskUsage(worktreePath: string): Promise<void> {
+    if (!this.diskUsageInvalidator) return;
+    try {
+      await this.diskUsageInvalidator.invalidate(worktreePath);
+    } catch (error) {
+      console.warn(`[WorktreeManager] Disk-usage invalidation failed for ${worktreePath}:`, error);
     }
   }
 
@@ -245,6 +271,12 @@ export class WorktreeManager {
         ]);
       }
 
+      // A worktree nested under an already-measured checkout (default `<project>/worktrees/<name>`)
+      // is part of that checkout's cached `du`; the System view subtracts nested entries' sizes from
+      // it, so a parent measured BEFORE this child existed would be under-reported. `invalidate`
+      // expires cached ancestors too.
+      await this.invalidateDiskUsage(worktreePath);
+
       console.log(`[WorktreeManager] Worktree created successfully at: ${worktreePath}`);
 
       return { worktreePath, baseCommit, baseBranch: actualBaseBranch };
@@ -310,6 +342,7 @@ export class WorktreeManager {
           // Still reap: a manually-deleted worktree can leave its detached Codex
           // broker running with a now-gone cwd.
           await this.reapCodexBrokers(worktreePath);
+          await this.invalidateDiskUsage(worktreePath);
           return;
         }
 
@@ -317,6 +350,7 @@ export class WorktreeManager {
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
       await this.reapCodexBrokers(worktreePath);
+      await this.invalidateDiskUsage(worktreePath);
     });
   }
 
@@ -342,11 +376,13 @@ export class WorktreeManager {
             errorMessage.includes('No such file or directory')) {
           console.log(`Worktree ${worktreePath} already removed or doesn't exist, skipping...`);
           await this.reapCodexBrokers(worktreePath);
+          await this.invalidateDiskUsage(worktreePath);
           return;
         }
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
       await this.reapCodexBrokers(worktreePath);
+      await this.invalidateDiskUsage(worktreePath);
     });
   }
 
@@ -577,6 +613,11 @@ export class WorktreeManager {
     mainBranch: string,
   ): Promise<{ landed: boolean; ownCommits: number; commitsAhead: number }> {
     const notLanded = { landed: false, ownCommits: 0, commitsAhead: 0 };
+    // A worktree directory deleted out-of-band (session still in the app) is an
+    // expected state, not a fault: spawning git with a missing cwd fails as
+    // `spawn /usr/bin/git ENOENT`, which logs at ERROR and misnames the binary
+    // as the thing that is missing.
+    if (!existsSync(worktreePath)) return notLanded;
     try {
       const branch = assertNotOptionLike(mainBranch, 'main branch');
 

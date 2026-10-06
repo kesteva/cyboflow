@@ -1,0 +1,17 @@
+Prune dirty?
+
+1 target · 3 MB disk reclaimable
+
+1 target has uncommitted changes. Pruning discards them permanently — nothing is stashed.
+dirty
+/private/tmp/cf-smoke261/repo/worktrees/dirty
+2 dirty files
+3 MB disk
+Also delete branch
+
+This cannot be undone
+
+Esc to cancel
+Cancel
+Prune
+[checkbox checked=true]

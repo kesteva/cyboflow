@@ -9,6 +9,7 @@ import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../share
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { isPtyLane, resolvePanelLane } from './panelLane';
+import { stampSpawnMarker } from '../utils/spawnMarker';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -956,7 +957,7 @@ export class SessionManager extends EventEmitter {
     return { success: overallSuccess, output: allOutput };
   }
   
-  private async execWithShellPath(command: string, options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
+  private async execWithShellPath(command: string, options: { cwd: string }): Promise<{ stdout: string; stderr: string }> {
     const { exec } = require('child_process');
     const { promisify } = require('util');
     const execAsync = promisify(exec);
@@ -965,10 +966,10 @@ export class SessionManager extends EventEmitter {
     return execAsync(command, {
       ...options,
       windowsHide: true,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: shellPath
-      }
+      }, options.cwd)
     });
   }
 }

@@ -325,6 +325,10 @@ export function makeCodexEvalJudgeQuery(
       await raceDeadline(
         turnSession.startThread({
           ...(cwd ? { cwd } : {}),
+          // The user's installed Codex plugins would otherwise load here too; a
+          // plugin's OAuth MCP server blocks thread/start on a macOS keychain
+          // prompt (see ClaudeSpawnerOptions.disableUserCodexPlugins).
+          config: { features: { plugins: false } },
           ephemeral: true,
         }),
         deadline.promise,

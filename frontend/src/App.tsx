@@ -32,6 +32,7 @@ import { InsightsView } from './components/Insights/InsightsView';
 import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
+import { SystemView } from './components/cyboflow/SystemView';
 import { ProjectOverviewPage } from './components/overview/ProjectOverviewPage';
 import { StatusBar } from './components/StatusBar';
 import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
@@ -84,6 +85,8 @@ function App() {
   const experimentComparisonId = useNavigationStore((s) => s.experimentComparisonId);
   const showVerifyQueue = useNavigationStore((s) => s.verifyQueueOpen);
   const toggleVerifyQueue = useNavigationStore((s) => s.toggleVerifyQueue);
+  const showSystem = useNavigationStore((s) => s.systemOpen);
+  const toggleSystem = useNavigationStore((s) => s.toggleSystem);
   // The per-project overview page (sidebar project click). Rendered only with a
   // resolved activeProjectId — a set flag with no project falls through to
   // LandingHome rather than rendering a project page for no project.
@@ -328,6 +331,8 @@ function App() {
             onToggleWorkflows={toggleWorkflows}
             verifyQueueActive={showVerifyQueue}
             onToggleVerifyQueue={toggleVerifyQueue}
+            systemActive={showSystem}
+            onToggleSystem={toggleSystem}
           />
         </PerfProfiler>
         </div>
@@ -427,6 +432,17 @@ function App() {
               </div>
             )}>
               <VerifyQueueView />
+            </ErrorBoundary>
+          ) : showSystem ? (
+            <ErrorBoundary fallback={(error) => (
+              <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                <div className="text-center">
+                  <p className="text-sm text-status-error font-semibold mb-2">System error — restart app</p>
+                  <p className="text-xs text-text-muted">{error.message}</p>
+                </div>
+              </div>
+            )}>
+              <SystemView />
             </ErrorBoundary>
           ) : showBacklog ? (
             <ErrorBoundary fallback={(error) => (

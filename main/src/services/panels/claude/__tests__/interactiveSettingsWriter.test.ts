@@ -94,9 +94,11 @@ function legacyCyboflowGroup(command: string): HookMatcherGroup {
 // ---------------------------------------------------------------------------
 
 describe('resolveInlineGatingHooks', () => {
-  const hookPath = resolveShellHookScriptPath(HOOK_DIR);
-  const stopHookPath = resolveStopHookScriptPath(HOOK_DIR);
-  const questionHookPath = resolveQuestionHookScriptPath(HOOK_DIR);
+  // Run through hookCommand: on a win32 host path.join yields backslashes, which the
+  // pinned-darwin command quotes.
+  const hookPath = hookCommand(resolveShellHookScriptPath(HOOK_DIR), 'darwin');
+  const stopHookPath = hookCommand(resolveStopHookScriptPath(HOOK_DIR), 'darwin');
+  const questionHookPath = hookCommand(resolveQuestionHookScriptPath(HOOK_DIR), 'darwin');
 
   // Every fragment below is built with platform: 'posix-ish' pinned to 'darwin'
   // so the expected command is a literal path, not whatever this host produces.
@@ -182,6 +184,14 @@ describe('hookCommand', () => {
   it('POSIX registers the bare script path, run through its shebang', () => {
     expect(hookCommand('/w/.cyboflow/hooks/gate.js', 'darwin')).toBe('/w/.cyboflow/hooks/gate.js');
     expect(hookCommand('/w/.cyboflow/hooks/gate.js', 'linux')).toBe('/w/.cyboflow/hooks/gate.js');
+  });
+
+  it('POSIX single-quotes a path with spaces so /bin/sh does not split it', () => {
+    // The Dev variant installs to `/Applications/Cyboflow Dev.app` — unquoted,
+    // sh runs `/Applications/Cyboflow` and every hook fails (the gate open).
+    const devPath = '/Applications/Cyboflow Dev.app/Contents/Resources/hooks/gate.js';
+    expect(hookCommand(devPath, 'darwin')).toBe(`'${devPath}'`);
+    expect(hookCommand("/a/it's here/gate.js", 'linux')).toBe(`'/a/it'\\''s here/gate.js'`);
   });
 
   it('win32 names the resolved node binary, both paths quoted', () => {

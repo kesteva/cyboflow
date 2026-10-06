@@ -276,6 +276,17 @@ export interface ClaudeSpawnerOptions extends LaneSpawnEnv {
    */
   standardServiceTier?: boolean;
   /**
+   * Turn OFF the user's installed Codex plugins (`features.plugins = false`) on
+   * this spawn's app-server thread. Set ONLY by the two workflow spawn seams
+   * (RunExecutor.execute, SpawnStepRunner) — quick chats keep the user's
+   * plugins. A plugin can declare an OAuth MCP server (e.g. Cloudflare's
+   * `cloudflare-api`) whose token Codex reads from the macOS keychain at thread
+   * start; every parallel lane's app-server then raises its own keychain prompt,
+   * and thread/start blocks behind it until cyboflow's 15s request timeout
+   * fails the step. Claude ignores this.
+   */
+  disableUserCodexPlugins?: boolean;
+  /**
    * HERMETIC global-agent isolation — the spawner-side twin of
    * {@link ClaudeSpawnOptions.isolation} (claudeCodeManager.ts). Set ONLY by the
    * global-agent thread, whose synthetic identity (`agent:<threadId>` for
@@ -999,6 +1010,7 @@ export class RunExecutor {
           hidePromptFromTranscript:
             turnKind === 'launch' || (turnKind === 'nudge' && this.hiddenNudges.has(runId)),
           standardServiceTier: true,
+          disableUserCodexPlugins: true,
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });

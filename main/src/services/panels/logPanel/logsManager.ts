@@ -5,6 +5,7 @@ import { addSessionLog, cleanupSessionLogs } from '../../../ipc/logs';
 import { mainWindow } from '../../../index';
 import { getShellPath } from '../../../utils/shellPath';
 import { killTreeImmediate } from '../../../utils/platformProcess';
+import { stampSpawnMarker } from '../../../utils/spawnMarker';
 
 export class LogsManager {
   private static instance: LogsManager;
@@ -136,10 +137,10 @@ export class LogsManager {
       cwd,
       shell: true,
       windowsHide: true,
-      env: {
+      env: stampSpawnMarker({
         ...process.env,
         PATH: shellPath
-      }
+      }, cwd)
     });
     
     if (childProcess.pid) {

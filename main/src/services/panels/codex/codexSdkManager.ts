@@ -259,14 +259,29 @@ function createDeferred<T>(): Deferred<T> {
   };
 }
 
+/**
+ * Appended to a thread start/resume timeout. The app-server answers those only
+ * after every MCP server it loads has started — cyboflow's, plus whatever the
+ * user's `~/.codex/config.toml` declares — so a server stalled on a macOS
+ * keychain prompt (a stored MCP OAuth token) surfaces as nothing but this
+ * timeout. Name the likely cause instead of leaving a bare "timed out".
+ */
+const CODEX_THREAD_TIMEOUT_HINT =
+  'thread start waits for every MCP server Codex loads (cyboflow\'s plus those in ~/.codex/config.toml); '
+  + 'a server stalled on a macOS keychain prompt for its stored OAuth token, or one slow to connect, blocks it';
+
 async function withTimeout<T>(
   operation: Promise<T>,
   timeoutMs: number,
   description: string,
+  hint?: string,
 ): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error(`${description} timed out after ${timeoutMs}ms`)), timeoutMs);
+    timeout = setTimeout(
+      () => reject(new Error(`${description} timed out after ${timeoutMs}ms${hint ? ` — ${hint}` : ''}`)),
+      timeoutMs,
+    );
   });
   try {
     return await Promise.race([operation, timeoutPromise]);
@@ -330,7 +345,7 @@ function appServerEnvironment(
   runtimeConfig: CodexMcpRuntimeConfig,
   options: ClaudeSpawnerOptions,
 ): NodeJS.ProcessEnv {
-  const env = buildCodexAppServerEnvironment(runId, runtimeConfig);
+  const env = buildCodexAppServerEnvironment(runId, options.worktreePath, runtimeConfig);
   return options.laneEnv ? { ...env, ...options.laneEnv } : env;
 }
 
@@ -1145,6 +1160,7 @@ export class CodexSdkManager extends AbstractCliManager {
               )),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread resume',
+              CODEX_THREAD_TIMEOUT_HINT,
             )
           : await withTimeout(
               entry.turnSession.startThread(
@@ -1158,6 +1174,7 @@ export class CodexSdkManager extends AbstractCliManager {
               ),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread start',
+              CODEX_THREAD_TIMEOUT_HINT,
             );
         entry.threadId = thread.threadId;
         // Only thread/start carries `experimentalRawEvents`; a resumed thread

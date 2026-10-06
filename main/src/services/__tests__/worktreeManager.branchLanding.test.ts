@@ -146,7 +146,14 @@ describe('WorktreeManager.getBranchLandingState', () => {
 
   it('fails closed on an unreadable worktree rather than claiming a landing', async () => {
     const manager = new WorktreeManager();
-    const state = await manager.getBranchLandingState('/nonexistent/worktree/path', 'main');
-    expect(state.landed).toBe(false);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const state = await manager.getBranchLandingState('/nonexistent/worktree/path', 'main');
+      expect(state.landed).toBe(false);
+      // A deleted worktree is expected state — no ERROR line blaming git.
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

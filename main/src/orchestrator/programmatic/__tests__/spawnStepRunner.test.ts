@@ -47,6 +47,8 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
     // Workflow turns never inherit a premium tier from the user's CLI config.
     expect(passed.standardServiceTier).toBe(true);
+    // …nor load the user's Codex plugins (an OAuth plugin keychain-prompts per lane).
+    expect(passed.disableUserCodexPlugins).toBe(true);
   });
 
   it('denies the visual-verification enqueue tool on every step turn (live-smoke fix 2026-07-22)', async () => {

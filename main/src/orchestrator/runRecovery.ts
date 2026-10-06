@@ -214,19 +214,22 @@ export async function dismissPendingReviewItemsForSession(
 ): Promise<ReviewItemSweepResult> {
   let rows: PendingReviewItemRow[];
   try {
+    // Driven FROM the session's runs (idx_workflow_runs_session_id + the
+    // sessions PK), then into review_items via idx_review_items_run_kind. The
+    // earlier shape filtered review_items first and correlated each pending
+    // row back to the session, which scanned the whole review_items table on
+    // the dismiss path (~300ms cold on a large DB, blocking the main thread).
     rows = db
       .prepare(
         `SELECT DISTINCT ri.id, ri.project_id
-           FROM review_items ri
-           JOIN workflow_runs r ON r.id = ri.run_id
-          WHERE ri.status = 'pending'
-            AND (
-              r.session_id = ?
-              OR EXISTS (
-                SELECT 1 FROM sessions s
-                 WHERE s.id = ? AND s.run_id = r.id
-              )
-            )
+           FROM workflow_runs r
+           JOIN review_items ri ON ri.run_id = r.id
+          WHERE r.id IN (
+                  SELECT id FROM workflow_runs WHERE session_id = ?
+                  UNION
+                  SELECT run_id FROM sessions WHERE id = ? AND run_id IS NOT NULL
+                )
+            AND ri.status = 'pending'
             ${DELIVERED_SESSION_FINDING_CARVE_OUT}`,
       )
       .all(sessionId, sessionId) as PendingReviewItemRow[];

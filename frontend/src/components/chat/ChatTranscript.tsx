@@ -156,6 +156,12 @@ export interface ChatTranscriptProps {
    * composer.
    */
   transcriptEndSlot?: React.ReactNode;
+  /**
+   * Host-owned content rendered at the START of the scrollable transcript,
+   * above the first message — e.g. the agent rail's "Load earlier messages"
+   * control for a windowed history.
+   */
+  transcriptStartSlot?: React.ReactNode;
 
   /** Per-message collapse state (keyed by message id). Owned by the caller. */
   collapsedMessages: Set<string>;
@@ -1470,6 +1476,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   isWaitingForResponse = false,
   liveTail,
   transcriptEndSlot,
+  transcriptStartSlot,
   collapsedMessages,
   onToggleMessageCollapse,
   expandedTools,
@@ -1559,6 +1566,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
             </div>
           ) : (
             <div className="space-y-4 px-4">
+              {transcriptStartSlot}
               {renderedMessages}
               {transcriptEndSlot}
               {isWaitingForResponse && (

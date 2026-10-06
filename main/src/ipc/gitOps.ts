@@ -1779,6 +1779,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         return { success: false, error: 'Cannot access git commands for archived session' };
       }
 
+      // Worktree deleted out-of-band — an expected state, not a fault. Without
+      // this, git spawns with a missing cwd and logs `spawnSync /usr/bin/git
+      // ENOENT` at ERROR, blaming the binary instead of the directory.
+      if (!fs.existsSync(session.worktreePath)) {
+        return { success: false, error: 'Worktree directory no longer exists' };
+      }
+
       const project = sessionManager.getProjectForSession(sessionId);
       if (!project) {
         return { success: false, error: 'Project not found for session' };

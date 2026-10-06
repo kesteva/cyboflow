@@ -22,6 +22,7 @@ import { findNodeExecutable } from '../../utils/nodeFinder';
 import { electronRunAsNodeGuardEnv } from '../../utils/electronNodeGuard';
 import { resolveMcpServerScriptPath } from './scriptPath';
 import { orchTokenEnv } from '../orchAuthToken';
+import { stampSpawnMarker } from '../../utils/spawnMarker';
 import type { LoggerLike } from '../types';
 
 // Re-export for callers that want the status type without importing the class.
@@ -46,11 +47,16 @@ export class McpServerLifecycle {
    *                                   the sentinel string 'orchestrator'.  Per-session
    *                                   identification happens inside tool calls via the
    *                                   run_id argument passed by Claude Code.
+   * @param worktreePath            Path recorded as CYBOFLOW_WORKTREE on the bridge.
+   *                                The bridge is a singleton with no per-run
+   *                                worktree, so it defaults to the app's own
+   *                                working directory.
    */
   constructor(
     private readonly socketPath: string,
     private readonly logger: LoggerLike,
     private readonly orchestratorRunIdProvider: () => string,
+    private readonly worktreePath: string = process.cwd(),
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -125,15 +131,18 @@ export class McpServerLifecycle {
     // token minted for it — they must never disagree or the socket server
     // refuses the bind.
     const orchestratorRunId = this.orchestratorRunIdProvider();
-    const env: Record<string, string> = {
-      ...this.buildSafeEnv(),
-      CYBOFLOW_RUN_ID: orchestratorRunId,
-      CYBOFLOW_ORCH_SOCKET: this.socketPath,
-      // Proves to OrchSocketServer that this subprocess really is the run it
-      // claims. In-memory only — never written to any config file.
-      ...orchTokenEnv(orchestratorRunId),
-      ...electronRunAsNodeGuardEnv(nodePath),
-    };
+    const env: Record<string, string> = stampSpawnMarker(
+      {
+        ...this.buildSafeEnv(),
+        CYBOFLOW_RUN_ID: orchestratorRunId,
+        CYBOFLOW_ORCH_SOCKET: this.socketPath,
+        // Proves to OrchSocketServer that this subprocess really is the run it
+        // claims. In-memory only — never written to any config file.
+        ...orchTokenEnv(orchestratorRunId),
+        ...electronRunAsNodeGuardEnv(nodePath),
+      },
+      this.worktreePath,
+    );
 
     const child = spawn(nodePath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -11,6 +11,8 @@ import { spawn } from 'node:child_process';
 import {
   parseProcessTable,
   collectDescendantPids,
+  parseEtime,
+  parsePsOutputWithCpuMem,
   type ProcessTableRow,
 } from './processTable';
 import { listPidPpidTableSync, killWindowsTree } from '../utils/platformProcess';
@@ -135,5 +137,58 @@ describe('windowsProcessTableCommand', () => {
     expect(command).not.toBe('powershell');
     expect(args[0]).toBe('-NoProfile');
     expect(args).toContain('-Command');
+  });
+});
+
+describe('parseEtime (shared)', () => {
+  it('parses the three macOS shapes and rejects the rest', () => {
+    expect(parseEtime('05:30')).toBe(330);
+    expect(parseEtime('01:02:15')).toBe(3735);
+    expect(parseEtime('2-03:04:05')).toBe(2 * 86400 + 3 * 3600 + 4 * 60 + 5);
+    expect(parseEtime('garbage')).toBeNull();
+    expect(parseEtime('99:99')).toBeNull();
+  });
+});
+
+describe('parsePsOutputWithCpuMem', () => {
+  it('parses a normal six-column row', () => {
+    const rows = parsePsOutputWithCpuMem('  123   1  12.5  0.3 01:02:15 /usr/bin/node server.js --port 1\n');
+    expect(rows).toEqual([
+      { pid: 123, ppid: 1, pcpu: 12.5, pmem: 0.3, etimeSeconds: 3735, command: '/usr/bin/node server.js --port 1' },
+    ]);
+  });
+
+  it('yields etimeSeconds null (row kept) for a time-shaped but unparseable etime', () => {
+    const rows = parsePsOutputWithCpuMem('10 1 0.0 0.1 99:99 /bin/foo\n');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].etimeSeconds).toBeNull();
+    expect(rows[0].command).toBe('/bin/foo');
+  });
+
+  it('yields null (never 0/NaN) for `-` pcpu/pmem', () => {
+    const rows = parsePsOutputWithCpuMem('2 1 - - 05:30 kernel_task\n');
+    expect(rows).toEqual([
+      { pid: 2, ppid: 1, pcpu: null, pmem: null, etimeSeconds: 330, command: 'kernel_task' },
+    ]);
+  });
+
+  it('keeps the row and yields null for a non-numeric (not shifted) pcpu/pmem token', () => {
+    const rows = parsePsOutputWithCpuMem('4 1 12,5 abc 00:10 /bin/foo\n8 1 1.5 0,3 00:10 /bin/bar\n');
+    expect(rows).toEqual([
+      { pid: 4, ppid: 1, pcpu: null, pmem: null, etimeSeconds: 10, command: '/bin/foo' },
+      { pid: 8, ppid: 1, pcpu: 1.5, pmem: null, etimeSeconds: 10, command: '/bin/bar' },
+    ]);
+  });
+
+  it('skips a row shifted by a silently dropped column instead of mis-parsing it', () => {
+    // pcpu column dropped: pmem lands in pcpu, etime in pmem.
+    expect(parsePsOutputWithCpuMem('10 1 0.3 05:30 /bin/foo bar\n')).toEqual([]);
+    // etime column dropped: the command's first word lands in the etime slot.
+    expect(parsePsOutputWithCpuMem('10 1 0.0 0.3 /bin/foo bar baz\n')).toEqual([]);
+  });
+
+  it('skips blank and malformed lines without affecting good rows', () => {
+    const rows = parsePsOutputWithCpuMem('\nnot a row\n0 1 0.0 0.0 00:01 zero-pid\n7 1 1.0 2.0 00:01 ok\n');
+    expect(rows.map((r) => r.pid)).toEqual([7]);
   });
 });

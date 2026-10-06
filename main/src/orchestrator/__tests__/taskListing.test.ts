@@ -1893,3 +1893,145 @@ describe('taskListing — human prerequisites do not gate readiness', () => {
     expect(a.waitingOnHuman).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bulk overlay prefetch parity — selectProjectBacklog computes every row's
+// overlay from a handful of grouped queries; it must agree, item for item,
+// with the per-row computeTaskOverlay reads the single-entity paths still use.
+// ---------------------------------------------------------------------------
+
+describe('selectProjectBacklog — bulk overlay prefetch parity with computeTaskOverlay', () => {
+  function flatten(items: ReturnType<typeof selectProjectBacklog>): ReturnType<typeof selectProjectBacklog> {
+    return items.flatMap((item) => [item, ...flatten(item.children ?? [])]);
+  }
+
+  it('every item (ideas, epics, nested tasks, both projects) matches the per-row overlay', () => {
+    const db = buildMembershipDb();
+    const adapter = dbAdapter(db);
+    seedFixture(db); // idea → epic → nested task
+    seedSecondProject(db);
+    seedWorkflow(db);
+    seedSession(db, 'sess-1', 'quick-1');
+    seedSession(db, 'sess-2', 'quick-2');
+
+    // Direct runs: two live (ordering), one terminal, one live with a pending approval.
+    seedTask(db, 'tsk_dir', 'TASK-201', 6);
+    seedDirectRun(db, { runId: 'run-d1', taskId: 'tsk_dir', status: 'running', sessionId: 'sess-1' });
+    seedDirectRun(db, { runId: 'run-d2', taskId: 'tsk_dir', status: 'stuck' });
+    seedDirectRun(db, { runId: 'run-d3', taskId: 'tsk_dir', status: 'completed' });
+    seedTask(db, 'tsk_appr', 'TASK-202', 6);
+    seedDirectRun(db, { runId: 'run-ap', taskId: 'tsk_appr', status: 'running' });
+    db.prepare(
+      `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status)
+       VALUES ('ap-1', 'run-ap', 'Bash', '{}', 'tu-1', 'pending')`,
+    ).run();
+    // A decided approval must NOT count.
+    seedTask(db, 'tsk_appr_done', 'TASK-203', 6);
+    seedDirectRun(db, { runId: 'run-ap2', taskId: 'tsk_appr_done', status: 'running' });
+    db.prepare(
+      `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status)
+       VALUES ('ap-2', 'run-ap2', 'Bash', '{}', 'tu-2', 'approved')`,
+    ).run();
+    // pr_open outcome on a terminal run → awaitingReview with no inFlow.
+    seedTask(db, 'tsk_pr', 'TASK-204', 8);
+    seedDirectRun(db, { runId: 'run-pr', taskId: 'tsk_pr', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET outcome = 'pr_open' WHERE id = 'run-pr'`).run();
+
+    // Batch arm, and a run matching both arms.
+    seedTask(db, 'tsk_bat', 'TASK-205', 7);
+    seedBatchRun(db, { runId: 'run-b1', taskId: 'tsk_bat', batchId: 'bat-1', status: 'running', sessionId: 'sess-2' });
+    seedTask(db, 'tsk_both', 'TASK-206', 7);
+    db.prepare(
+      `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES ('bat-2', 1, 'sdk', 'running')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, batch_id)
+       VALUES ('run-both', 'wf-1', 1, 'running', 'default', 'tsk_both', 'bat-2')`,
+    ).run();
+    db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-2', 'tsk_both', 'running')`).run();
+
+    // Done stage, and an epic with its own direct run.
+    seedTask(db, 'tsk_done', 'TASK-207', 9);
+    seedDirectRun(db, { runId: 'run-epic', taskId: 'epc_1', status: 'running' });
+
+    // Live vs decided experiment seeds.
+    seedTask(db, 'tsk_seed_live', 'TASK-208', 7);
+    seedTask(db, 'tsk_seed_done', 'TASK-209', 6);
+    seedExperiment(db, { id: 'exp-live', workflowId: 'wf-1', status: 'running', variantAId: 'va', variantBId: 'vb' });
+    seedExperiment(db, { id: 'exp-done', workflowId: 'wf-1', status: 'decided', variantAId: 'va', variantBId: 'vb' });
+    seedExperimentSeedTask(db, { experimentId: 'exp-live', originalTaskId: 'tsk_seed_live', cloneTaskIdA: 'c1', cloneTaskIdB: 'c2' });
+    seedExperimentSeedTask(db, { experimentId: 'exp-done', originalTaskId: 'tsk_seed_done', cloneTaskIdA: 'c3', cloneTaskIdB: 'c4' });
+
+    // Idea arm: single seed, multi seed (Ship), excluded launch seed, malformed JSON.
+    seedIdea(db, 'ide_a', 'IDEA-801', 1);
+    seedIdea(db, 'ide_b', 'IDEA-802', 1);
+    seedIdea(db, 'ide_c', 'IDEA-803', 1);
+    seedIdea(db, 'ide_x', 'IDEA-804', 1);
+    seedIdea(db, 'ide_bad', 'IDEA-805', 1);
+    seedIdeaSeededRun(db, { runId: 'run-ia', status: 'running', seedIdeaId: 'ide_a', sessionId: 'sess-1' });
+    seedIdeaSeededRun(db, {
+      runId: 'run-ibc',
+      status: 'running',
+      seedIdeaId: 'ide_b',
+      seedIdeaIds: ['ide_b', 'ide_c'],
+      workflowName: 'ship',
+    });
+    seedIdeaSeededRun(db, { runId: 'run-ix', status: 'running', seedIdeaId: 'ide_x', workflowName: 'launch' });
+    seedIdeaSeededRun(db, { runId: 'run-ibad', status: 'running' });
+    db.prepare(`UPDATE workflow_runs SET seed_idea_ids = '[not json' WHERE id = 'run-ibad'`).run();
+
+    const items = flatten(selectProjectBacklog(adapter, null));
+    expect(items.length).toBeGreaterThan(15);
+    for (const item of items) {
+      const perRow = computeTaskOverlay(adapter, { id: item.id, stage_id: item.stage_id, type: item.type });
+      expect(
+        { id: item.id, inFlow: item.inFlow, awaitingReview: item.awaitingReview, isDone: item.isDone, experimentSeed: item.experimentSeed },
+      ).toEqual({ id: item.id, ...perRow });
+    }
+
+    // Non-vacuous: the fixture really lit each arm.
+    const byId = new Map(items.map((i) => [i.id, i]));
+    expect(byId.get('tsk_dir')!.inFlow.map((f) => f.runId)).toEqual(['run-d1', 'run-d2']);
+    expect(byId.get('tsk_appr')!.awaitingReview).toBe(true);
+    expect(byId.get('tsk_appr_done')!.awaitingReview).toBe(false);
+    expect(byId.get('tsk_pr')!.awaitingReview).toBe(true);
+    expect(byId.get('tsk_bat')!.inFlow[0].sessionName).toBe('quick-2');
+    expect(byId.get('tsk_both')!.inFlow).toHaveLength(1);
+    expect(byId.get('tsk_done')!.isDone).toBe(true);
+    expect(byId.get('epc_1')!.inFlow.map((f) => f.runId)).toEqual(['run-epic']);
+    expect(byId.get('tsk_seed_live')!.experimentSeed).toBe(true);
+    expect(byId.get('tsk_seed_done')!.experimentSeed).toBe(false);
+    expect(byId.get('ide_a')!.inFlow[0]).toMatchObject({ runId: 'run-ia', workflowName: 'planner', sessionName: 'quick-1' });
+    expect(byId.get('ide_c')!.inFlow[0]).toMatchObject({ runId: 'run-ibc', workflowName: 'ship' });
+    expect(byId.get('ide_x')!.inFlow).toEqual([]);
+    expect(byId.get('ide_bad')!.inFlow).toEqual([]);
+  });
+
+  it('degrades like the per-row reads on a pre-batch/pre-session/pre-061 schema', () => {
+    const db = buildDb({ skipSeedIdeaIds: true });
+    const adapter = dbAdapter(db);
+    seedTask(db, 'tsk_d', 'TASK-004', 6);
+    seedIdea(db, 'ide_e', 'IDEA-805', 1);
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-p', 1, 'planner', '{}')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id)
+       VALUES ('run-4', 'wf-p', 1, 'running', 'default', 'tsk_d')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id)
+       VALUES ('run-5', 'wf-p', 1, 'running', 'default', 'ide_e')`,
+    ).run();
+
+    const items = flatten(selectProjectBacklog(adapter, 1));
+    for (const item of items) {
+      const perRow = computeTaskOverlay(adapter, { id: item.id, stage_id: item.stage_id, type: item.type });
+      expect({ id: item.id, inFlow: item.inFlow, awaitingReview: item.awaitingReview }).toEqual({
+        id: item.id,
+        inFlow: perRow.inFlow,
+        awaitingReview: perRow.awaitingReview,
+      });
+    }
+    expect(items.find((i) => i.id === 'tsk_d')!.inFlow.map((f) => f.runId)).toEqual(['run-4']);
+    expect(items.find((i) => i.id === 'ide_e')!.inFlow.map((f) => f.runId)).toEqual(['run-5']);
+  });
+});

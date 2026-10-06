@@ -24,6 +24,7 @@ const WATCHED: ReadonlyArray<keyof NavigationState> = [
   'workflowsOpen',
   'experimentComparisonId',
   'verifyQueueOpen',
+  'systemOpen',
   'projectOverviewOpen',
   'wizardOpts',
 ];

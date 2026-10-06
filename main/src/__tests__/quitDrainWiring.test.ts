@@ -88,6 +88,14 @@ describe('before-quit wiring (index.ts)', () => {
     expect(body).toMatch(/finish:\s*\(\)\s*=>\s*\{[\s\S]*app\.quit\(\)/);
   });
 
+  it('arms the post-quit exit watchdog with a hard app.exit', () => {
+    // finish re-issues app.quit() so the graceful will-quit → quit sequence gets
+    // its chance; forceExit is the backstop for the observed post-will-quit hang,
+    // and the only sane action at that point is app.exit.
+    const body = beforeQuitListenerBody();
+    expect(body).toMatch(/runQuitDrain\(\{[\s\S]*forceExit:\s*\(\)\s*=>\s*app\.exit\(0\)/);
+  });
+
   // Every owner of a node-pty handle must be torn down inside the drain. A pty
   // still live when Node disposes its environment is the mechanism behind the
   // CYBOFLOW-APP-12 abort — its onData callback fires through a napi

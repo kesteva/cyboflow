@@ -6,6 +6,33 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-05
+
+### Added
+
+- **System view** (macOS and Linux). A new sidebar view lists the project's worktrees and the
+  processes running in them, grouped by worktree or by process type, with CPU, memory and disk
+  usage and the ports and sockets in use. Each process is tagged as owned by this app, foreign,
+  orphaned or suspected. You can kill a process tree, prune a worktree, or reclaim everything
+  stale at once; each action first shows exactly what it will remove and how much it frees, and
+  is checked again before it runs. Processes the app spawns are stamped so orphans can be told
+  apart from other software. Disk sizing is unavailable on Windows.
+
+### Changed
+
+- Workflow, eval and verifier Codex threads run without your own Codex plugins, so a plugin's
+  sign-in prompt can no longer stall a sprint lane. A thread that times out at start now names
+  MCP startup as the likely cause.
+
+### Fixed
+
+- Dismissing a session no longer freezes the app on large databases: the assistant thread
+  history loads in windows, and backlog reads are batched.
+- If the app is still running 5 s after its shutdown drain, it now force-exits instead of
+  hanging.
+- Hook commands are quoted when their path contains spaces, so the approval gate works from
+  `/Applications/Cyboflow Dev.app`.
+
 ## [0.5.0] — 2026-09-30
 
 ### Added
