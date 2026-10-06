@@ -255,8 +255,10 @@ describe('cyboflow.system.snapshot — AC-5: no caller ⇒ zero ps/du', () => {
       },
       runShellManager: { listOwnedShells: () => [] },
     });
-    const realReadMarkers = createSpawnMarkerReader();
-    const readMarkers = vi.fn((rows: readonly { pid: number }[]) => realReadMarkers(rows));
+    // Linux reader with no readable environ: host-independent, and it starts no
+    // subprocess. (darwin's reader does a targeted ps -E of launchd children —
+    // covered in spawnMarkerReader.test.ts.)
+    const readMarkers = vi.fn(createSpawnMarkerReader({ platform: 'linux', readEnviron: async () => null }));
     const provider = createSystemSnapshotProvider({
       processSnapshot,
       readMarkers,

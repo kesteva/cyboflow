@@ -334,3 +334,35 @@ describe('descendants of a live owned process', () => {
     expect(classify([theirs, child], live, truth)[1].bucket).not.toBe('owned');
   });
 });
+
+describe('classify — marker worktree attribution', () => {
+  it("files a detached marked row under the marker's worktree when no handle matched", () => {
+    const [orphan, selfStray] = classify(
+      [
+        proc(400, 'node idle.js', { marker: { instanceId: DEAD, worktree: '/wt/gone' } }),
+        proc(401, 'node idle.js', { marker: { instanceId: SELF, worktree: '/wt/known' } }),
+      ],
+      live,
+      truth,
+    );
+    expect(orphan).toMatchObject({ bucket: 'orphan', worktreePath: '/wt/gone' });
+    expect(selfStray).toMatchObject({ bucket: 'suspected', worktreePath: '/wt/known' });
+  });
+
+  it('keeps a handle-matched worktree over the marker, and a null marker worktree changes nothing', () => {
+    const [handled, bare] = classify(
+      [
+        proc(402, 'claude', {
+          worktreePath: '/wt/known',
+          owner: { kind: 'cli', panelId: 'p', sessionId: 's' },
+          marker: { instanceId: SELF, worktree: '/wt/other' },
+        }),
+        proc(403, 'node x', { marker: { instanceId: DEAD, worktree: null } }),
+      ],
+      live,
+      truth,
+    );
+    expect(handled).toMatchObject({ bucket: 'owned', worktreePath: '/wt/known' });
+    expect(bare).toMatchObject({ bucket: 'orphan', worktreePath: null });
+  });
+});
